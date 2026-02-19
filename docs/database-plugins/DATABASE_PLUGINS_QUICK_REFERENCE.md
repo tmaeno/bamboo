@@ -151,7 +151,7 @@ class GraphDatabaseBackend:
     async def get_or_create_canonical_node(node: BaseNode, name: str) -> str
     async def create_relationship(rel: GraphRelationship) -> bool
     async def find_causes_by_error(error: str, limit: int) -> list
-    async def find_causes_by_features(features: list, limit: int) -> list
+    async def find_causes(errors: list, task_features: list, environment_factors: list, components: list, limit: int) -> list
     async def increment_cause_frequency(cause_id: str) -> None
     async def update_resolution_success_rate(res_id: str, success: bool) -> None
 ```

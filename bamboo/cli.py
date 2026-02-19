@@ -203,11 +203,11 @@ async def query_knowledge_interactive():
 
         if query_type == "error":
             error_name = Prompt.ask("Enter error message or keyword")
-            results = await graph_db.find_causes_by_error(error_name, limit=10)
+            results = await graph_db.find_causes(errors=[error_name], limit=10)
         else:
             features_str = Prompt.ask("Enter features (comma-separated)")
             features = [f.strip() for f in features_str.split(",")]
-            results = await graph_db.find_causes_by_features(features, limit=10)
+            results = await graph_db.find_causes(task_features=features, limit=10)
 
         if results:
             table = Table(title="Query Results")

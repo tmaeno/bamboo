@@ -44,7 +44,7 @@ EXTRACTION_STRATEGY=llm   # Default: llm
 
 ### Basic Usage (Auto-configured)
 ```python
-from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 
 # Uses configured strategy from settings
 extractor = KnowledgeGraphExtractor()
@@ -58,7 +58,7 @@ graph = await extractor.extract_from_sources(
 
 ### Specify Strategy
 ```python
-from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 
 # Use specific strategy
 extractor = KnowledgeGraphExtractor(strategy="panda")

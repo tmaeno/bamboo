@@ -37,17 +37,32 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
-    async def find_causes_by_error(
-        self, error_name: str, limit: int = 10
+    async def find_causes(
+        self,
+        errors: list[str] = None,
+        task_features: list[str] = None,
+        environment_factors: list[str] = None,
+        components: list[str] = None,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find possible causes for a given error."""
-        pass
+        """Find possible causes ranked by how many clue types they match.
 
-    @abstractmethod
-    async def find_causes_by_features(
-        self, features: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Find possible causes based on task features."""
+        Causes that match across multiple clue types (e.g. both an error and
+        a component) score higher than causes matching only one type, producing
+        more accurate ranking than merging separate single-type query results.
+
+        Args:
+            errors: Error node names extracted from the knowledge graph.
+            task_features: Task-feature node names extracted from the knowledge graph.
+            environment_factors: Environment node names extracted from the knowledge graph.
+            components: Component node names extracted from the knowledge graph.
+            limit: Maximum number of causes to return.
+
+        Returns:
+            List of cause dicts ordered by match_score DESC, frequency DESC,
+            confidence DESC.  Each dict includes a ``match_score`` field
+            indicating how many distinct clue types contributed to the match.
+        """
         pass
 
     @abstractmethod

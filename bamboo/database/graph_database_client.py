@@ -38,17 +38,22 @@ class GraphDatabaseClient:
         """Create a relationship between nodes."""
         return await self._backend.create_relationship(relationship)
 
-    async def find_causes_by_error(
-        self, error_name: str, limit: int = 10
+    async def find_causes(
+        self,
+        errors: list[str] = None,
+        task_features: list[str] = None,
+        environment_factors: list[str] = None,
+        components: list[str] = None,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find possible causes for a given error."""
-        return await self._backend.find_causes_by_error(error_name, limit)
-
-    async def find_causes_by_features(
-        self, features: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Find possible causes based on task features."""
-        return await self._backend.find_causes_by_features(features, limit)
+        """Find possible causes ranked by total evidence across all clue types."""
+        return await self._backend.find_causes(
+            errors=errors,
+            task_features=task_features,
+            environment_factors=environment_factors,
+            components=components,
+            limit=limit,
+        )
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

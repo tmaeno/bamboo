@@ -98,119 +98,79 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         )
         return True
 
-    async def find_causes_by_error(
-        self, error_name: str, limit: int = 10
+    async def find_causes(
+        self,
+        errors: list[str] = None,
+        task_features: list[str] = None,
+        environment_factors: list[str] = None,
+        components: list[str] = None,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find possible causes for a given error."""
-        results = []
+        """Find possible causes ranked by total evidence across all clue types."""
+        # Map each clue type to its node-type substring and relationship type
+        clue_groups = [
+            (errors or [],              "ERROR",       "indicate"),
+            (task_features or [],       "FEATURE",     "contribute_to"),
+            (environment_factors or [], "ENVIRONMENT", "contribute_to"),
+            (components or [],          "COMPONENT",   "contribute_to"),
+        ]
 
-        # Find error nodes matching the name
-        for node_id, node in self.nodes.items():
-            if "ERROR" in str(node.node_type) and (
-                error_name.lower() in node.name.lower()
-                or error_name.lower() in (node.description or "").lower()
-            ):
-                # Find causes connected via 'indicate' relationship
-                for rel_id, rel in self.relationships.items():
-                    if rel.source_id == node_id and "indicate" in str(
-                        rel.relation_type
-                    ):
-                        cause_node = self.nodes.get(rel.target_id)
-                        if cause_node and "CAUSE" in str(cause_node.node_type):
-                            # Find resolutions
-                            resolutions = []
-                            for rel_id2, rel2 in self.relationships.items():
-                                if (
-                                    rel2.source_id == cause_node.id
-                                    and "solved_by" in str(rel2.relation_type)
-                                ):
-                                    res_node = self.nodes.get(rel2.target_id)
-                                    if res_node:
-                                        resolutions.append(
-                                            {
-                                                "id": res_node.id,
-                                                "name": res_node.name,
-                                                "description": res_node.description,
-                                            }
-                                        )
+        # cause_id -> {"cause": node, "match_score": int, "resolutions": list}
+        matched: dict[str, dict] = {}
 
-                            results.append(
-                                {
-                                    "cause_id": cause_node.id,
-                                    "cause_name": cause_node.name,
-                                    "cause_description": cause_node.description,
-                                    "confidence": getattr(
-                                        cause_node, "confidence", 1.0
-                                    ),
-                                    "frequency": getattr(cause_node, "frequency", 1),
-                                    "resolutions": resolutions,
-                                }
-                            )
+        for clue_values, node_type_substr, rel_type in clue_groups:
+            if not clue_values:
+                continue
+            for node_id, node in self.nodes.items():
+                if node_type_substr not in str(node.node_type):
+                    continue
+                if node.name not in clue_values:
+                    continue
+                # Follow the relationship to a Cause node
+                for rel in self.relationships.values():
+                    if rel.source_id != node_id or rel_type not in str(rel.relation_type):
+                        continue
+                    cause_node = self.nodes.get(rel.target_id)
+                    if not cause_node or "CAUSE" not in str(cause_node.node_type):
+                        continue
+                    if cause_node.id not in matched:
+                        matched[cause_node.id] = {
+                            "cause": cause_node,
+                            "match_score": 0,
+                            "resolutions": [],
+                        }
+                    # Each clue type contributes at most +1 to match_score
+                    matched[cause_node.id]["match_score"] += 1
 
-        return results[:limit]
+        # Collect resolutions for each matched cause
+        for cause_id, data in matched.items():
+            for rel in self.relationships.values():
+                if rel.source_id != cause_id or "solved_by" not in str(rel.relation_type):
+                    continue
+                res_node = self.nodes.get(rel.target_id)
+                if res_node:
+                    data["resolutions"].append(
+                        {
+                            "id": res_node.id,
+                            "name": res_node.name,
+                            "description": res_node.description,
+                        }
+                    )
 
-    async def find_causes_by_features(
-        self, features: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Find possible causes based on task features."""
-        results = []
-        matched_causes = {}
-
-        # Find feature nodes and their connected causes
-        for node_id, node in self.nodes.items():
-            if "FEATURE" in str(node.node_type) and node.name in features:
-                # Find causes connected via 'contribute_to' relationship
-                for rel_id, rel in self.relationships.items():
-                    if rel.source_id == node_id and "contribute_to" in str(
-                        rel.relation_type
-                    ):
-                        cause_node = self.nodes.get(rel.target_id)
-                        if cause_node and "CAUSE" in str(cause_node.node_type):
-                            if cause_node.id not in matched_causes:
-                                matched_causes[cause_node.id] = {
-                                    "cause": cause_node,
-                                    "matching_features": [node.name],
-                                }
-                            else:
-                                matched_causes[cause_node.id][
-                                    "matching_features"
-                                ].append(node.name)
-
-        # Build results
-        for cause_id, data in matched_causes.items():
-            cause_node = data["cause"]
-
-            # Find resolutions
-            resolutions = []
-            for rel_id, rel in self.relationships.items():
-                if rel.source_id == cause_node.id and "solved_by" in str(
-                    rel.relation_type
-                ):
-                    res_node = self.nodes.get(rel.target_id)
-                    if res_node:
-                        resolutions.append(
-                            {
-                                "id": res_node.id,
-                                "name": res_node.name,
-                                "description": res_node.description,
-                            }
-                        )
-
-            results.append(
-                {
-                    "cause_id": cause_node.id,
-                    "cause_name": cause_node.name,
-                    "cause_description": cause_node.description,
-                    "confidence": getattr(cause_node, "confidence", 1.0),
-                    "frequency": getattr(cause_node, "frequency", 1),
-                    "matching_features": data["matching_features"],
-                    "resolutions": resolutions,
-                }
-            )
-
-        # Sort by number of matching features
+        results = [
+            {
+                "cause_id": data["cause"].id,
+                "cause_name": data["cause"].name,
+                "cause_description": data["cause"].description,
+                "confidence": getattr(data["cause"], "confidence", 1.0),
+                "frequency": getattr(data["cause"], "frequency", 1),
+                "match_score": data["match_score"],
+                "resolutions": data["resolutions"],
+            }
+            for data in matched.values()
+        ]
         results.sort(
-            key=lambda x: (len(x["matching_features"]), x["frequency"]),
+            key=lambda x: (x["match_score"], x["frequency"], x["confidence"]),
             reverse=True,
         )
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (
@@ -35,10 +35,10 @@ class ReasoningAgent:
         self.embeddings = get_embeddings()
         self.extractor = KnowledgeGraphExtractor()
 
-    def _extract_features_from_graph(self, graph) -> dict[str, Any]:
-        """Extract features and key information from knowledge graph."""
+    def _extract_clues_from_graph(self, graph) -> dict[str, Any]:
+        """Extract clues and key information from knowledge graph to deduce possible causes and resolutions."""
         errors = []
-        features = []
+        task_features = []
         environment_factors = []
         components = []
 
@@ -49,7 +49,7 @@ class ReasoningAgent:
             if "ERROR" in node_type_str:
                 errors.append(node.name)
             elif "TASK_FEATURE" in node_type_str or "FEATURE" in node_type_str:
-                features.append(node.name)
+                task_features.append(node.name)
             elif "ENVIRONMENT" in node_type_str:
                 environment_factors.append(node.name)
             elif "COMPONENT" in node_type_str:
@@ -57,7 +57,7 @@ class ReasoningAgent:
 
         return {
             "errors": errors,
-            "features": features,
+            "task_features": task_features,
             "environment_factors": environment_factors,
             "components": components,
             "context": {},
@@ -78,26 +78,29 @@ class ReasoningAgent:
             external_data=external_data,
         )
 
-        # Extract features from the graph for database queries
-        extracted_features = self._extract_features_from_graph(extracted_graph)
+        # Step 2: Canonicalize so node names match what is stored in the graph database
+        canonical_graph = await self.extractor.canonicalize(extracted_graph)
 
-        # Step 2: Query graph database
-        graph_results = await self._query_graph_database(extracted_features)
+        # Extract clues from the canonical graph for database queries
+        extracted_clues = self._extract_clues_from_graph(canonical_graph)
 
-        # Step 3: Query vector database
+        # Step 3: Query graph database
+        graph_results = await self._query_graph_database(extracted_clues)
+
+        # Step 4: Query vector database
         vector_results = await self._query_vector_database(
-            extracted_features, task_data
+            extracted_clues, task_data
         )
 
-        # Step 4: Identify root cause using LLM
+        # Step 5: Identify root cause using LLM
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results
         )
 
-        # Step 5: Generate email
+        # Step 6: Generate email
         email_content = await self._generate_email(task_data, analysis)
 
-        # Step 6: Create analysis result
+        # Step 7: Create analysis result
         result = AnalysisResult(
             task_id=task_data.get("task_id", "unknown"),
             root_cause=analysis["root_cause"],
@@ -107,7 +110,7 @@ class ReasoningAgent:
             supporting_evidence=analysis.get("supporting_evidence", []),
             email_content=email_content,
             metadata={
-                "extracted_features": extracted_features,
+                "extracted_clues": extracted_clues,
                 "graph_results_count": len(graph_results),
                 "vector_results_count": len(vector_results),
             },
@@ -117,47 +120,24 @@ class ReasoningAgent:
         return result
 
     async def _query_graph_database(
-        self, extracted_features: dict[str, Any]
+        self, extracted_clues: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Query graph database for relevant causes and resolutions."""
         logger.info("Querying graph database")
 
-        results = []
-
-        # Query by errors
-        errors = extracted_features.get("errors", [])
-        for error in errors:
-            error_results = await self.graph_db.find_causes_by_error(error, limit=5)
-            results.extend(error_results)
-
-        # Query by features
-        features = extracted_features.get("features", [])
-        if features:
-            feature_results = await self.graph_db.find_causes_by_features(
-                features, limit=5
-            )
-            results.extend(feature_results)
-
-        # Remove duplicates and rank
-        seen = set()
-        unique_results = []
-        for result in results:
-            cause_id = result.get("cause_id")
-            if cause_id not in seen:
-                seen.add(cause_id)
-                unique_results.append(result)
-
-        # Sort by frequency and confidence
-        unique_results.sort(
-            key=lambda x: (x.get("frequency", 0), x.get("confidence", 0)),
-            reverse=True,
+        results = await self.graph_db.find_causes(
+            errors=extracted_clues.get("errors"),
+            task_features=extracted_clues.get("task_features"),
+            environment_factors=extracted_clues.get("environment_factors"),
+            components=extracted_clues.get("components"),
+            limit=10,
         )
 
-        logger.info(f"Found {len(unique_results)} unique causes from graph database")
-        return unique_results[:10]  # Top 10
+        logger.info(f"Found {len(results)} causes from graph database")
+        return results
 
     async def _query_vector_database(
-        self, extracted_features: dict[str, Any], task_data: dict[str, Any]
+        self, extracted_clues: dict[str, Any], task_data: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Query vector database for similar cases by section type.
 
@@ -173,12 +153,12 @@ class ReasoningAgent:
         cause_results = []
         resolution_results = []
 
-        # Create base query from extracted features and task data
+        # Create base query from extracted clues and task data
         query_parts = []
-        if extracted_features.get("errors"):
-            query_parts.append("Errors: " + ", ".join(extracted_features["errors"]))
-        if extracted_features.get("features"):
-            query_parts.append("Features: " + ", ".join(extracted_features["features"]))
+        if extracted_clues.get("errors"):
+            query_parts.append("Errors: " + ", ".join(extracted_clues["errors"]))
+        if extracted_clues.get("clues"):
+            query_parts.append("Clues: " + ", ".join(extracted_clues["clues"]))
         if task_data.get("description"):
             query_parts.append(f"Description: {task_data['description']}")
 
@@ -195,7 +175,7 @@ class ReasoningAgent:
         all_results.extend([{**r, "section": "Summary"} for r in summary_results])
 
         # Query Cause section - for root cause analysis
-        if extracted_features.get("errors"):
+        if extracted_clues.get("errors"):
             cause_query = f"Root causes for:\n{base_query_text}"
             cause_results = await self._query_section(
                 query_text=cause_query,

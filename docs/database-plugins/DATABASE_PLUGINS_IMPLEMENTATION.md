@@ -250,8 +250,7 @@ GRAPH_DATABASE_BACKEND=in_memory pytest tests/
 - `create_node(node)` - Create a graph node
 - `get_or_create_canonical_node(node, name)` - Create or get by name
 - `create_relationship(relationship)` - Create relationship
-- `find_causes_by_error(error, limit)` - Query by error
-- `find_causes_by_features(features, limit)` - Query by features
+- `find_causes(errors, task_features, environment_factors, components, limit)` - Query by all clue types, ranked by evidence breadth
 - `increment_cause_frequency(cause_id)` - Update metrics
 - `update_resolution_success_rate(res_id, success)` - Update metrics
 

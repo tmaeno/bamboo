@@ -207,15 +207,15 @@ class GraphDatabaseBackend(ABC):
     async def create_relationship(self, relationship: GraphRelationship) -> bool:
         """Create relationship between nodes."""
 
-    async def find_causes_by_error(
-        self, error_name: str, limit: int = 10
+    async def find_causes(
+        self,
+        errors: list[str] = None,
+        task_features: list[str] = None,
+        environment_factors: list[str] = None,
+        components: list[str] = None,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find causes matching an error."""
-
-    async def find_causes_by_features(
-        self, features: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Find causes matching features."""
+        """Find causes ranked by evidence across all clue types."""
 
     async def increment_cause_frequency(self, cause_id: str) -> None:
         """Increment cause frequency counter."""

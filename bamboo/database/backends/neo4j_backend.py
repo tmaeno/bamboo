@@ -141,58 +141,75 @@ class Neo4jBackend(GraphDatabaseBackend):
             )
             return await result.single() is not None
 
-    async def find_causes_by_error(
-        self, error_name: str, limit: int = 10
+    async def find_causes(
+        self,
+        errors: list[str] = None,
+        task_features: list[str] = None,
+        environment_factors: list[str] = None,
+        components: list[str] = None,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find possible causes for a given error."""
-        async with self.driver.session(
-            database=self.settings.neo4j_database
-        ) as session:
-            query = """
-            MATCH (e:Error)-[:indicate]->(c:Cause)
-            WHERE e.name CONTAINS $error_name OR e.description CONTAINS $error_name
-            OPTIONAL MATCH (c)-[:solved_by]->(r:Resolution)
-            RETURN c.id as cause_id, c.name as cause_name, c.description as cause_description,
-                   c.confidence as confidence, c.frequency as frequency,
-                   collect({id: r.id, name: r.name, description: r.description, 
-                           steps: r.steps, success_rate: r.success_rate}) as resolutions
-            ORDER BY c.frequency DESC, c.confidence DESC
-            LIMIT $limit
-            """
-            result = await session.run(query, error_name=error_name, limit=limit)
-            records = await result.values()
-            return [
-                {
-                    "cause_id": record[0],
-                    "cause_name": record[1],
-                    "cause_description": record[2],
-                    "confidence": record[3],
-                    "frequency": record[4],
-                    "resolutions": record[5],
-                }
-                for record in records
-            ]
+        """Find possible causes ranked by total evidence across all clue types.
 
-    async def find_causes_by_features(
-        self, features: list[str], limit: int = 10
-    ) -> list[dict[str, Any]]:
-        """Find possible causes based on task features."""
+        Each clue type that links to a cause contributes +1 to its match_score,
+        so causes corroborated by multiple clue types rank above those matched
+        by only one.
+        """
         async with self.driver.session(
             database=self.settings.neo4j_database
         ) as session:
             query = """
-            MATCH (f:Feature)-[:contribute_to]->(c:Cause)
-            WHERE f.name IN $features
+            // --- Error clues ---
+            OPTIONAL MATCH (e:Error)-[:indicate]->(c1:Cause)
+            WHERE e.name IN $errors OR e.description IN $errors
+            WITH collect(DISTINCT c1) AS error_causes
+
+            // --- Task-feature clues ---
+            OPTIONAL MATCH (f:Feature)-[:contribute_to]->(c2:Cause)
+            WHERE f.name IN $task_features
+            WITH error_causes, collect(DISTINCT c2) AS feature_causes
+
+            // --- Environment clues ---
+            OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c3:Cause)
+            WHERE env.name IN $environment_factors
+            WITH error_causes, feature_causes, collect(DISTINCT c3) AS env_causes
+
+            // --- Component clues ---
+            OPTIONAL MATCH (comp:Component)-[:contribute_to]->(c4:Cause)
+            WHERE comp.name IN $components
+            WITH error_causes, feature_causes, env_causes,
+                 collect(DISTINCT c4) AS comp_causes
+
+            // --- Union all matched causes and score by clue-type breadth ---
+            WITH error_causes + feature_causes + env_causes + comp_causes AS all_causes,
+                 error_causes, feature_causes, env_causes, comp_causes
+            UNWIND all_causes AS c
+            WITH DISTINCT c,
+                 (CASE WHEN c IN error_causes       THEN 1 ELSE 0 END +
+                  CASE WHEN c IN feature_causes      THEN 1 ELSE 0 END +
+                  CASE WHEN c IN env_causes          THEN 1 ELSE 0 END +
+                  CASE WHEN c IN comp_causes         THEN 1 ELSE 0 END) AS match_score
+
             OPTIONAL MATCH (c)-[:solved_by]->(r:Resolution)
-            RETURN c.id as cause_id, c.name as cause_name, c.description as cause_description,
-                   c.confidence as confidence, c.frequency as frequency,
-                   collect(DISTINCT f.name) as matching_features,
+            RETURN c.id          AS cause_id,
+                   c.name        AS cause_name,
+                   c.description AS cause_description,
+                   c.confidence  AS confidence,
+                   c.frequency   AS frequency,
+                   match_score,
                    collect({id: r.id, name: r.name, description: r.description,
-                           steps: r.steps, success_rate: r.success_rate}) as resolutions
-            ORDER BY size(matching_features) DESC, c.frequency DESC
+                            steps: r.steps, success_rate: r.success_rate}) AS resolutions
+            ORDER BY match_score DESC, c.frequency DESC, c.confidence DESC
             LIMIT $limit
             """
-            result = await session.run(query, features=features, limit=limit)
+            result = await session.run(
+                query,
+                errors=errors or [],
+                task_features=task_features or [],
+                environment_factors=environment_factors or [],
+                components=components or [],
+                limit=limit,
+            )
             records = await result.values()
             return [
                 {
@@ -201,7 +218,7 @@ class Neo4jBackend(GraphDatabaseBackend):
                     "cause_description": record[2],
                     "confidence": record[3],
                     "frequency": record[4],
-                    "matching_features": record[5],
+                    "match_score": record[5],
                     "resolutions": record[6],
                 }
                 for record in records
