@@ -11,6 +11,7 @@ from .graph_element import (
     ErrorNode,
     GraphRelationship,
     ResolutionNode,
+    TaskContextNode,
     TaskFeatureNode,
 )
 
@@ -18,6 +19,7 @@ NodeUnion = Union[
     ErrorNode,
     EnvironmentNode,
     TaskFeatureNode,
+    TaskContextNode,
     ComponentNode,
     CauseNode,
     ResolutionNode,
@@ -37,7 +39,10 @@ class ExtractedKnowledge(BaseModel):
 
     graph: KnowledgeGraph
     summary: str = Field(..., description="LLM-generated entry of the graph")
-    key_insights: list[str] = Field(default_factory=list)
+    key_insights: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Unstructured node descriptions selected for vector indexing.",
+    )
     source_references: list[str] = Field(default_factory=list)
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
 

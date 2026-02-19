@@ -1,5 +1,4 @@
 """Knowledge accumulation agent for populating databases."""
-import copy
 import json
 import logging
 import uuid
@@ -15,7 +14,6 @@ from bamboo.llm import (
     get_embeddings,
     get_llm,
 )
-from bamboo.models.graph_element import NodeType
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
 
 logger = logging.getLogger(__name__)
@@ -45,32 +43,35 @@ class KnowledgeAccumulator:
         """Extract knowledge from sources and store in databases."""
         logger.info("Starting knowledge extraction process")
 
-        # Step 1: Extract knowledge graph
+        # Derive a stable graph_id from the task ID so that re-processing
+        # the same task overwrites existing vectors rather than duplicating them.
+        task_id = (task_data or {}).get("task_id")
+        graph_id = (
+            self._deterministic_id("graph", task_id)
+            if task_id
+            else str(uuid.uuid4())
+        )
+
+        # Step 1: Extract knowledge graph (IDs assigned inside extractor)
         graph = await self.extractor.extract_from_sources(
             email_text=email_text,
             task_data=task_data,
             external_data=external_data,
         )
+        graph.metadata["graph_id"] = graph_id
 
-        # Step 2: Canonicalize nodes
-        canonical_graph = await self.extractor.canonicalize(graph)
+        # Step 2: Store in Graph Database
+        await self._store_graph(graph)
 
-        # Step 3: Store in Graph Database
-        await self._store_graph(canonical_graph)
-
-        # Step 4: Generate summary
+        # Step 3: Generate summary
         summary = await self._generate_summary(graph)
 
-        # Step 5: Store in Vector Database
+        # Step 4: Store in Vector Database
         key_insights = await self._extract_key_insights(graph)
-        await self._store_in_vector_db(
-            graph,
-            summary,
-            key_insights,
-        )
+        await self._store_in_vector_db(graph, summary, key_insights)
 
         extracted_knowledge = ExtractedKnowledge(
-            graph=canonical_graph,
+            graph=graph,
             summary=summary,
             key_insights=key_insights,
             source_references=[],
@@ -140,67 +141,85 @@ class KnowledgeAccumulator:
 
     async def _extract_key_insights(
         self, graph: KnowledgeGraph
-    ) -> dict[str, list[dict[str, str]]]:
-        """Extract key insights from the graph."""
-        insights = {}
+    ) -> list[dict[str, Any]]:
+        """Collect nodes that carry unstructured prose worth semantic indexing.
 
-        # Extract main causes
-        causes = [node for node in graph.nodes if node.node_type == NodeType.CAUSE]
-        for cause in causes[:3]:  # Top 3 causes
-            insights.setdefault(cause.node_type, [])
-            insights[cause.node_type].append(
-                {
-                    "id": cause.id,
-                    "insight": f"Cause: {cause.name}. Description: {cause.description}",
-                }
-            )
-
-        # Extract resolutions
-        resolutions = [
-            node for node in graph.nodes if node.node_type == NodeType.RESOLUTION
-        ]
-        for resolution in resolutions[:3]:  # Top 3 resolutions
-            insights.setdefault(resolution.node_type, [])
-            insights[resolution.node_type].append(
-                {
-                    "id": resolution.id,
-                    "insight": f"Resolution: {cause.name}. Description: {cause.description}",
-                }
-            )
-
+        Only nodes with a ``description`` are included — these are the ones
+        whose value is not fully captured by their canonical name and therefore
+        benefit from vector similarity search.  Cause and Resolution nodes are
+        intentionally excluded: their canonical names and structured fields are
+        already precisely indexed in the graph database.
+        """
+        insights = []
+        for node in graph.nodes:
+            if node.description and node.node_type.value == "Task_Context":
+                insights.append(
+                    {
+                        "node_id": node.id,
+                        "section": node.node_type.value,
+                        "content": node.description,
+                    }
+                )
         return insights
 
     async def _store_in_vector_db(
         self,
         graph: KnowledgeGraph,
         summary: str,
-        key_insights: dict[str, list[dict[str, str]]],
+        key_insights: list[dict[str, Any]],
     ):
-        """Store knowledge in vector database."""
+        """Store unstructured node descriptions and the summary in the vector database.
+
+        Every entry is tagged with a ``graph_id`` so that, during retrieval,
+        a two-step query can be used:
+          1. Search unstructured descriptions to find semantically similar graphs.
+          2. Fetch the Summary entries for those graph_ids to get the full picture.
+        """
         logger.info("Storing knowledge in Vector Database")
 
-        local_key_insights = copy.deepcopy(key_insights)
-        local_key_insights.update({"Summary": [{"insight": summary}]})
+        graph_id = graph.metadata["graph_id"]
 
-        # Store key insights and summary in vector database with section metadata,
-        # allowing structured retrieval later based on sections
-        for section, insights in local_key_insights.items():
-            for item in insights:
-                insight = item["insight"]
-                node_id = item.get("id")
-                # Generate embedding
-                embedding = await self.embeddings.aembed_query(insight)
+        # Store unstructured node descriptions
+        for item in key_insights:
+            # Deterministic ID: re-processing the same graph overwrites the
+            # existing point rather than inserting a duplicate.
+            vector_id = self._deterministic_id(graph_id, item["section"], item["node_id"])
+            embedding = await self.embeddings.aembed_query(item["content"])
+            await self.vector_db.upsert_section_vector(
+                vector_id=vector_id,
+                embedding=embedding,
+                content=item["content"],
+                section=item["section"],
+                metadata={
+                    "graph_id": graph_id,
+                    "graph_node_id": item["node_id"],
+                },
+            )
 
-                # Store in vector database
-                vector_id = str(uuid.uuid4())
-                await self.vector_db.upsert_section_vector(
-                    vector_id=vector_id,
-                    embedding=embedding,
-                    content=insight,
-                    section=section,
-                    metadata={
-                        "graph_node_id": node_id,
-                    },
-                )
+        # Store the summary — always present so every graph is retrievable
+        summary_vector_id = self._deterministic_id(graph_id, "Summary")
+        summary_embedding = await self.embeddings.aembed_query(summary)
+        await self.vector_db.upsert_section_vector(
+            vector_id=summary_vector_id,
+            embedding=summary_embedding,
+            content=summary,
+            section="Summary",
+            metadata={"graph_id": graph_id},
+        )
 
-        logger.info("Knowledge stored successfully in vector database")
+        logger.info(
+            f"Stored {len(key_insights)} unstructured descriptions and 1 summary "
+            f"for graph {graph_id}"
+        )
+
+    @staticmethod
+    def _deterministic_id(*parts: str) -> str:
+        """Generate a deterministic UUID from the given parts.
+
+        Using UUID5 (SHA-1 namespace hash) so that upserting the same
+        graph_id + section + node_id combination always resolves to the
+        same point ID in the vector database.
+        """
+        key = ":".join(str(p) for p in parts)
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+

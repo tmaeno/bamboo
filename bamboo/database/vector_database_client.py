@@ -55,3 +55,15 @@ class VectorDatabaseClient:
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a specific document by ID."""
         return await self._backend.get_document(doc_id)
+
+    async def get_summaries_by_graph_ids(
+        self, graph_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Retrieve Summary entries for the given graph IDs.
+
+        Used as the second step of vector retrieval: after finding similar
+        unstructured node descriptions, fetch the full case summaries for
+        the matched graphs.
+        """
+        return await self._backend.get_summaries_by_graph_ids(graph_ids)
+

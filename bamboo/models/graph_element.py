@@ -12,6 +12,7 @@ class NodeType(str, Enum):
     ERROR = "Error"
     ENVIRONMENT = "Environment"
     TASK_FEATURE = "Task_Feature"
+    TASK_CONTEXT = "Task_Context"
     COMPONENT = "Component"
     CAUSE = "Cause"
     RESOLUTION = "Resolution"
@@ -54,7 +55,12 @@ class BaseNode(BaseModel):
 
     id: Optional[str] = None
     name: str = Field(..., description="Canonical name of the node")
-    description: str = Field(..., description="Detailed description")
+    description: Optional[str] = Field(
+        default=None,
+        description=(
+            "Additional detail about the node. "
+        ),
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -75,10 +81,47 @@ class EnvironmentNode(BaseNode):
 
 
 class TaskFeatureNode(BaseNode):
-    """Represents a task feature."""
+    """Represents a task feature as a key-value pair.
+
+    ``attribute`` and ``value`` are the primary fields.  The canonical
+    ``name`` is derived as ``"{attribute}={value}"`` (e.g. ``"RAM=1GB"``)
+    so that two tasks with different RAM values produce distinct nodes that
+    are never merged during canonicalization, while still being grouped by
+    attribute in queries.
+
+    Examples:
+        TaskFeatureNode(attribute="RAM",     value="1GB",  name="RAM=1GB")
+        TaskFeatureNode(attribute="RAM",     value="4GB",  name="RAM=4GB")
+        TaskFeatureNode(attribute="OS",      value="Ubuntu 22.04", name="OS=Ubuntu 22.04")
+        TaskFeatureNode(attribute="timeout", value="30s",  name="timeout=30s")
+    """
 
     node_type: NodeType = NodeType.TASK_FEATURE
+    attribute: str = Field(..., description="Feature key, e.g. 'RAM', 'OS', 'timeout'")
+    value: str = Field(..., description="Feature value, e.g. '1GB', 'Ubuntu 22.04', '30s'")
     properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskContextNode(BaseNode):
+    """Represents an unstructured task context as free-form prose.
+
+    Used for task characteristics whose value cannot be meaningfully
+    canonicalized — e.g. reproduction steps, user-reported descriptions,
+    free-text comments.
+
+    - ``name`` is the attribute key (e.g. "steps_to_reproduce")
+    - ``description`` is the unstructured prose value, indexed in the
+      vector database for semantic search
+    - This node is NOT stored in the graph database
+
+    Examples:
+        TaskContextNode(name="steps_to_reproduce",
+                        description="Click submit, wait 5s, observe 500 error")
+        TaskContextNode(name="user_report",
+                        description="Intermittent failures observed after deploy")
+    """
+
+    node_type: NodeType = NodeType.TASK_CONTEXT
 
 
 class ComponentNode(BaseNode):

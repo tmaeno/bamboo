@@ -5,31 +5,52 @@ EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to ex
 The graph should follow this schema:
 - Error -[indicate]-> Cause
 - Environment -[associated_with]-> Cause
-- Feature -[contribute_to]-> Cause
+- Task_Feature -[contribute_to]-> Cause
+- Task_Context -[contribute_to]-> Cause
 - Component -[originated_from]-> Cause
 - Cause -[solved_by]-> Resolution
 
 Node Types:
 - Error: Main error message
 - Environment: External factor (system, network, resource)
-- Feature: Task feature or characteristic
+- Task_Feature: A task characteristic with a discrete, comparable value.
+  MUST be formatted as "attribute=value" (e.g. "RAM=1GB", "OS=Ubuntu 22.04", "timeout=30s").
+  Use this when the value is a concrete, canonical unit — something you could sort or compare.
+  Include "attribute" and "value" as separate fields in metadata.
+- Task_Context: A task characteristic whose value is free-form prose that
+  cannot be meaningfully canonicalized.
+  Use this for reproduction steps, user descriptions, free-text comments, etc.
+  name = the attribute key only (e.g. "steps_to_reproduce", "user_report").
+  description = the full unstructured prose value.
+  Rule of thumb: if the value could appear in a dropdown or unit list → Task_Feature.
+                 If the value is a sentence or paragraph → Task_Context.
 - Component: Origin of the cause (system component, service, etc.)
 - Cause: Root cause of the issue
 - Resolution: Action to resolve the issue
+
+Canonicalization rules (apply during extraction — no separate pass needed):
+- Error, Environment, Component: output a single, normalised canonical name.
+  Prefer full names over abbreviations ("production" not "prod",
+  "NullPointerException" not "NPE", "authentication-service" not "auth-svc").
+  If the same concept appears multiple times under different surface forms,
+  emit it only once under its canonical name.
+- Task_Feature: name is already canonical by the "attribute=value" format.
+- Task_Context: each instance is unique — never deduplicate.
+- Cause, Resolution: write clearly and completely; they are canonical by nature.
 
 Input Information:
 {input_data}
 
 Extract and structure the information into nodes and relationships. For each node, provide:
-- name: A clear, descriptive name
-- description: Detailed description
-- relevant metadata
+- name: canonical name (see rules above)
+- description: detailed description (Task_Context: the full prose value)
+- relevant metadata (Task_Feature: include "attribute" and "value" keys)
 
 Output your response as a valid JSON with the following structure:
 {{
   "nodes": [
     {{
-      "node_type": "Error|Environment|Feature|Component|Cause|Resolution",
+      "node_type": "Error|Environment|Task_Feature|Task_Context|Component|Cause|Resolution",
       "name": "...",
       "description": "...",
       "metadata": {{}}
@@ -46,30 +67,6 @@ Output your response as a valid JSON with the following structure:
 }}
 """
 
-CANONICALIZATION_PROMPT = """You are a knowledge canonicalization expert. Your task is to determine if a new node should be merged with an existing node or kept separate.
-
-Existing nodes of type {node_type}:
-{existing_nodes}
-
-New node:
-Name: {new_node_name}
-Description: {new_node_description}
-
-Determine if the new node is essentially the same as any existing node, just expressed differently. Consider:
-- Semantic similarity
-- Core meaning
-- Context and intent
-
-If it matches an existing node, return the canonical name of that node.
-If it's unique, return a canonical name for the new node (possibly refined from the original).
-
-Respond with a JSON object:
-{{
-  "canonical_name": "...",
-  "is_new": true|false,
-  "reasoning": "..."
-}}
-"""
 
 SUMMARIZATION_PROMPT = """You are a technical documentation expert. Create a comprehensive yet concise entry of the following knowledge graph.
 

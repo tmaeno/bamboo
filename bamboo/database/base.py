@@ -121,3 +121,16 @@ class VectorDatabaseBackend(ABC):
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a specific document by ID."""
         pass
+
+    @abstractmethod
+    async def get_summaries_by_graph_ids(
+        self, graph_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Retrieve Summary entries for the given graph IDs.
+
+        Used in the two-step vector retrieval pattern:
+          1. Search unstructured node descriptions to find matching graph_ids.
+          2. Call this method to fetch the full summaries for those graphs.
+        """
+        pass
+

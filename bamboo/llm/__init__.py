@@ -2,7 +2,6 @@
 
 from .llm_client import get_embeddings, get_llm
 from .prompts import (
-    CANONICALIZATION_PROMPT,
     CAUSE_IDENTIFICATION_PROMPT,
     EMAIL_GENERATION_PROMPT,
     EXTRACTION_PROMPT,
@@ -13,7 +12,6 @@ __all__ = [
     "get_llm",
     "get_embeddings",
     "EXTRACTION_PROMPT",
-    "CANONICALIZATION_PROMPT",
     "SUMMARIZATION_PROMPT",
     "CAUSE_IDENTIFICATION_PROMPT",
     "EMAIL_GENERATION_PROMPT",

@@ -17,6 +17,7 @@ from bamboo.models.graph_element import (
     NodeType,
     RelationType,
     ResolutionNode,
+    TaskContextNode,
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
@@ -77,6 +78,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
     def name(self) -> str:
         """Strategy name."""
         return "llm"
+
 
     @property
     def description(self) -> str:
@@ -179,9 +181,30 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
                 category=node_data.get("category"),
             )
         elif node_type == NodeType.TASK_FEATURE:
+            metadata = node_data.get("metadata", {})
+            # Prefer explicit attribute/value from metadata; fall back to
+            # parsing the "attribute=value" name format
+            attribute = metadata.get("attribute") or node_data.get("attribute")
+            value = metadata.get("value") or node_data.get("value")
+            if not attribute or not value:
+                if "=" in node_data["name"]:
+                    attribute, _, value = node_data["name"].partition("=")
+                else:
+                    # Treat the whole name as the attribute with an empty value
+                    attribute = node_data["name"]
+                    value = node_data.get("description", "")
+            # Ensure the canonical name is always "attribute=value"
+            base_fields["name"] = f"{attribute}={value}"
             return TaskFeatureNode(
                 **base_fields,
-                feature_type=node_data.get("feature_type"),
+                attribute=attribute,
+                value=value,
+            )
+        elif node_type == NodeType.TASK_CONTEXT:
+            return TaskContextNode(
+                name=node_data.get("name", ""),
+                description=node_data.get("description"),
+                metadata=node_data.get("metadata", {}),
             )
         elif node_type == NodeType.COMPONENT:
             return ComponentNode(
