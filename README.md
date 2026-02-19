@@ -90,4 +90,4 @@ See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
 
 ## License
 
-MIT
+Apache 2.0 License - see [LICENSE](LICENSE) for details.
