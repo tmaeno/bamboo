@@ -175,7 +175,7 @@ The knowledge graph follows this structure:
 
 ```
 ┌───────────┐
-│   Error   │
+│ Symptom   │
 └─────┬─────┘
       │ indicate
       ↓

@@ -734,15 +734,13 @@ The Bamboo knowledge graph consists of **16 node types** and **18 relationship t
 ### Node Types (16)
 
 ```
-Core Nodes:
-- Error: Error messages and failures
+- Symptom: Symptom messages and failures
 - Cause: Root causes of issues
 - Resolution: Solutions and fixes
 - Environment: External factors
-- Feature: Task features
+- Task_Feature: Task features
+- Task_Context: Task context and reproduction steps
 - Component: System origin of causes
-
-Extended Nodes:
 - Metric: System metrics and KPIs
 - Anomaly: Detected anomalies
 - Issue: System issues
@@ -759,9 +757,9 @@ Extended Nodes:
 
 ```
 Core Relationships:
-- indicate: Error indicates Cause
+- indicate: Symptom indicates Cause
 - associated_with: Environment associated with Cause
-- contribute_to: Feature contributes to Cause
+- contribute_to: Task_Feature/Task_Context contributes to Cause
 - originated_from: Cause originated from Component
 - solved_by: Cause solved by Resolution
 
@@ -791,7 +789,7 @@ User (operator) ──[performed_by]──> Action ──[affects]──> System
 
 Metric ──[signals]──> Anomaly ──[leads_to]──> Issue ──[reported_by]──> User
    ↓
-Error ──[indicate]──> Cause ──[solved_by]──> Resolution
+Symptom ──[indicate]──> Cause ──[solved_by]──> Resolution
          ↓
      Component ──[originated_from]──> System
 ```

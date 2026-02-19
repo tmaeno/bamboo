@@ -44,7 +44,7 @@ import pytest
 os.environ['GRAPH_DATABASE_BACKEND'] = 'in_memory'
 
 from bamboo.database import GraphDatabaseClient
-from bamboo.models.graph_element import ErrorNode, CauseNode, GraphRelationship
+from bamboo.models.graph_element import SymptomNode, CauseNode, GraphRelationship
 
 
 @pytest.mark.asyncio
@@ -56,13 +56,13 @@ async def test_create_and_query_nodes():
     
     try:
         # Create nodes
-        error_node = ErrorNode(
+        symptom_node = SymptomNode(
             name="Database Connection Timeout",
             description="Connection to database timed out after 30 seconds",
             error_code="DB_TIMEOUT"
         )
-        error_id = await graph_db.create_node(error_node)
-        assert error_id is not None
+        symptom_id = await graph_db.create_node(symptom_node)
+        assert symptom_id is not None
         
         cause_node = CauseNode(
             name="Database Server Overload",
@@ -75,7 +75,7 @@ async def test_create_and_query_nodes():
         
         # Create relationship
         relationship = GraphRelationship(
-            source_id=error_id,
+            source_id=symptom_id,
             target_id=cause_id,
             relation_type="indicate",
             confidence=0.85
@@ -100,14 +100,14 @@ async def test_canonical_node_deduplication():
     await graph_db.connect()
     
     try:
-        error_node = ErrorNode(
+        symptom_node = SymptomNode(
             name="Initial Name",
-            description="Error description"
+            description="Symptom description"
         )
         
         # First call creates the node
         id1 = await graph_db.get_or_create_canonical_node(
-            error_node, 
+            symptom_node, 
             "Database Connection Timeout"
         )
         
