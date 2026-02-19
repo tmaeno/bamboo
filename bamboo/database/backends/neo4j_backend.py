@@ -158,7 +158,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             query = """
             // --- Symptom clues ---
             OPTIONAL MATCH (e:Symptom)-[:indicate]->(c1:Cause)
-            WHERE e.name IN symptoms OR e.description IN symptoms
+            WHERE e.name IN $symptoms
             WITH collect(DISTINCT c1) AS symptom_causes
 
             // --- Task-feature clues ---
