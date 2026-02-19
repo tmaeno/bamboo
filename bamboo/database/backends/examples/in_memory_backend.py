@@ -109,10 +109,10 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         """Find possible causes ranked by total evidence across all clue types."""
         # Map each clue type to its node-type substring and relationship type
         clue_groups = [
-            (errors or [],              "ERROR",       "indicate"),
-            (task_features or [],       "FEATURE",     "contribute_to"),
+            (errors or [], "ERROR", "indicate"),
+            (task_features or [], "FEATURE", "contribute_to"),
             (environment_factors or [], "ENVIRONMENT", "contribute_to"),
-            (components or [],          "COMPONENT",   "contribute_to"),
+            (components or [], "COMPONENT", "contribute_to"),
         ]
 
         # cause_id -> {"cause": node, "match_score": int, "resolutions": list}
@@ -128,7 +128,9 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
                     continue
                 # Follow the relationship to a Cause node
                 for rel in self.relationships.values():
-                    if rel.source_id != node_id or rel_type not in str(rel.relation_type):
+                    if rel.source_id != node_id or rel_type not in str(
+                        rel.relation_type
+                    ):
                         continue
                     cause_node = self.nodes.get(rel.target_id)
                     if not cause_node or "CAUSE" not in str(cause_node.node_type):
@@ -145,7 +147,9 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         # Collect resolutions for each matched cause
         for cause_id, data in matched.items():
             for rel in self.relationships.values():
-                if rel.source_id != cause_id or "solved_by" not in str(rel.relation_type):
+                if rel.source_id != cause_id or "solved_by" not in str(
+                    rel.relation_type
+                ):
                     continue
                 res_node = self.nodes.get(rel.target_id)
                 if res_node:

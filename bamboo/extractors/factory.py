@@ -72,9 +72,11 @@ def list_extraction_strategies() -> list[dict]:
                 "name": strategy.name,
                 "id": name,
                 "description": strategy.description,
-                "supports": "all systems"
-                if strategy.supports_system("generic")
-                else "structured systems only",
+                "supports": (
+                    "all systems"
+                    if strategy.supports_system("generic")
+                    else "structured systems only"
+                ),
             }
         )
     return strategies

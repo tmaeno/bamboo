@@ -133,4 +133,3 @@ class VectorDatabaseBackend(ABC):
           2. Call this method to fetch the full summaries for those graphs.
         """
         pass
-

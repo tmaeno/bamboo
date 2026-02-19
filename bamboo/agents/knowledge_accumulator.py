@@ -1,4 +1,5 @@
 """Knowledge accumulation agent for populating databases."""
+
 import json
 import logging
 import uuid
@@ -47,9 +48,7 @@ class KnowledgeAccumulator:
         # the same task overwrites existing vectors rather than duplicating them.
         task_id = (task_data or {}).get("task_id")
         graph_id = (
-            self._deterministic_id("graph", task_id)
-            if task_id
-            else str(uuid.uuid4())
+            self._deterministic_id("graph", task_id) if task_id else str(uuid.uuid4())
         )
 
         # Step 1: Extract knowledge graph (IDs assigned inside extractor)
@@ -84,7 +83,6 @@ class KnowledgeAccumulator:
 
         logger.info("Knowledge extraction completed successfully")
         return extracted_knowledge
-
 
     async def _store_graph(self, graph: KnowledgeGraph):
         """Store knowledge graph in Neo4j."""
@@ -183,7 +181,9 @@ class KnowledgeAccumulator:
         for item in key_insights:
             # Deterministic ID: re-processing the same graph overwrites the
             # existing point rather than inserting a duplicate.
-            vector_id = self._deterministic_id(graph_id, item["section"], item["node_id"])
+            vector_id = self._deterministic_id(
+                graph_id, item["section"], item["node_id"]
+            )
             embedding = await self.embeddings.aembed_query(item["content"])
             await self.vector_db.upsert_section_vector(
                 vector_id=vector_id,
@@ -222,4 +222,3 @@ class KnowledgeAccumulator:
         """
         key = ":".join(str(p) for p in parts)
         return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
-

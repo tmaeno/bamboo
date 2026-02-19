@@ -89,9 +89,7 @@ class ReasoningAgent:
         graph_results = await self._query_graph_database(extracted_clues)
 
         # Step 3: Query vector database
-        vector_results = await self._query_vector_database(
-            extracted_clues, task_data
-        )
+        vector_results = await self._query_vector_database(extracted_clues, task_data)
 
         # Step 4: Identify root cause using LLM
         analysis = await self._identify_root_cause(
@@ -169,7 +167,10 @@ class ReasoningAgent:
             )
         if extracted_clues.get("task_features"):
             section_queries.append(
-                ("Task_Feature", "Task features: " + ", ".join(extracted_clues["task_features"]))
+                (
+                    "Task_Feature",
+                    "Task features: " + ", ".join(extracted_clues["task_features"]),
+                )
             )
         if extracted_clues.get("task_contexts"):
             # Each prose context is its own query — don't concatenate them
@@ -177,7 +178,10 @@ class ReasoningAgent:
                 section_queries.append(("Task_Context", ctx))
         if extracted_clues.get("environment_factors"):
             section_queries.append(
-                ("Environment", "Environment: " + ", ".join(extracted_clues["environment_factors"]))
+                (
+                    "Environment",
+                    "Environment: " + ", ".join(extracted_clues["environment_factors"]),
+                )
             )
         if extracted_clues.get("components"):
             section_queries.append(
@@ -216,10 +220,12 @@ class ReasoningAgent:
         results = []
         for summary in summaries:
             graph_id = summary.get("metadata", {}).get("graph_id")
-            results.append({
-                **summary,
-                "score": graph_id_scores.get(graph_id, 0.0),
-            })
+            results.append(
+                {
+                    **summary,
+                    "score": graph_id_scores.get(graph_id, 0.0),
+                }
+            )
 
         results.sort(key=lambda x: x["score"], reverse=True)
 

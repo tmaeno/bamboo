@@ -79,7 +79,6 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         """Strategy name."""
         return "llm"
 
-
     @property
     def description(self) -> str:
         """Strategy description."""

@@ -66,4 +66,3 @@ class VectorDatabaseClient:
         the matched graphs.
         """
         return await self._backend.get_summaries_by_graph_ids(graph_ids)
-

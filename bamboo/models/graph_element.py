@@ -57,9 +57,7 @@ class BaseNode(BaseModel):
     name: str = Field(..., description="Canonical name of the node")
     description: Optional[str] = Field(
         default=None,
-        description=(
-            "Additional detail about the node. "
-        ),
+        description=("Additional detail about the node. "),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -98,7 +96,9 @@ class TaskFeatureNode(BaseNode):
 
     node_type: NodeType = NodeType.TASK_FEATURE
     attribute: str = Field(..., description="Feature key, e.g. 'RAM', 'OS', 'timeout'")
-    value: str = Field(..., description="Feature value, e.g. '1GB', 'Ubuntu 22.04', '30s'")
+    value: str = Field(
+        ..., description="Feature value, e.g. '1GB', 'Ubuntu 22.04', '30s'"
+    )
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
