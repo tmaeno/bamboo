@@ -10,8 +10,8 @@ Quick start guide to get up and running with Bamboo.
 ### 🔌 [Database Plugin System](./database-plugins/INDEX.md)
 Documentation for the database plugin architecture, including backend support (Neo4j, Qdrant, In-Memory) and configuration.
 
-### 🧩 [Extraction Strategies](./extraction-strategies/EXTRACTION_PLUGIN_SYSTEM.md)
-Documentation for the pluggable extraction system, including available strategies and how to add custom extractors.
+### 🧩 [Knowledge Extraction Strategies](./extraction-strategies/EXTRACTION_PLUGIN_SYSTEM.md)
+Documentation for the pluggable knowledge extraction system, including available strategies and how to add custom extractors.
 
 ### 👨‍💻 [Development](./development/DEVELOPMENT.md)
 Development guide for contributing to Bamboo.
