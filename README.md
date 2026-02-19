@@ -19,7 +19,7 @@ pip install -r requirements.txt
 python -m bamboo.cli interactive
 ```
 
-For detailed setup: see [QUICKSTART.md](QUICKSTART.md)
+For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 
 ## What is Bamboo?
 
@@ -71,12 +71,12 @@ bamboo/
 4. **Config**: `cp examples/.env.example .env` and add API keys
 5. **Verify**: `python verify_installation.py`
 
-For detailed instructions: see [QUICKSTART.md](QUICKSTART.md)
+For detailed instructions: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for:
+See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
 - Development setup and code style
 - Extension points (agents, tools, node types)
 - Testing and deployment guides
@@ -85,8 +85,8 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for:
 ## Next Steps
 
 1. Setup: `python verify_installation.py`
-2. Learn: [QUICKSTART.md](QUICKSTART.md)
-3. Develop: [DEVELOPMENT.md](DEVELOPMENT.md)
+2. Learn: [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
+3. Develop: [DEVELOPMENT.md](docs/development/DEVELOPMENT.md)
 
 ## License
 
