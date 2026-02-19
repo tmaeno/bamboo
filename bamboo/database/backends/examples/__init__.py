@@ -5,4 +5,3 @@ from bamboo.database.backends.examples.in_memory_backend import (
 )
 
 __all__ = ["InMemoryGraphBackend"]
-

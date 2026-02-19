@@ -6,9 +6,9 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
-from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.llm import (
     CAUSE_IDENTIFICATION_PROMPT,
     EMAIL_GENERATION_PROMPT,
@@ -85,7 +85,9 @@ class ReasoningAgent:
         graph_results = await self._query_graph_database(extracted_features)
 
         # Step 3: Query vector database
-        vector_results = await self._query_vector_database(extracted_features, task_data)
+        vector_results = await self._query_vector_database(
+            extracted_features, task_data
+        )
 
         # Step 4: Identify root cause using LLM
         analysis = await self._identify_root_cause(

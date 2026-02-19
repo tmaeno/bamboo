@@ -58,4 +58,3 @@ class ExtractionStrategy(ABC):
     def description(self) -> str:
         """Human-readable description of this strategy."""
         pass
-

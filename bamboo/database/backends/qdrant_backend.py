@@ -169,5 +169,3 @@ class QdrantBackend(VectorDatabaseBackend):
         except Exception as e:
             logger.error(f"Failed to retrieve document {doc_id}: {e}")
         return None
-
-

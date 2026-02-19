@@ -13,11 +13,11 @@ from bamboo.models.graph_element import (
     ComponentNode,
     EnvironmentNode,
     ErrorNode,
-    TaskFeatureNode,
     GraphRelationship,
     NodeType,
     RelationType,
     ResolutionNode,
+    TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
 
@@ -204,4 +204,3 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
             )
 
         return None
-

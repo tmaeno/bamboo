@@ -31,4 +31,3 @@ async def test_graph_extractor():
     #
     # assert len(graph.nodes) > 0
     # assert len(graph.relationships) > 0
-

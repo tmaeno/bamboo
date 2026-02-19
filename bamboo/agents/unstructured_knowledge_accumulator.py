@@ -7,9 +7,9 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
-from bamboo.agents.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.llm import (
     CANONICALIZATION_PROMPT,
     SUMMARIZATION_PROMPT,
@@ -223,7 +223,9 @@ class KnowledgeAccumulator:
         response = await self.llm.ainvoke(messages)
         return response.content
 
-    async def _extract_key_insights(self, graph: KnowledgeGraph) -> dict[str, list[dict[str, str]]]:
+    async def _extract_key_insights(
+        self, graph: KnowledgeGraph
+    ) -> dict[str, list[dict[str, str]]]:
         """Extract key insights from the graph."""
         insights = {}
 
@@ -231,8 +233,12 @@ class KnowledgeAccumulator:
         causes = [node for node in graph.nodes if node.node_type == NodeType.CAUSE]
         for cause in causes[:3]:  # Top 3 causes
             insights.setdefault(cause.node_type, [])
-            insights[cause.node_type].append({"id": cause.id,
-                                              "insight": f"Cause: {cause.name}. Description: {cause.description}"})
+            insights[cause.node_type].append(
+                {
+                    "id": cause.id,
+                    "insight": f"Cause: {cause.name}. Description: {cause.description}",
+                }
+            )
 
         # Extract resolutions
         resolutions = [
@@ -240,8 +246,12 @@ class KnowledgeAccumulator:
         ]
         for resolution in resolutions[:3]:  # Top 3 resolutions
             insights.setdefault(resolution.node_type, [])
-            insights[resolution.node_type].append({"id": resolution.id,
-                                                   "insight": f"Resolution: {cause.name}. Description: {cause.description}"})
+            insights[resolution.node_type].append(
+                {
+                    "id": resolution.id,
+                    "insight": f"Resolution: {cause.name}. Description: {cause.description}",
+                }
+            )
 
         return insights
 
@@ -275,7 +285,7 @@ class KnowledgeAccumulator:
                     section=section,
                     metadata={
                         "graph_node_id": node_id,
-                    }
+                    },
                 )
 
         logger.info("Knowledge stored successfully in vector database")

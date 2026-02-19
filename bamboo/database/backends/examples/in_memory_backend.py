@@ -82,15 +82,11 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         """Create a relationship between nodes."""
         # Verify both nodes exist
         if relationship.source_id not in self.nodes:
-            logger.warning(
-                f"Source node {relationship.source_id} not found"
-            )
+            logger.warning(f"Source node {relationship.source_id} not found")
             return False
 
         if relationship.target_id not in self.nodes:
-            logger.warning(
-                f"Target node {relationship.target_id} not found"
-            )
+            logger.warning(f"Target node {relationship.target_id} not found")
             return False
 
         rel_id = f"{relationship.source_id}-{relationship.relation_type}-{relationship.target_id}"
@@ -116,9 +112,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             ):
                 # Find causes connected via 'indicate' relationship
                 for rel_id, rel in self.relationships.items():
-                    if (
-                        rel.source_id == node_id
-                        and "indicate" in str(rel.relation_type)
+                    if rel.source_id == node_id and "indicate" in str(
+                        rel.relation_type
                     ):
                         cause_node = self.nodes.get(rel.target_id)
                         if cause_node and "CAUSE" in str(cause_node.node_type):
@@ -144,7 +139,9 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
                                     "cause_id": cause_node.id,
                                     "cause_name": cause_node.name,
                                     "cause_description": cause_node.description,
-                                    "confidence": getattr(cause_node, "confidence", 1.0),
+                                    "confidence": getattr(
+                                        cause_node, "confidence", 1.0
+                                    ),
                                     "frequency": getattr(cause_node, "frequency", 1),
                                     "resolutions": resolutions,
                                 }
@@ -164,9 +161,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             if "FEATURE" in str(node.node_type) and node.name in features:
                 # Find causes connected via 'contribute_to' relationship
                 for rel_id, rel in self.relationships.items():
-                    if (
-                        rel.source_id == node_id
-                        and "contribute_to" in str(rel.relation_type)
+                    if rel.source_id == node_id and "contribute_to" in str(
+                        rel.relation_type
                     ):
                         cause_node = self.nodes.get(rel.target_id)
                         if cause_node and "CAUSE" in str(cause_node.node_type):
@@ -187,9 +183,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             # Find resolutions
             resolutions = []
             for rel_id, rel in self.relationships.items():
-                if (
-                    rel.source_id == cause_node.id
-                    and "solved_by" in str(rel.relation_type)
+                if rel.source_id == cause_node.id and "solved_by" in str(
+                    rel.relation_type
                 ):
                     res_node = self.nodes.get(rel.target_id)
                     if res_node:
@@ -227,9 +222,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             node = self.nodes[cause_id]
             if hasattr(node, "frequency"):
                 node.frequency += 1
-                logger.debug(
-                    f"Incremented frequency for {cause_id}: {node.frequency}"
-                )
+                logger.debug(f"Incremented frequency for {cause_id}: {node.frequency}")
 
     async def update_resolution_success_rate(self, resolution_id: str, success: bool):
         """Update resolution success rate based on feedback."""
@@ -253,5 +246,3 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             logger.debug(
                 f"Updated success rate for {resolution_id}: {node.success_rate}"
             )
-
-

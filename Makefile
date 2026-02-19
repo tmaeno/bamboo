@@ -28,7 +28,7 @@ lint:
 
 format:
 	black bamboo/ tests/
-	ruff check --fix bamboo/
+	#ruff check --fix bamboo/
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

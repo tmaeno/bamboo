@@ -9,9 +9,9 @@ from .graph_element import (
     ComponentNode,
     EnvironmentNode,
     ErrorNode,
-    TaskFeatureNode,
     GraphRelationship,
     ResolutionNode,
+    TaskFeatureNode,
 )
 
 NodeUnion = Union[

@@ -12,9 +12,7 @@ logger = logging.getLogger(__name__)
 _extraction_strategies: dict[str, Type[ExtractionStrategy]] = {}
 
 
-def register_extraction_strategy(
-    name: str, strategy_class: Type[ExtractionStrategy]
-):
+def register_extraction_strategy(name: str, strategy_class: Type[ExtractionStrategy]):
     """Register an extraction strategy.
 
     Args:
@@ -51,9 +49,7 @@ def get_extraction_strategy(strategy: str = None) -> ExtractionStrategy:
     for strategy_class in _extraction_strategies.values():
         instance = strategy_class()
         if instance.supports_system(strategy):
-            logger.info(
-                f"Using extraction strategy {instance.name} for: {strategy}"
-            )
+            logger.info(f"Using extraction strategy {instance.name} for: {strategy}")
             return instance
 
     raise ValueError(
@@ -109,4 +105,3 @@ def _register_builtin_strategies():
 
 # Auto-register built-in strategies on import
 _register_builtin_strategies()
-

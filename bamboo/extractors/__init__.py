@@ -11,4 +11,3 @@ __all__ = [
     "list_extraction_strategies",
     "register_extraction_strategy",
 ]
-

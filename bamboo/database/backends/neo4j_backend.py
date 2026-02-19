@@ -8,8 +8,7 @@ try:
     from neo4j.exceptions import Neo4jError
 except ImportError as e:
     raise ImportError(
-        "Neo4j backend requires 'neo4j' package. "
-        "Install it with: pip install neo4j"
+        "Neo4j backend requires 'neo4j' package. " "Install it with: pip install neo4j"
     ) from e
 
 from bamboo.config import get_settings
@@ -238,6 +237,3 @@ class Neo4jBackend(GraphDatabaseBackend):
                 resolution_id=resolution_id,
                 success_increment=1 if success else 0,
             )
-
-
-

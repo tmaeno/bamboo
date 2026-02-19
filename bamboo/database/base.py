@@ -106,5 +106,3 @@ class VectorDatabaseBackend(ABC):
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a specific document by ID."""
         pass
-
-
