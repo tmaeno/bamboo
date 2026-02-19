@@ -1,0 +1,63 @@
+{
+  "source": "monitoring-system",
+  "timestamp": "2026-02-18T14:30:00Z",
+  "system_metrics": {
+    "cpu_usage": 85,
+    "memory_usage": 78,
+    "disk_usage": 65,
+    "network_latency_ms": 45
+  },
+  "resource_usage": {
+    "database_connections": 48,
+    "active_threads": 120,
+    "queue_depth": 350
+  },
+  "dependencies": [
+    {
+      "name": "postgres-primary",
+      "status": "healthy",
+      "response_time_ms": 250,
+      "connection_pool_usage": 0.96
+    },
+    {
+      "name": "redis-cache",
+      "status": "healthy",
+      "response_time_ms": 5
+    },
+    {
+      "name": "s3-storage",
+      "status": "healthy",
+      "response_time_ms": 120
+    }
+  ],
+  "integrations": {
+    "api_gateway": "operational",
+    "message_queue": "operational"
+  },
+  "logs": [
+    "2026-02-18T14:25:00Z [ERROR] Database connection pool exhausted",
+    "2026-02-18T14:25:15Z [WARN] Retry attempt 3 of 5",
+    "2026-02-18T14:26:00Z [ERROR] Task execution timeout",
+    "2026-02-18T14:30:00Z [ERROR] Task moved to exhausted state"
+  ],
+  "traces": [
+    {
+      "span_id": "abc123",
+      "operation": "database_query",
+      "duration_ms": 30000,
+      "status": "timeout"
+    },
+    {
+      "span_id": "def456",
+      "operation": "data_export",
+      "duration_ms": 35000,
+      "status": "failed"
+    }
+  ],
+  "context": {
+    "concurrent_tasks": 450,
+    "peak_hour": true,
+    "maintenance_window": false
+  }
+}
+

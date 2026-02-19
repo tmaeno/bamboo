@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-12345",
+  "status": "exhausted",
+  "title": "Process User Data Export",
+  "description": "Export user data for compliance request",
+  "created_at": "2026-02-15T10:00:00Z",
+  "updated_at": "2026-02-18T14:30:00Z",
+  "retry_count": 5,
+  "last_error": "DatabaseConnectionError: Connection timeout after 30 seconds",
+  "environment": {
+    "deployment": "production",
+    "region": "us-west-2",
+    "load": "high"
+  },
+  "configuration": {
+    "timeout": 30,
+    "max_retries": 5,
+    "batch_size": 1000
+  },
+  "features": {
+    "user_count": 50000,
+    "data_size_mb": 2500,
+    "export_format": "json",
+    "include_attachments": true
+  },
+  "parameters": {
+    "start_date": "2025-01-01",
+    "end_date": "2026-01-01"
+  },
+  "metadata": {
+    "priority": "high",
+    "assigned_to": "data-export-service",
+    "queue": "bulk-operations"
+  }
+}
+

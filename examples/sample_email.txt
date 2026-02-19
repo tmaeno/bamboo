@@ -1,0 +1,25 @@
+From: John Doe <john@example.com>
+To: Support Team <support@example.com>
+Subject: Task Exhaustion Issue - Database Timeout
+
+Hi team,
+
+We've been experiencing issues with tasks going into exhausted state.
+After investigation, we found that the root cause is database connection timeouts
+occurring when the system is under heavy load.
+
+The error message we're seeing is:
+"DatabaseConnectionError: Connection timeout after 30 seconds"
+
+This typically happens during peak hours when we have more than 1000 concurrent users.
+
+Resolution:
+1. Increased the connection pool size from 10 to 50
+2. Added retry logic with exponential backoff
+3. Implemented connection pooling optimization
+
+After these changes, the issue was resolved.
+
+Best regards,
+John Doe
+

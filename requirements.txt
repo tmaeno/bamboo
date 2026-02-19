@@ -1,0 +1,39 @@
+langchain-core
+# Core dependencies
+langgraph>=0.0.38
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-anthropic>=0.1.0
+
+# Database
+neo4j>=5.16.0
+qdrant-client>=1.7.0
+
+# Data processing
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+httpx>=0.26.0
+tenacity>=8.2.3
+
+# Email parsing
+email-validator>=2.1.0
+
+# CLI
+click>=8.1.7
+rich>=13.7.0
+
+# MCP (Model Context Protocol) - for future implementation
+# fastapi>=0.104.0  # For MCP server
+# uvicorn>=0.24.0   # ASGI server
+# websockets>=12.0  # WebSocket support
+
+# Development
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+black>=23.12.1
+ruff>=0.1.9
+mypy>=1.8.0
+
