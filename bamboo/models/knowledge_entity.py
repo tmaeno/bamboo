@@ -8,7 +8,7 @@ from .graph_element import (
     CauseNode,
     ComponentNode,
     EnvironmentNode,
-    ErrorNode,
+    SymptomNode,
     GraphRelationship,
     ResolutionNode,
     TaskContextNode,
@@ -16,7 +16,7 @@ from .graph_element import (
 )
 
 NodeUnion = Union[
-    ErrorNode,
+    SymptomNode,
     EnvironmentNode,
     TaskFeatureNode,
     TaskContextNode,

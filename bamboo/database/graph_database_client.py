@@ -48,7 +48,7 @@ class GraphDatabaseClient:
     ) -> list[dict[str, Any]]:
         """Find possible causes ranked by total evidence across all clue types."""
         return await self._backend.find_causes(
-            errors=errors,
+            symptoms=errors,
             task_features=task_features,
             environment_factors=environment_factors,
             components=components,

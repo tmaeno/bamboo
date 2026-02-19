@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class NodeType(str, Enum):
     """Types of nodes in the knowledge graph."""
 
-    ERROR = "Error"
+    SYMPTOM = "Symptom"
     ENVIRONMENT = "Environment"
     TASK_FEATURE = "Task_Feature"
     TASK_CONTEXT = "Task_Context"
@@ -62,10 +62,10 @@ class BaseNode(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ErrorNode(BaseNode):
-    """Represents a main error message."""
+class SymptomNode(BaseNode):
+    """Represents a main symptom message."""
 
-    node_type: NodeType = NodeType.ERROR
+    node_type: NodeType = NodeType.SYMPTOM
     error_code: Optional[str] = None
     severity: Optional[str] = None
 

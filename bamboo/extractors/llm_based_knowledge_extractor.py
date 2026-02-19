@@ -12,7 +12,7 @@ from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     EnvironmentNode,
-    ErrorNode,
+    SymptomNode,
     GraphRelationship,
     NodeType,
     RelationType,
@@ -168,8 +168,8 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
             "metadata": node_data.get("metadata", {}),
         }
 
-        if node_type == NodeType.ERROR:
-            return ErrorNode(
+        if node_type == NodeType.SYMPTOM:
+            return SymptomNode(
                 **base_fields,
                 error_code=node_data.get("error_code"),
                 severity=node_data.get("severity"),

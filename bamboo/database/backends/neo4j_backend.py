@@ -67,7 +67,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             index_queries = [
                 "CREATE INDEX IF NOT EXISTS FOR (n:Cause) ON (n.confidence)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Cause) ON (n.frequency)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Error) ON (n.name)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Symptom) ON (n.name)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Resolution) ON (n.success_rate)",
             ]
             for query in index_queries:
@@ -140,7 +140,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def find_causes(
         self,
-        errors: list[str] = None,
+        symptoms: list[str] = None,
         task_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
@@ -156,33 +156,33 @@ class Neo4jBackend(GraphDatabaseBackend):
             database=self.settings.neo4j_database
         ) as session:
             query = """
-            // --- Error clues ---
-            OPTIONAL MATCH (e:Error)-[:indicate]->(c1:Cause)
-            WHERE e.name IN $errors OR e.description IN $errors
-            WITH collect(DISTINCT c1) AS error_causes
+            // --- Symptom clues ---
+            OPTIONAL MATCH (e:Symptom)-[:indicate]->(c1:Cause)
+            WHERE e.name IN symptoms OR e.description IN symptoms
+            WITH collect(DISTINCT c1) AS symptom_causes
 
             // --- Task-feature clues ---
             OPTIONAL MATCH (f:Feature)-[:contribute_to]->(c2:Cause)
             WHERE f.name IN $task_features
-            WITH error_causes, collect(DISTINCT c2) AS feature_causes
+            WITH symptom_causes, collect(DISTINCT c2) AS feature_causes
 
             // --- Environment clues ---
             OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c3:Cause)
             WHERE env.name IN $environment_factors
-            WITH error_causes, feature_causes, collect(DISTINCT c3) AS env_causes
+            WITH symptom_causes, feature_causes, collect(DISTINCT c3) AS env_causes
 
             // --- Component clues ---
             OPTIONAL MATCH (comp:Component)-[:contribute_to]->(c4:Cause)
             WHERE comp.name IN $components
-            WITH error_causes, feature_causes, env_causes,
+            WITH symptom_causes, feature_causes, env_causes,
                  collect(DISTINCT c4) AS comp_causes
 
             // --- Union all matched causes and score by clue-type breadth ---
-            WITH error_causes + feature_causes + env_causes + comp_causes AS all_causes,
-                 error_causes, feature_causes, env_causes, comp_causes
+            WITH symptom_causes + feature_causes + env_causes + comp_causes AS all_causes,
+                 symptom_causes, feature_causes, env_causes, comp_causes
             UNWIND all_causes AS c
             WITH DISTINCT c,
-                 (CASE WHEN c IN error_causes       THEN 1 ELSE 0 END +
+                 (CASE WHEN c IN symptom_causes      THEN 1 ELSE 0 END +
                   CASE WHEN c IN feature_causes      THEN 1 ELSE 0 END +
                   CASE WHEN c IN env_causes          THEN 1 ELSE 0 END +
                   CASE WHEN c IN comp_causes         THEN 1 ELSE 0 END) AS match_score
@@ -201,7 +201,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             """
             result = await session.run(
                 query,
-                errors=errors or [],
+                symptoms=symptoms or [],
                 task_features=task_features or [],
                 environment_factors=environment_factors or [],
                 components=components or [],

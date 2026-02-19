@@ -100,7 +100,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
 
     async def find_causes(
         self,
-        errors: list[str] = None,
+        symptoms: list[str] = None,
         task_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
@@ -109,7 +109,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         """Find possible causes ranked by total evidence across all clue types."""
         # Map each clue type to its node-type substring and relationship type
         clue_groups = [
-            (errors or [], "ERROR", "indicate"),
+            (symptoms or [], "SYMPTOM", "indicate"),
             (task_features or [], "FEATURE", "contribute_to"),
             (environment_factors or [], "ENVIRONMENT", "contribute_to"),
             (components or [], "COMPONENT", "contribute_to"),

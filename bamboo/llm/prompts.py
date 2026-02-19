@@ -3,7 +3,7 @@
 EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to extract structured knowledge from the provided information and construct a knowledge graph.
 
 The graph should follow this schema:
-- Error -[indicate]-> Cause
+- Symptom -[indicate]-> Cause
 - Environment -[associated_with]-> Cause
 - Task_Feature -[contribute_to]-> Cause
 - Task_Context -[contribute_to]-> Cause
@@ -11,7 +11,7 @@ The graph should follow this schema:
 - Cause -[solved_by]-> Resolution
 
 Node Types:
-- Error: Main error message
+- Symptom: Main symptom message
 - Environment: External factor (system, network, resource)
 - Task_Feature: A task characteristic with a discrete, comparable value.
   MUST be formatted as "attribute=value" (e.g. "RAM=1GB", "OS=Ubuntu 22.04", "timeout=30s").
@@ -29,7 +29,7 @@ Node Types:
 - Resolution: Action to resolve the issue
 
 Canonicalization rules (apply during extraction — no separate pass needed):
-- Error, Environment, Component: output a single, normalised canonical name.
+- Symptom, Environment, Component: output a single, normalised canonical name.
   Prefer full names over abbreviations ("production" not "prod",
   "NullPointerException" not "NPE", "authentication-service" not "auth-svc").
   If the same concept appears multiple times under different surface forms,
@@ -50,7 +50,7 @@ Output your response as a valid JSON with the following structure:
 {{
   "nodes": [
     {{
-      "node_type": "Error|Environment|Task_Feature|Task_Context|Component|Cause|Resolution",
+      "node_type": "Symptom|Environment|Task_Feature|Task_Context|Component|Cause|Resolution",
       "name": "...",
       "description": "...",
       "metadata": {{}}

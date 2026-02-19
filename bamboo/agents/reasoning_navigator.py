@@ -37,7 +37,7 @@ class ReasoningAgent:
 
     def _extract_clues_from_graph(self, graph) -> dict[str, Any]:
         """Extract clues and key information from knowledge graph to deduce possible causes and resolutions."""
-        errors = []
+        symptoms = []
         task_features = []
         task_contexts = []  # unstructured prose — vector DB only, not graph DB
         environment_factors = []
@@ -46,8 +46,8 @@ class ReasoningAgent:
         for node in graph.nodes:
             node_type_str = str(node.node_type)
 
-            if "ERROR" in node_type_str:
-                errors.append(node.name)
+            if "SYMPTOM" in node_type_str:
+                symptoms.append(node.name)
             elif "TASK_CONTEXT" in node_type_str:
                 if node.description:
                     task_contexts.append(node.description)
@@ -59,7 +59,7 @@ class ReasoningAgent:
                 components.append(node.name)
 
         return {
-            "errors": errors,
+            "symptoms": symptoms,
             "task_features": task_features,
             "task_contexts": task_contexts,
             "environment_factors": environment_factors,
@@ -125,7 +125,7 @@ class ReasoningAgent:
         logger.info("Querying graph database")
 
         results = await self.graph_db.find_causes(
-            errors=extracted_clues.get("errors"),
+            symptoms=extracted_clues.get("symptoms"),
             task_features=extracted_clues.get("task_features"),
             environment_factors=extracted_clues.get("environment_factors"),
             components=extracted_clues.get("components"),

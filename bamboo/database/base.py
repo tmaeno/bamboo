@@ -39,7 +39,7 @@ class GraphDatabaseBackend(ABC):
     @abstractmethod
     async def find_causes(
         self,
-        errors: list[str] = None,
+        symptoms: list[str] = None,
         task_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
@@ -47,12 +47,12 @@ class GraphDatabaseBackend(ABC):
     ) -> list[dict[str, Any]]:
         """Find possible causes ranked by how many clue types they match.
 
-        Causes that match across multiple clue types (e.g. both an error and
+        Causes that match across multiple clue types (e.g. both a symptom and
         a component) score higher than causes matching only one type, producing
         more accurate ranking than merging separate single-type query results.
 
         Args:
-            errors: Error node names extracted from the knowledge graph.
+            symptoms: Symptom node names extracted from the knowledge graph.
             task_features: Task-feature node names extracted from the knowledge graph.
             environment_factors: Environment node names extracted from the knowledge graph.
             components: Component node names extracted from the knowledge graph.
