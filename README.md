@@ -1,5 +1,15 @@
 # Bamboo
 
+![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![LangGraph](https://img.shields.io/badge/LangGraph-0.0.38%2B-orange?logo=chainlink&logoColor=white)
+![Neo4j](https://img.shields.io/badge/Neo4j-5.16%2B-brightgreen?logo=neo4j&logoColor=white)
+![Qdrant](https://img.shields.io/badge/Qdrant-1.7%2B-red)
+![Code Style](https://img.shields.io/badge/code%20style-black-black)
+![Linting](https://img.shields.io/badge/linting-ruff-purple)
+![Type Checking](https://img.shields.io/badge/type%20checking-mypy-blue)
+
 **B**olstered **A**ssistance for **M**anaging and **B**uilding **O**perations and **O**versight
 
 An intelligent multi-agent AI system for system automation and operations, leveraging graph and vector databases for knowledge management.
@@ -20,10 +30,6 @@ python -m bamboo.cli interactive
 ```
 
 For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
-
-## What is Bamboo?
-
-Bamboo provides **6 specialized AI agents** working together:
 
 ## Key Features
 
@@ -54,6 +60,7 @@ Bamboo provides **6 specialized AI agents** working together:
 bamboo/
 ├── agents/            # AI agents
 ├── database/          # Database clients
+├── extractors/        # Knowledge extractors
 ├── mcp_tools/         # MCP tools
 ├── llm/               # LLM integration
 ├── models/            # Data models (Pydantic)
@@ -90,4 +97,4 @@ See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
 
 ## License
 
-Apache 2.0 License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.
