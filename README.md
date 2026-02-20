@@ -2,13 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![LangGraph](https://img.shields.io/badge/LangGraph-0.0.38%2B-orange?logo=chainlink&logoColor=white)
-![Neo4j](https://img.shields.io/badge/Neo4j-5.16%2B-brightgreen?logo=neo4j&logoColor=white)
-![Qdrant](https://img.shields.io/badge/Qdrant-1.7%2B-red)
-![Code Style](https://img.shields.io/badge/code%20style-black-black)
-![Linting](https://img.shields.io/badge/linting-ruff-purple)
-![Type Checking](https://img.shields.io/badge/type%20checking-mypy-blue)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue)
 
 **B**olstered **A**ssistance for **M**anaging and **B**uilding **O**perations and **O**versight
 
@@ -45,7 +39,7 @@ For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 - **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
 
 ### Sub-agents
-- **Graph Extraction** - Extracts structured knowledge from unstructured data
+- **Graph Extraction** - Extracts knowledge from unstructured data
 - 
 ### Agents to come
 - **Automation Agent** - Plans and executes operational workflows
@@ -97,4 +91,4 @@ See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Apache 2.0 License - see [LICENSE](LICENSE) for details.

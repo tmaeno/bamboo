@@ -120,12 +120,15 @@ class Neo4jBackend(GraphDatabaseBackend):
         async with self.driver.session(
             database=self.settings.neo4j_database
         ) as session:
-            query = """
+            query = (
+                """
             MATCH (source {id: $source_id})
             MATCH (target {id: $target_id})
             CREATE (source)-[r:%s $properties]->(target)
             RETURN r
-            """ % relationship.relation_type.value
+            """
+                % relationship.relation_type.value
+            )
 
             properties = relationship.properties.copy()
             properties["confidence"] = relationship.confidence

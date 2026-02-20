@@ -104,6 +104,15 @@ def _register_builtin_strategies():
     except ImportError as e:
         logger.debug(f"Rule-based strategy not available: {e}")
 
+    try:
+        from bamboo.extractors.panda_knowledge_extractor import (
+            PandaKnowledgeExtractor,
+        )
+
+        register_extraction_strategy("panda", PandaKnowledgeExtractor)
+    except ImportError as e:
+        logger.debug(f"Panda strategy not available: {e}")
+
 
 # Auto-register built-in strategies on import
 _register_builtin_strategies()

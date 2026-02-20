@@ -22,9 +22,9 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4-turbo-preview"
 
     # Extraction Configuration
-    extraction_strategy: Literal["llm", "rule_based", "jira", "github", "generic"] = (
-        "llm"
-    )
+    extraction_strategy: Literal[
+        "llm", "rule_based", "jira", "github", "generic", "panda"
+    ] = "llm"
 
     # Database Backend Configuration
     graph_database_backend: Literal["neo4j"] = "neo4j"

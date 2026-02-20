@@ -166,3 +166,84 @@ Respond with a JSON object:
   "context": {{}}
 }}
 """
+
+EMAIL_EXTRACTION_PROMPT = """You are a root-cause analysis expert reading an operational incident email thread.
+
+Extract ONLY the following node types from the email — do NOT emit Symptom, Environment, Task_Feature, or Component nodes (those are populated from structured data elsewhere):
+
+Node types to extract:
+- Cause: A root cause or contributing cause mentioned or implied in the thread.
+  name = short canonical description of the cause.
+  description = fuller explanation as written in the email.
+- Resolution: A fix, workaround, or recommended action mentioned in the thread.
+  name = short canonical description of the action.
+  description = fuller explanation as written in the email.
+  steps = list of discrete action steps if mentioned (else empty list).
+- Task_Context: Any free-form contextual remark that does not fit Cause or Resolution —
+  e.g. observations, background, constraints, timeline notes.
+  name = a short snake_case key summarising the topic (e.g. "observed_behavior", "timeline").
+  description = the verbatim or lightly paraphrased prose from the email.
+
+Relationships to emit (between extracted nodes only):
+- Cause -[solved_by]-> Resolution
+- Task_Context -[contribute_to]-> Cause  (only when the context directly supports a cause)
+
+Canonicalization:
+- If the same cause or resolution is mentioned multiple times, emit it only once.
+- Keep names concise and general (no incident-specific IDs, paths, or dataset names).
+
+Email thread:
+{email_text}
+
+Output ONLY a valid JSON object — no explanation, no markdown fences:
+{{
+  "nodes": [
+    {{
+      "node_type": "Cause|Resolution|Task_Context",
+      "name": "...",
+      "description": "...",
+      "metadata": {{}},
+      "steps": []
+    }}
+  ],
+  "relationships": [
+    {{
+      "source_name": "...",
+      "target_name": "...",
+      "relation_type": "solved_by|contribute_to",
+      "confidence": 0.0
+    }}
+  ]
+}}
+"""
+
+ERROR_CATEGORY_LABEL_PROMPT = """You are an error classification expert.
+
+Given a raw error message from an operational system, produce a short, canonical error-category label.
+
+Rules:
+- Strip ALL incident-specific tokens: dataset names, file paths, usernames, version strings, numeric IDs, timestamps, URLs, and any other values that differ between incidents.
+- Focus on the STRUCTURAL PATTERN of the error — what kind of failure is being described in general terms.
+- Return a single CamelCase label of 1–4 words (e.g. "TooManyFiles", "ConnectionTimeout", "PermissionDenied", "DiskFull").
+- Do NOT include punctuation, spaces, underscores, or numbers in the label.
+- Do NOT wrap the answer in quotes or add any explanation — output the label only.
+
+Examples:
+  "failed to insert files for mc20_13TeV:mc20_13TeV.900149.PG_single_nu_Pt50.digit.RDO.e8307_s3482_s3136_d1715/. Input dataset contains too many files >200000."
+  → TooManyFilesInDataset
+
+  "failed to insert files for user.skondo.Znnjets_mc20_700337_mc20e.eventpick.AOD.DTRun3_v1.2.15.log. Input dataset contains too many files >200000."
+  → TooManyFilesInDataset
+
+  "Connection refused: could not connect to host db-prod-3.internal on port 5432 after 3 retries."
+  → DatabaseConnectionRefused
+
+  "java.lang.OutOfMemoryError: Java heap space at com.example.Processor.run(Processor.java:42)"
+  → OutOfMemoryError
+
+Raw error message:
+{error_message}
+
+Category label:"""
+
+
