@@ -166,6 +166,49 @@ CLI_ARGUMENT_KEYS: frozenset[str] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# task_creation_arguments flags split by how incident-specific their values are:
+#
+# TASK_CREATION_SKIP_ARGS   — pure identifiers / GUIDs / numeric ranges whose
+#                             values are unique per incident and carry no
+#                             semantic signal worth indexing.  These are
+#                             dropped entirely (neither graph nor vector DB).
+#
+# TASK_CREATION_CONTEXT_ARGS — free-form human-readable strings (script names,
+#                             command payloads, file patterns) that are unique
+#                             per incident but carry semantic meaning.  These
+#                             are stored as TaskContextNode so the vector DB
+#                             can surface semantically similar incidents
+#                             (e.g. two users running similar scripts).
+#
+# Flags in neither set (e.g. --nFilesPerJob, --nEvents, --maxCpuCount) carry
+# configuration choices that repeat across incidents and become TaskFeatureNodes
+# in the graph DB.
+# ---------------------------------------------------------------------------
+TASK_CREATION_SKIP_ARGS: frozenset[str] = frozenset(
+    {
+        # Dataset identifiers — always GUIDs / unique scope tokens.
+        "outDS",
+        "inDS",
+        "minDS",
+        "cavDS",
+        "secondaryDSs",
+        "extFile",
+    }
+)
+
+TASK_CREATION_CONTEXT_ARGS: frozenset[str] = frozenset(
+    {
+        # Free-form execution payload — arbitrary user script invocation;
+        # semantically useful for finding incidents with similar workloads.
+        "exec",
+        "trf",
+        # Output file name patterns — may encode meaningful workflow names.
+        "outputs",
+        "extOutFile",
+    }
+)
+
+# ---------------------------------------------------------------------------
 # Keys whose values are continuous numerics (→ TaskFeatureNode with bucketed
 # value).  Storing raw numbers like ramCount=123 / ramCount=456 would create
 # a unique node per incident and prevent any graph merging.  Bucketing maps
@@ -671,20 +714,31 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         continuous_keys: Optional[frozenset[str]] = None,
         split_rule_keys: Optional[frozenset[str]] = None,
         cli_argument_keys: Optional[frozenset[str]] = None,
+        task_creation_context_args: Optional[frozenset[str]] = None,
+        task_creation_skip_args: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
     ) -> None:
         """
         Args:
-            unstructured_keys:  Override default prose keys (UNSTRUCTURED_TASK_KEYS).
-            discrete_keys:      Override default discrete keys (DISCRETE_TASK_KEYS).
-            continuous_keys:    Override default continuous keys (CONTINUOUS_TASK_KEYS).
-            split_rule_keys:    Override default pipe-split keys (SPLIT_RULE_KEYS).
-            cli_argument_keys:  Override default CLI-arg keys (CLI_ARGUMENT_KEYS).
-            error_classifier:   Custom ErrorCategoryClassifier (for testing).
-            cause_store:        Custom CanonicalNodeStore for Cause nodes (for testing).
-            resolution_store:   Custom CanonicalNodeStore for Resolution nodes (for testing).
+            unstructured_keys:           Override default prose keys (UNSTRUCTURED_TASK_KEYS).
+            discrete_keys:               Override default discrete keys (DISCRETE_TASK_KEYS).
+            continuous_keys:             Override default continuous keys (CONTINUOUS_TASK_KEYS).
+            split_rule_keys:             Override default pipe-split keys (SPLIT_RULE_KEYS).
+            cli_argument_keys:           Override default CLI-arg keys (CLI_ARGUMENT_KEYS).
+            task_creation_context_args:  Override the set of task_creation_arguments flags
+                                         whose values are free-form but semantically useful
+                                         (script names, exec payloads) → stored as
+                                         TaskContextNode for vector search
+                                         (TASK_CREATION_CONTEXT_ARGS).
+            task_creation_skip_args:     Override the set of task_creation_arguments flags
+                                         whose values are pure identifiers / GUIDs with no
+                                         semantic signal → dropped entirely
+                                         (TASK_CREATION_SKIP_ARGS).
+            error_classifier:            Custom ErrorCategoryClassifier (for testing).
+            cause_store:                 Custom CanonicalNodeStore for Cause nodes (for testing).
+            resolution_store:            Custom CanonicalNodeStore for Resolution nodes (for testing).
         """
         self._unstructured_keys: frozenset[str] = (
             unstructured_keys
@@ -702,6 +756,16 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         )
         self._cli_argument_keys: frozenset[str] = (
             cli_argument_keys if cli_argument_keys is not None else CLI_ARGUMENT_KEYS
+        )
+        self._task_creation_context_args: frozenset[str] = (
+            task_creation_context_args
+            if task_creation_context_args is not None
+            else TASK_CREATION_CONTEXT_ARGS
+        )
+        self._task_creation_skip_args: frozenset[str] = (
+            task_creation_skip_args
+            if task_creation_skip_args is not None
+            else TASK_CREATION_SKIP_ARGS
         )
         self._error_classifier: ErrorCategoryClassifier = (
             error_classifier or ErrorCategoryClassifier()
@@ -821,8 +885,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # CLI-argument string: each flag/value pair becomes its own
                 # TaskFeatureNode, namespaced as "<key>:<attr>" to avoid
                 # collisions with identically-named top-level task_data keys
-                # or splitRule sub-keys.  Positional tokens (e.g. the program
-                # name "prun" in task_creation_arguments) go to a TaskContextNode.
+                # or splitRule sub-keys.
+                # For task_creation_arguments the first positional token (the
+                # command name, e.g. "prun") becomes a TaskFeatureNode
+                # (attribute="task_creation_arguments:command"); any further
+                # positional tokens become a TaskContextNode.
                 pairs = _parse_cli_arguments(str(value))
                 for attr, val in pairs:
                     if attr == "positional_args":
@@ -854,14 +921,38 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             )
                     else:
                         namespaced_attr = f"{key}:{attr}"
-                        nodes.append(
-                            self._make_feature_node(
-                                attribute=namespaced_attr,
-                                value=val,
-                                description=f"{key} arg: --{attr}",
-                                source=f"task_data/{key}",
+                        # For task_creation_arguments, classify each flag:
+                        #   skip args    — pure GUIDs/identifiers, no signal → drop
+                        #   context args — free-form prose, semantic meaning → TaskContextNode (vector DB)
+                        #   everything else — repeatable config choices → TaskFeatureNode (graph DB)
+                        if key == "task_creation_arguments":
+                            if attr in self._task_creation_skip_args:
+                                continue
+                            elif attr in self._task_creation_context_args:
+                                nodes.append(
+                                    self._make_context_node(
+                                        attribute=namespaced_attr,
+                                        prose=val,
+                                    )
+                                )
+                            else:
+                                nodes.append(
+                                    self._make_feature_node(
+                                        attribute=namespaced_attr,
+                                        value=val,
+                                        description=f"{key} arg: --{attr}",
+                                        source=f"task_data/{key}",
+                                    )
+                                )
+                        else:
+                            nodes.append(
+                                self._make_feature_node(
+                                    attribute=namespaced_attr,
+                                    value=val,
+                                    description=f"{key} arg: --{attr}",
+                                    source=f"task_data/{key}",
+                                )
                             )
-                        )
             elif key in self._unstructured_keys:
                 nodes.append(
                     self._make_context_node(
