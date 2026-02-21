@@ -80,4 +80,6 @@ class GraphDatabaseClient:
 
     async def update_resolution_success_rate(self, resolution_id: str, success: bool):
         """Update the running success-rate statistic on a resolution node."""
-        return await self._backend.update_resolution_success_rate(resolution_id, success)
+        return await self._backend.update_resolution_success_rate(
+            resolution_id, success
+        )

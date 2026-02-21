@@ -112,16 +112,19 @@ def list_vector_backends() -> list[str]:
 # Auto-registration of built-in backends
 # ---------------------------------------------------------------------------
 
+
 def _register_builtin_backends():
     """Register built-in backend implementations.  Called once at import time."""
     try:
         from bamboo.database.backends.neo4j_backend import Neo4jBackend
+
         register_graph_backend("neo4j", Neo4jBackend)
     except ImportError as exc:
         logger.debug("Neo4j backend not available: %s", exc)
 
     try:
         from bamboo.database.backends.qdrant_backend import QdrantBackend
+
         register_vector_backend("qdrant", QdrantBackend)
     except ImportError as exc:
         logger.debug("Qdrant backend not available: %s", exc)

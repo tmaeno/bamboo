@@ -74,8 +74,10 @@ UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
         # Note: "errorDialog" is handled separately — it produces a
         # SymptomNode (canonical category name, raw message as description)
         # rather than a TaskContextNode.
-        # Note: "jobParameters" is handled separately — its CLI-argument string
-        # is parsed into individual TaskFeatureNodes (see JOB_PARAMETER_KEYS).
+        # Note: "job_execution_params" and "task_creation_arguments" are handled
+        # separately — their CLI-argument strings are parsed into individual
+        # TaskFeatureNodes (and positional tokens into TaskContextNodes) by the
+        # CLI_ARGUMENT_KEYS branch.
     }
 )
 
@@ -141,12 +143,27 @@ DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
 SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 
 # ---------------------------------------------------------------------------
-# Keys whose value is a CLI-argument string like "--par1=val1 --par2 val2 ...".
-# Each --key / --key=value / --key value pair becomes its own TaskFeatureNode.
-# Positional arguments (no leading "--") are collected under a single
+# Keys whose value is a CLI-argument string like "--par1=val1 -v --par2 val2 ...".
+# Long options (--key, --key=value, --key value) and short options (-k, -k value,
+# -k=value, -abc combined flags) each become their own TaskFeatureNode.
+# Positional arguments (no leading "-") are collected under a single
 # TaskContextNode with attribute "<key>:positional_args".
+#
+# Current members:
+#   "job_execution_params"      – parameters passed to the job executor,
+#                                  e.g. "--nEvents=100 --inputDS=ds1"
+#   "task_creation_arguments"   – the full client-tool command used to
+#                                  create the task, e.g.
+#                                  'prun --exec "python a.py" --outDS user.x -v'
+#                                  The first positional token (e.g. "prun") is
+#                                  the command name and is stored as a discrete
+#                                  TaskFeatureNode(attribute="task_creation_arguments:command").
+#                                  Any further positional tokens go to a
+#                                  TaskContextNode(attribute="task_creation_arguments:positional_args").
 # ---------------------------------------------------------------------------
-JOB_PARAMETER_KEYS: frozenset[str] = frozenset({"jobParameters"})
+CLI_ARGUMENT_KEYS: frozenset[str] = frozenset(
+    {"job_execution_params", "task_creation_arguments"}
+)
 
 # ---------------------------------------------------------------------------
 # Keys whose values are continuous numerics (→ TaskFeatureNode with bucketed
@@ -176,26 +193,59 @@ CONTINUOUS_TASK_KEYS: frozenset[str] = frozenset(
 # The last entry's upper_bound should be math.inf.
 _BUCKETS: dict[str, list[tuple[float, str]]] = {
     # Memory / disk: MB
-    "ramCount":      [(512, "<512MB"), (2048, "512MB-2GB"), (8192, "2-8GB"),
-                      (32768, "8-32GB"), (float("inf"), ">32GB")],
-    "baseRamCount":  [(512, "<512MB"), (2048, "512MB-2GB"), (8192, "2-8GB"),
-                      (32768, "8-32GB"), (float("inf"), ">32GB")],
-    "outDiskCount":  [(1024, "<1GB"), (10240, "1-10GB"), (102400, "10-100GB"),
-                      (float("inf"), ">100GB")],
-    "workDiskCount": [(1024, "<1GB"), (10240, "1-10GB"), (102400, "10-100GB"),
-                      (float("inf"), ">100GB")],
+    "ramCount": [
+        (512, "<512MB"),
+        (2048, "512MB-2GB"),
+        (8192, "2-8GB"),
+        (32768, "8-32GB"),
+        (float("inf"), ">32GB"),
+    ],
+    "baseRamCount": [
+        (512, "<512MB"),
+        (2048, "512MB-2GB"),
+        (8192, "2-8GB"),
+        (32768, "8-32GB"),
+        (float("inf"), ">32GB"),
+    ],
+    "outDiskCount": [
+        (1024, "<1GB"),
+        (10240, "1-10GB"),
+        (102400, "10-100GB"),
+        (float("inf"), ">100GB"),
+    ],
+    "workDiskCount": [
+        (1024, "<1GB"),
+        (10240, "1-10GB"),
+        (102400, "10-100GB"),
+        (float("inf"), ">100GB"),
+    ],
     # I/O: MB/s
-    "diskIO":        [(10, "<10MB/s"), (100, "10-100MB/s"), (float("inf"), ">100MB/s")],
+    "diskIO": [(10, "<10MB/s"), (100, "10-100MB/s"), (float("inf"), ">100MB/s")],
     # Time: seconds
-    "walltime":      [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
-                      (float("inf"), ">24h")],
-    "baseWalltime":  [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
-                      (float("inf"), ">24h")],
-    "cpuTime":       [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
-                      (float("inf"), ">24h")],
+    "walltime": [
+        (3600, "<1h"),
+        (21600, "1-6h"),
+        (86400, "6-24h"),
+        (float("inf"), ">24h"),
+    ],
+    "baseWalltime": [
+        (3600, "<1h"),
+        (21600, "1-6h"),
+        (86400, "6-24h"),
+        (float("inf"), ">24h"),
+    ],
+    "cpuTime": [
+        (3600, "<1h"),
+        (21600, "1-6h"),
+        (86400, "6-24h"),
+        (float("inf"), ">24h"),
+    ],
     # I/O intensity: dimensionless score
-    "ioIntensity":   [(100, "low(<100)"), (1000, "medium(100-1000)"),
-                      (float("inf"), "high(>1000)")],
+    "ioIntensity": [
+        (100, "low(<100)"),
+        (1000, "medium(100-1000)"),
+        (float("inf"), "high(>1000)"),
+    ],
 }
 
 
@@ -227,23 +277,40 @@ def _bucket_value(key: str, raw: str) -> str:
     return buckets[-1][1]  # should never reach here due to inf sentinel
 
 
-def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
+def _parse_cli_arguments(raw: str) -> list[tuple[str, str]]:
     """Parse a CLI-argument string into a list of *(attribute, value)* pairs.
 
     Handles the following forms:
 
-    - ``--key=value``         → ``("key", "value")``
-    - ``--key="val ue"``      → ``("key", "val ue")``   (quoted value with spaces)
-    - ``--key 'val ue'``      → ``("key", "val ue")``   (space-separated quoted value)
-    - ``--key value``         → ``("key", "value")``    (next token is value if it
-                                does not start with ``--``)
-    - ``--flag``              → ``("key", "true")``     (boolean flag, no value)
-    - ``positional``          → collected and returned as
+    Long options (``--``)::
+
+        --key=value           → ``("key", "value")``
+        --key="val ue"        → ``("key", "val ue")``   (quoted value with spaces)
+        --key 'val ue'        → ``("key", "val ue")``   (space-separated quoted value)
+        --key value           → ``("key", "value")``    (next token is value if it
+                                does not start with ``-``)
+        --flag                → ``("flag", "true")``    (boolean flag, no value)
+
+    Short options (``-``)::
+
+        -k=value              → ``("k", "value")``
+        -k value              → ``("k", "value")``      (next token is value if it
+                                does not start with ``-``)
+        -v                    → ``("v", "true")``       (boolean flag)
+        -abc                  → ``("a", "true"), ("b", "true"), ("c", "true")``
+                                (combined single-char flags, expanded individually)
+
+    Positional::
+
+        positional            → collected and returned as
                                 ``("positional_args", "<space-joined tokens>")``
 
     Quoted strings (single or double quotes) are handled via :mod:`shlex`
     so that ``--args="blah blah"`` and ``--args 'blah blah'`` both yield
     ``("args", "blah blah")``.
+
+    If the same key appears more than once the last value wins (consistent with
+    most CLI parsers).
 
     Returns a sorted list so that identical parameter sets produce identical
     node names regardless of the order they appear in the original string.
@@ -255,7 +322,7 @@ def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
     except ValueError:
         # Fallback to naive split if shlex fails (e.g. unmatched quotes).
         logger.warning(
-            "_parse_job_parameters: shlex failed to parse %r — falling back to whitespace split",
+            "_parse_cli_arguments: shlex failed to parse %r — falling back to whitespace split",
             raw,
         )
         tokens = raw.split()
@@ -266,15 +333,35 @@ def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
     while i < len(tokens):
         token = tokens[i]
         if token.startswith("--"):
-            token = token.lstrip("-")
-            if "=" in token:
-                key, value = token.split("=", 1)
+            # Long option: --key, --key=value, --key value
+            body = token[2:]  # strip leading "--"
+            if "=" in body:
+                key, value = body.split("=", 1)
                 pairs[key.strip()] = value
-            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                pairs[token.strip()] = tokens[i + 1]
+            elif body and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                pairs[body.strip()] = tokens[i + 1]
                 i += 1
+            elif body:
+                pairs[body.strip()] = "true"
+            # bare "--" (end-of-options marker) falls through with no action
+        elif token.startswith("-") and len(token) > 1:
+            # Short option: -k, -k=value, -k value, -abc (combined flags)
+            body = token[1:]  # strip leading "-"
+            if "=" in body:
+                # -k=value
+                key, value = body.split("=", 1)
+                pairs[key.strip()] = value
+            elif len(body) == 1:
+                # Single short flag: -v or -v value
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+                    pairs[body] = tokens[i + 1]
+                    i += 1
+                else:
+                    pairs[body] = "true"
             else:
-                pairs[token.strip()] = "true"
+                # Combined flags: -abc → -a -b -c (all boolean)
+                for ch in body:
+                    pairs[ch] = "true"
         else:
             positional.append(token)
         i += 1
@@ -290,6 +377,7 @@ def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _canonical_vector_id(node_type: str, label: str) -> str:
     """Stable, URL-safe vector ID for a canonical node of any type."""
     slug = re.sub(r"[^a-zA-Z0-9_-]", "_", label)
@@ -297,10 +385,10 @@ def _canonical_vector_id(node_type: str, label: str) -> str:
     return f"canonical-{node_type.lower()}-{slug[:24]}-{digest[:8]}"
 
 
-
 # ---------------------------------------------------------------------------
 # CanonicalNodeStore  (VectorDB + LLM — works for any node type)
 # ---------------------------------------------------------------------------
+
 
 class CanonicalNodeStore:
     """Persistent store for canonical names of a single node type,
@@ -349,6 +437,7 @@ class CanonicalNodeStore:
     async def _get_client(self):
         if self._vector_client is None:
             from bamboo.database.vector_database_client import VectorDatabaseClient
+
             self._vector_client = VectorDatabaseClient()
             await self._vector_client.connect()
         return self._vector_client
@@ -395,14 +484,18 @@ class CanonicalNodeStore:
             score = float(results[0]["score"])
             logger.debug(
                 "CanonicalNodeStore[%s]: matched '%s' (score=%.3f)",
-                self._node_type, label, score,
+                self._node_type,
+                label,
+                score,
             )
             return label, score, False
 
         # Step 3b: store candidate as a new entry
         logger.info(
             "CanonicalNodeStore[%s]: no match (threshold=%.2f) for '%s'; storing new",
-            self._node_type, self.match_threshold, candidate,
+            self._node_type,
+            self.match_threshold,
+            candidate,
         )
         await self._store(candidate, auto_generated=True)
         return candidate, 0.0, True
@@ -435,6 +528,7 @@ class CanonicalNodeStore:
 # LLM label functions — one per canonicalisable node type
 # ---------------------------------------------------------------------------
 
+
 async def _generate_category_label(error_message: str) -> str:
     """LLM: raw error message → CamelCase error-category label.
 
@@ -454,6 +548,7 @@ async def _generate_category_label(error_message: str) -> str:
 
 def _make_cause_resolution_label_fn(node_type: str):
     """Return an async label function for Cause or Resolution nodes."""
+
     async def _fn(raw_name: str) -> str:
         llm = get_llm()
         # Pass an empty existing-names block — the VectorDB handles matching;
@@ -470,12 +565,14 @@ def _make_cause_resolution_label_fn(node_type: str):
                 f"LLM returned an empty canonical name for {node_type} {raw_name!r}"
             )
         return canonical
+
     return _fn
 
 
 # ---------------------------------------------------------------------------
-# ErrorCategoryStore  — specialisation of CanonicalNodeStore
+# ErrorCategoryStore  — specialization of CanonicalNodeStore
 # ---------------------------------------------------------------------------
+
 
 class ErrorCategoryStore(CanonicalNodeStore):
     """Persistent store for error categories.
@@ -525,6 +622,7 @@ class ErrorCategoryStore(CanonicalNodeStore):
 # ErrorCategoryClassifier
 # ---------------------------------------------------------------------------
 
+
 class ErrorCategoryClassifier:
     """Classifies a raw error message using :class:`ErrorCategoryStore`."""
 
@@ -546,6 +644,7 @@ class ErrorCategoryClassifier:
 # ---------------------------------------------------------------------------
 # Main extractor
 # ---------------------------------------------------------------------------
+
 
 class PandaKnowledgeExtractor(ExtractionStrategy):
     """Structured extraction strategy for Panda-flavoured task data.
@@ -571,7 +670,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         discrete_keys: Optional[frozenset[str]] = None,
         continuous_keys: Optional[frozenset[str]] = None,
         split_rule_keys: Optional[frozenset[str]] = None,
-        job_parameter_keys: Optional[frozenset[str]] = None,
+        cli_argument_keys: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
@@ -582,13 +681,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             discrete_keys:      Override default discrete keys (DISCRETE_TASK_KEYS).
             continuous_keys:    Override default continuous keys (CONTINUOUS_TASK_KEYS).
             split_rule_keys:    Override default pipe-split keys (SPLIT_RULE_KEYS).
-            job_parameter_keys: Override default CLI-arg keys (JOB_PARAMETER_KEYS).
+            cli_argument_keys:  Override default CLI-arg keys (CLI_ARGUMENT_KEYS).
             error_classifier:   Custom ErrorCategoryClassifier (for testing).
             cause_store:        Custom CanonicalNodeStore for Cause nodes (for testing).
             resolution_store:   Custom CanonicalNodeStore for Resolution nodes (for testing).
         """
         self._unstructured_keys: frozenset[str] = (
-            unstructured_keys if unstructured_keys is not None else UNSTRUCTURED_TASK_KEYS
+            unstructured_keys
+            if unstructured_keys is not None
+            else UNSTRUCTURED_TASK_KEYS
         )
         self._discrete_keys: frozenset[str] = (
             discrete_keys if discrete_keys is not None else DISCRETE_TASK_KEYS
@@ -599,8 +700,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         self._split_rule_keys: frozenset[str] = (
             split_rule_keys if split_rule_keys is not None else SPLIT_RULE_KEYS
         )
-        self._job_parameter_keys: frozenset[str] = (
-            job_parameter_keys if job_parameter_keys is not None else JOB_PARAMETER_KEYS
+        self._cli_argument_keys: frozenset[str] = (
+            cli_argument_keys if cli_argument_keys is not None else CLI_ARGUMENT_KEYS
         )
         self._error_classifier: ErrorCategoryClassifier = (
             error_classifier or ErrorCategoryClassifier()
@@ -609,9 +710,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             node_type="Cause",
             label_fn=_make_cause_resolution_label_fn("Cause"),
         )
-        self._resolution_store: CanonicalNodeStore = resolution_store or CanonicalNodeStore(
-            node_type="Resolution",
-            label_fn=_make_cause_resolution_label_fn("Resolution"),
+        self._resolution_store: CanonicalNodeStore = (
+            resolution_store
+            or CanonicalNodeStore(
+                node_type="Resolution",
+                label_fn=_make_cause_resolution_label_fn("Resolution"),
+            )
         )
 
     # ------------------------------------------------------------------
@@ -646,10 +750,14 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         relationships: list[GraphRelationship] = []
 
         for key, value in (external_data or {}).items():
-            nodes.append(self._make_feature_node(
-                attribute=str(key), value=str(value),
-                description=f"External data field: {key}", source="external_data",
-            ))
+            nodes.append(
+                self._make_feature_node(
+                    attribute=str(key),
+                    value=str(value),
+                    description=f"External data field: {key}",
+                    source="external_data",
+                )
+            )
 
         for key, value in (task_data or {}).items():
             if key == "errorDialog":
@@ -658,28 +766,32 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # message text (preserved for traceability and vector search).
                 if value:
                     category, confidence = await self._classify_error(str(value))
-                    nodes.append(SymptomNode(
-                        name=category,
-                        description=str(value),
-                        metadata={
-                            "source": "error_classifier",
-                            "classifier_confidence": confidence,
-                        },
-                    ))
+                    nodes.append(
+                        SymptomNode(
+                            name=category,
+                            description=str(value),
+                            metadata={
+                                "source": "error_classifier",
+                                "classifier_confidence": confidence,
+                            },
+                        )
+                    )
             elif key == "status":
                 # Task status (e.g. "failed", "broken") describes the failure
                 # state of the task, not a configuration attribute.  It is stored
                 # as a SymptomNode so it participates in Symptom→Cause edges.
                 if value:
                     category, confidence = await self._classify_error(str(value))
-                    nodes.append(SymptomNode(
-                        name=category,
-                        description=str(value),
-                        metadata={
-                            "source": "task_status",
-                            "classifier_confidence": confidence,
-                        },
-                    ))
+                    nodes.append(
+                        SymptomNode(
+                            name=category,
+                            description=str(value),
+                            metadata={
+                                "source": "task_status",
+                                "classifier_confidence": confidence,
+                            },
+                        )
+                    )
             elif key in self._split_rule_keys:
                 # splitRule value is a comma-separated "attr=val,attr=val" string.
                 # Each sub-rule becomes its own TaskFeatureNode.
@@ -691,51 +803,81 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     if "=" in sub_rule:
                         attr, val = sub_rule.split("=", 1)
                         namespaced_attr = f"splitRule:{attr.strip()}"
-                        nodes.append(self._make_feature_node(
-                            attribute=namespaced_attr,
-                            value=val.strip(),
-                            description=f"splitRule sub-rule: {sub_rule}",
-                            source="task_data/splitRule",
-                        ))
+                        nodes.append(
+                            self._make_feature_node(
+                                attribute=namespaced_attr,
+                                value=val.strip(),
+                                description=f"splitRule sub-rule: {sub_rule}",
+                                source="task_data/splitRule",
+                            )
+                        )
                     elif sub_rule:
                         logger.warning(
                             "PandaKnowledgeExtractor: splitRule sub-rule '%s' "
-                            "has no '=' separator — skipped", sub_rule,
+                            "has no '=' separator — skipped",
+                            sub_rule,
                         )
-            elif key in self._job_parameter_keys:
-                # jobParameters is a CLI-argument string like "--par1=val1 --par2 val2 ...".
-                # Each --key/value pair becomes its own TaskFeatureNode (sorted for
-                # determinism so identical parameter sets always produce the same nodes).
-                # The attribute is namespaced as "jobParameters:<attr>" so that a
-                # parameter like --site=CERN cannot collide with the top-level
-                # task_data key "site=CERN" in the graph DB.
-                # Positional arguments are collected into a single TaskContextNode.
-                pairs = _parse_job_parameters(str(value))
+            elif key in self._cli_argument_keys:
+                # CLI-argument string: each flag/value pair becomes its own
+                # TaskFeatureNode, namespaced as "<key>:<attr>" to avoid
+                # collisions with identically-named top-level task_data keys
+                # or splitRule sub-keys.  Positional tokens (e.g. the program
+                # name "prun" in task_creation_arguments) go to a TaskContextNode.
+                pairs = _parse_cli_arguments(str(value))
                 for attr, val in pairs:
                     if attr == "positional_args":
-                        nodes.append(self._make_context_node(
-                            attribute=f"{key}:positional_args",
-                            prose=val,
-                        ))
+                        positional_tokens = val.split()
+                        if key == "task_creation_arguments" and positional_tokens:
+                            # First token is the command name — discrete.
+                            nodes.append(
+                                self._make_feature_node(
+                                    attribute=f"{key}:command",
+                                    value=positional_tokens[0],
+                                    description=f"{key} command name",
+                                    source=f"task_data/{key}",
+                                )
+                            )
+                            # Remaining positional tokens (rare) stay as context.
+                            if len(positional_tokens) > 1:
+                                nodes.append(
+                                    self._make_context_node(
+                                        attribute=f"{key}:positional_args",
+                                        prose=" ".join(positional_tokens[1:]),
+                                    )
+                                )
+                        else:
+                            nodes.append(
+                                self._make_context_node(
+                                    attribute=f"{key}:positional_args",
+                                    prose=val,
+                                )
+                            )
                     else:
                         namespaced_attr = f"{key}:{attr}"
-                        nodes.append(self._make_feature_node(
-                            attribute=namespaced_attr,
-                            value=val,
-                            description=f"jobParameters arg: --{attr}",
-                            source=f"task_data/{key}",
-                        ))
+                        nodes.append(
+                            self._make_feature_node(
+                                attribute=namespaced_attr,
+                                value=val,
+                                description=f"{key} arg: --{attr}",
+                                source=f"task_data/{key}",
+                            )
+                        )
             elif key in self._unstructured_keys:
-                nodes.append(self._make_context_node(
-                    attribute=str(key),
-                    prose=str(value) if value is not None else "",
-                ))
+                nodes.append(
+                    self._make_context_node(
+                        attribute=str(key),
+                        prose=str(value) if value is not None else "",
+                    )
+                )
             elif key in self._discrete_keys:
-                nodes.append(self._make_feature_node(
-                    attribute=str(key),
-                    value=str(value) if value is not None else "",
-                    description=f"Task data field: {key}", source="task_data",
-                ))
+                nodes.append(
+                    self._make_feature_node(
+                        attribute=str(key),
+                        value=str(value) if value is not None else "",
+                        description=f"Task data field: {key}",
+                        source="task_data",
+                    )
+                )
             elif key in self._continuous_keys:
                 # Bucket the raw numeric into a range label so incidents with
                 # different but similar values share the same node.
@@ -744,15 +886,19 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 if bucketed == raw:
                     logger.warning(
                         "PandaKnowledgeExtractor: continuous key '%s' has "
-                        "non-numeric value '%s' — stored as-is", key, raw,
+                        "non-numeric value '%s' — stored as-is",
+                        key,
+                        raw,
                     )
-                nodes.append(self._make_feature_node(
-                    attribute=str(key),
-                    value=bucketed,
-                    description=f"Task data field: {key} (bucketed from {raw!r})",
-                    source="task_data",
-                    extra_metadata={"raw_value": raw},
-                ))
+                nodes.append(
+                    self._make_feature_node(
+                        attribute=str(key),
+                        value=bucketed,
+                        description=f"Task data field: {key} (bucketed from {raw!r})",
+                        source="task_data",
+                        extra_metadata={"raw_value": raw},
+                    )
+                )
             else:
                 # ignore unrecognised keys.
                 pass
@@ -765,7 +911,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         logger.info(
             "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
-            len(nodes), len(relationships),
+            len(nodes),
+            len(relationships),
         )
         return graph
 
@@ -804,7 +951,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
             if node_type_str in _store_for_type:
                 node_data = dict(node_data)
-                canonical, _, _ = await _store_for_type[node_type_str].find_or_create(raw_name)
+                canonical, _, _ = await _store_for_type[node_type_str].find_or_create(
+                    raw_name
+                )
                 node_data["name"] = canonical
 
             node = self._create_email_node(node_data)
@@ -826,16 +975,19 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     rel_data.get("relation_type"),
                 )
                 continue
-            relationships.append(GraphRelationship(
-                source_id=raw_name_to_node[src].name,
-                target_id=raw_name_to_node[tgt].name,
-                relation_type=rel_type,
-                confidence=float(rel_data.get("confidence", 1.0)),
-            ))
+            relationships.append(
+                GraphRelationship(
+                    source_id=raw_name_to_node[src].name,
+                    target_id=raw_name_to_node[tgt].name,
+                    relation_type=rel_type,
+                    confidence=float(rel_data.get("confidence", 1.0)),
+                )
+            )
 
         logger.debug(
             "PandaKnowledgeExtractor: email yielded %d nodes, %d relationships",
-            len(nodes), len(relationships),
+            len(nodes),
+            len(relationships),
         )
         return nodes, relationships
 
@@ -843,18 +995,21 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     def _parse_email_response(response: str) -> dict[str, Any]:
         text = response.strip()
         if "```json" in text:
-            text = text[text.find("```json") + 7: text.rfind("```")].strip()
+            text = text[text.find("```json") + 7 : text.rfind("```")].strip()
         elif "```" in text:
-            text = text[text.find("```") + 3: text.rfind("```")].strip()
+            text = text[text.find("```") + 3 : text.rfind("```")].strip()
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            logger.error("PandaKnowledgeExtractor: failed to parse email LLM response: %s", exc)
+            logger.error(
+                "PandaKnowledgeExtractor: failed to parse email LLM response: %s", exc
+            )
             return {"nodes": [], "relationships": []}
 
     @staticmethod
     def _create_email_node(node_data: dict[str, Any]):
         from bamboo.models.graph_element import NodeType
+
         try:
             node_type = NodeType(node_data.get("node_type", ""))
         except ValueError:
@@ -892,20 +1047,32 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     # ------------------------------------------------------------------
 
     def _make_feature_node(
-        self, attribute: str, value: str, description: str, source: str,
+        self,
+        attribute: str,
+        value: str,
+        description: str,
+        source: str,
         extra_metadata: Optional[dict[str, Any]] = None,
     ) -> TaskFeatureNode:
-        metadata: dict[str, Any] = {"attribute": attribute, "value": value, "source": source}
+        metadata: dict[str, Any] = {
+            "attribute": attribute,
+            "value": value,
+            "source": source,
+        }
         if extra_metadata:
             metadata.update(extra_metadata)
         return TaskFeatureNode(
-            name=f"{attribute}={value}", attribute=attribute, value=value,
-            description=description, metadata=metadata,
+            name=f"{attribute}={value}",
+            attribute=attribute,
+            value=value,
+            description=description,
+            metadata=metadata,
         )
 
     def _make_context_node(self, attribute: str, prose: str) -> TaskContextNode:
         return TaskContextNode(
-            name=attribute, description=prose,
+            name=attribute,
+            description=prose,
             metadata={"source": "task_data", "attribute": attribute},
         )
 

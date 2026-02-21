@@ -218,22 +218,28 @@ class ReasoningNavigator:
                 ("Error", "Error: " + ", ".join(extracted_clues["errors"]))
             )
         if extracted_clues.get("task_features"):
-            section_queries.append((
-                "Task_Feature",
-                "Task features: " + ", ".join(extracted_clues["task_features"]),
-            ))
+            section_queries.append(
+                (
+                    "Task_Feature",
+                    "Task features: " + ", ".join(extracted_clues["task_features"]),
+                )
+            )
         for ctx in extracted_clues.get("task_contexts", []):
             section_queries.append(("Task_Context", ctx))
         if extracted_clues.get("environment_factors"):
-            section_queries.append((
-                "Environment",
-                "Environment: " + ", ".join(extracted_clues["environment_factors"]),
-            ))
+            section_queries.append(
+                (
+                    "Environment",
+                    "Environment: " + ", ".join(extracted_clues["environment_factors"]),
+                )
+            )
         if extracted_clues.get("components"):
-            section_queries.append((
-                "Component",
-                "Component: " + ", ".join(extracted_clues["components"]),
-            ))
+            section_queries.append(
+                (
+                    "Component",
+                    "Component: " + ", ".join(extracted_clues["components"]),
+                )
+            )
         if task_data.get("description"):
             section_queries.append(("Error", task_data["description"]))
 
@@ -275,7 +281,8 @@ class ReasoningNavigator:
 
         logger.info(
             "ReasoningNavigator: vector DB returned %d past cases via %d graph IDs",
-            len(results), len(graph_id_scores),
+            len(results),
+            len(graph_id_scores),
         )
         return results
 

@@ -328,5 +328,3 @@ Raw error message:
 {error_message}
 
 Category label:"""
-
-

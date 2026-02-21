@@ -134,6 +134,7 @@ class GraphRelationship(BaseModel):
 # Node classes
 # ---------------------------------------------------------------------------
 
+
 class SymptomNode(BaseNode):
     """A canonical, reusable class of failure observed in an incident.
 
@@ -269,6 +270,7 @@ class ResolutionNode(BaseNode):
 # ---------------------------------------------------------------------------
 # Extended node types (available for future strategies)
 # ---------------------------------------------------------------------------
+
 
 class MetricNode(BaseNode):
     """A system metric or KPI."""

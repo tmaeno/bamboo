@@ -93,7 +93,9 @@ class KnowledgeAccumulator:
         key_insights = await self._extract_key_insights(graph)
         await self._store_in_vector_db(graph, summary, key_insights)
 
-        logger.info("KnowledgeAccumulator: extraction completed for graph '%s'", graph_id)
+        logger.info(
+            "KnowledgeAccumulator: extraction completed for graph '%s'", graph_id
+        )
         return ExtractedKnowledge(
             graph=graph,
             summary=summary,
@@ -114,7 +116,9 @@ class KnowledgeAccumulator:
         Relationship source/target IDs are remapped to the actual stored IDs
         before insertion.
         """
-        logger.info("KnowledgeAccumulator: storing %d nodes in graph DB", len(graph.nodes))
+        logger.info(
+            "KnowledgeAccumulator: storing %d nodes in graph DB", len(graph.nodes)
+        )
 
         node_ids: dict[str, str] = {}
         for node in graph.nodes:
@@ -213,7 +217,9 @@ class KnowledgeAccumulator:
         graph_id = graph.metadata["graph_id"]
 
         for item in key_insights:
-            vector_id = self._deterministic_id(graph_id, item["section"], item["node_id"])
+            vector_id = self._deterministic_id(
+                graph_id, item["section"], item["node_id"]
+            )
             embedding = await self.embeddings.aembed_query(item["content"])
             await self.vector_db.upsert_section_vector(
                 vector_id=vector_id,
@@ -238,7 +244,8 @@ class KnowledgeAccumulator:
 
         logger.info(
             "KnowledgeAccumulator: stored %d node descriptions + 1 summary for graph '%s'",
-            len(key_insights), graph_id,
+            len(key_insights),
+            graph_id,
         )
 
     @staticmethod

@@ -75,7 +75,9 @@ def get_extraction_strategy(strategy: str = None) -> ExtractionStrategy:
     for strategy_class in _extraction_strategies.values():
         instance = strategy_class()
         if instance.supports_system(strategy):
-            logger.info("Using extraction strategy '%s' for system: %s", instance.name, strategy)
+            logger.info(
+                "Using extraction strategy '%s' for system: %s", instance.name, strategy
+            )
             return instance
 
     raise ValueError(
@@ -94,15 +96,18 @@ def list_extraction_strategies() -> list[dict]:
     result = []
     for name, strategy_class in _extraction_strategies.items():
         instance = strategy_class()
-        result.append({
-            "name": instance.name,
-            "id": name,
-            "description": instance.description,
-            "supports": (
-                "all systems" if instance.supports_system("generic")
-                else "structured systems only"
-            ),
-        })
+        result.append(
+            {
+                "name": instance.name,
+                "id": name,
+                "description": instance.description,
+                "supports": (
+                    "all systems"
+                    if instance.supports_system("generic")
+                    else "structured systems only"
+                ),
+            }
+        )
     return result
 
 
@@ -110,16 +115,19 @@ def list_extraction_strategies() -> list[dict]:
 # Auto-registration of built-in strategies
 # ---------------------------------------------------------------------------
 
+
 def _register_builtin_strategies():
     """Register built-in extraction strategies.  Called once at import time."""
     try:
         from bamboo.extractors.llm_strategy import LLMExtractionStrategy
+
         register_extraction_strategy("llm", LLMExtractionStrategy)
     except ImportError as exc:
         logger.debug("LLM strategy not available: %s", exc)
 
     try:
         from bamboo.extractors.rule_based_strategy import RuleBasedExtractionStrategy
+
         register_extraction_strategy("rule_based", RuleBasedExtractionStrategy)
         register_extraction_strategy("jira", RuleBasedExtractionStrategy)
         register_extraction_strategy("github", RuleBasedExtractionStrategy)
@@ -129,6 +137,7 @@ def _register_builtin_strategies():
 
     try:
         from bamboo.extractors.panda_knowledge_extractor import PandaKnowledgeExtractor
+
         register_extraction_strategy("panda", PandaKnowledgeExtractor)
     except ImportError as exc:
         logger.debug("Panda strategy not available: %s", exc)

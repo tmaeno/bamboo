@@ -17,8 +17,7 @@ try:
     from neo4j.exceptions import Neo4jError
 except ImportError as e:
     raise ImportError(
-        "Neo4j backend requires 'neo4j' package. "
-        "Install it with: pip install neo4j"
+        "Neo4j backend requires 'neo4j' package. " "Install it with: pip install neo4j"
     ) from e
 
 from bamboo.config import get_settings
@@ -65,7 +64,9 @@ class Neo4jBackend(GraphDatabaseBackend):
         Idempotent — uses ``IF NOT EXISTS`` so re-running on an already
         initialised database is safe.
         """
-        async with self.driver.session(database=self.settings.neo4j_database) as session:
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
             for node_type in NodeType:
                 await session.run(
                     f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{node_type.value}) "
@@ -89,7 +90,10 @@ class Neo4jBackend(GraphDatabaseBackend):
             for canonical node types (Cause, Resolution, Symptom, etc.).
         """
         import uuid
-        async with self.driver.session(database=self.settings.neo4j_database) as session:
+
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
             properties = node.model_dump(exclude={"node_type"})
             if not properties.get("id"):
                 properties["id"] = str(uuid.uuid4())
@@ -116,7 +120,9 @@ class Neo4jBackend(GraphDatabaseBackend):
         Returns:
             The node's ID string.
         """
-        async with self.driver.session(database=self.settings.neo4j_database) as session:
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
             result = await session.run(
                 f"MATCH (n:{node.node_type.value} {{name: $name}}) RETURN n.id AS id",
                 name=canonical_name,
@@ -139,7 +145,9 @@ class Neo4jBackend(GraphDatabaseBackend):
         Returns:
             ``True`` if the relationship was created.
         """
-        async with self.driver.session(database=self.settings.neo4j_database) as session:
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
             properties = relationship.properties.copy()
             properties["confidence"] = relationship.confidence
             result = await session.run(
@@ -268,4 +276,3 @@ class Neo4jBackend(GraphDatabaseBackend):
                 resolution_id=resolution_id,
                 success_increment=1 if success else 0,
             )
-

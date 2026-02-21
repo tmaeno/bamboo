@@ -76,7 +76,9 @@ class ExtractedKnowledge(BaseModel):
     """
 
     graph: KnowledgeGraph
-    summary: str = Field(..., description="LLM-generated narrative summary of the graph.")
+    summary: str = Field(
+        ..., description="LLM-generated narrative summary of the graph."
+    )
     key_insights: list[dict[str, Any]] = Field(
         default_factory=list,
         description=(
