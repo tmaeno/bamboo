@@ -6,7 +6,7 @@
 
 **B**olstered **A**ssistance for **M**anaging and **B**uilding **O**perations and **O**versight
 
-An intelligent multi-agent AI system for system automation and operations, leveraging graph and vector databases for knowledge management.
+An intelligent multi-agent AI framework for system automation and operations, leveraging graph and vector databases for knowledge management.
 
 ## Quick Start
 
