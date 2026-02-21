@@ -1,4 +1,22 @@
-"""Extraction strategy factory and registry."""
+"""Extraction strategy factory and registry.
+
+Strategies are registered by name at import time via
+:func:`register_extraction_strategy`.  The active strategy is resolved by
+:func:`get_extraction_strategy`, which first checks for an exact name match
+and then falls back to calling :meth:`~bamboo.extractors.base.ExtractionStrategy.supports_system`
+on each registered strategy.
+
+Built-in strategies registered automatically:
+
+============  ====================================================
+Name          Class
+============  ====================================================
+``panda``     :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
+``llm``       ``LLMExtractionStrategy`` (optional dependency)
+``rule_based`` / ``jira`` / ``github`` / ``generic``
+              ``RuleBasedExtractionStrategy`` (optional dependency)
+============  ====================================================
+"""
 
 import logging
 from typing import Type
@@ -8,111 +26,112 @@ from bamboo.extractors.base import ExtractionStrategy
 
 logger = logging.getLogger(__name__)
 
-# Registry of available extraction strategies
+# Registry: lower-cased name → strategy class
 _extraction_strategies: dict[str, Type[ExtractionStrategy]] = {}
 
 
 def register_extraction_strategy(name: str, strategy_class: Type[ExtractionStrategy]):
-    """Register an extraction strategy.
+    """Register an extraction strategy under *name*.
+
+    If a strategy is already registered under the same name it is silently
+    replaced, which allows tests to inject mock implementations.
 
     Args:
-        name: Unique name for the strategy
-        strategy_class: Class implementing ExtractionStrategy
+        name:           Lower-cased registry key (e.g. ``"panda"``).
+        strategy_class: Concrete :class:`ExtractionStrategy` subclass.
     """
     _extraction_strategies[name.lower()] = strategy_class
-    logger.debug(f"Registered extraction strategy: {name}")
+    logger.debug("Registered extraction strategy: %s", name)
 
 
 def get_extraction_strategy(strategy: str = None) -> ExtractionStrategy:
-    """Get appropriate extraction strategy.
+    """Return an instantiated :class:`ExtractionStrategy`.
+
+    Resolution order:
+
+    1. If *strategy* (or ``EXTRACTION_STRATEGY`` from config when *None*) is an
+       exact key in the registry, return an instance of that class.
+    2. Otherwise iterate the registry and return the first strategy whose
+       :meth:`~ExtractionStrategy.supports_system` returns ``True`` for the
+       given name.
 
     Args:
-        strategy: Strategy name (llm, rule_based, jira, github, generic, etc.)
-                 If None, uses EXTRACTION_STRATEGY from configuration.
+        strategy: Strategy name or system identifier.  ``None`` uses the
+                  ``EXTRACTION_STRATEGY`` configuration value.
 
     Returns:
-        ExtractionStrategy instance
+        A freshly instantiated :class:`ExtractionStrategy`.
 
     Raises:
-        ValueError: If no suitable strategy found
+        ValueError: If no registered strategy matches *strategy*.
     """
     settings = get_settings()
     strategy = strategy or settings.extraction_strategy
 
-    # First try explicit strategy name
     if strategy in _extraction_strategies:
-        strategy_class = _extraction_strategies[strategy]
-        logger.info(f"Using extraction strategy: {strategy}")
-        return strategy_class()
+        logger.info("Using extraction strategy: %s", strategy)
+        return _extraction_strategies[strategy]()
 
-    # Try to find strategy that supports this system
     for strategy_class in _extraction_strategies.values():
         instance = strategy_class()
         if instance.supports_system(strategy):
-            logger.info(f"Using extraction strategy {instance.name} for: {strategy}")
+            logger.info("Using extraction strategy '%s' for system: %s", instance.name, strategy)
             return instance
 
     raise ValueError(
-        f"No extraction strategy found for: {strategy}. "
-        f"Available strategies: {list(_extraction_strategies.keys())}"
+        f"No extraction strategy found for: {strategy!r}. "
+        f"Available strategies: {sorted(_extraction_strategies.keys())}"
     )
 
 
 def list_extraction_strategies() -> list[dict]:
-    """List all registered extraction strategies with details.
+    """Return metadata for every registered extraction strategy.
 
     Returns:
-        List of dicts with strategy info
+        List of dicts with keys ``name``, ``id``, ``description``,
+        ``supports``.
     """
-    strategies = []
+    result = []
     for name, strategy_class in _extraction_strategies.items():
-        strategy = strategy_class()
-        strategies.append(
-            {
-                "name": strategy.name,
-                "id": name,
-                "description": strategy.description,
-                "supports": (
-                    "all systems"
-                    if strategy.supports_system("generic")
-                    else "structured systems only"
-                ),
-            }
-        )
-    return strategies
+        instance = strategy_class()
+        result.append({
+            "name": instance.name,
+            "id": name,
+            "description": instance.description,
+            "supports": (
+                "all systems" if instance.supports_system("generic")
+                else "structured systems only"
+            ),
+        })
+    return result
 
 
-# Register built-in strategies
+# ---------------------------------------------------------------------------
+# Auto-registration of built-in strategies
+# ---------------------------------------------------------------------------
+
 def _register_builtin_strategies():
-    """Register built-in extraction strategies."""
+    """Register built-in extraction strategies.  Called once at import time."""
     try:
         from bamboo.extractors.llm_strategy import LLMExtractionStrategy
-
         register_extraction_strategy("llm", LLMExtractionStrategy)
-    except ImportError as e:
-        logger.debug(f"LLM strategy not available: {e}")
+    except ImportError as exc:
+        logger.debug("LLM strategy not available: %s", exc)
 
     try:
-        from bamboo.extractors.rule_based_strategy import (
-            RuleBasedExtractionStrategy,
-        )
-
+        from bamboo.extractors.rule_based_strategy import RuleBasedExtractionStrategy
         register_extraction_strategy("rule_based", RuleBasedExtractionStrategy)
         register_extraction_strategy("jira", RuleBasedExtractionStrategy)
         register_extraction_strategy("github", RuleBasedExtractionStrategy)
         register_extraction_strategy("generic", RuleBasedExtractionStrategy)
-    except ImportError as e:
-        logger.debug(f"Rule-based strategy not available: {e}")
+    except ImportError as exc:
+        logger.debug("Rule-based strategy not available: %s", exc)
 
     try:
-        from bamboo.extractors.panda_knowledge_extractor import (
-            PandaKnowledgeExtractor,
-        )
-
+        from bamboo.extractors.panda_knowledge_extractor import PandaKnowledgeExtractor
         register_extraction_strategy("panda", PandaKnowledgeExtractor)
-    except ImportError as e:
-        logger.debug(f"Panda strategy not available: {e}")
+    except ImportError as exc:
+        logger.debug("Panda strategy not available: %s", exc)
 
 
-# Auto-register built-in strategies on import
 _register_builtin_strategies()

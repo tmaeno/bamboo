@@ -1,4 +1,42 @@
-"""LLM prompts for various tasks."""
+"""LLM prompt templates for all pipeline stages.
+
+All prompts are plain strings with ``{placeholder}`` format fields.
+Call ``.format(...)`` to produce the final prompt before passing to the LLM.
+
+Prompt constants
+----------------
+``EXTRACTION_PROMPT``
+    General-purpose knowledge-graph extraction from raw text.
+    Used by ``LLMExtractionStrategy``.
+
+``EMAIL_EXTRACTION_PROMPT``
+    Extracts ``Cause``, ``Resolution``, and ``Task_Context`` nodes from an
+    email thread.  Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
+
+``CAUSE_RESOLUTION_CANONICALIZE_PROMPT``
+    Normalises a raw Cause/Resolution name into a stable canonical phrase,
+    optionally matching against existing names from the vector DB.
+
+``ERROR_CATEGORY_LABEL_PROMPT``
+    Converts a raw error message into a short CamelCase error-category label.
+    Used by :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryStore`.
+
+``SUMMARIZATION_PROMPT``
+    Produces a narrative summary of a knowledge graph for vector indexing.
+    Used by :class:`~bamboo.agents.knowledge_accumulator.KnowledgeAccumulator`.
+
+``CAUSE_IDENTIFICATION_PROMPT``
+    Root-cause analysis from graph and vector DB evidence.
+    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningAgent`.
+
+``EMAIL_GENERATION_PROMPT``
+    Drafts a professional resolution email for a task submitter.
+    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningAgent`.
+
+``FEATURE_EXTRACTION_PROMPT``
+    Extracts structured features from raw task and external data.
+    (Legacy; superseded by ``PandaKnowledgeExtractor`` for Panda tasks.)
+"""
 
 EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to extract structured knowledge from the provided information and construct a knowledge graph.
 

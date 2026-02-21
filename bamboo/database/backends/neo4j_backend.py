@@ -1,4 +1,13 @@
-"""Neo4j graph database backend implementation."""
+"""Neo4j graph database backend implementation.
+
+Provides :class:`Neo4jBackend`, a concrete :class:`GraphDatabaseBackend`
+that persists the Bamboo knowledge graph in a Neo4j database using the
+async Python driver.
+
+Connection is established via :meth:`Neo4jBackend.connect` (called by
+:class:`~bamboo.database.graph_database_client.GraphDatabaseClient`).
+All methods require an open driver; call :meth:`Neo4jBackend.close` when done.
+"""
 
 import logging
 from typing import Any
@@ -8,133 +17,138 @@ try:
     from neo4j.exceptions import Neo4jError
 except ImportError as e:
     raise ImportError(
-        "Neo4j backend requires 'neo4j' package. " "Install it with: pip install neo4j"
+        "Neo4j backend requires 'neo4j' package. "
+        "Install it with: pip install neo4j"
     ) from e
 
 from bamboo.config import get_settings
 from bamboo.database.base import GraphDatabaseBackend
-from bamboo.models.graph_element import (
-    BaseNode,
-    GraphRelationship,
-    NodeType,
-)
+from bamboo.models.graph_element import BaseNode, GraphRelationship, NodeType
 
 logger = logging.getLogger(__name__)
 
 
 class Neo4jBackend(GraphDatabaseBackend):
-    """Neo4j implementation of graph database backend."""
+    """Async Neo4j implementation of :class:`GraphDatabaseBackend`.
+
+    Uses the official ``neo4j`` async driver.  All public methods open a
+    short-lived session so they are safe to call concurrently.
+    """
 
     def __init__(self):
-        """Initialize Neo4j backend."""
         self.settings = get_settings()
         self.driver = None
 
     async def connect(self):
-        """Establish connection to Neo4j."""
+        """Open the Neo4j driver, verify connectivity, and create indexes."""
         try:
             self.driver = AsyncGraphDatabase.driver(
                 self.settings.neo4j_uri,
                 auth=(self.settings.neo4j_username, self.settings.neo4j_password),
             )
             await self.driver.verify_connectivity()
-            logger.info("Successfully connected to Neo4j")
+            logger.info("Connected to Neo4j at %s", self.settings.neo4j_uri)
             await self._create_indexes()
-        except Neo4jError as e:
-            logger.error(f"Failed to connect to Neo4j: {e}")
+        except Neo4jError as exc:
+            logger.error("Failed to connect to Neo4j: %s", exc)
             raise
 
     async def close(self):
-        """Close Neo4j connection."""
+        """Close the Neo4j driver and release all connections."""
         if self.driver:
             await self.driver.close()
             logger.info("Neo4j connection closed")
 
     async def _create_indexes(self):
-        """Create necessary indexes and constraints."""
-        async with self.driver.session(
-            database=self.settings.neo4j_database
-        ) as session:
-            # Create constraints for unique node IDs
-            for node_type in NodeType:
-                constraint_query = f"""
-                CREATE CONSTRAINT IF NOT EXISTS FOR (n:{node_type.value})
-                REQUIRE n.id IS UNIQUE
-                """
-                await session.run(constraint_query)
+        """Create uniqueness constraints and performance indexes.
 
-            # Create indexes for common queries
-            index_queries = [
+        Idempotent — uses ``IF NOT EXISTS`` so re-running on an already
+        initialised database is safe.
+        """
+        async with self.driver.session(database=self.settings.neo4j_database) as session:
+            for node_type in NodeType:
+                await session.run(
+                    f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{node_type.value}) "
+                    "REQUIRE n.id IS UNIQUE"
+                )
+            for query in [
                 "CREATE INDEX IF NOT EXISTS FOR (n:Cause) ON (n.confidence)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Cause) ON (n.frequency)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Symptom) ON (n.name)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Resolution) ON (n.success_rate)",
-            ]
-            for query in index_queries:
+            ]:
                 await session.run(query)
 
     async def create_node(self, node: BaseNode) -> str:
-        """Create a node in Neo4j."""
-        async with self.driver.session(
-            database=self.settings.neo4j_database
-        ) as session:
-            query = f"""
-            CREATE (n:{node.node_type.value} $properties)
-            RETURN n.id as id
-            """
+        """Create a new node unconditionally and return its ID.
+
+        A UUID is generated if ``node.id`` is not already set.
+
+        .. note::
+            Prefer :meth:`get_or_create_canonical_node` to avoid duplicates
+            for canonical node types (Cause, Resolution, Symptom, etc.).
+        """
+        import uuid
+        async with self.driver.session(database=self.settings.neo4j_database) as session:
             properties = node.model_dump(exclude={"node_type"})
             if not properties.get("id"):
-                import uuid
-
                 properties["id"] = str(uuid.uuid4())
-
-            result = await session.run(query, properties=properties)
+            result = await session.run(
+                f"CREATE (n:{node.node_type.value} $properties) RETURN n.id AS id",
+                properties=properties,
+            )
             record = await result.single()
             return record["id"]
 
     async def get_or_create_canonical_node(
         self, node: BaseNode, canonical_name: str
     ) -> str:
-        """Get existing node by canonical name or create new one."""
-        async with self.driver.session(
-            database=self.settings.neo4j_database
-        ) as session:
-            # Try to find existing node with canonical name
-            find_query = f"""
-            MATCH (n:{node.node_type.value} {{name: $name}})
-            RETURN n.id as id
-            """
+        """Merge on canonical name: return existing ID or create and return new ID.
 
-            result = await session.run(find_query, name=canonical_name)
+        Looks up a node of the same type with ``name = canonical_name``.  If
+        found, returns its ID without modification.  If not found, sets
+        ``node.name = canonical_name`` and creates a new node.
+
+        Args:
+            node:           Source node whose properties are used when creating.
+            canonical_name: Stable name used as the merge key.
+
+        Returns:
+            The node's ID string.
+        """
+        async with self.driver.session(database=self.settings.neo4j_database) as session:
+            result = await session.run(
+                f"MATCH (n:{node.node_type.value} {{name: $name}}) RETURN n.id AS id",
+                name=canonical_name,
+            )
             record = await result.single()
-
             if record:
                 return record["id"]
-
-            # Create new node with canonical name
             node.name = canonical_name
             return await self.create_node(node)
 
     async def create_relationship(self, relationship: GraphRelationship) -> bool:
-        """Create a relationship between nodes."""
-        async with self.driver.session(
-            database=self.settings.neo4j_database
-        ) as session:
-            query = (
-                """
-            MATCH (source {id: $source_id})
-            MATCH (target {id: $target_id})
-            CREATE (source)-[r:%s $properties]->(target)
-            RETURN r
-            """
-                % relationship.relation_type.value
-            )
+        """Create a directed relationship between two nodes.
 
+        Nodes are looked up by their ``id`` property.  Returns ``False``
+        (without raising) if either node cannot be found.
+
+        Args:
+            relationship: Edge descriptor.
+
+        Returns:
+            ``True`` if the relationship was created.
+        """
+        async with self.driver.session(database=self.settings.neo4j_database) as session:
             properties = relationship.properties.copy()
             properties["confidence"] = relationship.confidence
-
             result = await session.run(
-                query,
+                f"""
+                MATCH (source {{id: $source_id}})
+                MATCH (target {{id: $target_id}})
+                CREATE (source)-[r:{relationship.relation_type.value} $properties]->(target)
+                RETURN r
+                """,
                 source_id=relationship.source_id,
                 target_id=relationship.target_id,
                 properties=properties,
@@ -254,5 +268,4 @@ class Neo4jBackend(GraphDatabaseBackend):
                 resolution_id=resolution_id,
                 success_increment=1 if success else 0,
             )
-
 

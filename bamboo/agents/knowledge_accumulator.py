@@ -1,4 +1,17 @@
-"""Knowledge accumulation agent for populating databases."""
+"""Knowledge accumulation agent: extracts, stores, and indexes incident graphs.
+
+:class:`KnowledgeAccumulator` is the first half of the Bamboo pipeline.  Given
+the raw data for one resolved incident (email thread, task fields, external
+metadata) it:
+
+1. Extracts a :class:`~bamboo.models.knowledge_entity.KnowledgeGraph` using
+   the configured :class:`~bamboo.extractors.base.ExtractionStrategy`.
+2. Stores nodes and relationships in **Neo4j** (graph database), merging on
+   canonical names to avoid duplicate nodes.
+3. Generates a narrative summary with the LLM.
+4. Indexes unstructured node descriptions and the summary in **Qdrant** (vector
+   database) so they are retrievable by semantic similarity.
+"""
 
 import json
 import logging
@@ -21,14 +34,18 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeAccumulator:
-    """Agent for extracting knowledge and populating databases."""
+    """Extracts knowledge from a resolved incident and persists it to both DBs.
+
+    Args:
+        graph_db:  Connected :class:`GraphDatabaseClient`.
+        vector_db: Connected :class:`VectorDatabaseClient`.
+    """
 
     def __init__(
         self,
         graph_db: GraphDatabaseClient,
         vector_db: VectorDatabaseClient,
     ):
-        """Initialize knowledge extraction agent."""
         self.graph_db = graph_db
         self.vector_db = vector_db
         self.llm = get_llm()
@@ -41,17 +58,29 @@ class KnowledgeAccumulator:
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
     ) -> ExtractedKnowledge:
-        """Extract knowledge from sources and store in databases."""
-        logger.info("Starting knowledge extraction process")
+        """Process one resolved incident and persist the extracted knowledge.
 
-        # Derive a stable graph_id from the task ID so that re-processing
-        # the same task overwrites existing vectors rather than duplicating them.
+        A deterministic ``graph_id`` is derived from ``task_data["task_id"]``
+        so that re-processing the same incident overwrites existing vectors
+        rather than creating duplicates.
+
+        Args:
+            email_text:    Email thread for the incident.
+            task_data:     Structured task fields.  ``task_id`` is used to
+                           derive the ``graph_id``.
+            external_data: Supplementary metadata.
+
+        Returns:
+            :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
+            the graph, summary, and key insights.
+        """
+        logger.info("KnowledgeAccumulator: starting knowledge extraction")
+
         task_id = (task_data or {}).get("task_id")
         graph_id = (
             self._deterministic_id("graph", task_id) if task_id else str(uuid.uuid4())
         )
 
-        # Step 1: Extract knowledge graph (IDs assigned inside extractor)
         graph = await self.extractor.extract_from_sources(
             email_text=email_text,
             task_data=task_data,
@@ -59,17 +88,13 @@ class KnowledgeAccumulator:
         )
         graph.metadata["graph_id"] = graph_id
 
-        # Step 2: Store in Graph Database
         await self._store_graph(graph)
-
-        # Step 3: Generate summary
         summary = await self._generate_summary(graph)
-
-        # Step 4: Store in Vector Database
         key_insights = await self._extract_key_insights(graph)
         await self._store_in_vector_db(graph, summary, key_insights)
 
-        extracted_knowledge = ExtractedKnowledge(
+        logger.info("KnowledgeAccumulator: extraction completed for graph '%s'", graph_id)
+        return ExtractedKnowledge(
             graph=graph,
             summary=summary,
             key_insights=key_insights,
@@ -81,30 +106,35 @@ class KnowledgeAccumulator:
             },
         )
 
-        logger.info("Knowledge extraction completed successfully")
-        return extracted_knowledge
-
     async def _store_graph(self, graph: KnowledgeGraph):
-        """Store knowledge graph in Neo4j."""
-        logger.info(f"Storing {len(graph.nodes)} nodes in Neo4j")
+        """Persist graph nodes and relationships to Neo4j.
 
-        # Store nodes
-        node_ids = {}
+        Nodes are merged by canonical name via
+        :meth:`GraphDatabaseClient.get_or_create_canonical_node`.
+        Relationship source/target IDs are remapped to the actual stored IDs
+        before insertion.
+        """
+        logger.info("KnowledgeAccumulator: storing %d nodes in graph DB", len(graph.nodes))
+
+        node_ids: dict[str, str] = {}
         for node in graph.nodes:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
             node_ids[node.id or node.name] = node_id
 
-        # Store relationships
         for rel in graph.relationships:
             rel.source_id = node_ids.get(rel.source_id, rel.source_id)
             rel.target_id = node_ids.get(rel.target_id, rel.target_id)
             await self.graph_db.create_relationship(rel)
 
-        logger.info("Graph stored successfully in Graph Database")
+        logger.info("KnowledgeAccumulator: graph stored successfully")
 
     async def _generate_summary(self, graph: KnowledgeGraph) -> str:
-        """Generate entry of knowledge graph using LLM."""
-        logger.info("Generating knowledge graph entry")
+        """Ask the LLM to produce a narrative summary of the knowledge graph.
+
+        The summary is stored in Qdrant so that users can retrieve full
+        incident narratives via semantic search.
+        """
+        logger.info("KnowledgeAccumulator: generating graph summary")
 
         graph_data = {
             "nodes": [
@@ -128,7 +158,6 @@ class KnowledgeAccumulator:
         prompt = SUMMARIZATION_PROMPT.format(
             graph_data=json.dumps(graph_data, indent=2)
         )
-
         messages = [
             SystemMessage(content="You are an expert at creating technical summaries."),
             HumanMessage(content=prompt),
@@ -170,24 +199,21 @@ class KnowledgeAccumulator:
         summary: str,
         key_insights: list[dict[str, Any]],
     ):
-        """Store unstructured node descriptions and the summary in the vector database.
+        """Store node descriptions and the graph summary in Qdrant.
 
-        Every entry is tagged with a ``graph_id`` so that, during retrieval,
-        a two-step query can be used:
-          1. Search unstructured descriptions to find semantically similar graphs.
-          2. Fetch the Summary entries for those graph_ids to get the full picture.
+        Every entry is tagged with ``graph_id`` so that the two-step retrieval
+        pattern in :meth:`ReasoningAgent._query_vector_database` can fetch the
+        full summary once matching node descriptions are found.
+
+        Deterministic point IDs are used so that re-processing the same graph
+        overwrites existing points rather than inserting duplicates.
         """
-        logger.info("Storing knowledge in Vector Database")
+        logger.info("KnowledgeAccumulator: storing vectors in vector DB")
 
         graph_id = graph.metadata["graph_id"]
 
-        # Store unstructured node descriptions
         for item in key_insights:
-            # Deterministic ID: re-processing the same graph overwrites the
-            # existing point rather than inserting a duplicate.
-            vector_id = self._deterministic_id(
-                graph_id, item["section"], item["node_id"]
-            )
+            vector_id = self._deterministic_id(graph_id, item["section"], item["node_id"])
             embedding = await self.embeddings.aembed_query(item["content"])
             await self.vector_db.upsert_section_vector(
                 vector_id=vector_id,
@@ -200,7 +226,6 @@ class KnowledgeAccumulator:
                 },
             )
 
-        # Store the summary — always present so every graph is retrievable
         summary_vector_id = self._deterministic_id(graph_id, "Summary")
         summary_embedding = await self.embeddings.aembed_query(summary)
         await self.vector_db.upsert_section_vector(
@@ -212,8 +237,8 @@ class KnowledgeAccumulator:
         )
 
         logger.info(
-            f"Stored {len(key_insights)} unstructured descriptions and 1 summary "
-            f"for graph {graph_id}"
+            "KnowledgeAccumulator: stored %d node descriptions + 1 summary for graph '%s'",
+            len(key_insights), graph_id,
         )
 
     @staticmethod

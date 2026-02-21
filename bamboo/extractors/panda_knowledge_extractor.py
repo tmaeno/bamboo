@@ -358,10 +358,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     * ``external_data`` key→value pairs → :class:`TaskFeatureNode`
     * ``task_data`` discrete fields     → :class:`TaskFeatureNode`
     * ``task_data`` free-form fields    → :class:`TaskContextNode`
-    * ``task_data["ErrorMessage"]``     → :class:`TaskContextNode` (raw text)
-                                          + :class:`SymptomNode` (canonical error
-                                          category) via :class:`ErrorCategoryClassifier`,
-                                          linked by ``TaskContext -[indicate]-> Symptom``
+    * ``task_data["ErrorMessage"]``     → :class:`SymptomNode` whose ``name``
+                                          is the canonical error category and
+                                          ``description`` is the raw message text
     * ``email_text``                    → :class:`CauseNode`, :class:`ResolutionNode`,
                                           and :class:`TaskContextNode` via LLM.
                                           Cause/Resolution names are canonicalised

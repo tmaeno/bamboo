@@ -1,4 +1,22 @@
-"""Reasoning navigation for analyzing problematic tasks."""
+"""Reasoning agent: diagnoses incidents and generates resolution emails.
+
+:class:`ReasoningAgent` is the second half of the Bamboo pipeline.  Given a
+new exhausted task it:
+
+1. Extracts a :class:`~bamboo.models.knowledge_entity.KnowledgeGraph` from the
+   task's structured fields using the configured
+   :class:`~bamboo.extractors.base.ExtractionStrategy`.
+2. Queries the **graph database** for candidate causes ranked by how many
+   extracted clue types (symptoms, features, environment, components) point to
+   them.
+3. Queries the **vector database** using a two-step retrieval pattern:
+   a. Searches unstructured node descriptions to find similar past cases
+      (returns ``graph_id`` values).
+   b. Fetches the narrative summaries for those graphs.
+4. Feeds all evidence to an LLM to identify the most likely root cause and
+   recommend a resolution.
+5. Drafts a professional email for the task submitter.
+"""
 
 import json
 import logging
@@ -21,31 +39,53 @@ logger = logging.getLogger(__name__)
 
 
 class ReasoningAgent:
-    """Agent for diagnosing system issues, analyzing failures, and generating resolutions."""
+    """Diagnoses an exhausted task and drafts a resolution email.
+
+    The agent is stateless between calls: every :meth:`analyze_task`
+    invocation is independent.
+
+    Args:
+        graph_db:  Connected :class:`GraphDatabaseClient`.
+        vector_db: Connected :class:`VectorDatabaseClient`.
+    """
 
     def __init__(
         self,
         graph_db: GraphDatabaseClient,
         vector_db: VectorDatabaseClient,
     ):
-        """Initialize diagnostic agent."""
         self.graph_db = graph_db
         self.vector_db = vector_db
         self.llm = get_llm()
         self.embeddings = get_embeddings()
         self.extractor = KnowledgeGraphExtractor()
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def _extract_clues_from_graph(self, graph) -> dict[str, Any]:
-        """Extract clues and key information from knowledge graph to deduce possible causes and resolutions."""
+        """Partition graph nodes into typed clue lists for database queries.
+
+        ``TaskContextNode`` values are kept separately (as ``task_contexts``)
+        because they are only available via vector search — they are not
+        stored in the graph database.
+
+        Args:
+            graph: A :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`.
+
+        Returns:
+            Dict with keys ``symptoms``, ``task_features``, ``task_contexts``,
+            ``environment_factors``, ``components``, ``context``.
+        """
         symptoms = []
         task_features = []
-        task_contexts = []  # unstructured prose — vector DB only, not graph DB
+        task_contexts = []
         environment_factors = []
         components = []
 
         for node in graph.nodes:
             node_type_str = str(node.node_type)
-
             if "SYMPTOM" in node_type_str:
                 symptoms.append(node.name)
             elif "TASK_CONTEXT" in node_type_str:
@@ -72,35 +112,40 @@ class ReasoningAgent:
         task_data: dict[str, Any],
         external_data: dict[str, Any] = None,
     ) -> AnalysisResult:
-        """Analyze exhausted task and generate resolution."""
-        logger.info(f"Analyzing task: {task_data.get('task_id', 'unknown')}")
+        """Analyse an exhausted task and return a root-cause + resolution result.
 
-        # Step 1: Extract knowledge graph (IDs assigned, names normalised by strategy)
+        Pipeline:
+            1. Extract knowledge graph from structured task fields.
+            2. Query graph DB for candidate causes.
+            3. Query vector DB for similar past cases (two-step retrieval).
+            4. Ask LLM to identify the root cause.
+            5. Ask LLM to draft a resolution email.
+
+        Args:
+            task_data:     Structured task fields (must include ``task_id``).
+            external_data: Optional supplementary metadata.
+
+        Returns:
+            :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
+            root cause, resolution, explanation, email draft, and evidence.
+        """
+        logger.info("ReasoningAgent: analysing task '%s'", task_data.get("task_id", "unknown"))
+
         extracted_graph = await self.extractor.extract_from_sources(
             email_text="",
             task_data=task_data,
             external_data=external_data,
         )
-
-        # Extract clues from the graph for database queries
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
-        # Step 2: Query graph database
         graph_results = await self._query_graph_database(extracted_clues)
-
-        # Step 3: Query vector database
         vector_results = await self._query_vector_database(extracted_clues, task_data)
-
-        # Step 4: Identify root cause using LLM
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results
         )
-
-        # Step 5: Generate email
         email_content = await self._generate_email(task_data, analysis)
 
-        # Step 6: Create analysis result
-        result = AnalysisResult(
+        return AnalysisResult(
             task_id=task_data.get("task_id", "unknown"),
             root_cause=analysis["root_cause"],
             confidence=analysis["confidence"],
@@ -115,15 +160,22 @@ class ReasoningAgent:
             },
         )
 
-        logger.info("Task analysis completed successfully")
-        return result
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
     async def _query_graph_database(
         self, extracted_clues: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """Query graph database for relevant causes and resolutions."""
-        logger.info("Querying graph database")
+        """Query the graph DB for causes that match the extracted clues.
 
+        Args:
+            extracted_clues: Output of :meth:`_extract_clues_from_graph`.
+
+        Returns:
+            List of cause dicts from :meth:`GraphDatabaseClient.find_causes`.
+        """
+        logger.info("ReasoningAgent: querying graph database")
         results = await self.graph_db.find_causes(
             symptoms=extracted_clues.get("symptoms"),
             task_features=extracted_clues.get("task_features"),
@@ -131,66 +183,60 @@ class ReasoningAgent:
             components=extracted_clues.get("components"),
             limit=10,
         )
-
-        logger.info(f"Found {len(results)} causes from graph database")
+        logger.info("ReasoningAgent: graph DB returned %d causes", len(results))
         return results
 
     async def _query_vector_database(
         self, extracted_clues: dict[str, Any], task_data: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        """Find similar past cases using a two-step vector retrieval pattern.
+        """Find similar past cases using two-step vector retrieval.
 
-        Step 1 — Search unstructured node descriptions:
-            Query each clue type's section (Error, Task_Feature, Environment,
-            Component) using the raw description text from the canonical graph.
-            These are the only entries stored in the vector DB from those node
-            types, because their names are already canonical and live in the
-            graph DB.  Hits carry a ``graph_id`` in their metadata.
+        **Step 1** — search each unstructured clue type's section in the vector
+        DB to find ``graph_id`` values of similar past cases.
 
-        Step 2 — Fetch summaries for matched graphs:
-            Use the collected ``graph_id`` values to retrieve the corresponding
-            Summary entries directly (no embedding needed — it is a metadata
-            filter).  This gives the full narrative context of each matched
-            past case.
+        **Step 2** — fetch the ``Summary`` entries for those graph IDs to
+        obtain the full narrative context.
 
-        Returns a list of summary dicts ordered by the hit score of the
-        description match that triggered them.
+        The result list is sorted by the best hit score across all sections.
+
+        Args:
+            extracted_clues: Output of :meth:`_extract_clues_from_graph`.
+            task_data:       Raw task data (``description`` field used as an
+                             additional query if present).
+
+        Returns:
+            List of summary dicts, each augmented with a ``score`` field
+            reflecting the strength of the best section match.
         """
-        logger.info("Querying vector database (two-step: descriptions → summaries)")
+        logger.info("ReasoningAgent: querying vector database (two-step)")
 
-        # --- Step 1: build per-section queries from canonical clues ---
-        section_queries: list[tuple[str, str]] = []  # (section, query_text)
+        section_queries: list[tuple[str, str]] = []
 
         if extracted_clues.get("errors"):
             section_queries.append(
                 ("Error", "Error: " + ", ".join(extracted_clues["errors"]))
             )
         if extracted_clues.get("task_features"):
-            section_queries.append(
-                (
-                    "Task_Feature",
-                    "Task features: " + ", ".join(extracted_clues["task_features"]),
-                )
-            )
-        if extracted_clues.get("task_contexts"):
-            # Each prose context is its own query — don't concatenate them
-            for ctx in extracted_clues["task_contexts"]:
-                section_queries.append(("Task_Context", ctx))
+            section_queries.append((
+                "Task_Feature",
+                "Task features: " + ", ".join(extracted_clues["task_features"]),
+            ))
+        for ctx in extracted_clues.get("task_contexts", []):
+            section_queries.append(("Task_Context", ctx))
         if extracted_clues.get("environment_factors"):
-            section_queries.append(
-                (
-                    "Environment",
-                    "Environment: " + ", ".join(extracted_clues["environment_factors"]),
-                )
-            )
+            section_queries.append((
+                "Environment",
+                "Environment: " + ", ".join(extracted_clues["environment_factors"]),
+            ))
         if extracted_clues.get("components"):
-            section_queries.append(
-                ("Component", "Component: " + ", ".join(extracted_clues["components"]))
-            )
+            section_queries.append((
+                "Component",
+                "Component: " + ", ".join(extracted_clues["components"]),
+            ))
         if task_data.get("description"):
             section_queries.append(("Error", task_data["description"]))
 
-        # --- Search each section, collect (graph_id, best_score) ---
+        # Step 1: collect best score per graph_id across all sections
         graph_id_scores: dict[str, float] = {}
         for section, query_text in section_queries:
             query_embedding = await self.embeddings.aembed_query(query_text)
@@ -204,36 +250,32 @@ class ReasoningAgent:
                 graph_id = hit.get("metadata", {}).get("graph_id")
                 if graph_id:
                     score = hit.get("score", 0.0)
-                    # Keep the best score across all sections for this graph
                     if score > graph_id_scores.get(graph_id, 0.0):
                         graph_id_scores[graph_id] = score
 
         if not graph_id_scores:
-            logger.info("No matching graphs found in vector database")
+            logger.info("ReasoningAgent: no matching graphs found in vector DB")
             return []
 
-        # --- Step 2: fetch summaries for all matched graph_ids ---
-        matched_graph_ids = list(graph_id_scores.keys())
-        summaries = await self.vector_db.get_summaries_by_graph_ids(matched_graph_ids)
-
-        # Attach the trigger score so the caller can rank results
-        results = []
-        for summary in summaries:
-            graph_id = summary.get("metadata", {}).get("graph_id")
-            results.append(
-                {
-                    **summary,
-                    "score": graph_id_scores.get(graph_id, 0.0),
-                }
-            )
-
+        # Step 2: fetch summaries for all matched graph_ids
+        summaries = await self.vector_db.get_summaries_by_graph_ids(
+            list(graph_id_scores.keys())
+        )
+        results = [
+            {
+                **summary,
+                "score": graph_id_scores.get(
+                    summary.get("metadata", {}).get("graph_id"), 0.0
+                ),
+            }
+            for summary in summaries
+        ]
         results.sort(key=lambda x: x["score"], reverse=True)
 
         logger.info(
-            f"Found {len(results)} matching past cases via "
-            f"{len(graph_id_scores)} unique graph IDs"
+            "ReasoningAgent: vector DB returned %d past cases via %d graph IDs",
+            len(results), len(graph_id_scores),
         )
-
         return results
 
     async def _identify_root_cause(
@@ -243,8 +285,19 @@ class ReasoningAgent:
         graph_results: list[dict[str, Any]],
         vector_results: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Use LLM to identify root cause from database results."""
-        logger.info("Identifying root cause with LLM")
+        """Call the LLM to synthesise a root-cause analysis.
+
+        Args:
+            task_data:      Raw task fields.
+            external_data:  Supplementary metadata (may be ``None``).
+            graph_results:  Candidate causes from the graph DB.
+            vector_results: Similar past cases from the vector DB.
+
+        Returns:
+            Dict with keys ``root_cause``, ``confidence``, ``resolution``,
+            ``reasoning``, and ``supporting_evidence``.
+        """
+        logger.info("ReasoningAgent: identifying root cause with LLM")
 
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
             task_info=json.dumps(task_data, indent=2),
@@ -255,7 +308,7 @@ class ReasoningAgent:
                     {
                         "score": r["score"],
                         "entry": r["entry"],
-                        "content": r["content"][:500],  # Truncate content
+                        "content": r["content"][:500],
                     }
                     for r in vector_results
                 ],
@@ -269,33 +322,38 @@ class ReasoningAgent:
             ),
             HumanMessage(content=prompt),
         ]
-
         response = await self.llm.ainvoke(messages)
 
         try:
-            result = json.loads(response.content)
-            return result
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response: {e}")
+            return json.loads(response.content)
+        except json.JSONDecodeError as exc:
+            logger.error("ReasoningAgent: failed to parse LLM response: %s", exc)
             return {
                 "root_cause": "Unable to determine root cause",
                 "confidence": 0.0,
                 "resolution": "Manual investigation required",
-                "reasoning": "Failed to analyze the issue",
+                "reasoning": "LLM response could not be parsed.",
             }
 
     async def _generate_email(
         self, task_data: dict[str, Any], analysis: dict[str, Any]
     ) -> str:
-        """Generate email explaining the issue and resolution."""
-        logger.info("Generating email content")
+        """Draft a professional resolution email for the task submitter.
+
+        Args:
+            task_data: Raw task fields (``task_id`` and ``description`` used).
+            analysis:  Root-cause analysis dict from :meth:`_identify_root_cause`.
+
+        Returns:
+            Email body as a plain-text string.
+        """
+        logger.info("ReasoningAgent: generating resolution email")
 
         prompt = EMAIL_GENERATION_PROMPT.format(
             task_id=task_data.get("task_id", "unknown"),
             task_description=task_data.get("description", ""),
             analysis=json.dumps(analysis, indent=2),
         )
-
         messages = [
             SystemMessage(
                 content="You are an expert at technical communication and customer support."
