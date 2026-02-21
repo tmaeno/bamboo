@@ -64,3 +64,5 @@ class GraphDatabaseClient:
         return await self._backend.update_resolution_success_rate(
             resolution_id, success
         )
+
+

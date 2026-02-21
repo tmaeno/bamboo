@@ -142,15 +142,19 @@ class KnowledgeAccumulator:
     ) -> list[dict[str, Any]]:
         """Collect nodes that carry unstructured prose worth semantic indexing.
 
-        Only nodes with a ``description`` are included — these are the ones
-        whose value is not fully captured by their canonical name and therefore
-        benefit from vector similarity search.  Cause and Resolution nodes are
-        intentionally excluded: their canonical names and structured fields are
-        already precisely indexed in the graph database.
+        Indexed node types:
+        - ``Task_Context``: free-form prose fields (steps, user reports, etc.)
+        - ``Symptom``: description holds the raw error message text, which is
+          worth semantic search even though the node's canonical name is the
+          clean error category.
+
+        Cause and Resolution nodes are intentionally excluded: their canonical
+        names are already precisely indexed in the graph database.
         """
+        _INDEXABLE = {"Task_Context", "Symptom"}
         insights = []
         for node in graph.nodes:
-            if node.description and node.node_type.value == "Task_Context":
+            if node.description and node.node_type.value in _INDEXABLE:
                 insights.append(
                     {
                         "node_id": node.id,

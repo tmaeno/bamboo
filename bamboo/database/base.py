@@ -76,6 +76,7 @@ class GraphDatabaseBackend(ABC):
         pass
 
 
+
 class VectorDatabaseBackend(ABC):
     """Abstract base class for vector database implementations."""
 

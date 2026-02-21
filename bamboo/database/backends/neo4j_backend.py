@@ -254,3 +254,5 @@ class Neo4jBackend(GraphDatabaseBackend):
                 resolution_id=resolution_id,
                 success_increment=1 if success else 0,
             )
+
+

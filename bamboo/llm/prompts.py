@@ -217,6 +217,51 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
 }}
 """
 
+CAUSE_RESOLUTION_CANONICALIZE_PROMPT = """You are a knowledge-graph canonicalization expert.
+
+You will be given a short name for a Cause or Resolution node extracted from an incident report,
+together with the list of names that already exist in the knowledge graph for that node type.
+
+Your task:
+1. If the raw name describes the same concept as one of the existing names, return that existing
+   name EXACTLY — character for character, including spacing and capitalisation.
+2. Only if no existing name is a good match, coin a new canonical name following the rules below.
+
+Rules for a new canonical name:
+- Remove ALL incident-specific tokens: dataset names, file paths, usernames, version strings,
+  numeric IDs, timestamps, job names, and any other values that differ between incidents.
+- Normalise the phrasing to a consistent, general form.
+- Use lowercase with spaces. 3–8 words is ideal.
+- Do NOT add punctuation at the end.
+- Do NOT wrap the answer in quotes or add any explanation — output the canonical name only.
+
+Node type: {node_type}
+
+Existing names in the graph ({node_type}):
+{existing_names}
+
+Examples for Cause:
+  raw: "input dataset mc20_13TeV contains too many files (>200000)"
+  existing: ["input dataset exceeds file limit", "database connection refused"]
+  → input dataset exceeds file limit          ← matched existing
+
+  raw: "segmentation fault in worker process PID 4821"
+  existing: ["input dataset exceeds file limit", "database connection refused"]
+  → worker process segmentation fault         ← no match, new name coined
+
+Examples for Resolution:
+  raw: "split mc20_13TeV dataset into subsets < 200k files"
+  existing: ["split dataset into smaller subsets", "restart service"]
+  → split dataset into smaller subsets        ← matched existing
+
+  raw: "patch libssl to version 3.1.2"
+  existing: ["split dataset into smaller subsets", "restart service"]
+  → update ssl library version                ← no match, new name coined
+
+Raw name: {raw_name}
+
+Canonical name:"""
+
 ERROR_CATEGORY_LABEL_PROMPT = """You are an error classification expert.
 
 Given a raw error message from an operational system, produce a short, canonical error-category label.

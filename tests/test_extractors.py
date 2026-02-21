@@ -6,11 +6,14 @@ import pytest
 
 from bamboo.extractors.panda_knowledge_extractor import (
     UNSTRUCTURED_TASK_KEYS,
+    CanonicalNodeStore,
     ErrorCategoryClassifier,
     ErrorCategoryStore,
     PandaKnowledgeExtractor,
+    _canonical_vector_id,
     _category_vector_id,
     _generate_category_label,
+    _make_cause_resolution_label_fn,
 )
 from bamboo.models.graph_element import NodeType, RelationType
 
@@ -19,13 +22,11 @@ from bamboo.models.graph_element import NodeType, RelationType
 # Helpers
 # ---------------------------------------------------------------------------
 
-
 def _make_mock_store(
     category: str = "Timeout",
     score: float = 0.9,
     is_new: bool = False,
 ) -> ErrorCategoryStore:
-    """Return an ErrorCategoryStore whose find_or_create() is mocked."""
     store = MagicMock(spec=ErrorCategoryStore)
     store.find_or_create = AsyncMock(return_value=(category, score, is_new))
     store.add_category = AsyncMock(return_value="fake-id")
@@ -33,29 +34,52 @@ def _make_mock_store(
     return store
 
 
+def _make_mock_canonical_store(
+    label: str = "some canonical label",
+    score: float = 0.9,
+    is_new: bool = False,
+) -> CanonicalNodeStore:
+    store = MagicMock(spec=CanonicalNodeStore)
+    store.find_or_create = AsyncMock(return_value=(label, score, is_new))
+    store.add = AsyncMock(return_value="fake-id")
+    store.list_all = AsyncMock(return_value=[])
+    return store
+
+
 def _make_mock_classifier(
     category: str = "Timeout",
     confidence: float = 0.9,
 ) -> ErrorCategoryClassifier:
-    """Return an ErrorCategoryClassifier whose classify() is mocked."""
-    store = _make_mock_store(category, confidence)
-    clf = ErrorCategoryClassifier(store=store)
-    return clf
+    return ErrorCategoryClassifier(store=_make_mock_store(category, confidence))
+
+
+def _make_fake_vector_client(search_results: list) -> MagicMock:
+    client = MagicMock()
+    client.search_similar = AsyncMock(return_value=search_results)
+    client.upsert_section_vector = AsyncMock(return_value="fake-id")
+    return client
+
+
+def _make_fake_embeddings() -> MagicMock:
+    emb = MagicMock()
+    emb.embed_query = MagicMock(return_value=[0.1] * 8)
+    return emb
 
 
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
 
-
 class TestHelpers:
-    def test_category_vector_id_stable(self):
-        assert _category_vector_id("Timeout") == _category_vector_id("Timeout")
-        assert _category_vector_id("Timeout") != _category_vector_id("NetworkError")
+    def test_canonical_vector_id_stable(self):
+        assert _canonical_vector_id("Cause", "db timeout") == _canonical_vector_id("Cause", "db timeout")
+        assert _canonical_vector_id("Cause", "x") != _canonical_vector_id("Resolution", "x")
+
+    def test_category_vector_id_is_alias(self):
+        assert _category_vector_id("Timeout") == _canonical_vector_id("ErrorCategory", "Timeout")
 
     @pytest.mark.asyncio
     async def test_generate_category_label_uses_llm(self):
-        """LLM response is cleaned and returned as the label."""
         mock_response = MagicMock()
         mock_response.content = "  TooManyFilesInDataset  "
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
@@ -67,30 +91,22 @@ class TestHelpers:
 
     @pytest.mark.asyncio
     async def test_generate_category_label_same_for_similar_messages(self):
-        """Two messages that differ only in incident-specific tokens must map
-        to the same label when the LLM strips those tokens correctly."""
         mock_response = MagicMock()
         mock_response.content = "TooManyFilesInDataset"
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
             mock_get_llm.return_value = mock_llm
-
             label1 = await _generate_category_label(
-                "failed to insert files for mc20_13TeV:mc20_13TeV.900149."
-                "PG_single_nu_Pt50.digit.RDO.e8307_s3482_s3136_d1715/. "
-                "Input dataset contains too many files >200000."
+                "failed to insert files for mc20_13TeV. Input dataset contains too many files >200000."
             )
             label2 = await _generate_category_label(
-                "failed to insert files for user.skondo.Znnjets_mc20_700337_mc20e"
-                ".eventpick.AOD.DTRun3_v1.2.15.log. "
-                "Input dataset contains too many files >200000."
+                "failed to insert files for user.skondo.eventpick.AOD. Input dataset contains too many files >200000."
             )
         assert label1 == label2 == "TooManyFilesInDataset"
 
     @pytest.mark.asyncio
     async def test_generate_category_label_raises_on_llm_failure(self):
-        """LLM errors must propagate so nothing is written to the database."""
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
             mock_get_llm.side_effect = RuntimeError("no API key")
             with pytest.raises(RuntimeError, match="no API key"):
@@ -98,9 +114,8 @@ class TestHelpers:
 
     @pytest.mark.asyncio
     async def test_generate_category_label_raises_on_empty_response(self):
-        """An empty/non-alphabetic LLM response must also raise."""
         mock_response = MagicMock()
-        mock_response.content = "123 !@#"  # no alphabetic characters
+        mock_response.content = "123 !@#"
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -108,103 +123,176 @@ class TestHelpers:
             with pytest.raises(ValueError, match="empty or non-alphabetic"):
                 await _generate_category_label("some error message")
 
+    @pytest.mark.asyncio
+    async def test_make_cause_resolution_label_fn_returns_canonical(self):
+        mock_response = MagicMock()
+        mock_response.content = "input dataset exceeds file limit"
+        with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
+            mock_llm = MagicMock()
+            mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+            mock_get_llm.return_value = mock_llm
+            fn = _make_cause_resolution_label_fn("Cause")
+            result = await fn("dataset mc20_13TeV contains too many files")
+        assert result == "input dataset exceeds file limit"
+
+    @pytest.mark.asyncio
+    async def test_make_cause_resolution_label_fn_raises_on_empty(self):
+        mock_response = MagicMock()
+        mock_response.content = ""
+        with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
+            mock_llm = MagicMock()
+            mock_llm.ainvoke = AsyncMock(return_value=mock_response)
+            mock_get_llm.return_value = mock_llm
+            fn = _make_cause_resolution_label_fn("Cause")
+            with pytest.raises(ValueError, match="empty canonical name"):
+                await fn("some cause")
+
 
 # ---------------------------------------------------------------------------
-# ErrorCategoryStore
+# CanonicalNodeStore
 # ---------------------------------------------------------------------------
 
-
-class TestErrorCategoryStore:
-    """Unit-tests using a fake async vector client."""
+class TestCanonicalNodeStore:
+    """Tests for the generic CanonicalNodeStore used by all canonicalisable types."""
 
     def _make_store(
-        self, existing_results: list
-    ) -> tuple[ErrorCategoryStore, MagicMock]:
-        fake_client = MagicMock()
-        fake_client.search_similar = AsyncMock(return_value=existing_results)
-        fake_client.upsert_section_vector = AsyncMock(return_value="fake-id")
+        self, search_results: list, label_fn_return: str = "canonical label"
+    ) -> CanonicalNodeStore:
+        async def _fake_label_fn(raw: str) -> str:
+            return label_fn_return
 
-        fake_embeddings = MagicMock()
-        fake_embeddings.embed_query = MagicMock(return_value=[0.1] * 8)
-        fake_embeddings.embed_documents = MagicMock(return_value=[[0.1] * 8])
+        return CanonicalNodeStore(
+            node_type="Cause",
+            label_fn=_fake_label_fn,
+            vector_client=_make_fake_vector_client(search_results),
+            embeddings_client=_make_fake_embeddings(),
+            match_threshold=0.82,
+        )
 
+    @pytest.mark.asyncio
+    async def test_find_existing_returns_stored_label(self):
+        results = [{"id": "x", "score": 0.91, "content": "existing cause",
+                    "metadata": {"label": "existing cause"}}]
+        store = self._make_store(results)
+        label, score, is_new = await store.find_or_create("some wordy cause description")
+        assert label == "existing cause"
+        assert score == 0.91
+        assert is_new is False
+        store._vector_client.upsert_section_vector.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_match_stores_and_returns_candidate(self):
+        store = self._make_store(search_results=[], label_fn_return="input dataset exceeds file limit")
+        label, score, is_new = await store.find_or_create("dataset mc20 too many files")
+        assert label == "input dataset exceeds file limit"
+        assert score == 0.0
+        assert is_new is True
+        store._vector_client.upsert_section_vector.assert_called_once()
+        call_kwargs = store._vector_client.upsert_section_vector.call_args.kwargs
+        assert call_kwargs["content"] == "input dataset exceeds file limit"
+        assert call_kwargs["section"] == "canonical_node::Cause"
+        assert call_kwargs["metadata"]["label"] == "input dataset exceeds file limit"
+
+    @pytest.mark.asyncio
+    async def test_section_is_namespaced_by_node_type(self):
+        """Different node types must not share the same VectorDB section."""
+        store = self._make_store([], "some label")
+        await store.find_or_create("raw text")
+        call_kwargs = store._vector_client.upsert_section_vector.call_args.kwargs
+        assert call_kwargs["section"] == "canonical_node::Cause"
+
+    @pytest.mark.asyncio
+    async def test_add_stores_with_auto_generated_false(self):
+        store = self._make_store([])
+        await store.add("my manual label")
+        call_kwargs = store._vector_client.upsert_section_vector.call_args.kwargs
+        assert call_kwargs["metadata"]["auto_generated"] is False
+        assert call_kwargs["metadata"]["label"] == "my manual label"
+
+    @pytest.mark.asyncio
+    async def test_list_all_returns_entries(self):
+        results = [
+            {"id": "a", "score": 0.9, "content": "cause A",
+             "metadata": {"label": "cause A", "auto_generated": False}},
+            {"id": "b", "score": 0.8, "content": "cause B",
+             "metadata": {"label": "cause B", "auto_generated": True}},
+        ]
+        store = self._make_store(results)
+        entries = await store.list_all()
+        labels = [e["label"] for e in entries]
+        assert "cause A" in labels
+        assert "cause B" in labels
+
+
+# ---------------------------------------------------------------------------
+# ErrorCategoryStore  (specialisation of CanonicalNodeStore)
+# ---------------------------------------------------------------------------
+
+class TestErrorCategoryStore:
+
+    def _make_store(self, search_results: list) -> ErrorCategoryStore:
         store = ErrorCategoryStore(
-            vector_client=fake_client,
-            embeddings_client=fake_embeddings,
+            vector_client=_make_fake_vector_client(search_results),
+            embeddings_client=_make_fake_embeddings(),
             new_category_threshold=0.70,
         )
-        return store, fake_client
+        return store
 
     @pytest.mark.asyncio
     async def test_find_existing_category(self):
         results = [{"id": "x", "score": 0.91, "content": "Timeout",
                     "metadata": {"label": "Timeout"}}]
-        store, client = self._make_store(results)
-        with patch(
-            "bamboo.extractors.panda_knowledge_extractor._generate_category_label",
-            new=AsyncMock(return_value="Timeout"),
-        ):
-            label, score, is_new = await store.find_or_create("request timed out")
+        store = self._make_store(results)
+        store._label_fn = AsyncMock(return_value="Timeout")
+        label, score, is_new = await store.find_or_create("request timed out")
         assert label == "Timeout"
         assert score == 0.91
         assert is_new is False
-        # The label was found — nothing should be written to the store.
-        client.upsert_section_vector.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_creates_new_category_when_no_match(self):
-        store, client = self._make_store(existing_results=[])
-        with patch(
-            "bamboo.extractors.panda_knowledge_extractor._generate_category_label",
-            new=AsyncMock(return_value="BizarreCustomFailure"),
-        ):
-            label, score, is_new = await store.find_or_create("bizarre custom failure xyz")
-        assert is_new is True
-        assert score == 0.0
+        store = self._make_store([])
+        store._label_fn = AsyncMock(return_value="BizarreCustomFailure")
+        label, score, is_new = await store.find_or_create("bizarre custom failure xyz")
         assert label == "BizarreCustomFailure"
-        client.upsert_section_vector.assert_called_once()
-        call_kwargs = client.upsert_section_vector.call_args.kwargs
-        # The stored content must be the clean label, not the raw message.
+        assert score == 0.0
+        assert is_new is True
+        call_kwargs = store._vector_client.upsert_section_vector.call_args.kwargs
+        assert call_kwargs["section"] == "canonical_node::ErrorCategory"
         assert call_kwargs["content"] == "BizarreCustomFailure"
-        assert call_kwargs["metadata"]["label"] == "BizarreCustomFailure"
-        assert call_kwargs["section"] == "error_category"
 
     @pytest.mark.asyncio
     async def test_add_category(self):
-        store, client = self._make_store([])
+        store = self._make_store([])
         await store.add_category("CustomDB", "Some exotic database failure")
-        client.upsert_section_vector.assert_called_once()
-        call_kwargs = client.upsert_section_vector.call_args.kwargs
+        store._vector_client.upsert_section_vector.assert_called_once()
+        call_kwargs = store._vector_client.upsert_section_vector.call_args.kwargs
         assert call_kwargs["metadata"]["label"] == "CustomDB"
         assert call_kwargs["metadata"]["auto_generated"] is False
 
     @pytest.mark.asyncio
-    async def test_list_categories(self):
+    async def test_list_categories_adds_description_key(self):
         results = [
-            {
-                "id": "a",
-                "score": 0.9,
-                "content": "desc A",
-                "metadata": {"label": "CatA", "auto_generated": False},
-            },
-            {
-                "id": "b",
-                "score": 0.8,
-                "content": "desc B",
-                "metadata": {"label": "CatB", "auto_generated": True},
-            },
+            {"id": "a", "score": 0.9, "content": "CatA",
+             "metadata": {"label": "CatA", "auto_generated": False}},
         ]
-        store, _ = self._make_store(results)
+        store = self._make_store(results)
         cats = await store.list_categories()
-        labels = [c["label"] for c in cats]
-        assert "CatA" in labels
-        assert "CatB" in labels
+        assert cats[0]["description"] == cats[0]["label"]
+
+    def test_is_subclass_of_canonical_node_store(self):
+        assert issubclass(ErrorCategoryStore, CanonicalNodeStore)
+
+    def test_new_category_threshold_property(self):
+        store = ErrorCategoryStore(new_category_threshold=0.65)
+        assert store.new_category_threshold == 0.65
+        store.new_category_threshold = 0.80
+        assert store.match_threshold == 0.80
 
 
 # ---------------------------------------------------------------------------
 # ErrorCategoryClassifier
 # ---------------------------------------------------------------------------
-
 
 class TestErrorCategoryClassifier:
     @pytest.mark.asyncio
@@ -235,31 +323,27 @@ class TestErrorCategoryClassifier:
 
 
 # ---------------------------------------------------------------------------
-# PandaKnowledgeExtractor
+# PandaKnowledgeExtractor — structured fields
 # ---------------------------------------------------------------------------
 
-
 class TestPandaKnowledgeExtractor:
+
     def _extractor(self, category="Timeout", confidence=0.9) -> PandaKnowledgeExtractor:
         return PandaKnowledgeExtractor(
-            error_classifier=_make_mock_classifier(category, confidence)
+            error_classifier=_make_mock_classifier(category, confidence),
+            cause_store=_make_mock_canonical_store("some cause"),
+            resolution_store=_make_mock_canonical_store("some resolution"),
         )
-
-    # --- external_data -------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_external_data_becomes_feature_nodes(self):
         ext = self._extractor()
-        graph = await ext.extract(
-            external_data={"env": "production", "region": "us-east-1"}
-        )
+        graph = await ext.extract(external_data={"env": "production", "region": "us-east-1"})
         names = {n.name for n in graph.nodes}
         assert "env=production" in names
         assert "region=us-east-1" in names
         for node in graph.nodes:
             assert node.node_type == NodeType.TASK_FEATURE
-
-    # --- task_data discrete fields ------------------------------------------
 
     @pytest.mark.asyncio
     async def test_discrete_task_field_becomes_feature_node(self):
@@ -268,8 +352,6 @@ class TestPandaKnowledgeExtractor:
         names = {n.name for n in graph.nodes}
         assert "RAM=4GB" in names
         assert "OS=Ubuntu 22.04" in names
-
-    # --- task_data unstructured fields ---------------------------------------
 
     @pytest.mark.asyncio
     async def test_unstructured_task_field_becomes_context_node(self):
@@ -281,73 +363,52 @@ class TestPandaKnowledgeExtractor:
         node = graph.nodes[0]
         assert node.node_type == NodeType.TASK_CONTEXT
         assert node.name == "description"
-        assert "crashes" in node.description
-
-    # --- ErrorMessage special handling --------------------------------------
 
     @pytest.mark.asyncio
-    async def test_error_message_produces_context_and_feature_nodes(self):
+    async def test_error_message_produces_symptom_node(self):
         ext = self._extractor(category="NetworkError", confidence=0.87)
         graph = await ext.extract(
             task_data={"ErrorMessage": "Connection refused: host unreachable"}
         )
-        node_types = {n.node_type for n in graph.nodes}
-        assert NodeType.TASK_CONTEXT in node_types
-        assert NodeType.TASK_FEATURE in node_types
-
-        feat = next(n for n in graph.nodes if n.node_type == NodeType.TASK_FEATURE)
-        assert feat.name == "ErrorCategory=NetworkError"
-        assert feat.attribute == "ErrorCategory"
-        assert feat.value == "NetworkError"
-
-        ctx = next(n for n in graph.nodes if n.node_type == NodeType.TASK_CONTEXT)
-        assert ctx.name == "ErrorMessage"
+        assert len(graph.nodes) == 1
+        node = graph.nodes[0]
+        assert node.node_type == NodeType.SYMPTOM
+        assert node.name == "NetworkError"
+        # Raw message preserved as description for traceability + vector search
+        assert node.description == "Connection refused: host unreachable"
 
     @pytest.mark.asyncio
-    async def test_error_message_creates_relationship(self):
+    async def test_error_message_no_relationship_no_context_node(self):
+        """ErrorMessage must not produce a TaskContextNode or any relationship."""
         ext = self._extractor(category="Timeout", confidence=0.95)
-        graph = await ext.extract(
-            task_data={"ErrorMessage": "Request timed out after 30s"}
-        )
-        assert len(graph.relationships) == 1
-        rel = graph.relationships[0]
-        assert rel.relation_type == RelationType.ASSOCIATED_WITH
-        assert rel.source_id == "ErrorMessage"
-        assert rel.target_id == "ErrorCategory=Timeout"
+        graph = await ext.extract(task_data={"ErrorMessage": "Request timed out after 30s"})
+        assert len(graph.relationships) == 0
+        assert all(n.node_type != NodeType.TASK_CONTEXT for n in graph.nodes)
 
     @pytest.mark.asyncio
-    async def test_empty_error_message_no_feature_node(self):
+    async def test_empty_error_message_produces_no_node(self):
         ext = self._extractor()
         graph = await ext.extract(task_data={"ErrorMessage": ""})
-        assert all(n.node_type == NodeType.TASK_CONTEXT for n in graph.nodes)
+        assert len(graph.nodes) == 0
         assert len(graph.relationships) == 0
-
-    # --- mixed input ---------------------------------------------------------
 
     @pytest.mark.asyncio
     async def test_mixed_input(self):
         ext = self._extractor(category="DatabaseError", confidence=0.92)
-        # Patch email extraction so it contributes nothing in this test,
-        # keeping the assertion count predictable.
         with patch.object(ext, "_extract_from_email", new=AsyncMock(return_value=([], []))):
             graph = await ext.extract(
                 email_text="some email text",
-                task_data={
-                    "priority": "high",
-                    "ErrorMessage": "SQL deadlock detected",
-                    "description": "Intermittent DB lock contention",
-                },
+                task_data={"priority": "high", "ErrorMessage": "SQL deadlock", "description": "DB contention"},
                 external_data={"component": "auth-service"},
             )
         names = {n.name for n in graph.nodes}
+        node_types = {n.node_type for n in graph.nodes}
         assert "component=auth-service" in names
         assert "priority=high" in names
-        assert "ErrorCategory=DatabaseError" in names
-        assert "ErrorMessage" in names
+        assert "DatabaseError" in names          # SymptomNode
+        assert NodeType.SYMPTOM in node_types
         assert "description" in names
-        assert len(graph.relationships) == 1
-
-    # --- interface -----------------------------------------------------------
+        assert len(graph.relationships) == 0     # no relationships from structured data
 
     def test_name(self):
         assert PandaKnowledgeExtractor().name == "panda"
@@ -364,9 +425,16 @@ class TestPandaKnowledgeExtractor:
         assert "my_text_field" in ext._unstructured_keys
         assert "description" not in ext._unstructured_keys
 
+    def test_cause_and_resolution_stores_injected(self):
+        cause = _make_mock_canonical_store("cause label")
+        res = _make_mock_canonical_store("res label")
+        ext = PandaKnowledgeExtractor(cause_store=cause, resolution_store=res)
+        assert ext._cause_store is cause
+        assert ext._resolution_store is res
+
 
 # ---------------------------------------------------------------------------
-# Email extraction
+# PandaKnowledgeExtractor — email extraction
 # ---------------------------------------------------------------------------
 
 _LLM_EMAIL_RESPONSE = """{
@@ -374,37 +442,33 @@ _LLM_EMAIL_RESPONSE = """{
     {
       "node_type": "Cause",
       "name": "input dataset exceeds file limit",
-      "description": "The dataset had more than 200000 files, exceeding the allowed limit.",
-      "metadata": {},
-      "steps": []
+      "description": "The dataset had more than 200000 files.",
+      "metadata": {}, "steps": []
     },
     {
       "node_type": "Resolution",
       "name": "split dataset into smaller chunks",
-      "description": "Divide the input dataset so each subset has fewer than 200000 files.",
+      "description": "Divide the input dataset into subsets below 200000 files.",
       "metadata": {},
-      "steps": ["Identify dataset boundaries", "Split into subsets < 200k files", "Re-submit jobs"]
+      "steps": ["Identify boundaries", "Split into subsets", "Re-submit"]
     },
     {
       "node_type": "Task_Context",
       "name": "timeline",
-      "description": "Issue first observed during the nightly digitization run on 2025-11-03.",
-      "metadata": {},
-      "steps": []
+      "description": "Issue first observed during the nightly run on 2025-11-03.",
+      "metadata": {}, "steps": []
     }
   ],
   "relationships": [
     {
       "source_name": "input dataset exceeds file limit",
       "target_name": "split dataset into smaller chunks",
-      "relation_type": "solved_by",
-      "confidence": 0.95
+      "relation_type": "solved_by", "confidence": 0.95
     },
     {
       "source_name": "timeline",
       "target_name": "input dataset exceeds file limit",
-      "relation_type": "contribute_to",
-      "confidence": 0.6
+      "relation_type": "contribute_to", "confidence": 0.6
     }
   ]
 }"""
@@ -412,49 +476,79 @@ _LLM_EMAIL_RESPONSE = """{
 
 class TestPandaEmailExtraction:
 
-    def _extractor(self) -> PandaKnowledgeExtractor:
-        return PandaKnowledgeExtractor(
-            error_classifier=_make_mock_classifier()
-        )
-
-    def _mock_llm(self, response_text: str = _LLM_EMAIL_RESPONSE):
+    def _make_mock_llm(self, response_text: str = _LLM_EMAIL_RESPONSE):
         mock_response = MagicMock()
         mock_response.content = response_text
         mock_llm = MagicMock()
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         return mock_llm
 
+    def _extractor(
+        self,
+        cause_label: str = "input dataset exceeds file limit",
+        resolution_label: str = "split dataset into smaller subsets",
+    ) -> PandaKnowledgeExtractor:
+        return PandaKnowledgeExtractor(
+            error_classifier=_make_mock_classifier(),
+            cause_store=_make_mock_canonical_store(cause_label),
+            resolution_store=_make_mock_canonical_store(resolution_label),
+        )
+
     @pytest.mark.asyncio
     async def test_email_produces_cause_resolution_context_nodes(self):
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm()):
+                   return_value=self._make_mock_llm()):
             graph = await ext.extract(email_text="... incident email ...")
-
         node_types = {n.node_type for n in graph.nodes}
         assert NodeType.CAUSE in node_types
         assert NodeType.RESOLUTION in node_types
         assert NodeType.TASK_CONTEXT in node_types
 
     @pytest.mark.asyncio
-    async def test_email_cause_and_resolution_names(self):
-        ext = self._extractor()
+    async def test_canonical_name_from_store_used_not_raw(self):
+        """The name in the graph node must be from the store, not from the LLM extraction."""
+        ext = self._extractor(cause_label="input dataset exceeds file limit",
+                               resolution_label="split dataset into smaller subsets")
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm()):
+                   return_value=self._make_mock_llm()):
             graph = await ext.extract(email_text="... incident email ...")
-
         names = {n.name for n in graph.nodes}
         assert "input dataset exceeds file limit" in names
-        assert "split dataset into smaller chunks" in names
-        assert "timeline" in names
+        assert "split dataset into smaller subsets" in names
+        # raw name from LLM response must NOT appear as a node name
+        assert "split dataset into smaller chunks" not in names
+
+    @pytest.mark.asyncio
+    async def test_canonical_name_used_in_relationship(self):
+        ext = self._extractor(resolution_label="split dataset into smaller subsets")
+        with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
+                   return_value=self._make_mock_llm()):
+            graph = await ext.extract(email_text="... incident email ...")
+        res_rel = next(r for r in graph.relationships if r.relation_type == RelationType.SOLVED_BY)
+        assert res_rel.target_id == "split dataset into smaller subsets"
+
+    @pytest.mark.asyncio
+    async def test_cause_store_called_for_cause_nodes(self):
+        cause_store = _make_mock_canonical_store("input dataset exceeds file limit")
+        res_store = _make_mock_canonical_store("split dataset into smaller subsets")
+        ext = PandaKnowledgeExtractor(
+            error_classifier=_make_mock_classifier(),
+            cause_store=cause_store,
+            resolution_store=res_store,
+        )
+        with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
+                   return_value=self._make_mock_llm()):
+            await ext.extract(email_text="... incident email ...")
+        cause_store.find_or_create.assert_called_once_with("input dataset exceeds file limit")
+        res_store.find_or_create.assert_called_once_with("split dataset into smaller chunks")
 
     @pytest.mark.asyncio
     async def test_email_resolution_steps_parsed(self):
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm()):
+                   return_value=self._make_mock_llm()):
             graph = await ext.extract(email_text="... incident email ...")
-
         resolution = next(n for n in graph.nodes if n.node_type == NodeType.RESOLUTION)
         assert len(resolution.steps) == 3
 
@@ -462,65 +556,55 @@ class TestPandaEmailExtraction:
     async def test_email_relationships_created(self):
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm()):
+                   return_value=self._make_mock_llm()):
             graph = await ext.extract(email_text="... incident email ...")
-
         rel_types = {r.relation_type for r in graph.relationships}
         assert RelationType.SOLVED_BY in rel_types
         assert RelationType.CONTRIBUTE_TO in rel_types
 
     @pytest.mark.asyncio
     async def test_email_empty_text_skips_llm(self):
-        """Empty / whitespace-only email_text must not call the LLM."""
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm") as mock_get_llm:
             graph = await ext.extract(email_text="   ")
         mock_get_llm.assert_not_called()
-        assert all(
-            n.node_type not in (NodeType.CAUSE, NodeType.RESOLUTION)
-            for n in graph.nodes
-        )
+        assert all(n.node_type not in (NodeType.CAUSE, NodeType.RESOLUTION) for n in graph.nodes)
 
     @pytest.mark.asyncio
     async def test_email_disallowed_node_types_skipped(self):
-        """Node types other than Cause/Resolution/Task_Context are silently dropped."""
         bad_response = """{
           "nodes": [
-            {"node_type": "Symptom", "name": "bad symptom", "description": "x", "metadata": {}},
-            {"node_type": "Cause",   "name": "real cause",  "description": "y", "metadata": {}}
+            {"node_type": "Symptom", "name": "bad", "description": "x", "metadata": {}},
+            {"node_type": "Cause",   "name": "real cause", "description": "y", "metadata": {}}
           ],
           "relationships": []
         }"""
-        ext = self._extractor()
+        ext = self._extractor(cause_label="real cause")
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm(bad_response)):
+                   return_value=self._make_mock_llm(bad_response)):
             graph = await ext.extract(email_text="some email")
-
         assert all(n.node_type != NodeType.SYMPTOM for n in graph.nodes)
         assert any(n.name == "real cause" for n in graph.nodes)
 
     @pytest.mark.asyncio
     async def test_email_malformed_json_returns_empty(self):
-        """A non-JSON LLM response must not raise — it yields zero nodes."""
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm("not json at all")):
+                   return_value=self._make_mock_llm("not json at all")):
             graph = await ext.extract(email_text="some email")
         assert graph.nodes == []
         assert graph.relationships == []
 
     @pytest.mark.asyncio
     async def test_email_and_task_data_merged(self):
-        """Nodes from email extraction and task_data must coexist in the graph."""
         ext = self._extractor()
         with patch("bamboo.extractors.panda_knowledge_extractor.get_llm",
-                   return_value=self._mock_llm()):
+                   return_value=self._make_mock_llm()):
             graph = await ext.extract(
                 email_text="... incident email ...",
                 task_data={"priority": "high"},
             )
         node_types = {n.node_type for n in graph.nodes}
-        assert NodeType.TASK_FEATURE in node_types   # from task_data
-        assert NodeType.CAUSE in node_types           # from email
-        assert NodeType.RESOLUTION in node_types      # from email
-
+        assert NodeType.TASK_FEATURE in node_types
+        assert NodeType.CAUSE in node_types
+        assert NodeType.RESOLUTION in node_types
