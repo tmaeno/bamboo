@@ -68,7 +68,7 @@ class KnowledgeAccumulator:
             email_text:    Email thread for the incident.
             task_data:     Structured task fields.  ``task_id`` is used to
                            derive the ``graph_id``.
-            external_data: Supplementary metadata.
+            external_data: External system data.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -107,7 +107,7 @@ class KnowledgeAccumulator:
         )
 
     async def _store_graph(self, graph: KnowledgeGraph):
-        """Persist graph nodes and relationships to Neo4j.
+        """Persist graph nodes and relationships to Graph database.
 
         Nodes are merged by canonical name via
         :meth:`GraphDatabaseClient.get_or_create_canonical_node`.
@@ -199,7 +199,7 @@ class KnowledgeAccumulator:
         summary: str,
         key_insights: list[dict[str, Any]],
     ):
-        """Store node descriptions and the graph summary in Qdrant.
+        """Store node descriptions and the graph summary in Vector database.
 
         Every entry is tagged with ``graph_id`` so that the two-step retrieval
         pattern in :meth:`ReasoningNavigator._query_vector_database` can fetch the
