@@ -68,7 +68,7 @@ class KnowledgeAccumulator:
             email_text:    Email thread for the incident.
             task_data:     Structured task fields.  ``task_id`` is used to
                            derive the ``graph_id``.
-            external_data: External system data.
+            external_data: External environmental factors.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with

@@ -1,4 +1,4 @@
-"""Panda extraction strategy for structured task/external data.
+"""PanDA extraction strategy for structured task/external data.
 
 Design
 ------
@@ -9,7 +9,7 @@ Design
     - **discrete / categorical** → :class:`TaskFeatureNode`
     - **unstructured / free-form** → :class:`TaskContextNode`
 
-  The special ``ErrorMessage`` field produces a :class:`SymptomNode` whose
+  The special ``errorDialog`` field produces a :class:`SymptomNode` whose
   ``name`` is the canonical error category (clean, stable, reusable across
   incidents) and whose ``description`` is the verbatim raw message (preserved
   for traceability and vector search).  No ``TaskContextNode`` is created —
@@ -70,21 +70,77 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
     {
-        "description",
-        "steps_to_reproduce",
-        "user_report",
-        "comment",
-        "notes",
-        "additional_info",
-        "reproduction_steps",
-        "observed_behavior",
-        "expected_behavior",
-        "workaround",
-        # Note: "ErrorMessage" is handled separately — it produces a
+        "jobParameters",
+        "taskName",
+        # Note: "errorDialog" is handled separately — it produces a
         # SymptomNode (canonical category name, raw message as description)
         # rather than a TaskContextNode.
     }
 )
+
+# ---------------------------------------------------------------------------
+# Keys in task_data that carry discrete / categorical values (→ TaskFeatureNode).
+# Any key that is not in DISCRETE_TASK_KEYS, UNSTRUCTURED_TASK_KEYS, or the
+# special "errorDialog" field will be logged as unknown and skipped, preventing
+# accidental indexing of unexpected blobs or nested structures.
+#
+# Notes:
+# - "taskName" must NOT appear here; it belongs only in UNSTRUCTURED_TASK_KEYS.
+# - "status" must NOT appear here; it is routed to the SymptomNode branch
+#   because it describes the task's failure state (e.g. "failed", "broken"),
+#   not a task configuration attribute.
+# - "splitRule" is handled by a dedicated branch that parses its pipe-separated
+#   "key=value|key=value" format into one TaskFeatureNode per sub-rule.
+# ---------------------------------------------------------------------------
+DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
+    {
+        "userName",
+        "prodSourceLabel",
+        "workingGroup",
+        "vo",
+        "coreCount",
+        "taskType",
+        "processingType",
+        "taskPriority",
+        "architecture",
+        "transUses",
+        "transHome",
+        "transPath",
+        "walltime",
+        "walltimeUnit",
+        "outDiskCount",
+        "outDiskUnit",
+        "workDiskCount",
+        "workDiskUnit",
+        "ramCount",
+        "ramUnit",
+        "ioIntensity",
+        "ioIntensityUnit",
+        "reqID",
+        "site",
+        "countryGroup",
+        "campaign",
+        "goal",
+        "cpuTime",
+        "cpuTimeUnit",
+        "baseWalltime",
+        "nucleus",
+        "baseRamCount",
+        "requestType",
+        "gshare",
+        "resource_type",
+        "diskIO",
+        "diskIOUnit",
+        "container_name",
+        "framework",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Keys whose value is a pipe-separated "key=value|key=value" string.
+# Each sub-rule is unpacked into its own TaskFeatureNode.
+# ---------------------------------------------------------------------------
+SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +153,6 @@ def _canonical_vector_id(node_type: str, label: str) -> str:
     digest = hashlib.md5(f"canonical::{node_type}::{label}".encode()).hexdigest()
     return f"canonical-{node_type.lower()}-{slug[:24]}-{digest[:8]}"
 
-
-# Keep the old name as an alias so existing tests importing it still work.
-def _category_vector_id(label: str) -> str:
-    return _canonical_vector_id("ErrorCategory", label)
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +410,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     * ``external_data`` key→value pairs → :class:`TaskFeatureNode`
     * ``task_data`` discrete fields     → :class:`TaskFeatureNode`
     * ``task_data`` free-form fields    → :class:`TaskContextNode`
-    * ``task_data["ErrorMessage"]``     → :class:`SymptomNode` whose ``name``
+    * ``task_data["errorDialog"]``     → :class:`SymptomNode` whose ``name``
                                           is the canonical error category and
                                           ``description`` is the raw message text
     * ``email_text``                    → :class:`CauseNode`, :class:`ResolutionNode`,
@@ -373,19 +425,29 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     def __init__(
         self,
         unstructured_keys: Optional[frozenset[str]] = None,
+        discrete_keys: Optional[frozenset[str]] = None,
+        split_rule_keys: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
     ) -> None:
         """
         Args:
-            unstructured_keys: Override default prose keys.
+            unstructured_keys: Override default prose keys (UNSTRUCTURED_TASK_KEYS).
+            discrete_keys:     Override default discrete keys (DISCRETE_TASK_KEYS).
+            split_rule_keys:   Override default pipe-split keys (SPLIT_RULE_KEYS).
             error_classifier:  Custom ErrorCategoryClassifier (for testing).
             cause_store:       Custom CanonicalNodeStore for Cause nodes (for testing).
             resolution_store:  Custom CanonicalNodeStore for Resolution nodes (for testing).
         """
         self._unstructured_keys: frozenset[str] = (
             unstructured_keys if unstructured_keys is not None else UNSTRUCTURED_TASK_KEYS
+        )
+        self._discrete_keys: frozenset[str] = (
+            discrete_keys if discrete_keys is not None else DISCRETE_TASK_KEYS
+        )
+        self._split_rule_keys: frozenset[str] = (
+            split_rule_keys if split_rule_keys is not None else SPLIT_RULE_KEYS
         )
         self._error_classifier: ErrorCategoryClassifier = (
             error_classifier or ErrorCategoryClassifier()
@@ -413,7 +475,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             "Structured extraction for Panda task data: "
             "discrete fields → TaskFeatureNode, "
             "free-form fields → TaskContextNode, "
-            "ErrorMessage → VectorDB+LLM error-category classification, "
+            "errorDialog → VectorDB+LLM error-category classification, "
             "email_text → LLM-extracted Cause / Resolution / Task_Context "
             "(all canonicalised via VectorDB+LLM)."
         )
@@ -437,7 +499,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             ))
 
         for key, value in (task_data or {}).items():
-            if key == "ErrorMessage":
+            if key == "errorDialog":
                 # Dedicated handling: produce a SymptomNode whose name is the
                 # canonical error category and whose description is the raw
                 # message text (preserved for traceability and vector search).
@@ -451,17 +513,55 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             "classifier_confidence": confidence,
                         },
                     ))
+            elif key == "status":
+                # Task status (e.g. "failed", "broken") describes the failure
+                # state of the task, not a configuration attribute.  It is stored
+                # as a SymptomNode so it participates in Symptom→Cause edges.
+                if value:
+                    category, confidence = await self._classify_error(str(value))
+                    nodes.append(SymptomNode(
+                        name=category,
+                        description=str(value),
+                        metadata={
+                            "source": "task_status",
+                            "classifier_confidence": confidence,
+                        },
+                    ))
+            elif key in self._split_rule_keys:
+                # splitRule value is a comma-separated "attr=val,attr=val" string.
+                # Each sub-rule becomes its own TaskFeatureNode.
+                for sub_rule in str(value).split(","):
+                    sub_rule = sub_rule.strip()
+                    if "=" in sub_rule:
+                        attr, val = sub_rule.split("=", 1)
+                        nodes.append(self._make_feature_node(
+                            attribute=attr.strip(),
+                            value=val.strip(),
+                            description=f"splitRule sub-rule: {sub_rule}",
+                            source="task_data/splitRule",
+                        ))
+                    elif sub_rule:
+                        logger.warning(
+                            "PandaKnowledgeExtractor: splitRule sub-rule '%s' "
+                            "has no '=' separator — skipped", sub_rule,
+                        )
             elif key in self._unstructured_keys:
                 nodes.append(self._make_context_node(
                     attribute=str(key),
                     prose=str(value) if value is not None else "",
                 ))
-            else:
+            elif key in self._discrete_keys:
                 nodes.append(self._make_feature_node(
                     attribute=str(key),
                     value=str(value) if value is not None else "",
                     description=f"Task data field: {key}", source="task_data",
                 ))
+            else:
+                logger.warning(
+                    "PandaKnowledgeExtractor: unknown task_data key '%s' — skipped "
+                    "(add to DISCRETE_TASK_KEYS or UNSTRUCTURED_TASK_KEYS to index it)",
+                    key,
+                )
 
         if email_text and email_text.strip():
             email_nodes, email_rels = await self._extract_from_email(email_text)

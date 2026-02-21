@@ -5,13 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bamboo.extractors.panda_knowledge_extractor import (
-    UNSTRUCTURED_TASK_KEYS,
     CanonicalNodeStore,
     ErrorCategoryClassifier,
     ErrorCategoryStore,
     PandaKnowledgeExtractor,
     _canonical_vector_id,
-    _category_vector_id,
     _generate_category_label,
     _make_cause_resolution_label_fn,
 )
@@ -75,8 +73,9 @@ class TestHelpers:
         assert _canonical_vector_id("Cause", "db timeout") == _canonical_vector_id("Cause", "db timeout")
         assert _canonical_vector_id("Cause", "x") != _canonical_vector_id("Resolution", "x")
 
-    def test_category_vector_id_is_alias(self):
-        assert _category_vector_id("Timeout") == _canonical_vector_id("ErrorCategory", "Timeout")
+    def test_canonical_vector_id_different_types(self):
+        assert _canonical_vector_id("Cause", "x") != _canonical_vector_id("Resolution", "x")
+        assert _canonical_vector_id("ErrorCategory", "x") != _canonical_vector_id("Cause", "x")
 
     @pytest.mark.asyncio
     async def test_generate_category_label_uses_llm(self):
@@ -348,27 +347,27 @@ class TestPandaKnowledgeExtractor:
     @pytest.mark.asyncio
     async def test_discrete_task_field_becomes_feature_node(self):
         ext = self._extractor()
-        graph = await ext.extract(task_data={"RAM": "4GB", "OS": "Ubuntu 22.04"})
+        graph = await ext.extract(task_data={"coreCount": "8", "cmtConfig": "x86_64"})
         names = {n.name for n in graph.nodes}
-        assert "RAM=4GB" in names
-        assert "OS=Ubuntu 22.04" in names
+        assert "coreCount=8" in names
+        assert "cmtConfig=x86_64" in names
 
     @pytest.mark.asyncio
     async def test_unstructured_task_field_becomes_context_node(self):
         ext = self._extractor()
         graph = await ext.extract(
-            task_data={"description": "The system crashes intermittently under load."}
+            task_data={"taskName": "The system crashes intermittently under load."}
         )
         assert len(graph.nodes) == 1
         node = graph.nodes[0]
         assert node.node_type == NodeType.TASK_CONTEXT
-        assert node.name == "description"
+        assert node.name == "taskName"
 
     @pytest.mark.asyncio
     async def test_error_message_produces_symptom_node(self):
         ext = self._extractor(category="NetworkError", confidence=0.87)
         graph = await ext.extract(
-            task_data={"ErrorMessage": "Connection refused: host unreachable"}
+            task_data={"errorDialog": "Connection refused: host unreachable"}
         )
         assert len(graph.nodes) == 1
         node = graph.nodes[0]
@@ -379,18 +378,74 @@ class TestPandaKnowledgeExtractor:
 
     @pytest.mark.asyncio
     async def test_error_message_no_relationship_no_context_node(self):
-        """ErrorMessage must not produce a TaskContextNode or any relationship."""
+        """errorDialog must not produce a TaskContextNode or any relationship."""
         ext = self._extractor(category="Timeout", confidence=0.95)
-        graph = await ext.extract(task_data={"ErrorMessage": "Request timed out after 30s"})
+        graph = await ext.extract(task_data={"errorDialog": "Request timed out after 30s"})
         assert len(graph.relationships) == 0
         assert all(n.node_type != NodeType.TASK_CONTEXT for n in graph.nodes)
 
     @pytest.mark.asyncio
     async def test_empty_error_message_produces_no_node(self):
         ext = self._extractor()
-        graph = await ext.extract(task_data={"ErrorMessage": ""})
+        graph = await ext.extract(task_data={"errorDialog": ""})
         assert len(graph.nodes) == 0
         assert len(graph.relationships) == 0
+
+    @pytest.mark.asyncio
+    async def test_status_produces_symptom_node(self):
+        """task_data['status'] must produce a SymptomNode, not a TaskFeatureNode."""
+        ext = self._extractor(category="TaskFailed", confidence=0.90)
+        graph = await ext.extract(task_data={"status": "failed"})
+        assert len(graph.nodes) == 1
+        node = graph.nodes[0]
+        assert node.node_type == NodeType.SYMPTOM
+        assert node.name == "TaskFailed"
+        assert node.description == "failed"
+        assert node.metadata["source"] == "task_status"
+
+    @pytest.mark.asyncio
+    async def test_status_not_in_discrete_keys(self):
+        """'status' must not appear in DISCRETE_TASK_KEYS."""
+        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        assert "status" not in DISCRETE_TASK_KEYS
+
+    @pytest.mark.asyncio
+    async def test_split_rule_produces_multiple_feature_nodes(self):
+        """splitRule pipe-separated string must produce one TaskFeatureNode per sub-rule."""
+        ext = self._extractor()
+        graph = await ext.extract(
+            task_data={"splitRule": "nGBPerJob=10|nFilesPerJob=5|nMaxFilesPerJob=100"}
+        )
+        names = {n.name for n in graph.nodes}
+        assert "nGBPerJob=10" in names
+        assert "nFilesPerJob=5" in names
+        assert "nMaxFilesPerJob=100" in names
+        assert len(graph.nodes) == 3
+        for node in graph.nodes:
+            assert node.node_type == NodeType.TASK_FEATURE
+
+    @pytest.mark.asyncio
+    async def test_split_rule_invalid_sub_rule_skipped(self):
+        """splitRule sub-rules without '=' are skipped with a warning."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"splitRule": "nGBPerJob=10|badentry|nFilesPerJob=5"})
+        assert len(graph.nodes) == 2
+        names = {n.name for n in graph.nodes}
+        assert "nGBPerJob=10" in names
+        assert "nFilesPerJob=5" in names
+
+    @pytest.mark.asyncio
+    async def test_split_rule_not_in_discrete_keys(self):
+        """'splitRule' must not appear in DISCRETE_TASK_KEYS."""
+        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        assert "splitRule" not in DISCRETE_TASK_KEYS
+
+    @pytest.mark.asyncio
+    async def test_unknown_task_key_is_skipped(self):
+        """Keys not in DISCRETE_TASK_KEYS or UNSTRUCTURED_TASK_KEYS must be skipped."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"unknownBlobField": "some value"})
+        assert len(graph.nodes) == 0
 
     @pytest.mark.asyncio
     async def test_mixed_input(self):
@@ -398,16 +453,16 @@ class TestPandaKnowledgeExtractor:
         with patch.object(ext, "_extract_from_email", new=AsyncMock(return_value=([], []))):
             graph = await ext.extract(
                 email_text="some email text",
-                task_data={"priority": "high", "ErrorMessage": "SQL deadlock", "description": "DB contention"},
+                task_data={"taskPriority": "900", "errorDialog": "SQL deadlock", "taskName": "DB contention"},
                 external_data={"component": "auth-service"},
             )
         names = {n.name for n in graph.nodes}
         node_types = {n.node_type for n in graph.nodes}
         assert "component=auth-service" in names
-        assert "priority=high" in names
-        assert "DatabaseError" in names          # SymptomNode
+        assert "taskPriority=900" in names
+        assert "DatabaseError" in names          # SymptomNode from errorDialog
         assert NodeType.SYMPTOM in node_types
-        assert "description" in names
+        assert "taskName" in names               # TaskContextNode
         assert len(graph.relationships) == 0     # no relationships from structured data
 
     def test_name(self):
