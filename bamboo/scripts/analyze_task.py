@@ -1,4 +1,4 @@
-"""Script to analyze an exhausted task."""
+"""Script to analyze a problematic task."""
 
 import asyncio
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import click
 
-from bamboo.agents.reasoning_navigator import ReasoningAgent
+from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.utils.logging import setup_logging
@@ -31,7 +31,7 @@ from bamboo.utils.logging import setup_logging
     help="Path to save analysis results",
 )
 def main(task_data, external_data, output):
-    """Analyze an exhausted task and generate resolution."""
+    """Analyze a problematic task and generate a resolution."""
     setup_logging()
 
     # Load data
@@ -91,7 +91,7 @@ async def analyze_task(task_dict, external_dict):
         await neo4j.connect()
         await qdrant.connect()
 
-        agent = ReasoningAgent(neo4j, qdrant)
+        agent = ReasoningNavigator(neo4j, qdrant)
 
         click.echo("Analyzing task...")
         result = await agent.analyze_task(

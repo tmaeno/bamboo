@@ -10,7 +10,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.agents.reasoning_navigator import ReasoningAgent
+from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.utils.logging import setup_logging
@@ -20,7 +20,7 @@ console = Console()
 
 @click.group()
 def cli():
-    """Bamboo - AI Agent System for Task Exhaustion Analysis."""
+    """Bamboo - AI Agent System for Operational Task Analysis."""
     setup_logging()
 
 
@@ -30,7 +30,7 @@ def interactive():
     console.print(
         Panel.fit(
             "[bold blue]Bamboo Interactive Mode[/bold blue]\n"
-            "AI Agent System for Task Exhaustion Analysis",
+            "AI Agent System for Operational Task Analysis",
             border_style="blue",
         )
     )
@@ -38,7 +38,7 @@ def interactive():
     while True:
         console.print("\n[bold]Main Menu:[/bold]")
         console.print("1. Populate knowledge base")
-        console.print("2. Analyze exhausted task")
+        console.print("2. Analyze problematic task")
         console.print("3. Query knowledge graph")
         console.print("4. Exit")
 
@@ -120,7 +120,7 @@ async def populate_knowledge_interactive():
 
 async def analyze_task_interactive():
     """Interactive task analysis."""
-    console.print("\n[bold cyan]Analyze Exhausted Task[/bold cyan]")
+    console.print("\n[bold cyan]Analyze Problematic Task[/bold cyan]")
 
     task_path = Prompt.ask("Enter path to task JSON file")
     try:
@@ -146,7 +146,7 @@ async def analyze_task_interactive():
         await graph_db.connect()
         await vector_db.connect()
 
-        agent = ReasoningAgent(graph_db, vector_db)
+        agent = ReasoningNavigator(graph_db, vector_db)
 
         with console.status("[bold green]Analyzing task..."):
             result = await agent.analyze_task(

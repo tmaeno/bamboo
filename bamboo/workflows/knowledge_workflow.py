@@ -5,8 +5,8 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import END, StateGraph
 
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.database.neo4j_client import Neo4jClient
-from bamboo.database.qdrant_client import QdrantClient
+from bamboo.database.graph_database_client import GraphDatabaseClient
+from bamboo.database.vector_database_client import VectorDatabaseClient
 
 
 class KnowledgeState(TypedDict):
@@ -24,13 +24,13 @@ class KnowledgeState(TypedDict):
 async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
     """Extract knowledge from sources."""
     try:
-        neo4j = Neo4jClient()
-        qdrant = QdrantClient()
+        graph_db = GraphDatabaseClient()
+        vector_db = VectorDatabaseClient()
 
-        await neo4j.connect()
-        await qdrant.connect()
+        await graph_db.connect()
+        await vector_db.connect()
 
-        agent = KnowledgeAccumulator(neo4j, qdrant)
+        agent = KnowledgeAccumulator(graph_db, vector_db)
 
         result = await agent.process_knowledge(
             email_text=state["email_text"],
@@ -38,13 +38,13 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
             external_data=state["external_data"],
         )
 
-        await neo4j.close()
-        await qdrant.close()
+        await graph_db.close()
+        await vector_db.close()
 
         return {
             **state,
             "extracted_graph": result.graph.model_dump(),
-            "entry": result.summary,
+            "summary": result.summary,
             "status": "completed",
         }
     except Exception as e:

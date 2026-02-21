@@ -27,11 +27,11 @@ Prompt constants
 
 ``CAUSE_IDENTIFICATION_PROMPT``
     Root-cause analysis from graph and vector DB evidence.
-    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningAgent`.
+    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningNavigator`.
 
 ``EMAIL_GENERATION_PROMPT``
     Drafts a professional resolution email for a task submitter.
-    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningAgent`.
+    Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningNavigator`.
 
 ``FEATURE_EXTRACTION_PROMPT``
     Extracts structured features from raw task and external data.

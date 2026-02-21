@@ -272,7 +272,7 @@ pip install -r requirements.txt
 ## Next Steps
 
 1. **Populate your knowledge base** with real email threads and task data
-2. **Analyze exhausted tasks** and review the generated explanations
+2. **Analyze problematic tasks** and review the generated explanations
 3. **Provide feedback** to improve the system's accuracy
 4. **Customize prompts** for your specific domain
 5. **Extend the graph schema** with domain-specific nodes

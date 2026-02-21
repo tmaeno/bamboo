@@ -202,7 +202,7 @@ class KnowledgeAccumulator:
         """Store node descriptions and the graph summary in Qdrant.
 
         Every entry is tagged with ``graph_id`` so that the two-step retrieval
-        pattern in :meth:`ReasoningAgent._query_vector_database` can fetch the
+        pattern in :meth:`ReasoningNavigator._query_vector_database` can fetch the
         full summary once matching node descriptions are found.
 
         Deterministic point IDs are used so that re-processing the same graph

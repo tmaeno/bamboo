@@ -123,7 +123,7 @@ class QueryResult(BaseModel):
 
 
 class AnalysisResult(BaseModel):
-    """The final output of a :class:`ReasoningAgent` analysis run.
+    """The final output of a :class:`ReasoningNavigator` analysis run.
 
     Attributes:
         task_id:             Identifier of the analysed task.

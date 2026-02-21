@@ -82,6 +82,6 @@ class VectorDatabaseClient:
         """Fetch ``Summary`` section entries for the given graph IDs.
 
         Second step of the two-step vector retrieval pattern used by
-        :meth:`~bamboo.agents.reasoning_navigator.ReasoningAgent._query_vector_database`.
+        :meth:`~bamboo.agents.reasoning_navigator.ReasoningNavigator._query_vector_database`.
         """
         return await self._backend.get_summaries_by_graph_ids(graph_ids)

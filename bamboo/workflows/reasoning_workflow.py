@@ -4,9 +4,9 @@ from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from bamboo.agents.reasoning_navigator import ReasoningAgent
-from bamboo.database.neo4j_client import Neo4jClient
-from bamboo.database.qdrant_client import QdrantClient
+from bamboo.agents.reasoning_navigator import ReasoningNavigator
+from bamboo.database.graph_database_client import GraphDatabaseClient
+from bamboo.database.vector_database_client import VectorDatabaseClient
 
 
 class ReasoningState(TypedDict):
@@ -27,21 +27,21 @@ class ReasoningState(TypedDict):
 async def analyze_task_node(state: ReasoningState) -> ReasoningState:
     """Analyze task and determine root cause."""
     try:
-        neo4j = Neo4jClient()
-        qdrant = QdrantClient()
+        graph_db = GraphDatabaseClient()
+        vector_db = VectorDatabaseClient()
 
-        await neo4j.connect()
-        await qdrant.connect()
+        await graph_db.connect()
+        await vector_db.connect()
 
-        agent = ReasoningAgent(neo4j, qdrant)
+        agent = ReasoningNavigator(graph_db, vector_db)
 
         result = await agent.analyze_task(
             task_data=state["task_data"],
             external_data=state["external_data"],
         )
 
-        await neo4j.close()
-        await qdrant.close()
+        await graph_db.close()
+        await vector_db.close()
 
         return {
             **state,

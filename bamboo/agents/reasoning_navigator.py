@@ -1,7 +1,7 @@
 """Reasoning agent: diagnoses incidents and generates resolution emails.
 
-:class:`ReasoningAgent` is the second half of the Bamboo pipeline.  Given a
-new exhausted task it:
+:class:`ReasoningNavigator` is the second half of the Bamboo pipeline.  Given a
+new problematic task it:
 
 1. Extracts a :class:`~bamboo.models.knowledge_entity.KnowledgeGraph` from the
    task's structured fields using the configured
@@ -38,8 +38,8 @@ from bamboo.models.knowledge_entity import AnalysisResult
 logger = logging.getLogger(__name__)
 
 
-class ReasoningAgent:
-    """Diagnoses an exhausted task and drafts a resolution email.
+class ReasoningNavigator:
+    """Diagnoses a problematic task and drafts a resolution email.
 
     The agent is stateless between calls: every :meth:`analyze_task`
     invocation is independent.
@@ -112,7 +112,7 @@ class ReasoningAgent:
         task_data: dict[str, Any],
         external_data: dict[str, Any] = None,
     ) -> AnalysisResult:
-        """Analyse an exhausted task and return a root-cause + resolution result.
+        """Analyse a problematic task and return a root-cause + resolution result.
 
         Pipeline:
             1. Extract knowledge graph from structured task fields.
@@ -129,7 +129,7 @@ class ReasoningAgent:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
             root cause, resolution, explanation, email draft, and evidence.
         """
-        logger.info("ReasoningAgent: analysing task '%s'", task_data.get("task_id", "unknown"))
+        logger.info("ReasoningNavigator: analysing task '%s'", task_data.get("task_id", "unknown"))
 
         extracted_graph = await self.extractor.extract_from_sources(
             email_text="",
@@ -175,7 +175,7 @@ class ReasoningAgent:
         Returns:
             List of cause dicts from :meth:`GraphDatabaseClient.find_causes`.
         """
-        logger.info("ReasoningAgent: querying graph database")
+        logger.info("ReasoningNavigator: querying graph database")
         results = await self.graph_db.find_causes(
             symptoms=extracted_clues.get("symptoms"),
             task_features=extracted_clues.get("task_features"),
@@ -183,7 +183,7 @@ class ReasoningAgent:
             components=extracted_clues.get("components"),
             limit=10,
         )
-        logger.info("ReasoningAgent: graph DB returned %d causes", len(results))
+        logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
         return results
 
     async def _query_vector_database(
@@ -208,7 +208,7 @@ class ReasoningAgent:
             List of summary dicts, each augmented with a ``score`` field
             reflecting the strength of the best section match.
         """
-        logger.info("ReasoningAgent: querying vector database (two-step)")
+        logger.info("ReasoningNavigator: querying vector database (two-step)")
 
         section_queries: list[tuple[str, str]] = []
 
@@ -254,7 +254,7 @@ class ReasoningAgent:
                         graph_id_scores[graph_id] = score
 
         if not graph_id_scores:
-            logger.info("ReasoningAgent: no matching graphs found in vector DB")
+            logger.info("ReasoningNavigator: no matching graphs found in vector DB")
             return []
 
         # Step 2: fetch summaries for all matched graph_ids
@@ -273,7 +273,7 @@ class ReasoningAgent:
         results.sort(key=lambda x: x["score"], reverse=True)
 
         logger.info(
-            "ReasoningAgent: vector DB returned %d past cases via %d graph IDs",
+            "ReasoningNavigator: vector DB returned %d past cases via %d graph IDs",
             len(results), len(graph_id_scores),
         )
         return results
@@ -297,7 +297,7 @@ class ReasoningAgent:
             Dict with keys ``root_cause``, ``confidence``, ``resolution``,
             ``reasoning``, and ``supporting_evidence``.
         """
-        logger.info("ReasoningAgent: identifying root cause with LLM")
+        logger.info("ReasoningNavigator: identifying root cause with LLM")
 
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
             task_info=json.dumps(task_data, indent=2),
@@ -327,7 +327,7 @@ class ReasoningAgent:
         try:
             return json.loads(response.content)
         except json.JSONDecodeError as exc:
-            logger.error("ReasoningAgent: failed to parse LLM response: %s", exc)
+            logger.error("ReasoningNavigator: failed to parse LLM response: %s", exc)
             return {
                 "root_cause": "Unable to determine root cause",
                 "confidence": 0.0,
@@ -347,7 +347,7 @@ class ReasoningAgent:
         Returns:
             Email body as a plain-text string.
         """
-        logger.info("ReasoningAgent: generating resolution email")
+        logger.info("ReasoningNavigator: generating resolution email")
 
         prompt = EMAIL_GENERATION_PROMPT.format(
             task_id=task_data.get("task_id", "unknown"),
