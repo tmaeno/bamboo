@@ -95,6 +95,9 @@ UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
 #   not a task configuration attribute.
 # - "splitRule" is handled by a dedicated branch that parses its pipe-separated
 #   "key=value|key=value" format into one TaskFeatureNode per sub-rule.
+# - Continuous numeric fields (ramCount, walltime, diskIO, etc.) must NOT
+#   appear here; they belong in CONTINUOUS_TASK_KEYS and are bucketed into
+#   range labels before becoming TaskFeatureNodes.
 # ---------------------------------------------------------------------------
 DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
     {
@@ -110,30 +113,21 @@ DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
         "transUses",
         "transHome",
         "transPath",
-        "walltime",
         "walltimeUnit",
-        "outDiskCount",
         "outDiskUnit",
-        "workDiskCount",
         "workDiskUnit",
-        "ramCount",
         "ramUnit",
-        "ioIntensity",
         "ioIntensityUnit",
         "reqID",
         "site",
         "countryGroup",
         "campaign",
         "goal",
-        "cpuTime",
         "cpuTimeUnit",
-        "baseWalltime",
         "nucleus",
-        "baseRamCount",
         "requestType",
         "gshare",
         "resource_type",
-        "diskIO",
         "diskIOUnit",
         "container_name",
         "framework",
@@ -154,22 +148,118 @@ SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 # ---------------------------------------------------------------------------
 JOB_PARAMETER_KEYS: frozenset[str] = frozenset({"jobParameters"})
 
+# ---------------------------------------------------------------------------
+# Keys whose values are continuous numerics (→ TaskFeatureNode with bucketed
+# value).  Storing raw numbers like ramCount=123 / ramCount=456 would create
+# a unique node per incident and prevent any graph merging.  Bucketing maps
+# many incidents to the same node, making graph patterns meaningful.
+#
+# Bucket boundaries are chosen to reflect operationally significant thresholds
+# in the PanDA system.  Units follow PanDA conventions (MB for memory/disk,
+# seconds for time, integer for pure counts).
+# ---------------------------------------------------------------------------
+CONTINUOUS_TASK_KEYS: frozenset[str] = frozenset(
+    {
+        "ramCount",
+        "outDiskCount",
+        "workDiskCount",
+        "diskIO",
+        "walltime",
+        "baseWalltime",
+        "cpuTime",
+        "baseRamCount",
+        "ioIntensity",
+    }
+)
+
+# Bucket definitions per key: sorted list of (upper_bound_exclusive, label).
+# The last entry's upper_bound should be math.inf.
+_BUCKETS: dict[str, list[tuple[float, str]]] = {
+    # Memory / disk: MB
+    "ramCount":      [(512, "<512MB"), (2048, "512MB-2GB"), (8192, "2-8GB"),
+                      (32768, "8-32GB"), (float("inf"), ">32GB")],
+    "baseRamCount":  [(512, "<512MB"), (2048, "512MB-2GB"), (8192, "2-8GB"),
+                      (32768, "8-32GB"), (float("inf"), ">32GB")],
+    "outDiskCount":  [(1024, "<1GB"), (10240, "1-10GB"), (102400, "10-100GB"),
+                      (float("inf"), ">100GB")],
+    "workDiskCount": [(1024, "<1GB"), (10240, "1-10GB"), (102400, "10-100GB"),
+                      (float("inf"), ">100GB")],
+    # I/O: MB/s
+    "diskIO":        [(10, "<10MB/s"), (100, "10-100MB/s"), (float("inf"), ">100MB/s")],
+    # Time: seconds
+    "walltime":      [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
+                      (float("inf"), ">24h")],
+    "baseWalltime":  [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
+                      (float("inf"), ">24h")],
+    "cpuTime":       [(3600, "<1h"), (21600, "1-6h"), (86400, "6-24h"),
+                      (float("inf"), ">24h")],
+    # I/O intensity: dimensionless score
+    "ioIntensity":   [(100, "low(<100)"), (1000, "medium(100-1000)"),
+                      (float("inf"), "high(>1000)")],
+}
+
+
+def _bucket_value(key: str, raw: str) -> str:
+    """Map a raw numeric string to a bucketed range label.
+
+    Args:
+        key: The task_data field name (must be in ``CONTINUOUS_TASK_KEYS``).
+        raw: The raw string value from task_data.
+
+    Returns:
+        A bucketed label string, e.g. ``"512MB-2GB"``.  If *raw* cannot be
+        parsed as a number the original string is returned unchanged so the
+        node is still created (with a warning logged by the caller).
+
+    Raises:
+        ValueError: If *key* has no bucket definition.
+    """
+    buckets = _BUCKETS.get(key)
+    if buckets is None:
+        raise ValueError(f"No bucket definition for continuous key '{key}'")
+    try:
+        numeric = float(raw)
+    except (ValueError, TypeError):
+        return raw  # caller will log a warning
+    for upper, label in buckets:
+        if numeric < upper:
+            return label
+    return buckets[-1][1]  # should never reach here due to inf sentinel
+
 
 def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
     """Parse a CLI-argument string into a list of *(attribute, value)* pairs.
 
-    Handles three forms:
-    - ``--key=value``    → ``("key", "value")``
-    - ``--key value``    → ``("key", "value")``   (next token is value if it
-                           does not start with ``--``)
-    - ``--flag``         → ``("key", "true")``    (boolean flag, no value)
-    - ``positional``     → collected and returned as
-                           ``("positional_args", "<space-joined tokens>")``
+    Handles the following forms:
+
+    - ``--key=value``         → ``("key", "value")``
+    - ``--key="val ue"``      → ``("key", "val ue")``   (quoted value with spaces)
+    - ``--key 'val ue'``      → ``("key", "val ue")``   (space-separated quoted value)
+    - ``--key value``         → ``("key", "value")``    (next token is value if it
+                                does not start with ``--``)
+    - ``--flag``              → ``("key", "true")``     (boolean flag, no value)
+    - ``positional``          → collected and returned as
+                                ``("positional_args", "<space-joined tokens>")``
+
+    Quoted strings (single or double quotes) are handled via :mod:`shlex`
+    so that ``--args="blah blah"`` and ``--args 'blah blah'`` both yield
+    ``("args", "blah blah")``.
 
     Returns a sorted list so that identical parameter sets produce identical
     node names regardless of the order they appear in the original string.
     """
-    tokens = raw.split()
+    import shlex
+
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        # Fallback to naive split if shlex fails (e.g. unmatched quotes).
+        logger.warning(
+            "_parse_job_parameters: shlex failed to parse %r — falling back to whitespace split",
+            raw,
+        )
+        tokens = raw.split()
+
     pairs: dict[str, str] = {}
     positional: list[str] = []
     i = 0
@@ -179,9 +269,9 @@ def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
             token = token.lstrip("-")
             if "=" in token:
                 key, value = token.split("=", 1)
-                pairs[key.strip()] = value.strip()
+                pairs[key.strip()] = value
             elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-                pairs[token.strip()] = tokens[i + 1].strip()
+                pairs[token.strip()] = tokens[i + 1]
                 i += 1
             else:
                 pairs[token.strip()] = "true"
@@ -479,6 +569,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         self,
         unstructured_keys: Optional[frozenset[str]] = None,
         discrete_keys: Optional[frozenset[str]] = None,
+        continuous_keys: Optional[frozenset[str]] = None,
         split_rule_keys: Optional[frozenset[str]] = None,
         job_parameter_keys: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
@@ -489,6 +580,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         Args:
             unstructured_keys:  Override default prose keys (UNSTRUCTURED_TASK_KEYS).
             discrete_keys:      Override default discrete keys (DISCRETE_TASK_KEYS).
+            continuous_keys:    Override default continuous keys (CONTINUOUS_TASK_KEYS).
             split_rule_keys:    Override default pipe-split keys (SPLIT_RULE_KEYS).
             job_parameter_keys: Override default CLI-arg keys (JOB_PARAMETER_KEYS).
             error_classifier:   Custom ErrorCategoryClassifier (for testing).
@@ -500,6 +592,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         )
         self._discrete_keys: frozenset[str] = (
             discrete_keys if discrete_keys is not None else DISCRETE_TASK_KEYS
+        )
+        self._continuous_keys: frozenset[str] = (
+            continuous_keys if continuous_keys is not None else CONTINUOUS_TASK_KEYS
         )
         self._split_rule_keys: frozenset[str] = (
             split_rule_keys if split_rule_keys is not None else SPLIT_RULE_KEYS
@@ -586,14 +681,18 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         },
                     ))
             elif key in self._split_rule_keys:
-                # splitRule value is a pipe-separated "attr=val|attr=val" string.
+                # splitRule value is a comma-separated "attr=val,attr=val" string.
                 # Each sub-rule becomes its own TaskFeatureNode.
-                for sub_rule in str(value).split("|"):
+                # The attribute is namespaced as "splitRule:<attr>" so that a
+                # sub-rule like "site=CERN" cannot collide with the top-level
+                # task_data key "site=CERN" in the graph DB.
+                for sub_rule in str(value).split(","):
                     sub_rule = sub_rule.strip()
                     if "=" in sub_rule:
                         attr, val = sub_rule.split("=", 1)
+                        namespaced_attr = f"splitRule:{attr.strip()}"
                         nodes.append(self._make_feature_node(
-                            attribute=attr.strip(),
+                            attribute=namespaced_attr,
                             value=val.strip(),
                             description=f"splitRule sub-rule: {sub_rule}",
                             source="task_data/splitRule",
@@ -607,6 +706,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # jobParameters is a CLI-argument string like "--par1=val1 --par2 val2 ...".
                 # Each --key/value pair becomes its own TaskFeatureNode (sorted for
                 # determinism so identical parameter sets always produce the same nodes).
+                # The attribute is namespaced as "jobParameters:<attr>" so that a
+                # parameter like --site=CERN cannot collide with the top-level
+                # task_data key "site=CERN" in the graph DB.
                 # Positional arguments are collected into a single TaskContextNode.
                 pairs = _parse_job_parameters(str(value))
                 for attr, val in pairs:
@@ -616,8 +718,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             prose=val,
                         ))
                     else:
+                        namespaced_attr = f"{key}:{attr}"
                         nodes.append(self._make_feature_node(
-                            attribute=attr,
+                            attribute=namespaced_attr,
                             value=val,
                             description=f"jobParameters arg: --{attr}",
                             source=f"task_data/{key}",
@@ -633,16 +736,26 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     value=str(value) if value is not None else "",
                     description=f"Task data field: {key}", source="task_data",
                 ))
-            elif key == "taskID":
-                # taskID is the unique incident identifier used as graph_id;
-                # it has no value as a comparable task attribute and is silently skipped.
-                pass
+            elif key in self._continuous_keys:
+                # Bucket the raw numeric into a range label so incidents with
+                # different but similar values share the same node.
+                raw = str(value) if value is not None else ""
+                bucketed = _bucket_value(key, raw)
+                if bucketed == raw:
+                    logger.warning(
+                        "PandaKnowledgeExtractor: continuous key '%s' has "
+                        "non-numeric value '%s' — stored as-is", key, raw,
+                    )
+                nodes.append(self._make_feature_node(
+                    attribute=str(key),
+                    value=bucketed,
+                    description=f"Task data field: {key} (bucketed from {raw!r})",
+                    source="task_data",
+                    extra_metadata={"raw_value": raw},
+                ))
             else:
-                logger.warning(
-                    "PandaKnowledgeExtractor: unknown task_data key '%s' — skipped "
-                    "(add to DISCRETE_TASK_KEYS or UNSTRUCTURED_TASK_KEYS to index it)",
-                    key,
-                )
+                # ignore unrecognised keys.
+                pass
 
         if email_text and email_text.strip():
             email_nodes, email_rels = await self._extract_from_email(email_text)

@@ -440,6 +440,58 @@ class TestPandaKnowledgeExtractor:
         from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
         assert "splitRule" not in DISCRETE_TASK_KEYS
 
+    # ------------------------------------------------------------------
+    # Continuous keys (bucketing)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_continuous_key_is_bucketed(self):
+        """ramCount=1024 should produce a bucketed node, not ramCount=1024."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"ramCount": "1024"})
+        assert len(graph.nodes) == 1
+        node = graph.nodes[0]
+        assert node.node_type == NodeType.TASK_FEATURE
+        assert node.name == "ramCount=512MB-2GB"
+        assert node.metadata["raw_value"] == "1024"
+
+    @pytest.mark.asyncio
+    async def test_different_raw_values_same_bucket_merge_to_same_node(self):
+        """ramCount=1024 and ramCount=1500 should produce the same node name."""
+        ext = self._extractor()
+        g1 = await ext.extract(task_data={"ramCount": "1024"})
+        g2 = await ext.extract(task_data={"ramCount": "1500"})
+        assert g1.nodes[0].name == g2.nodes[0].name
+
+    @pytest.mark.asyncio
+    async def test_different_buckets_produce_different_nodes(self):
+        """ramCount=256 (<512MB) and ramCount=1024 (512MB-2GB) must differ."""
+        ext = self._extractor()
+        g1 = await ext.extract(task_data={"ramCount": "256"})
+        g2 = await ext.extract(task_data={"ramCount": "1024"})
+        assert g1.nodes[0].name != g2.nodes[0].name
+
+    @pytest.mark.asyncio
+    async def test_walltime_bucketing(self):
+        """walltime=7200 (2 h) → '1-6h' bucket."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"walltime": "7200"})
+        assert graph.nodes[0].name == "walltime=1-6h"
+
+    @pytest.mark.asyncio
+    async def test_continuous_non_numeric_stored_as_is(self):
+        """Non-numeric value for a continuous key is stored unchanged (with warning)."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"diskIO": "high"})
+        assert graph.nodes[0].name == "diskIO=high"
+
+    @pytest.mark.asyncio
+    async def test_continuous_not_in_discrete_keys(self):
+        from bamboo.extractors.panda_knowledge_extractor import (
+            CONTINUOUS_TASK_KEYS, DISCRETE_TASK_KEYS,
+        )
+        assert CONTINUOUS_TASK_KEYS.isdisjoint(DISCRETE_TASK_KEYS)
+
     @pytest.mark.asyncio
     async def test_job_parameters_key_value_form(self):
         """--key=value pairs in jobParameters become individual TaskFeatureNodes."""
