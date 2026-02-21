@@ -54,6 +54,7 @@ from bamboo.llm.prompts import (
 )
 from bamboo.models.graph_element import (
     CauseNode,
+    ComponentNode,
     GraphRelationship,
     RelationType,
     ResolutionNode,
@@ -156,8 +157,9 @@ SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 #                                  create the task, e.g.
 #                                  'prun --exec "python a.py" --outDS user.x -v'
 #                                  The first positional token (e.g. "prun") is
-#                                  the command name and is stored as a discrete
-#                                  TaskFeatureNode(attribute="task_creation_arguments:command").
+#                                  the submission tool name and becomes a
+#                                  ComponentNode(system="submission_tool") so it
+#                                  can participate in Component→Cause edges.
 #                                  Any further positional tokens go to a
 #                                  TaskContextNode(attribute="task_creation_arguments:positional_args").
 #
@@ -888,21 +890,22 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # collisions with identically-named top-level task_data keys
                 # or splitRule sub-keys.
                 # For task_creation_arguments the first positional token (the
-                # command name, e.g. "prun") becomes a TaskFeatureNode
-                # (attribute="task_creation_arguments:command"); any further
+                # command name, e.g. "prun") is the submission tool — a system
+                # component — and becomes a ComponentNode so it can participate
+                # in Component -[originated_from]-> Cause edges.  Any further
                 # positional tokens become a TaskContextNode.
                 pairs = _parse_cli_arguments(str(value))
                 for attr, val in pairs:
                     if attr == "positional_args":
                         positional_tokens = val.split()
                         if key == "task_creation_arguments" and positional_tokens:
-                            # First token is the command name — discrete.
+                            # First token is the submission tool name — a Component.
                             nodes.append(
-                                self._make_feature_node(
-                                    attribute=f"{key}:command",
-                                    value=positional_tokens[0],
-                                    description=f"{key} command name",
-                                    source=f"task_data/{key}",
+                                ComponentNode(
+                                    name=positional_tokens[0],
+                                    description=f"Submission tool used to create the task",
+                                    system="submission_tool",
+                                    metadata={"source": f"task_data/{key}"},
                                 )
                             )
                             # Remaining positional tokens (rare) stay as context.
