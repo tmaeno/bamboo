@@ -1,4 +1,4 @@
-"""PanDA extraction strategy for structured task/external data.
+"""PanDA knowledge extraction strategy for structured task/external data.
 
 Design
 ------
