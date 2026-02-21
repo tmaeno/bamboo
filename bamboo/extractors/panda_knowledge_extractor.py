@@ -70,21 +70,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
     {
-        "jobParameters",
         "taskName",
         # Note: "errorDialog" is handled separately — it produces a
         # SymptomNode (canonical category name, raw message as description)
         # rather than a TaskContextNode.
+        # Note: "jobParameters" is handled separately — its CLI-argument string
+        # is parsed into individual TaskFeatureNodes (see JOB_PARAMETER_KEYS).
     }
 )
 
 # ---------------------------------------------------------------------------
 # Keys in task_data that carry discrete / categorical values (→ TaskFeatureNode).
 # Any key that is not in DISCRETE_TASK_KEYS, UNSTRUCTURED_TASK_KEYS, or the
-# special "errorDialog" field will be logged as unknown and skipped, preventing
+# special reserved keys will be logged as unknown and skipped, preventing
 # accidental indexing of unexpected blobs or nested structures.
 #
 # Notes:
+# - "taskID" must NOT appear here; it is the unique incident identifier used
+#   as graph_id by the knowledge accumulator and carries no comparative value
+#   as a task attribute.
 # - "taskName" must NOT appear here; it belongs only in UNSTRUCTURED_TASK_KEYS.
 # - "status" must NOT appear here; it is routed to the SymptomNode branch
 #   because it describes the task's failure state (e.g. "failed", "broken"),
@@ -141,6 +145,55 @@ DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
 # Each sub-rule is unpacked into its own TaskFeatureNode.
 # ---------------------------------------------------------------------------
 SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
+
+# ---------------------------------------------------------------------------
+# Keys whose value is a CLI-argument string like "--par1=val1 --par2 val2 ...".
+# Each --key / --key=value / --key value pair becomes its own TaskFeatureNode.
+# Positional arguments (no leading "--") are collected under a single
+# TaskContextNode with attribute "<key>:positional_args".
+# ---------------------------------------------------------------------------
+JOB_PARAMETER_KEYS: frozenset[str] = frozenset({"jobParameters"})
+
+
+def _parse_job_parameters(raw: str) -> list[tuple[str, str]]:
+    """Parse a CLI-argument string into a list of *(attribute, value)* pairs.
+
+    Handles three forms:
+    - ``--key=value``    → ``("key", "value")``
+    - ``--key value``    → ``("key", "value")``   (next token is value if it
+                           does not start with ``--``)
+    - ``--flag``         → ``("key", "true")``    (boolean flag, no value)
+    - ``positional``     → collected and returned as
+                           ``("positional_args", "<space-joined tokens>")``
+
+    Returns a sorted list so that identical parameter sets produce identical
+    node names regardless of the order they appear in the original string.
+    """
+    tokens = raw.split()
+    pairs: dict[str, str] = {}
+    positional: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.startswith("--"):
+            token = token.lstrip("-")
+            if "=" in token:
+                key, value = token.split("=", 1)
+                pairs[key.strip()] = value.strip()
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                pairs[token.strip()] = tokens[i + 1].strip()
+                i += 1
+            else:
+                pairs[token.strip()] = "true"
+        else:
+            positional.append(token)
+        i += 1
+
+    # Sort so identical parameter sets always produce identical node names.
+    result = sorted(pairs.items())
+    if positional:
+        result.append(("positional_args", " ".join(positional)))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -427,18 +480,20 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         unstructured_keys: Optional[frozenset[str]] = None,
         discrete_keys: Optional[frozenset[str]] = None,
         split_rule_keys: Optional[frozenset[str]] = None,
+        job_parameter_keys: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
     ) -> None:
         """
         Args:
-            unstructured_keys: Override default prose keys (UNSTRUCTURED_TASK_KEYS).
-            discrete_keys:     Override default discrete keys (DISCRETE_TASK_KEYS).
-            split_rule_keys:   Override default pipe-split keys (SPLIT_RULE_KEYS).
-            error_classifier:  Custom ErrorCategoryClassifier (for testing).
-            cause_store:       Custom CanonicalNodeStore for Cause nodes (for testing).
-            resolution_store:  Custom CanonicalNodeStore for Resolution nodes (for testing).
+            unstructured_keys:  Override default prose keys (UNSTRUCTURED_TASK_KEYS).
+            discrete_keys:      Override default discrete keys (DISCRETE_TASK_KEYS).
+            split_rule_keys:    Override default pipe-split keys (SPLIT_RULE_KEYS).
+            job_parameter_keys: Override default CLI-arg keys (JOB_PARAMETER_KEYS).
+            error_classifier:   Custom ErrorCategoryClassifier (for testing).
+            cause_store:        Custom CanonicalNodeStore for Cause nodes (for testing).
+            resolution_store:   Custom CanonicalNodeStore for Resolution nodes (for testing).
         """
         self._unstructured_keys: frozenset[str] = (
             unstructured_keys if unstructured_keys is not None else UNSTRUCTURED_TASK_KEYS
@@ -448,6 +503,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         )
         self._split_rule_keys: frozenset[str] = (
             split_rule_keys if split_rule_keys is not None else SPLIT_RULE_KEYS
+        )
+        self._job_parameter_keys: frozenset[str] = (
+            job_parameter_keys if job_parameter_keys is not None else JOB_PARAMETER_KEYS
         )
         self._error_classifier: ErrorCategoryClassifier = (
             error_classifier or ErrorCategoryClassifier()
@@ -528,9 +586,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         },
                     ))
             elif key in self._split_rule_keys:
-                # splitRule value is a comma-separated "attr=val,attr=val" string.
+                # splitRule value is a pipe-separated "attr=val|attr=val" string.
                 # Each sub-rule becomes its own TaskFeatureNode.
-                for sub_rule in str(value).split(","):
+                for sub_rule in str(value).split("|"):
                     sub_rule = sub_rule.strip()
                     if "=" in sub_rule:
                         attr, val = sub_rule.split("=", 1)
@@ -545,6 +603,25 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             "PandaKnowledgeExtractor: splitRule sub-rule '%s' "
                             "has no '=' separator — skipped", sub_rule,
                         )
+            elif key in self._job_parameter_keys:
+                # jobParameters is a CLI-argument string like "--par1=val1 --par2 val2 ...".
+                # Each --key/value pair becomes its own TaskFeatureNode (sorted for
+                # determinism so identical parameter sets always produce the same nodes).
+                # Positional arguments are collected into a single TaskContextNode.
+                pairs = _parse_job_parameters(str(value))
+                for attr, val in pairs:
+                    if attr == "positional_args":
+                        nodes.append(self._make_context_node(
+                            attribute=f"{key}:positional_args",
+                            prose=val,
+                        ))
+                    else:
+                        nodes.append(self._make_feature_node(
+                            attribute=attr,
+                            value=val,
+                            description=f"jobParameters arg: --{attr}",
+                            source=f"task_data/{key}",
+                        ))
             elif key in self._unstructured_keys:
                 nodes.append(self._make_context_node(
                     attribute=str(key),
@@ -556,6 +633,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     value=str(value) if value is not None else "",
                     description=f"Task data field: {key}", source="task_data",
                 ))
+            elif key == "taskID":
+                # taskID is the unique incident identifier used as graph_id;
+                # it has no value as a comparable task attribute and is silently skipped.
+                pass
             else:
                 logger.warning(
                     "PandaKnowledgeExtractor: unknown task_data key '%s' — skipped "

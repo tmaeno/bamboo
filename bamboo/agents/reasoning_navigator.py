@@ -122,14 +122,15 @@ class ReasoningNavigator:
             5. Ask LLM to draft a resolution email.
 
         Args:
-            task_data:     Structured task fields (must include ``task_id``).
+            task_data:     Structured task fields (must include ``taskID``).
             external_data: Optional supplementary metadata.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
             root cause, resolution, explanation, email draft, and evidence.
         """
-        logger.info("ReasoningNavigator: analysing task '%s'", task_data.get("task_id", "unknown"))
+        task_id = task_data.get("taskID") or "unknown"
+        logger.info("ReasoningNavigator: analysing task '%s'", task_id)
 
         extracted_graph = await self.extractor.extract_from_sources(
             email_text="",
@@ -146,7 +147,7 @@ class ReasoningNavigator:
         email_content = await self._generate_email(task_data, analysis)
 
         return AnalysisResult(
-            task_id=task_data.get("task_id", "unknown"),
+            task_id=task_id,
             root_cause=analysis["root_cause"],
             confidence=analysis["confidence"],
             resolution=analysis["resolution"],
@@ -341,7 +342,7 @@ class ReasoningNavigator:
         """Draft a professional resolution email for the task submitter.
 
         Args:
-            task_data: Raw task fields (``task_id`` and ``description`` used).
+            task_data: Raw task fields (``taskID`` and ``description`` used).
             analysis:  Root-cause analysis dict from :meth:`_identify_root_cause`.
 
         Returns:
@@ -350,7 +351,7 @@ class ReasoningNavigator:
         logger.info("ReasoningNavigator: generating resolution email")
 
         prompt = EMAIL_GENERATION_PROMPT.format(
-            task_id=task_data.get("task_id", "unknown"),
+            task_id=task_data.get("taskID") or "unknown",
             task_description=task_data.get("description", ""),
             analysis=json.dumps(analysis, indent=2),
         )

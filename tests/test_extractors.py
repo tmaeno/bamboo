@@ -441,6 +441,83 @@ class TestPandaKnowledgeExtractor:
         assert "splitRule" not in DISCRETE_TASK_KEYS
 
     @pytest.mark.asyncio
+    async def test_job_parameters_key_value_form(self):
+        """--key=value pairs in jobParameters become individual TaskFeatureNodes."""
+        ext = self._extractor()
+        graph = await ext.extract(
+            task_data={"jobParameters": "--nEventsPerJob=500 --maxWalltime=3600"}
+        )
+        names = {n.name for n in graph.nodes}
+        assert "nEventsPerJob=500" in names
+        assert "maxWalltime=3600" in names
+        assert len(graph.nodes) == 2
+        for node in graph.nodes:
+            assert node.node_type == NodeType.TASK_FEATURE
+
+    @pytest.mark.asyncio
+    async def test_job_parameters_space_separated_value(self):
+        """--key value (space-separated) pairs are parsed correctly."""
+        ext = self._extractor()
+        graph = await ext.extract(
+            task_data={"jobParameters": "--par1 val1 --par2 val2"}
+        )
+        names = {n.name for n in graph.nodes}
+        assert "par1=val1" in names
+        assert "par2=val2" in names
+
+    @pytest.mark.asyncio
+    async def test_job_parameters_boolean_flag(self):
+        """--flag (no value) becomes flag=true."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"jobParameters": "--verbose"})
+        names = {n.name for n in graph.nodes}
+        assert "verbose=true" in names
+
+    @pytest.mark.asyncio
+    async def test_job_parameters_positional_args_become_context_node(self):
+        """Positional arguments (no --) become a TaskContextNode."""
+        ext = self._extractor()
+        graph = await ext.extract(
+            task_data={"jobParameters": "--par1=val1 posarg1 posarg2"}
+        )
+        feature_names = {n.name for n in graph.nodes if n.node_type == NodeType.TASK_FEATURE}
+        context_nodes = [n for n in graph.nodes if n.node_type == NodeType.TASK_CONTEXT]
+        assert "par1=val1" in feature_names
+        assert len(context_nodes) == 1
+        assert context_nodes[0].name == "jobParameters:positional_args"
+        assert context_nodes[0].description == "posarg1 posarg2"
+
+    @pytest.mark.asyncio
+    async def test_job_parameters_order_independent(self):
+        """Same parameters in different order produce the same set of nodes."""
+        ext = self._extractor()
+        graph1 = await ext.extract(
+            task_data={"jobParameters": "--par1=val1 --par2=val2"}
+        )
+        graph2 = await ext.extract(
+            task_data={"jobParameters": "--par2=val2 --par1=val1"}
+        )
+        assert {n.name for n in graph1.nodes} == {n.name for n in graph2.nodes}
+
+    @pytest.mark.asyncio
+    async def test_job_parameters_not_in_unstructured_keys(self):
+        """'jobParameters' must not appear in UNSTRUCTURED_TASK_KEYS."""
+        from bamboo.extractors.panda_knowledge_extractor import UNSTRUCTURED_TASK_KEYS
+        assert "jobParameters" not in UNSTRUCTURED_TASK_KEYS
+
+    @pytest.mark.asyncio
+    async def test_task_id_is_silently_skipped(self):
+        """taskID is the graph identifier; it must not produce any node."""
+        ext = self._extractor()
+        graph = await ext.extract(task_data={"taskID": "12345"})
+        assert len(graph.nodes) == 0
+
+    @pytest.mark.asyncio
+    async def test_task_id_not_in_discrete_keys(self):
+        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        assert "taskID" not in DISCRETE_TASK_KEYS
+
+    @pytest.mark.asyncio
     async def test_unknown_task_key_is_skipped(self):
         """Keys not in DISCRETE_TASK_KEYS or UNSTRUCTURED_TASK_KEYS must be skipped."""
         ext = self._extractor()

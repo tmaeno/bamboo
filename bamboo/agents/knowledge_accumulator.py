@@ -60,13 +60,13 @@ class KnowledgeAccumulator:
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
-        A deterministic ``graph_id`` is derived from ``task_data["task_id"]``
+        A deterministic ``graph_id`` is derived from ``task_data["taskID"]``
         so that re-processing the same incident overwrites existing vectors
         rather than creating duplicates.
 
         Args:
             email_text:    Email thread for the incident.
-            task_data:     Structured task fields.  ``task_id`` is used to
+            task_data:     Structured task fields.  ``taskID`` is used to
                            derive the ``graph_id``.
             external_data: External environmental factors.
 
@@ -76,7 +76,7 @@ class KnowledgeAccumulator:
         """
         logger.info("KnowledgeAccumulator: starting knowledge extraction")
 
-        task_id = (task_data or {}).get("task_id")
+        task_id = (task_data or {}).get("taskID")
         graph_id = (
             self._deterministic_id("graph", task_id) if task_id else str(uuid.uuid4())
         )
