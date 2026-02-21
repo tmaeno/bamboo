@@ -71,13 +71,17 @@ logger = logging.getLogger(__name__)
 UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "taskName",
+        # job_execution_params is a free-form, incident-specific string with no
+        # reliable structure.  Parsing it into graph nodes would produce noise;
+        # storing it whole as a TaskContextNode lets the vector DB surface
+        # semantically similar incidents.
+        "job_execution_params",
         # Note: "errorDialog" is handled separately — it produces a
         # SymptomNode (canonical category name, raw message as description)
         # rather than a TaskContextNode.
-        # Note: "job_execution_params" and "task_creation_arguments" are handled
-        # separately — their CLI-argument strings are parsed into individual
-        # TaskFeatureNodes (and positional tokens into TaskContextNodes) by the
-        # CLI_ARGUMENT_KEYS branch.
+        # Note: "task_creation_arguments" is handled separately — its
+        # CLI-argument string is parsed into individual TaskFeatureNodes /
+        # TaskContextNodes by the CLI_ARGUMENT_KEYS branch.
     }
 )
 
@@ -143,15 +147,11 @@ DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
 SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 
 # ---------------------------------------------------------------------------
-# Keys whose value is a CLI-argument string like "--par1=val1 -v --par2 val2 ...".
-# Long options (--key, --key=value, --key value) and short options (-k, -k value,
-# -k=value, -abc combined flags) each become their own TaskFeatureNode.
-# Positional arguments (no leading "-") are collected under a single
-# TaskContextNode with attribute "<key>:positional_args".
+# Keys whose value is a CLI-argument string to be parsed into individual
+# flag/value nodes.  Only keys whose structure is reliable enough to yield
+# meaningful graph nodes belong here.
 #
 # Current members:
-#   "job_execution_params"      – parameters passed to the job executor,
-#                                  e.g. "--nEvents=100 --inputDS=ds1"
 #   "task_creation_arguments"   – the full client-tool command used to
 #                                  create the task, e.g.
 #                                  'prun --exec "python a.py" --outDS user.x -v'
@@ -160,29 +160,30 @@ SPLIT_RULE_KEYS: frozenset[str] = frozenset({"splitRule"})
 #                                  TaskFeatureNode(attribute="task_creation_arguments:command").
 #                                  Any further positional tokens go to a
 #                                  TaskContextNode(attribute="task_creation_arguments:positional_args").
+#
+# Note: "job_execution_params" is NOT here — its value is a free-form,
+# incident-specific string with no reliable structure.  It lives in
+# UNSTRUCTURED_TASK_KEYS and is stored whole as a TaskContextNode.
 # ---------------------------------------------------------------------------
-CLI_ARGUMENT_KEYS: frozenset[str] = frozenset(
-    {"job_execution_params", "task_creation_arguments"}
-)
+CLI_ARGUMENT_KEYS: frozenset[str] = frozenset({"task_creation_arguments"})
 
 # ---------------------------------------------------------------------------
-# task_creation_arguments flags split by how incident-specific their values are:
+# Flags within task_creation_arguments split by how incident-specific their
+# values are.  (job_execution_params is not parsed at all — it lives in
+# UNSTRUCTURED_TASK_KEYS and is stored whole as a TaskContextNode.)
 #
 # TASK_CREATION_SKIP_ARGS   — pure identifiers / GUIDs / numeric ranges whose
 #                             values are unique per incident and carry no
-#                             semantic signal worth indexing.  These are
-#                             dropped entirely (neither graph nor vector DB).
+#                             semantic signal worth indexing.  Dropped entirely
+#                             (neither graph nor vector DB).
 #
 # TASK_CREATION_CONTEXT_ARGS — free-form human-readable strings (script names,
-#                             command payloads, file patterns) that are unique
-#                             per incident but carry semantic meaning.  These
-#                             are stored as TaskContextNode so the vector DB
-#                             can surface semantically similar incidents
-#                             (e.g. two users running similar scripts).
+#                             exec payloads, file patterns) that are unique per
+#                             incident but carry semantic meaning.  Stored as
+#                             TaskContextNode for vector DB similarity search.
 #
 # Flags in neither set (e.g. --nFilesPerJob, --nEvents, --maxCpuCount) carry
-# configuration choices that repeat across incidents and become TaskFeatureNodes
-# in the graph DB.
+# repeatable configuration choices and become TaskFeatureNodes in the graph DB.
 # ---------------------------------------------------------------------------
 TASK_CREATION_SKIP_ARGS: frozenset[str] = frozenset(
     {
@@ -921,29 +922,19 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             )
                     else:
                         namespaced_attr = f"{key}:{attr}"
-                        # For task_creation_arguments, classify each flag:
-                        #   skip args    — pure GUIDs/identifiers, no signal → drop
+                        # Classify each flag into three buckets:
+                        #   skip args    — pure GUIDs/identifiers, no signal → dropped entirely
                         #   context args — free-form prose, semantic meaning → TaskContextNode (vector DB)
                         #   everything else — repeatable config choices → TaskFeatureNode (graph DB)
-                        if key == "task_creation_arguments":
-                            if attr in self._task_creation_skip_args:
-                                continue
-                            elif attr in self._task_creation_context_args:
-                                nodes.append(
-                                    self._make_context_node(
-                                        attribute=namespaced_attr,
-                                        prose=val,
-                                    )
+                        if attr in self._task_creation_skip_args:
+                            continue
+                        elif attr in self._task_creation_context_args:
+                            nodes.append(
+                                self._make_context_node(
+                                    attribute=namespaced_attr,
+                                    prose=val,
                                 )
-                            else:
-                                nodes.append(
-                                    self._make_feature_node(
-                                        attribute=namespaced_attr,
-                                        value=val,
-                                        description=f"{key} arg: --{attr}",
-                                        source=f"task_data/{key}",
-                                    )
-                                )
+                            )
                         else:
                             nodes.append(
                                 self._make_feature_node(
