@@ -57,6 +57,7 @@ class KnowledgeAccumulator:
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
+        logs: dict[str, str] = None,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
@@ -69,6 +70,8 @@ class KnowledgeAccumulator:
             task_data:     Structured task fields.  ``taskID`` is used to
                            derive the ``graph_id``.
             external_data: External environmental factors.
+            logs:          Raw log output keyed by source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``).
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -85,6 +88,7 @@ class KnowledgeAccumulator:
             email_text=email_text,
             task_data=task_data,
             external_data=external_data,
+            logs=logs,
         )
         graph.metadata["graph_id"] = graph_id
 

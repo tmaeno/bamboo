@@ -111,11 +111,12 @@ class ReasoningNavigator:
         self,
         task_data: dict[str, Any],
         external_data: dict[str, Any] = None,
+        logs: dict[str, str] = None,
     ) -> AnalysisResult:
         """Analyse a problematic task and return a root-cause + resolution result.
 
         Pipeline:
-            1. Extract knowledge graph from structured task fields.
+            1. Extract knowledge graph from structured task fields and log output.
             2. Query graph DB for candidate causes.
             3. Query vector DB for similar past cases (two-step retrieval).
             4. Ask LLM to identify the root cause.
@@ -124,6 +125,8 @@ class ReasoningNavigator:
         Args:
             task_data:     Structured task fields (must include ``taskID``).
             external_data: Optional supplementary metadata.
+            logs:          Raw log output keyed by source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``).
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
@@ -136,6 +139,7 @@ class ReasoningNavigator:
             email_text="",
             task_data=task_data,
             external_data=external_data,
+            logs=logs,
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 

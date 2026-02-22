@@ -1,9 +1,10 @@
 """Abstract base classes for extraction strategy plugins.
 
 An :class:`ExtractionStrategy` converts raw incident data (email thread,
-structured task fields, external metadata) into a :class:`KnowledgeGraph`.
-New strategies are registered via :func:`~bamboo.extractors.factory.register_extraction_strategy`
-and selected at runtime through the ``EXTRACTION_STRATEGY`` configuration key.
+structured task fields, external metadata, log output) into a
+:class:`KnowledgeGraph`.  New strategies are registered via
+:func:`~bamboo.extractors.factory.register_extraction_strategy` and selected
+at runtime through the ``EXTRACTION_STRATEGY`` configuration key.
 """
 
 from abc import ABC, abstractmethod
@@ -30,18 +31,26 @@ class ExtractionStrategy(ABC):
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
+        logs: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
 
-        Implementations should treat all three arguments as optional: a caller
-        may supply only ``task_data``, only ``email_text``, or any combination.
+        Implementations should treat all arguments as optional: a caller may
+        supply any combination of sources.
 
         Args:
             email_text:    Email thread or communication text.  May be empty.
             task_data:     Structured task/issue data as a flat dict.  May be
                            ``None``.
-            external_data: External metadata (logs, metrics, JIRA fields, etc.)
-                           as a flat dict.  May be ``None``.
+            external_data: External metadata (metrics, JIRA fields, etc.) as a
+                           flat dict.  May be ``None``.
+            logs:          Raw log output from one or more sources, keyed by
+                           source name (e.g. ``{"pilot": "...", "payload": "..."}``)
+                           May be ``None``.  Each source is passed to the LLM
+                           separately to extract :class:`SymptomNode`,
+                           :class:`ComponentNode`, and :class:`TaskContextNode`
+                           nodes; Cause and Resolution are intentionally
+                           excluded (those come from email and graph reasoning).
 
         Returns:
             :class:`KnowledgeGraph` containing the extracted nodes and

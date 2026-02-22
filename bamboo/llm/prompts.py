@@ -13,6 +13,14 @@ Prompt constants
     Extracts ``Cause``, ``Resolution``, and ``Task_Context`` nodes from an
     email thread.  Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
 
+``LOG_EXTRACTION_PROMPT``
+    Extracts ``Symptom``, ``Component``, and ``Task_Context`` nodes from raw
+    log text.  Cause and Resolution are intentionally excluded — logs record
+    what happened, not why or how to fix it; those come from the email thread
+    and graph reasoning.  The prompt de-duplicates repeated occurrences of the
+    same error, captures the components named in stack traces or log prefixes,
+    and stores the surrounding prose as Task_Context for vector search.
+
 ``CAUSE_RESOLUTION_CANONICALIZE_PROMPT``
     Normalises a raw Cause/Resolution name into a stable canonical phrase,
     optionally matching against existing names from the vector DB.
@@ -328,3 +336,80 @@ Raw error message:
 {error_message}
 
 Category label:"""
+
+LOG_EXTRACTION_PROMPT = """You are a log analysis expert reading raw operational log output from a distributed computing job.
+
+Your goal is to extract reusable, incident-agnostic knowledge from the log — the kind that helps identify recurring failure patterns across many jobs.
+
+Extract ONLY the following node types — do NOT emit Cause or Resolution nodes (those are determined from email threads and graph reasoning, not from logs alone):
+
+Node types to extract:
+
+- Symptom: A distinct class of error or failure signal observed in the log.
+  name = a short CamelCase label describing the error pattern, stripped of all
+         incident-specific tokens (dataset names, file paths, job IDs, timestamps,
+         hostnames, numeric IDs).  Use the same canonicalisation rules as
+         ERROR_CATEGORY_LABEL_PROMPT — the same structural error in two different
+         jobs must produce the same Symptom name.
+  description = one representative log line that best illustrates the error,
+                lightly redacted to remove incident-specific tokens.
+  severity = "critical" | "error" | "warning" | "info"  (infer from log level or context)
+  If the same error pattern appears many times, emit it ONCE with a count in metadata.
+
+- Component: A named software component, service, worker, or library identified
+  in the log as the origin of an error (stack frame module, daemon name, plugin,
+  executor name, etc.).
+  name = canonical component name (normalise: drop version numbers, instance IDs,
+         and host-specific suffixes; e.g. "pilot" not "pilot-2.7.3-worker-42").
+  system = the broader system it belongs to, if determinable (e.g. "PanDA", "Athena").
+  Do NOT emit a Component for generic OS-level things (kernel, libc) unless they
+  are clearly the origin of the error.
+
+- Task_Context: A short passage from the log that provides useful context for
+  understanding the failure but does not fit Symptom or Component — e.g. the
+  sequence of steps leading up to an error, a resource exhaustion trace, a
+  configuration dump, or a timing observation.
+  name = a short snake_case key summarising the topic
+         (e.g. "resource_exhaustion_trace", "retry_sequence", "config_at_failure").
+  description = the relevant log excerpt, lightly cleaned (remove timestamps and
+                hostnames but keep the substance).
+  Emit at most 3–5 Task_Context nodes — choose the passages most useful for
+  semantic similarity search across incidents.  Do NOT dump the entire log.
+
+Relationships to emit (between extracted nodes only):
+- Component -[originated_from]-> Symptom  (when the component is clearly the source)
+- Task_Context -[contribute_to]-> Symptom  (when the context directly precedes or explains a symptom)
+
+Canonicalization:
+- If the same Symptom or Component appears multiple times, emit it only once.
+- Strip ALL incident-specific tokens from names: no dataset names, file paths,
+  usernames, job IDs, PIDs, timestamps, IP addresses, or hostnames.
+
+Log text:
+{log_text}
+
+Output ONLY a valid JSON object — no explanation, no markdown fences:
+{{
+  "nodes": [
+    {{
+      "node_type": "Symptom|Component|Task_Context",
+      "name": "...",
+      "description": "...",
+      "severity": "critical|error|warning|info|null",
+      "system": "...|null",
+      "metadata": {{
+        "occurrence_count": 1
+      }}
+    }}
+  ],
+  "relationships": [
+    {{
+      "source_name": "...",
+      "target_name": "...",
+      "relation_type": "originated_from|contribute_to",
+      "confidence": 0.0
+    }}
+  ]
+}}
+"""
+

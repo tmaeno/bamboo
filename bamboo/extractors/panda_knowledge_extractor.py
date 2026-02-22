@@ -27,6 +27,16 @@ Design
   same VectorDB + LLM pattern as error categories, so the same concept always
   maps to the same canonical name regardless of how it is worded.
 
+* ``logs``           – raw log output from one or more sources, keyed by
+  source name (e.g. ``{"pilot": "...", "payload": "..."}``).  Each source
+  is passed to the LLM separately to extract :class:`SymptomNode`,
+  :class:`ComponentNode`, and :class:`TaskContextNode` nodes.  Cause and
+  Resolution are intentionally excluded — logs record *what* happened, not
+  *why* or *how to fix it*; those come from the email thread and graph
+  reasoning.  Every extracted node is tagged with ``log_source`` in its
+  metadata.  The raw log is never stored as-is; only the LLM-extracted
+  structure is indexed.
+
 Persistence
 -----------
 All canonical names (error categories, causes, resolutions) are stored in the
@@ -47,7 +57,7 @@ import re
 from typing import Any, Optional
 
 from bamboo.extractors.base import ExtractionStrategy
-from bamboo.llm import EMAIL_EXTRACTION_PROMPT, get_embeddings, get_llm
+from bamboo.llm import EMAIL_EXTRACTION_PROMPT, LOG_EXTRACTION_PROMPT, get_embeddings, get_llm
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
     ERROR_CATEGORY_LABEL_PROMPT,
@@ -800,8 +810,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             "discrete fields → TaskFeatureNode, "
             "free-form fields → TaskContextNode, "
             "errorDialog → VectorDB+LLM error-category classification, "
-            "email_text → LLM-extracted Cause / Resolution / Task_Context "
-            "(all canonicalised via VectorDB+LLM)."
+            "email_text → LLM-extracted Cause / Resolution / Task_Context, "
+            "logs → per-source LLM-extracted Symptom / Component / Task_Context "
+            "(all canonicalized via VectorDB+LLM)."
         )
 
     def supports_system(self, system_type: str) -> bool:
@@ -812,6 +823,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         email_text: str = "",
         task_data: Optional[dict[str, Any]] = None,
         external_data: Optional[dict[str, Any]] = None,
+        logs: Optional[dict[str, str]] = None,
     ) -> KnowledgeGraph:
         nodes: list = []
         relationships: list[GraphRelationship] = []
@@ -993,6 +1005,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
 
+        for source_name, source_log in (logs or {}).items():
+            if source_log and source_log.strip():
+                log_nodes, log_rels = await self._extract_from_log(source_name, source_log)
+                nodes.extend(log_nodes)
+                relationships.extend(log_rels)
+
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         logger.info(
             "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
@@ -1000,6 +1018,141 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             len(relationships),
         )
         return graph
+
+    # ------------------------------------------------------------------
+    # Log extraction
+    # ------------------------------------------------------------------
+
+    async def _extract_from_log(
+        self, source_name: str, log_text: str
+    ) -> tuple[list, list[GraphRelationship]]:
+        """LLM extracts Symptom/Component/Task_Context from one log source.
+
+        Args:
+            source_name: Identifies the log origin (e.g. ``"pilot"``,
+                         ``"payload"``).  Stored in every node's metadata so
+                         the graph can distinguish which component produced
+                         which symptom.
+            log_text:    Raw log content for this source.
+
+        Cause and Resolution are intentionally excluded — logs record *what*
+        happened, not *why* or how to fix it.  Symptom names are canonicalised
+        via :class:`ErrorCategoryClassifier` (same path as ``errorDialog``) so
+        that the same error pattern in a log and in errorDialog merges into one
+        node.
+        """
+        llm = get_llm()
+        response = await llm.ainvoke(
+            LOG_EXTRACTION_PROMPT.format(log_text=log_text)
+        )
+        raw = self._parse_log_response(response.content)
+
+        nodes = []
+        name_to_node: dict[str, Any] = {}
+
+        for node_data in raw.get("nodes", []):
+            raw_name = node_data["name"]
+            node_type_str = node_data.get("node_type", "")
+
+            # Tag every node with the log source so downstream queries can
+            # filter by origin (e.g. "only symptoms from the pilot log").
+            node_data = dict(node_data)
+            node_data.setdefault("metadata", {})["log_source"] = source_name
+
+            # Canonicalize Symptom names through the error classifier so they
+            # merge with SymptomNodes produced from errorDialog.
+            if node_type_str == "Symptom":
+                canonical, confidence = await self._classify_error(raw_name)
+                node_data["name"] = canonical
+                node_data["metadata"]["classifier_confidence"] = confidence
+
+            node = self._create_log_node(node_data)
+            if node is not None:
+                nodes.append(node)
+                name_to_node[raw_name] = node
+
+        relationships: list[GraphRelationship] = []
+        for rel_data in raw.get("relationships", []):
+            src = rel_data.get("source_name")
+            tgt = rel_data.get("target_name")
+            if src not in name_to_node or tgt not in name_to_node:
+                continue
+            try:
+                rel_type = RelationType(rel_data["relation_type"])
+            except ValueError:
+                logger.warning(
+                    "PandaKnowledgeExtractor: unknown relation_type '%s' in log extraction — skipped",
+                    rel_data.get("relation_type"),
+                )
+                continue
+            relationships.append(
+                GraphRelationship(
+                    source_id=name_to_node[src].name,
+                    target_id=name_to_node[tgt].name,
+                    relation_type=rel_type,
+                    confidence=float(rel_data.get("confidence", 1.0)),
+                )
+            )
+
+        logger.debug(
+            "PandaKnowledgeExtractor: log source '%s' yielded %d nodes, %d relationships",
+            source_name,
+            len(nodes),
+            len(relationships),
+        )
+        return nodes, relationships
+
+    @staticmethod
+    def _parse_log_response(response: str) -> dict[str, Any]:
+        text = response.strip()
+        if "```json" in text:
+            text = text[text.find("```json") + 7 : text.rfind("```")].strip()
+        elif "```" in text:
+            text = text[text.find("```") + 3 : text.rfind("```")].strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "PandaKnowledgeExtractor: failed to parse log LLM response: %s", exc
+            )
+            return {"nodes": [], "relationships": []}
+
+    @staticmethod
+    def _create_log_node(node_data: dict[str, Any]):
+        from bamboo.models.graph_element import NodeType
+
+        try:
+            node_type = NodeType(node_data.get("node_type", ""))
+        except ValueError:
+            logger.warning(
+                "PandaKnowledgeExtractor: unexpected node_type '%s' in log extraction — skipped",
+                node_data.get("node_type"),
+            )
+            return None
+
+        base = {
+            "name": node_data["name"],
+            "description": node_data.get("description"),
+            "metadata": node_data.get("metadata", {}),
+        }
+        if node_type == NodeType.SYMPTOM:
+            return SymptomNode(
+                **base,
+                severity=node_data.get("severity"),
+            )
+        if node_type == NodeType.COMPONENT:
+            return ComponentNode(
+                **base,
+                system=node_data.get("system"),
+            )
+        if node_type == NodeType.TASK_CONTEXT:
+            return TaskContextNode(**base)
+
+        logger.warning(
+            "PandaKnowledgeExtractor: node_type '%s' is not permitted in log extraction — skipped",
+            node_type,
+        )
+        return None
 
     # ------------------------------------------------------------------
     # Email extraction
@@ -1010,7 +1163,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Cause/Resolution/Task_Context from email.
 
-        Cause and Resolution names are canonicalised via their respective
+        Cause and Resolution names are canonicalized via their respective
         :class:`CanonicalNodeStore` instances (VectorDB + LLM), using the same
         approach as ErrorCategory.  This guarantees that the same concept from
         two different emails produces the same node name and is merged correctly

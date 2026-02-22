@@ -44,6 +44,7 @@ class KnowledgeGraphExtractor:
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
+        logs: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph and assign stable node IDs.
 
@@ -55,6 +56,8 @@ class KnowledgeGraphExtractor:
             email_text:    Email thread or communication text.
             task_data:     Structured task/issue data as a flat dict.
             external_data: External metadata as a flat dict.
+            logs:          Raw log output keyed by source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``).
 
         Returns:
             :class:`KnowledgeGraph` with all nodes carrying stable UUIDs.
@@ -63,6 +66,7 @@ class KnowledgeGraphExtractor:
             email_text=email_text,
             task_data=task_data,
             external_data=external_data,
+            logs=logs,
         )
 
         for node in graph.nodes:

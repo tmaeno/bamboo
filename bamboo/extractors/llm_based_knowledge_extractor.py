@@ -41,10 +41,11 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
+        logs: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract using LLM-based approach."""
         # Combine all input sources
-        input_data = self._prepare_input(email_text, task_data, external_data)
+        input_data = self._prepare_input(email_text, task_data, external_data, logs)
 
         # Use LLM to extract structured graph
         prompt = EXTRACTION_PROMPT.format(input_data=input_data)
@@ -89,6 +90,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         email_text: str,
         task_data: dict[str, Any],
         external_data: dict[str, Any],
+        logs: dict[str, str] = None,
     ) -> str:
         """Prepare combined input for LLM."""
         sections = []
@@ -103,6 +105,10 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
             sections.append(
                 f"EXTERNAL INFORMATION:\n{json.dumps(external_data, indent=2)}"
             )
+
+        for source_name, source_log in (logs or {}).items():
+            if source_log and source_log.strip():
+                sections.append(f"LOG OUTPUT ({source_name}):\n{source_log}")
 
         return "\n\n".join(sections)
 
