@@ -62,6 +62,9 @@ Homepage = "https://github.com/yourusername/bamboo"
 where = ["."]
 include = ["bamboo*"]
 
+[tool.setuptools.package-data]
+"bamboo" = ["data/.env.example"]
+
 [tool.black]
 line-length = 88
 target-version = ['py310', 'py311', 'py312']
