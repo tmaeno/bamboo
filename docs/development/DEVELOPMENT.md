@@ -51,8 +51,8 @@ docker ps
 ### 3. Configure Environment
 
 ```bash
-# Copy example config
-cp examples/.env.example .env
+# Get the installed .env.example path and copy it
+cp "$(python -c "import importlib.resources; print(importlib.resources.files('bamboo.data').joinpath('.env.example'))")" .env
 
 # Edit .env with your settings
 # Required: OPENAI_API_KEY or ANTHROPIC_API_KEY

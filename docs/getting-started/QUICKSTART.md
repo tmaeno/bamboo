@@ -55,14 +55,22 @@ make docker-up
 
 ### 4. Configure Environment
 
+`bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your API keys:
+
 ```bash
-# Copy the example environment file
-cp examples/.env.example .env
+# bamboo-verify shows the exact path — copy it here
+cp <path-shown-by-bamboo-verify> .env
 
 # Edit .env and add your API keys
 # At minimum, set:
 # - OPENAI_API_KEY (or ANTHROPIC_API_KEY)
 # - NEO4J_PASSWORD (default: password)
+```
+
+Alternatively, retrieve the path directly:
+
+```bash
+python -c "import importlib.resources; print(importlib.resources.files('bamboo.data').joinpath('.env.example'))"
 ```
 
 ### 5. Test the Setup

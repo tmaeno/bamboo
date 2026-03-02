@@ -41,15 +41,16 @@ An intelligent multi-agent AI framework for system automation and operations, le
 # 1. Install
 pip install .
 
-# 2. Verify (from any directory)
+# 2. Verify — prints the exact cp command for your .env setup
 bamboo-verify
 
-# 3. Setup
-cp examples/.env.example .env   # Configure your API keys
-docker-compose up -d            # Start databases (graph database, vector database)
+# 3. Copy .env.example (path shown by bamboo-verify) and add your API keys
+cp <path-from-bamboo-verify> .env
 
+# 4. Start databases
+docker-compose up -d
 
-# 4. Try it
+# 5. Try it
 bamboo interactive
 ```
 
