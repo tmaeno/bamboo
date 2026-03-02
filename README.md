@@ -11,16 +11,18 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ## Quick Start
 
 ```bash
-# 1. Verify installation
-python verify_installation.py
+# 1. Install
+pip install .
 
 # 2. Setup
-cp examples/.env.example .env          # Configure your API keys
-docker-compose up -d          # Start databases (Neo4j, Qdrant)
-pip install -r requirements.txt
+cp examples/.env.example .env   # Configure your API keys
+docker-compose up -d            # Start databases (Neo4j, Qdrant)
 
-# 3. Try it
-python -m bamboo.cli interactive
+# 3. Verify
+python verify_installation.py
+
+# 4. Try it
+bamboo interactive
 ```
 
 For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
@@ -40,7 +42,7 @@ For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 
 ### Sub-agents
 - **Graph Extraction** - Extracts knowledge from unstructured data
-- 
+
 ### Agents to come
 - **Automation Agent** - Plans and executes operational workflows
 - **Anomaly Detection Agent** - Monitors metrics, detects anomalies
@@ -67,7 +69,7 @@ bamboo/
 ## Installation
 
 1. **Prerequisites**: Python 3.10+, Docker, API keys (OpenAI/Anthropic)
-2. **Install**: `pip install -r requirements.txt`
+2. **Install**: `pip install .` (or `pip install ".[dev]"` for development)
 3. **Databases**: `docker-compose up -d`
 4. **Config**: `cp examples/.env.example .env` and add API keys
 5. **Verify**: `python verify_installation.py`

@@ -34,7 +34,7 @@ source .venv/bin/activate  # macOS/Linux
 # or
 .venv\Scripts\activate  # Windows
 
-# Install in development mode with dev dependencies
+# Install in editable mode with dev dependencies
 pip install -e ".[dev]"
 ```
 
@@ -648,15 +648,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+COPY pyproject.toml .
 COPY bamboo/ bamboo/
-COPY setup.py .
 
-RUN pip install -e .
+RUN pip install --no-cache-dir .
 
-CMD ["python", "-m", "bamboo.cli", "interactive"]
+CMD ["bamboo", "interactive"]
 ```
 
 ### Production Docker Compose
@@ -729,9 +726,9 @@ refactor: Simplify database query methods
 
 ## Graph Schema Reference
 
-The Bamboo knowledge graph consists of **16 node types** and **18 relationship types**:
+The Bamboo knowledge graph consists of **17 node types** and **18 relationship types**:
 
-### Node Types (16)
+### Node Types (17)
 
 ```
 - Symptom: Symptom messages and failures

@@ -18,11 +18,11 @@ This guide will help you get started with Bamboo quickly.
 # Activate your virtual environment
 source .venv/bin/activate
 
-# Install the package in development mode
-pip install -e .
+# Install the package
+pip install .
 
-# Or install from requirements.txt
-pip install -r requirements.txt
+# For development (includes pytest, black, ruff, mypy)
+pip install ".[dev]"
 ```
 
 ### 2. Start Database Services
@@ -262,11 +262,11 @@ python -c "from bamboo.llm import get_llm; llm = get_llm(); print(llm)"
 ### Import Errors
 
 ```bash
-# Reinstall in development mode
-pip install -e .
+# Reinstall the package
+pip install .
 
-# Or install all dependencies
-pip install -r requirements.txt
+# Or in editable/development mode
+pip install -e .
 ```
 
 ## Next Steps
