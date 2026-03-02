@@ -55,21 +55,6 @@ bamboo interactive
 For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 
 
-## Project Structure
-
-```
-bamboo/
-├── agents/            # AI agents
-├── database/          # Database clients
-├── extractors/        # Knowledge extractors
-├── mcp_tools/         # MCP tools
-├── llm/               # LLM integration
-├── models/            # Data models (Pydantic)
-├── workflows/         # LangGraph workflows
-├── scripts/           # CLI tools
-└── utils/             # Utilities
-```
-
 ## Development
 
 See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
