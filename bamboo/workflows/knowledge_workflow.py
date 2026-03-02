@@ -20,6 +20,11 @@ class KnowledgeState(TypedDict):
     status: str
     error: Optional[str]
 
+    # Derived composite identifier: "<taskID>:<task_status>" (or just "<taskID>"
+    # when status is absent).  Set after extraction so downstream nodes can
+    # reference the graph without re-computing it.
+    graph_id: Optional[str]
+
 
 async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
     """Extract knowledge from sources."""
@@ -41,17 +46,30 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
         await graph_db.close()
         await vector_db.close()
 
+        # Build the composite identifier for downstream reference.
+        task_data = state.get("task_data") or {}
+        raw_task_id = task_data.get("taskID")
+        task_status = task_data.get("status")
+        if raw_task_id and task_status:
+            graph_id = f"{raw_task_id}:{task_status}"
+        elif raw_task_id:
+            graph_id = raw_task_id
+        else:
+            graph_id = result.graph.metadata.get("graph_id")
+
         return {
             **state,
             "extracted_graph": result.graph.model_dump(),
             "summary": result.summary,
             "status": "completed",
+            "graph_id": graph_id,
         }
     except Exception as e:
         return {
             **state,
             "status": "error",
             "error": str(e),
+            "graph_id": None,
         }
 
 

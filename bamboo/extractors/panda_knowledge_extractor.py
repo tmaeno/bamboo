@@ -103,13 +103,14 @@ UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
 # accidental indexing of unexpected blobs or nested structures.
 #
 # Notes:
-# - "taskID" must NOT appear here; it is the unique incident identifier used
-#   as graph_id by the knowledge accumulator and carries no comparative value
-#   as a task attribute.
+# - "taskID" must NOT appear here; it is part of the composite incident
+#   identifier (taskID, status) used as graph_id by the knowledge accumulator
+#   and carries no comparative value as a task attribute.
 # - "taskName" must NOT appear here; it belongs only in UNSTRUCTURED_TASK_KEYS.
 # - "status" must NOT appear here; it is routed to the SymptomNode branch
 #   because it describes the task's failure state (e.g. "failed", "broken"),
-#   not a task configuration attribute.
+#   not a task configuration attribute.  It also forms half of the composite
+#   unique identifier together with "taskID".
 # - "splitRule" is handled by a dedicated branch that parses its pipe-separated
 #   "key=value|key=value" format into one TaskFeatureNode per sub-rule.
 # - Continuous numeric fields (ramCount, walltime, diskIO, etc.) must NOT

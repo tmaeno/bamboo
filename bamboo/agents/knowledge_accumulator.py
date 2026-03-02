@@ -61,14 +61,20 @@ class KnowledgeAccumulator:
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
-        A deterministic ``graph_id`` is derived from ``task_data["taskID"]``
-        so that re-processing the same incident overwrites existing vectors
-        rather than creating duplicates.
+        A deterministic ``graph_id`` is derived from the composite key
+        ``(task_data["taskID"], task_data["status"])`` so that the same task in
+        different failure states is stored as a separate incident, while
+        re-processing the exact same ``(taskID, status)`` pair overwrites
+        existing vectors rather than creating duplicates.
+
+        If only ``taskID`` is present (no ``status``) the id falls back to the
+        ``taskID`` alone for backward compatibility.
 
         Args:
             email_text:    Email thread for the incident.
-            task_data:     Structured task fields.  ``taskID`` is used to
-                           derive the ``graph_id``.
+            task_data:     Structured task fields.  ``taskID`` and ``status``
+                           together form the composite unique identifier used
+                           to derive ``graph_id``.
             external_data: External environmental factors.
             logs:          Raw log output keyed by source name
                            (e.g. ``{"pilot": "...", "payload": "..."}``).
@@ -80,9 +86,13 @@ class KnowledgeAccumulator:
         logger.info("KnowledgeAccumulator: starting knowledge extraction")
 
         task_id = (task_data or {}).get("taskID")
-        graph_id = (
-            self._deterministic_id("graph", task_id) if task_id else str(uuid.uuid4())
-        )
+        task_status = (task_data or {}).get("status")
+        if task_id and task_status:
+            graph_id = self._deterministic_id("graph", task_id, task_status)
+        elif task_id:
+            graph_id = self._deterministic_id("graph", task_id)
+        else:
+            graph_id = str(uuid.uuid4())
 
         graph = await self.extractor.extract_from_sources(
             email_text=email_text,
@@ -98,7 +108,11 @@ class KnowledgeAccumulator:
         await self._store_in_vector_db(graph, summary, key_insights)
 
         logger.info(
-            "KnowledgeAccumulator: extraction completed for graph '%s'", graph_id
+            "KnowledgeAccumulator: extraction completed for graph '%s' "
+            "(task_id=%s, task_status=%s)",
+            graph_id,
+            task_id,
+            task_status,
         )
         return ExtractedKnowledge(
             graph=graph,

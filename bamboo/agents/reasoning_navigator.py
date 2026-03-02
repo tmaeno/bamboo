@@ -123,7 +123,9 @@ class ReasoningNavigator:
             5. Ask LLM to draft a resolution email.
 
         Args:
-            task_data:     Structured task fields (must include ``taskID``).
+            task_data:     Structured task fields (must include ``taskID``; ``status``
+                           is used together with ``taskID`` as the composite
+                           unique identifier for the incident).
             external_data: Optional supplementary metadata.
             logs:          Raw log output keyed by source name
                            (e.g. ``{"pilot": "...", "payload": "..."}``).
@@ -132,7 +134,9 @@ class ReasoningNavigator:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
             root cause, resolution, explanation, email draft, and evidence.
         """
-        task_id = task_data.get("taskID") or "unknown"
+        raw_task_id = task_data.get("taskID") or "unknown"
+        task_status = task_data.get("status")
+        task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         logger.info("ReasoningNavigator: analysing task '%s'", task_id)
 
         extracted_graph = await self.extractor.extract_from_sources(
@@ -361,8 +365,11 @@ class ReasoningNavigator:
         """
         logger.info("ReasoningNavigator: generating resolution email")
 
+        raw_task_id = task_data.get("taskID") or "unknown"
+        task_status = task_data.get("status")
+        composite_task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         prompt = EMAIL_GENERATION_PROMPT.format(
-            task_id=task_data.get("taskID") or "unknown",
+            task_id=composite_task_id,
             task_description=task_data.get("description", ""),
             analysis=json.dumps(analysis, indent=2),
         )
