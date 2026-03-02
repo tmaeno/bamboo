@@ -12,7 +12,7 @@ This guide will help you get started with Bamboo quickly.
 
 ## Setup Steps
 
-### 1. Install Dependencies
+### 1. Install the Package
 
 ```bash
 # Activate your virtual environment
@@ -25,7 +25,19 @@ pip install .
 pip install ".[dev]"
 ```
 
-### 2. Start Database Services
+### 2. Verify the Installation
+
+```bash
+# Works from any directory — no need to be in the project root
+python verify_installation.py
+
+# Or if you're in a different working directory
+python /path/to/bamboo/verify_installation.py
+```
+
+This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
+
+### 3. Start Database Services
 
 ```bash
 # Start graph database and vector database using Docker Compose
@@ -42,7 +54,7 @@ Or use the Makefile:
 make docker-up
 ```
 
-### 3. Configure Environment
+### 4. Configure Environment
 
 ```bash
 # Copy the example environment file
@@ -54,7 +66,7 @@ cp examples/.env.example .env
 # - NEO4J_PASSWORD (default: password)
 ```
 
-### 4. Test the Setup
+### 5. Test the Setup
 
 ```bash
 # Start the interactive CLI

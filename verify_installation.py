@@ -1,155 +1,191 @@
 #!/usr/bin/env python
-"""Verification script for Bamboo installation."""
+"""Verify that the Bamboo package is correctly installed.
 
-import sys
+Can be run from any directory after installation:
+
+    pip install .
+    python verify_installation.py
+
+Or directly without changing directory:
+
+    python /path/to/bamboo/verify_installation.py
+"""
+
 import subprocess
-from pathlib import Path
+import sys
 
 
-def check_python_version():
-    """Check Python version."""
-    print("Checking Python version...")
-    version = sys.version_info
-    if version.major >= 3 and version.minor >= 10:
-        print(f"✓ Python {version.major}.{version.minor}.{version.micro}")
-        return True
-    else:
-        print(f"✗ Python {version.major}.{version.minor}.{version.micro} (requires 3.10+)")
-        return False
+def _ok(msg: str) -> bool:
+    print(f"  ✓ {msg}")
+    return True
 
 
-def check_file_exists(filepath):
-    """Check if file exists."""
-    path = Path(filepath)
-    if path.exists():
-        print(f"✓ {filepath}")
-        return True
-    else:
-        print(f"✗ {filepath} (missing)")
-        return False
+def _fail(msg: str, hint: str = "") -> bool:
+    print(f"  ✗ {msg}")
+    if hint:
+        print(f"    → {hint}")
+    return False
 
 
-def check_directory_exists(dirpath):
-    """Check if directory exists."""
-    path = Path(dirpath)
-    if path.is_dir():
-        count = sum(1 for _ in path.rglob('*.py'))
-        print(f"✓ {dirpath}/ ({count} Python files)")
-        return True
-    else:
-        print(f"✗ {dirpath}/ (missing)")
-        return False
+# ---------------------------------------------------------------------------
+# Individual checks
+# ---------------------------------------------------------------------------
+
+def check_python_version() -> bool:
+    print("Python version")
+    v = sys.version_info
+    label = f"Python {v.major}.{v.minor}.{v.micro}"
+    if (v.major, v.minor) >= (3, 10):
+        return _ok(label)
+    return _fail(label, "Bamboo requires Python 3.10 or higher.")
 
 
-def check_docker():
-    """Check if Docker is available."""
-    print("\nChecking Docker...")
+def check_package_importable() -> bool:
+    print("Package import")
     try:
+        import bamboo  # noqa: F401
+        return _ok(f"bamboo {bamboo.__version__} imported successfully")
+    except ImportError as exc:
+        return _fail(f"cannot import bamboo: {exc}",
+                     "Run: pip install .")
+
+
+def check_submodule_imports() -> bool:
+    print("Sub-module imports")
+    modules = [
+        "bamboo.config",
+        "bamboo.cli",
+        "bamboo.models.graph_element",
+        "bamboo.models.knowledge_entity",
+        "bamboo.llm.llm_client",
+        "bamboo.llm.prompts",
+        "bamboo.database.base",
+        "bamboo.database.factory",
+        "bamboo.database.graph_database_client",
+        "bamboo.database.vector_database_client",
+        "bamboo.database.backends.neo4j_backend",
+        "bamboo.database.backends.qdrant_backend",
+        "bamboo.extractors.base",
+        "bamboo.extractors.factory",
+        "bamboo.agents.knowledge_accumulator",
+        "bamboo.agents.reasoning_navigator",
+        "bamboo.workflows.knowledge_workflow",
+        "bamboo.workflows.reasoning_workflow",
+    ]
+    ok = True
+    for mod in modules:
+        try:
+            __import__(mod)
+            _ok(mod)
+        except ImportError as exc:
+            _fail(mod, str(exc))
+            ok = False
+    return ok
+
+
+def check_cli_entry_points() -> bool:
+    print("CLI entry points")
+    ok = True
+    for cmd in ("bamboo", "bamboo-populate", "bamboo-analyze"):
         result = subprocess.run(
-            ["docker", "--version"],
+            [cmd, "--help"],
             capture_output=True,
             text=True,
-            check=True
         )
-        print(f"✓ {result.stdout.strip()}")
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("✗ Docker not found (optional for local development)")
-        return False
+        if result.returncode == 0:
+            _ok(f"`{cmd} --help` works")
+        else:
+            _fail(f"`{cmd}` not found or errored",
+                  "Run: pip install .  (entry points are registered on install)")
+            ok = False
+    return ok
 
 
-def check_docker_compose():
-    """Check if Docker Compose is available."""
+def check_key_dependencies() -> bool:
+    print("Key dependencies")
+    deps = [
+        ("langchain_core", "langchain-core"),
+        ("langgraph", "langgraph"),
+        ("langchain_openai", "langchain-openai"),
+        ("langchain_anthropic", "langchain-anthropic"),
+        ("neo4j", "neo4j"),
+        ("qdrant_client", "qdrant-client"),
+        ("pydantic", "pydantic"),
+        ("pydantic_settings", "pydantic-settings"),
+        ("dotenv", "python-dotenv"),
+        ("click", "click"),
+        ("rich", "rich"),
+    ]
+    ok = True
+    for mod, pkg in deps:
+        try:
+            __import__(mod)
+            _ok(pkg)
+        except ImportError:
+            _fail(pkg, f"Run: pip install {pkg}")
+            ok = False
+    return ok
+
+
+def check_docker() -> bool:
+    print("Docker (optional — needed to run databases locally)")
     try:
-        result = subprocess.run(
-            ["docker-compose", "--version"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(f"✓ {result.stdout.strip()}")
+        r = subprocess.run(["docker", "--version"], capture_output=True, text=True)
+        r2 = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True)
+        _ok(r.stdout.strip())
+        _ok(r2.stdout.strip())
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("✗ Docker Compose not found (optional for local development)")
+    except FileNotFoundError:
+        _fail("Docker not found",
+              "Install Docker Desktop: https://www.docker.com/products/docker-desktop/")
         return False
 
 
-def main():
-    """Run all verification checks."""
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> int:
     print("=" * 70)
     print("Bamboo Installation Verification")
     print("=" * 70)
 
-    all_checks = []
+    sections = [
+        check_python_version,
+        check_package_importable,
+        check_submodule_imports,
+        check_cli_entry_points,
+        check_key_dependencies,
+    ]
 
-    # Python version
-    all_checks.append(check_python_version())
+    results = []
+    for fn in sections:
+        print(f"\n[{fn.__name__.replace('check_', '').replace('_', ' ').title()}]")
+        results.append(fn())
 
-    # Core files
-    print("\nChecking core files...")
-    all_checks.append(check_file_exists("requirements.txt"))
-    all_checks.append(check_file_exists("setup.py"))
-    all_checks.append(check_file_exists("pyproject.toml"))
-    all_checks.append(check_file_exists("docker-compose.yml"))
-    all_checks.append(check_file_exists("examples/.env.example"))
-
-    # Documentation
-    print("\nChecking documentation...")
-    all_checks.append(check_file_exists("README.md"))
-    all_checks.append(check_file_exists("QUICKSTART.md"))
-    all_checks.append(check_file_exists("ARCHITECTURE.md"))
-    all_checks.append(check_file_exists("DEVELOPMENT.md"))
-
-    # Package structure
-    print("\nChecking package structure...")
-    all_checks.append(check_directory_exists("bamboo"))
-    all_checks.append(check_directory_exists("bamboo/models"))
-    all_checks.append(check_directory_exists("bamboo/database"))
-    all_checks.append(check_directory_exists("bamboo/llm"))
-    all_checks.append(check_directory_exists("bamboo/extractors"))
-    all_checks.append(check_directory_exists("bamboo/agents"))
-    all_checks.append(check_directory_exists("bamboo/workflows"))
-    all_checks.append(check_directory_exists("bamboo/scripts"))
-    all_checks.append(check_directory_exists("bamboo/utils"))
-
-    # Examples and tests
-    print("\nChecking examples and tests...")
-    all_checks.append(check_directory_exists("examples"))
-    all_checks.append(check_directory_exists("tests"))
-
-    # Docker (optional)
+    # Docker is optional — run but don't count towards pass/fail
+    print(f"\n[{check_docker.__name__.replace('check_', '').replace('_', ' ').title()}]")
     check_docker()
-    check_docker_compose()
 
-    # Environment check
-    print("\nChecking environment configuration...")
-    env_file = Path(".env")
-    if env_file.exists():
-        print("✓ .env file exists")
-        print("  → Make sure to set your API keys!")
-    else:
-        print("⚠ .env file not found")
-        print("  → Run: cp .env.example .env")
-        print("  → Then edit .env and add your API keys")
-
-    # Summary
     print("\n" + "=" * 70)
-    required_checks = sum(all_checks)
-    total_checks = len(all_checks)
+    passed = sum(results)
+    total = len(results)
 
-    if required_checks == total_checks:
-        print(f"✓ All {total_checks} required checks passed!")
-        print("\nNext steps:")
-        print("1. Copy .env.example to .env and add your API keys")
-        print("2. Start databases: make docker-up")
-        print("3. Install dependencies: pip install -r requirements.txt")
-        print("4. Try the examples: python -m bamboo.cli interactive")
-        print("\nSee QUICKSTART.md for detailed instructions.")
+    if passed == total:
+        print(f"✓ All {total} checks passed — Bamboo is ready to use!")
+        print()
+        print("Next steps:")
+        print("  1. cp /path/to/bamboo/examples/.env.example .env")
+        print("     Edit .env and add your API keys (OPENAI_API_KEY / ANTHROPIC_API_KEY)")
+        print("  2. docker compose -f /path/to/bamboo/docker-compose.yml up -d")
+        print("  3. bamboo interactive")
+        print()
+        print("Full guide: docs/getting-started/QUICKSTART.md  (in the project source)")
         return 0
     else:
-        print(f"✗ {total_checks - required_checks} checks failed")
-        print(f"✓ {required_checks}/{total_checks} checks passed")
-        print("\nPlease fix the issues above before proceeding.")
+        print(f"✗ {total - passed} check(s) failed  ({passed}/{total} passed)")
+        print()
+        print("Fix the issues above, then re-run: python verify_installation.py")
         return 1
 
 

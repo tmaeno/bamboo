@@ -41,12 +41,13 @@ An intelligent multi-agent AI framework for system automation and operations, le
 # 1. Install
 pip install .
 
-# 2. Setup
+# 2. Verify (from any directory)
+python verify_installation.py
+
+# 3. Setup
 cp examples/.env.example .env   # Configure your API keys
 docker-compose up -d            # Start databases (graph database, vector database)
 
-# 3. Verify
-python verify_installation.py
 
 # 4. Try it
 bamboo interactive
