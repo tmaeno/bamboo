@@ -69,31 +69,12 @@ bamboo/
 └── utils/             # Utilities
 ```
 
-
-## Installation
-
-1. **Prerequisites**: Python 3.10+, Docker, API keys (OpenAI/Anthropic)
-2. **Install**: `pip install .` (or `pip install ".[dev]"` for development)
-3. **Databases**: `docker-compose up -d`
-4. **Config**: `cp examples/.env.example .env` and add API keys
-5. **Verify**: `python verify_installation.py`
-
-For detailed instructions: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
-
-
 ## Development
 
 See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
 - Development setup and code style
 - Extension points (agents, tools, node types)
 - Testing and deployment guides
-
-
-## Next Steps
-
-1. Setup: `python verify_installation.py`
-2. Learn: [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
-3. Develop: [DEVELOPMENT.md](docs/development/DEVELOPMENT.md)
 
 ## License
 
