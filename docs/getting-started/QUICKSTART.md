@@ -28,14 +28,13 @@ pip install ".[dev]"
 ### 2. Verify the Installation
 
 ```bash
-# Works from any directory — no need to be in the project root
-python verify_installation.py
-
-# Or if you're in a different working directory
-python /path/to/bamboo/verify_installation.py
+# Works from any directory after pip install .
+bamboo-verify
 ```
 
 This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
+
+> **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
 
 ### 3. Start Database Services
 

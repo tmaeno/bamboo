@@ -42,7 +42,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 pip install .
 
 # 2. Verify (from any directory)
-python verify_installation.py
+bamboo-verify
 
 # 3. Setup
 cp examples/.env.example .env   # Configure your API keys
