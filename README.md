@@ -32,7 +32,7 @@ For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 ✅ **Multi-Agent Architecture**  
 ✅ **Dual Database** - Graph + Vector search  
 ✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
-✅ **Knowledge Graph** - Structured operational knowledge  
+✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce
 ✅ **MCP Tools** - Domain-specific Model Context Protocol tools  
 ✅ **Human-in-Loop** - Safety through human oversight
 
