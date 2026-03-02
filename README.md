@@ -13,7 +13,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ✅ **Multi-Agent Architecture**  
 ✅ **Dual Database** - Graph + Vector search  
 ✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
-✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce
+✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
 ✅ **MCP Tools** - Domain-specific Model Context Protocol tools  
 ✅ **Human-in-Loop** - Safety through human oversight
 
