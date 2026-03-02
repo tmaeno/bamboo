@@ -41,7 +41,7 @@ For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 - **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
 
 ### Sub-agents
-- **Graph Extraction** - Extracts knowledge graph from structured and unstructured data
+- **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
 - **Graph Summarization** - Summarizes graph data for quick insights
 - **Node Canonicalization** - Transforms diverse node data into a canonical format
 - **Feature Classification** - Classifies node features for better reasoning
