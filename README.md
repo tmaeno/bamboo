@@ -8,25 +8,6 @@
 
 An intelligent multi-agent AI framework for system automation and operations, leveraging graph and vector databases for knowledge management.
 
-## Quick Start
-
-```bash
-# 1. Install
-pip install .
-
-# 2. Setup
-cp examples/.env.example .env   # Configure your API keys
-docker-compose up -d            # Start databases (graph database, vector database)
-
-# 3. Verify
-python verify_installation.py
-
-# 4. Try it
-bamboo interactive
-```
-
-For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
-
 ## Key Features
 
 ✅ **Multi-Agent Architecture**  
@@ -52,6 +33,26 @@ For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 - **Anomaly Detection Agent** - Monitors metrics, detects anomalies
 - **Proactive Mitigation Agent** - Predicts failures, applies preventive measures
 - **System Enhancement Agent** - Identifies optimization opportunities
+
+
+## Quick Start
+
+```bash
+# 1. Install
+pip install .
+
+# 2. Setup
+cp examples/.env.example .env   # Configure your API keys
+docker-compose up -d            # Start databases (graph database, vector database)
+
+# 3. Verify
+python verify_installation.py
+
+# 4. Try it
+bamboo interactive
+```
+
+For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
 
 
 ## Project Structure
