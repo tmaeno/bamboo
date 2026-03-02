@@ -158,36 +158,47 @@ Both agents are implemented as LangGraph workflows:
 
 The system includes specialized sub-agents:
 
-### In Knowledge Extraction Agent:
-- **GraphExtractor**: Extracts knowledge graphs from text
-- **FeatureExtractor**: Extracts features from structured data
-- **Canonicalizer**: (via LLM) Normalizes node names
-- **Summarizer**: (via LLM) Creates summaries
+### In Knowledge Accumulation Agent:
+- **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
+- **Graph Summarization** - Summarizes graph data for quick insights
+- **Node Canonicalization** - Transforms diverse node data into a canonical format
+- **Feature Classification** - Classifies node features for better reasoning
 
-### In Reasoning Agent:
-- **FeatureExtractor**: Extracts features from task data
-- **CauseIdentifier**: (via LLM) Identifies root causes
-- **EmailGenerator**: (via LLM) Generates explanatory emails
+### In Reasoning Navigation Agent:
+- **Knowledge Extraction** - Extracts features from task data for querying
+- **Output Synthesis** - Synthesizes outputs from various agents into coherent responses
 
 ## Graph Schema
 
-The knowledge graph follows this structure:
+The core knowledge graph schema used by the incident-analysis pipeline:
 
 ```
-┌───────────┐
-│ Symptom   │
-└─────┬─────┘
-      │ indicate
-      ↓
-┌───────────┐     ┌────────────────┐
-│   Cause   │────→│  Resolution    │
-└─────┬─────┘     └────────────────┘
-      ↑              solved_by
-      │
-      ├── originated_from ── Component
-      ├── associated_with ── Environment
-      └── contribute_to ─── Feature
+Symptom       -[indicate]->        Cause  -[solved_by]->  Resolution
+Environment   -[contribute_to]->   Cause
+Task_Feature  -[contribute_to]->   Cause
+Component     -[originated_from]-> Cause
 ```
+
+### Core Node Types
+| Node | Description |
+|------|-------------|
+| `Symptom` | Observed failure class (e.g. error message category) |
+| `Cause` | Root cause of the incident |
+| `Resolution` | Solution or fix applied |
+| `Environment` | External factor contributing to the cause (e.g. OS, runtime version) |
+| `Task_Feature` | Discrete task attribute stored as `attribute=value` (e.g. `RAM=4GB`) |
+| `Component` | System component where the cause originated |
+| `Task_Context` | Free-form prose context — stored in vector database only, not in graph |
+
+### Core Relationships
+| Relationship | From → To | Description |
+|-------------|-----------|-------------|
+| `indicate` | Symptom → Cause | Symptom points to a root cause |
+| `solved_by` | Cause → Resolution | Cause is resolved by a resolution |
+| `contribute_to` | Task_Feature / Environment → Cause | Feature or environment contributes to a cause |
+| `originated_from` | Component → Cause | Cause originated in a component |
+
+> Extended node types (Metric, Anomaly, Issue, System, Pattern, Optimization, Event, Action, Dependency, User) and relationships are available for future extraction strategies.
 
 ## Customization
 
