@@ -174,8 +174,9 @@ The core knowledge graph schema used by the incident-analysis pipeline:
 
 ```
 Symptom       -[indicate]->        Cause  -[solved_by]->  Resolution
-Environment   -[contribute_to]->   Cause
+Environment   -[associated_with]-> Cause
 Task_Feature  -[contribute_to]->   Cause
+Task_Context  -[contribute_to]->   Cause
 Component     -[originated_from]-> Cause
 ```
 
@@ -191,12 +192,13 @@ Component     -[originated_from]-> Cause
 | `Task_Context` | Free-form prose context — stored in vector database only, not in graph |
 
 ### Core Relationships
-| Relationship | From → To | Description |
-|-------------|-----------|-------------|
-| `indicate` | Symptom → Cause | Symptom points to a root cause |
-| `solved_by` | Cause → Resolution | Cause is resolved by a resolution |
-| `contribute_to` | Task_Feature / Environment → Cause | Feature or environment contributes to a cause |
-| `originated_from` | Component → Cause | Cause originated in a component |
+| Relationship | From → To                           | Description                                                       |
+|-------------|-------------------------------------|-------------------------------------------------------------------|
+| `indicate` | Symptom → Cause                     | Symptom points to a root cause                                    |
+| `solved_by` | Cause → Resolution                  | Cause is resolved by a resolution                                 |
+| `contribute_to` | Task_Feature / Task_Context → Cause | Feature or context contributes to a cause                         |
+| `originated_from` | Component → Cause                   | Cause originated in a component                                   |
+| `associated_with` | Environment → Cause                 | Cause associated with an external factor |
 
 > Extended node types (Metric, Anomaly, Issue, System, Pattern, Optimization, Event, Action, Dependency, User) and relationships are available for future extraction strategies.
 
