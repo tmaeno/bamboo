@@ -258,11 +258,20 @@ async def custom_query(self, params):
 
 ## Testing
 
-Run tests:
+The `tests/` directory is part of the **source tree**, not the installed package, so tests must always be run from the **project root** with an editable install:
 
 ```bash
-pytest tests/ -v
+# 1. Clone / cd into the source tree
+cd /path/to/bamboo
+
+# 2. Install in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# 3. Run tests
+pytest
 ```
+
+`pytest` with no arguments reads `pyproject.toml` from the current directory, which sets `testpaths = ["tests"]` and `asyncio_mode = "auto"`. Running `pytest tests/ -v` from any other directory will fail with `file or directory not found: tests/`.
 
 Note: Some tests require actual API keys and database connections.
 
@@ -284,12 +293,55 @@ docker logs bamboo-vector_db-1
 ### API Key Issues
 
 ```bash
-# Verify your .env file
-cat .env | grep API_KEY
+# Check which keys are set in your .env
+grep API_KEY .env
 
-# Test LLM connection
-python -c "from bamboo.llm import get_llm; llm = get_llm(); print(llm)"
+# Check which provider and model are configured
+python -c "
+from bamboo.config import get_settings
+s = get_settings()
+print('provider :', s.llm_provider)
+print('model    :', s.llm_model)
+print('openai   :', 'set' if s.openai_api_key else 'MISSING')
+print('anthropic:', 'set' if s.anthropic_api_key else 'MISSING')
+"
+
+# Verify the key for the configured provider is actually set
+python -c "
+from bamboo.config import get_settings
+s = get_settings()
+if s.llm_provider == 'openai' and not s.openai_api_key:
+    print('ERROR: LLM_PROVIDER=openai but OPENAI_API_KEY is not set')
+elif s.llm_provider == 'anthropic' and not s.anthropic_api_key:
+    print('ERROR: LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set')
+else:
+    print('OK: API key for', s.llm_provider, 'is set')
+"
+
+# Test that the LLM client can be constructed (does not make a network call)
+python -c "from bamboo.llm.llm_client import get_llm; print(get_llm())"
+
+# Test a real API call (requires a valid key and network access)
+python -c "
+import asyncio
+from bamboo.llm.llm_client import get_llm
+from langchain_core.messages import HumanMessage
+async def test():
+    llm = get_llm()
+    response = await llm.ainvoke([HumanMessage(content='Say hello.')])
+    print('LLM response:', response.content[:80])
+asyncio.run(test())
+"
 ```
+
+Common errors:
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `AuthenticationError` / `401` | Wrong or missing API key | Check `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in `.env` |
+| `ValueError: llm_provider must be...` | Invalid `LLM_PROVIDER` value | Set `LLM_PROVIDER=openai` or `LLM_PROVIDER=anthropic` |
+| `openai_api_key` is empty | `.env` not loaded | Make sure `.env` is in the working directory where you run Bamboo |
+| `RateLimitError` | API quota exceeded | Check your API plan or wait and retry |
 
 ### Import Errors
 
