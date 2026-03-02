@@ -28,12 +28,12 @@ pip install ".[dev]"
 ### 2. Start Database Services
 
 ```bash
-# Start Neo4j and Qdrant using Docker Compose
+# Start graph database and vector database using Docker Compose
 docker-compose up -d
 
 # Wait about 10 seconds for services to be ready
-# Neo4j will be available at http://localhost:7474
-# Qdrant will be available at http://localhost:6333
+# Graph database will be available at http://localhost:7474
+# Vector database will be available at http://localhost:6333
 ```
 
 Or use the Makefile:
@@ -123,17 +123,17 @@ The Knowledge Extraction Agent processes input data in several steps:
 
 1. **Extraction**: Uses LLM to extract structured graph from unstructured data
 2. **Canonicalization**: Normalizes node names to avoid duplicates
-3. **Graph Storage**: Stores nodes and relationships in Neo4j
+3. **Graph Storage**: Stores nodes and relationships in the graph database
 4. **Summarization**: Generates summary using LLM
-5. **Vector Storage**: Stores summary and key insights in Qdrant
+5. **Vector Storage**: Stores summary and key insights in the vector database
 
 ### Reasoning Agent
 
 The Reasoning Agent analyzes tasks in these steps:
 
 1. **Feature Extraction**: Extracts key features from task data
-2. **Graph Query**: Queries Neo4j for matching causes and resolutions
-3. **Vector Search**: Finds similar cases in Qdrant
+2. **Graph Query**: Queries the graph database for matching causes and resolutions
+3. **Vector Search**: Finds similar cases in the vector database
 4. **Analysis**: Uses LLM to determine root cause
 5. **Email Generation**: Creates human-readable explanation
 6. **Human Review**: Allows operator to review and provide feedback
@@ -214,7 +214,7 @@ Your custom prompt here...
 
 ### Custom Database Queries
 
-Extend `Neo4jClient` in `bamboo/database/neo4j_client.py`:
+Extend the graph database client in `bamboo/database/backends/neo4j_backend.py`:
 
 ```python
 async def custom_query(self, params):
@@ -242,10 +242,10 @@ Note: Some tests require actual API keys and database connections.
 # Check if databases are running
 docker ps
 
-# Check Neo4j logs
+# Check graph database logs
 docker logs bamboo-graph_db-1
 
-# Check Qdrant logs
+# Check vector database logs
 docker logs bamboo-vector_db-1
 ```
 

@@ -154,8 +154,8 @@
 - [x] `bamboo/database/base.py` - Abstract interfaces
 - [x] `bamboo/database/factory.py` - Plugin system
 - [x] `bamboo/database/backends/__init__.py` - Backends package
-- [x] `bamboo/database/backends/neo4j_backend.py` - Neo4j implementation
-- [x] `bamboo/database/backends/qdrant_backend.py` - Qdrant implementation
+- [x] `bamboo/database/backends/neo4j_backend.py` - Graph database implementation
+- [x] `bamboo/database/backends/qdrant_backend.py` - Vector database implementation
 - [x] `bamboo/database/backends/examples/__init__.py` - Examples package
 - [x] `bamboo/database/backends/examples/in_memory_backend.py` - Example backend
 - [x] `DATABASE_PLUGINS.md` - Full documentation
@@ -298,7 +298,7 @@ All components:
 ## Next Steps for Users
 
 1. Read `DATABASE_PLUGINS_QUICK_REFERENCE.md` (5 min)
-2. Install dependencies: `pip install neo4j qdrant-client`
+2. Install dependencies: `pip install .`
 3. Configure backends in `.env`
 4. Use existing code - it works as-is!
 5. Explore advanced features in docs as needed

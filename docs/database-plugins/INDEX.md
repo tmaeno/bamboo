@@ -45,7 +45,7 @@ bamboo/
 ## Summary
 
 The plugin system enables:
-- ✅ Multiple database backends (Neo4j, Qdrant, In-Memory, Custom)
+- ✅ Multiple database backends (graph database, vector database, In-Memory, Custom)
 - ✅ Configuration-based backend selection
 - ✅ Easy backend extension
 - ✅ Testing without external databases

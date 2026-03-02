@@ -15,7 +15,7 @@ The Bamboo database layer now supports a **plugin-based architecture** that allo
 ```python
 from bamboo.database import GraphDatabaseClient, VectorDatabaseClient
 
-# Automatically uses configured backends (Neo4j + Qdrant)
+# Automatically uses configured backends (graph database + vector database)
 graph_db = GraphDatabaseClient()
 vector_db = VectorDatabaseClient()
 
@@ -35,11 +35,11 @@ VECTOR_DATABASE_BACKEND=qdrant
 ## 📋 Available Backends
 
 ### Graph Databases
-- `neo4j` - Neo4j property graph database (default)
+- `neo4j` - Graph database backend (default)
 - `in_memory` - In-memory backend (testing/development)
 
 ### Vector Databases
-- `qdrant` - Qdrant vector search (default)
+- `qdrant` - Vector search backend (default)
 
 ## 🔧 File Structure
 
@@ -50,8 +50,8 @@ bamboo/database/
 ├── graph_database_client.py     # Wrapper (delegates to backend)
 ├── vector_database_client.py    # Wrapper (delegates to backend)
 └── backends/
-    ├── neo4j_backend.py         # Neo4j implementation
-    ├── qdrant_backend.py        # Qdrant implementation
+    ├── neo4j_backend.py         # Graph database implementation
+    ├── qdrant_backend.py        # Vector database implementation
     └── examples/
         └── in_memory_backend.py # Example: in-memory backend
 ```
@@ -196,13 +196,13 @@ print(f"Vector backend: {settings.vector_database_backend}")
 GRAPH_DATABASE_BACKEND=neo4j
 VECTOR_DATABASE_BACKEND=qdrant
 
-# Neo4j Config
+# Graph Database Config
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=graph_db
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=graph_db
 
-# Qdrant Config
+# Vector Database Config
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=
 QDRANT_COLLECTION_NAME=bamboo_knowledge
@@ -282,17 +282,17 @@ register_graph_backend("my_backend", MyBackend)
 **Q: ImportError for database library?**
 A: Install the required dependencies:
 ```bash
-pip install neo4j qdrant-client
+pip install .
 ```
 
-**Q: How to test without Neo4j?**
+**Q: How to test without the graph database?**
 A: Use the in-memory backend:
 ```env
 GRAPH_DATABASE_BACKEND=in_memory
 ```
 
 **Q: Can I use multiple backend types?**
-A: Yes! You can use Neo4j for graphs and Qdrant for vectors (or any combination).
+A: Yes! You can use the graph database backend for graphs and the vector database backend for vectors (or any combination).
 
 ## 🚦 Next Steps
 

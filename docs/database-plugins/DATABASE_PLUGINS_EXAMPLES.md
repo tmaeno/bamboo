@@ -17,7 +17,7 @@ Run your app:
 source .env.dev && python -m bamboo.cli
 ```
 
-### Production with Neo4j and Qdrant
+### Production with graph database and vector database
 
 Create `.env.prod`:
 ```env
@@ -357,7 +357,7 @@ Usage:
 # Development with in-memory
 ENV=development python app.py
 
-# Staging with Neo4j and Qdrant
+# Staging with graph database and vector database
 ENV=staging python app.py
 
 # Production

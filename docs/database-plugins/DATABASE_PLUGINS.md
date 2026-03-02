@@ -5,10 +5,10 @@ The Bamboo project now supports a plugin-based architecture for database backend
 ## Current Supported Backends
 
 ### Graph Database
-- **Neo4j** (default) - Property graph database
+- **Neo4j** (default) - Property graph database backend
 
 ### Vector Database
-- **Qdrant** (default) - Vector similarity search database
+- **Qdrant** (default) - Vector similarity search database backend
 
 ## Architecture
 
@@ -34,16 +34,16 @@ The Bamboo project now supports a plugin-based architecture for database backend
         ┌─────────┴─────────┐
         │                   │
 ┌───────▼──────┐    ┌──────▼────────┐
-│ Neo4j Backend│    │ Qdrant Backend │
-│ (Graph DB)   │    │ (Vector DB)    │
+│ Graph DB     │    │ Vector DB      │
+│ Backend      │    │ Backend        │
 └──────────────┘    └────────────────┘
         │                   │
         └─────────┬─────────┘
                   │
         ┌─────────▼──────────────┐
         │ Database Implementations│
-        │ - Neo4j Driver         │
-        │ - Qdrant SDK           │
+        │ - Graph DB Driver      │
+        │ - Vector DB SDK        │
         └────────────────────────┘
 ```
 
@@ -58,13 +58,13 @@ Set these in your `.env` file to select backends:
 GRAPH_DATABASE_BACKEND=neo4j
 VECTOR_DATABASE_BACKEND=qdrant
 
-# Neo4j Configuration
+# Graph Database Configuration
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=graph_db
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=graph_db
 
-# Qdrant Configuration
+# Vector Database Configuration
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=
 QDRANT_COLLECTION_NAME=bamboo_knowledge
@@ -316,8 +316,8 @@ bamboo/database/
 ├── vector_database_client.py   # Vector DB client wrapper
 └── backends/
     ├── __init__.py
-    ├── neo4j_backend.py        # Neo4j implementation
-    └── qdrant_backend.py       # Qdrant implementation
+    ├── neo4j_backend.py        # Graph database implementation
+    └── qdrant_backend.py       # Vector database implementation
 ```
 
 ## Testing with Different Backends
@@ -325,7 +325,7 @@ bamboo/database/
 To test with different backends:
 
 ```bash
-# Test with Neo4j
+# Test with graph database backend
 GRAPH_DATABASE_BACKEND=neo4j pytest tests/
 
 # Test with different vector backend (if added)
@@ -367,7 +367,7 @@ pip install qdrant-client
 
 ## Migration Guide
 
-### From Direct Neo4j Usage
+### From Direct Graph Database Usage
 
 **Before:**
 ```python

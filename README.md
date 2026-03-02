@@ -16,7 +16,7 @@ pip install .
 
 # 2. Setup
 cp examples/.env.example .env   # Configure your API keys
-docker-compose up -d            # Start databases (Neo4j, Qdrant)
+docker-compose up -d            # Start databases (graph database, vector database)
 
 # 3. Verify
 python verify_installation.py

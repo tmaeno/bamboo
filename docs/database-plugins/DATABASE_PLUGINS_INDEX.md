@@ -91,8 +91,8 @@ The Bamboo database plugin system is fully documented with multiple guides for d
 |------|---------|
 | `bamboo/database/base.py` | Abstract base classes for backends |
 | `bamboo/database/factory.py` | Backend factory and registry |
-| `bamboo/database/backends/neo4j_backend.py` | Neo4j implementation |
-| `bamboo/database/backends/qdrant_backend.py` | Qdrant implementation |
+| `bamboo/database/backends/neo4j_backend.py` | Graph database implementation |
+| `bamboo/database/backends/qdrant_backend.py` | Vector database implementation |
 | `bamboo/database/backends/examples/in_memory_backend.py` | Example in-memory implementation |
 
 ### Code Files Modified
@@ -110,8 +110,8 @@ The Bamboo database plugin system is fully documented with multiple guides for d
 
 ### Backend
 An implementation of a database interface. Examples:
-- Neo4j for graph databases
-- Qdrant for vector databases
+- Graph database backend for graph databases
+- Vector database backend for vector databases
 - In-Memory for testing
 
 ### Factory
@@ -138,7 +138,7 @@ Design pattern that allows:
 
 ### 1. Install Dependencies
 ```bash
-pip install neo4j qdrant-client
+pip install .
 ```
 
 ### 2. Set Configuration (.env)
@@ -168,11 +168,11 @@ await graph_db.connect()
 ## 📊 Current Backend Status
 
 ### Graph Databases ✅
-- **Neo4j** - Production-ready
+- **Neo4j** - Production-ready graph database backend
 - **In-Memory** - Testing/Development
 
 ### Vector Databases ✅
-- **Qdrant** - Production-ready
+- **Qdrant** - Production-ready vector database backend
 - *Others can be added following the guide*
 
 ---
@@ -207,8 +207,8 @@ bamboo/database/
 ├── graph_database_client.py   # Graph DB wrapper
 ├── vector_database_client.py  # Vector DB wrapper
 └── backends/
-    ├── neo4j_backend.py       # Neo4j plugin
-    ├── qdrant_backend.py      # Qdrant plugin
+    ├── neo4j_backend.py       # Graph database plugin
+    ├── qdrant_backend.py      # Vector database plugin
     └── examples/
         └── in_memory_backend.py  # Example plugin
 ```
@@ -226,7 +226,7 @@ bamboo/database/
 
 - ✅ All files compile without syntax errors
 - ✅ Plugin system initializes successfully
-- ✅ Default backends (Neo4j + Qdrant) register properly
+- ✅ Default backends (graph database + vector database) register properly
 - ✅ Example backend (in-memory) works
 - ✅ Factory pattern correctly delegates
 - ✅ Configuration-based backend selection works
@@ -245,7 +245,7 @@ bamboo/database/
 ### How to add PostgreSQL?
 → See: `DATABASE_PLUGINS_EXAMPLES.md` → "Example 3"
 
-### How to test without Neo4j?
+### How to test without the graph database?
 → Set: `GRAPH_DATABASE_BACKEND=in_memory`
 
 ### Want to contribute?
@@ -277,7 +277,7 @@ bamboo/database/
 - Consistent test environment
 
 ### Production
-- Use Neo4j + Qdrant (or other backends)
+- Use graph database + vector database backends (or other backends)
 - Easy switching between providers
 - Clear backend selection via config
 

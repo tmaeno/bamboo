@@ -30,7 +30,7 @@ A complete **plugin-based architecture** for database backends has been implemen
     ┌─────────┴─────────┐
     │                   │
 ┌───▼──────┐       ┌───▼──────┐
-│ Neo4j    │       │ Qdrant   │
+│ Graph DB │       │ Vector DB│
 │ Backend  │       │ Backend  │
 └──────────┘       └──────────┘
     │                   │
@@ -61,17 +61,17 @@ A complete **plugin-based architecture** for database backends has been implemen
    - Auto-registration of built-in backends
 
 3. **`bamboo/database/backends/neo4j_backend.py`**
-   - Neo4j implementation of `GraphDatabaseBackend`
+   - Graph database implementation of `GraphDatabaseBackend`
    - All graph database operations
    - Migrated from original `graph_database_client.py`
 
 4. **`bamboo/database/backends/qdrant_backend.py`**
-   - Qdrant implementation of `VectorDatabaseBackend`
+   - Vector database implementation of `VectorDatabaseBackend`
    - All vector database operations
    - Migrated from original `vector_database_client.py`
 
 5. **`bamboo/database/backends/__init__.py`**
-   - Exports Neo4j and Qdrant backend classes
+   - Exports graph database and vector database backend classes
 
 6. **`bamboo/database/backends/examples/in_memory_backend.py`**
    - Example in-memory implementation for testing/development
@@ -214,13 +214,13 @@ GRAPH_DATABASE_BACKEND=my_backend
 GRAPH_DATABASE_BACKEND=neo4j
 VECTOR_DATABASE_BACKEND=qdrant
 
-# Neo4j
+# Graph Database
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=graph_db
 NEO4J_PASSWORD=password
 NEO4J_DATABASE=graph_db
 
-# Qdrant
+# Vector Database
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=
 QDRANT_COLLECTION_NAME=bamboo_knowledge
@@ -232,7 +232,7 @@ EMBEDDING_DIMENSION=1536
 
 ## 🧪 Testing
 
-### With Neo4j
+### With graph database backend (external)
 ```bash
 GRAPH_DATABASE_BACKEND=neo4j pytest tests/
 ```
@@ -277,7 +277,7 @@ GRAPH_DATABASE_BACKEND=in_memory pytest tests/
 
 ### Before
 ```python
-# Direct dependency on Neo4j
+# Direct dependency on graph database driver
 from neo4j import AsyncGraphDatabase
 driver = AsyncGraphDatabase.driver(...)
 ```
@@ -346,7 +346,7 @@ Plugin system initializes successfully:
 
 ## 🚦 Next Steps
 
-1. **Install Dependencies**: `pip install neo4j qdrant-client`
+1. **Install Dependencies**: `pip install .`
 2. **Start Using**: The plugin system is ready to use
 3. **Add Custom Backends**: Follow the guide in `DATABASE_PLUGINS.md`
 4. **Test**: Use in-memory backend for testing

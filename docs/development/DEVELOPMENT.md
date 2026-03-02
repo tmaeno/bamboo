@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 ### 2. Start Development Databases
 
 ```bash
-# Start Neo4j and Qdrant
+# Start graph database and vector database
 docker-compose up -d
 
 # Verify services are running
@@ -499,22 +499,21 @@ async def test_agent_with_mock_llm(mock_llm):
 # tests/integration/test_knowledge_extraction.py
 import pytest
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.database.neo4j_client import Neo4jClient
-from bamboo.database.qdrant_client import QdrantClient
+from bamboo.database import GraphDatabaseClient, VectorDatabaseClient
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_full_knowledge_extraction():
     """Test full knowledge extraction pipeline."""
-    neo4j = Neo4jClient()
-    qdrant = QdrantClient()
+    graph_db = GraphDatabaseClient()
+    vector_db = VectorDatabaseClient()
 
-    await neo4j.connect()
-    await qdrant.connect()
+    await graph_db.connect()
+    await vector_db.connect()
 
     try:
-        agent = KnowledgeAccumulator(neo4j, qdrant)
+        agent = KnowledgeAccumulator(graph_db, vector_db)
 
         result = await agent.process_knowledge(
             email_text="Sample email",
@@ -525,8 +524,8 @@ async def test_full_knowledge_extraction():
         assert result.summary
 
     finally:
-        await neo4j.close()
-        await qdrant.close()
+        await graph_db.close()
+        await vector_db.close()
 ```
 
 ### Running Tests
@@ -575,7 +574,7 @@ breakpoint()
 ### Database Inspection
 
 ```bash
-# Neo4j Browser
+# Graph database browser
 open http://localhost:7474
 
 # Cypher query examples
@@ -583,7 +582,7 @@ MATCH (n) RETURN n LIMIT 25;
 MATCH (c:Cause) RETURN c.name, c.frequency ORDER BY c.frequency DESC;
 MATCH (e:Error)-[r:indicate]->(c:Cause) RETURN e, r, c;
 
-# Qdrant inspection
+# Vector database inspection
 curl http://localhost:6333/collections
 curl http://localhost:6333/collections/bamboo_knowledge
 ```
@@ -592,7 +591,7 @@ curl http://localhost:6333/collections/bamboo_knowledge
 
 ### Database Indexing
 
-Neo4j indexes are created automatically. To add custom indexes:
+Graph database indexes are created automatically. To add custom indexes:
 
 ```python
 async def create_custom_indexes(self):
@@ -720,8 +719,8 @@ refactor: Simplify database query methods
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [LangChain Documentation](https://python.langchain.com/)
-- [Neo4j Cypher Manual](https://neo4j.com/docs/cypher-manual/current/)
-- [Qdrant Documentation](https://qdrant.tech/documentation/)
+- [Graph Database Cypher Manual](https://neo4j.com/docs/cypher-manual/current/)
+- [Vector Database Documentation](https://qdrant.tech/documentation/)
 - [Pydantic Documentation](https://docs.pydantic.dev/)
 
 ## Graph Schema Reference
