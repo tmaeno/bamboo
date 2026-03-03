@@ -52,7 +52,10 @@ extractor = KnowledgeGraphExtractor()
 graph = await extractor.extract_from_sources(
     email_text=email,
     task_data=task_dict,
-    external_data=external_data
+    external_data=external_data,
+    task_logs={"jedi": "...", "harvester": "..."},   # task-level orchestration logs
+    job_logs={"pilot": "...", "payload": "..."},      # job-level execution logs
+    jobs_data=[{"PandaID": 123, "jobStatus": "failed", ...}],  # raw job records
 )
 ```
 
@@ -92,7 +95,15 @@ from bamboo.models.knowledge_entity import KnowledgeGraph
 class MySystemExtractionStrategy(ExtractionStrategy):
     """Extract from MySystem task format."""
 
-    async def extract(self, email_text="", task_data=None, external_data=None):
+    async def extract(
+        self,
+        email_text: str = "",
+        task_data: dict = None,
+        external_data: dict = None,
+        task_logs: dict[str, str] = None,   # task-level orchestration logs
+        job_logs: dict[str, str] = None,    # job-level execution logs
+        jobs_data: list[dict] = None,       # raw job records for aggregation
+    ):
         # Extract using MySystem-specific logic
         # Return KnowledgeGraph
         pass

@@ -77,6 +77,9 @@ class Neo4jBackend(GraphDatabaseBackend):
                 "CREATE INDEX IF NOT EXISTS FOR (n:Cause) ON (n.frequency)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Symptom) ON (n.name)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Resolution) ON (n.success_rate)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Task_Feature) ON (n.name)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Feature) ON (n.name)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Feature) ON (n.attribute)",
             ]:
                 await session.run(query)
 
@@ -167,6 +170,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
+        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
@@ -175,7 +179,8 @@ class Neo4jBackend(GraphDatabaseBackend):
 
         Each clue type that links to a cause contributes +1 to its match_score,
         so causes corroborated by multiple clue types rank above those matched
-        by only one.
+        by only one.  Job features (aggregated execution patterns) are scored
+        independently from task features so the signal is additive.
         """
         async with self.driver.session(
             database=self.settings.neo4j_database
@@ -187,30 +192,39 @@ class Neo4jBackend(GraphDatabaseBackend):
             WITH collect(DISTINCT c1) AS symptom_causes
 
             // --- Task-feature clues ---
-            OPTIONAL MATCH (f:Feature)-[:contribute_to]->(c2:Cause)
+            OPTIONAL MATCH (f:Task_Feature)-[:contribute_to]->(c2:Cause)
             WHERE f.name IN $task_features
             WITH symptom_causes, collect(DISTINCT c2) AS feature_causes
 
+            // --- Job-feature clues ---
+            OPTIONAL MATCH (jf:Job_Feature)-[:contribute_to]->(c3:Cause)
+            WHERE jf.name IN $job_features
+            WITH symptom_causes, feature_causes, collect(DISTINCT c3) AS job_feature_causes
+
             // --- Environment clues ---
-            OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c3:Cause)
+            OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c4:Cause)
             WHERE env.name IN $environment_factors
-            WITH symptom_causes, feature_causes, collect(DISTINCT c3) AS env_causes
+            WITH symptom_causes, feature_causes, job_feature_causes,
+                 collect(DISTINCT c4) AS env_causes
 
             // --- Component clues ---
-            OPTIONAL MATCH (comp:Component)-[:contribute_to]->(c4:Cause)
+            OPTIONAL MATCH (comp:Component)-[:originated_from]->(c5:Cause)
             WHERE comp.name IN $components
-            WITH symptom_causes, feature_causes, env_causes,
-                 collect(DISTINCT c4) AS comp_causes
+            WITH symptom_causes, feature_causes, job_feature_causes, env_causes,
+                 collect(DISTINCT c5) AS comp_causes
 
             // --- Union all matched causes and score by clue-type breadth ---
-            WITH symptom_causes + feature_causes + env_causes + comp_causes AS all_causes,
-                 symptom_causes, feature_causes, env_causes, comp_causes
+            WITH symptom_causes + feature_causes + job_feature_causes
+                 + env_causes + comp_causes AS all_causes,
+                 symptom_causes, feature_causes, job_feature_causes,
+                 env_causes, comp_causes
             UNWIND all_causes AS c
             WITH DISTINCT c,
-                 (CASE WHEN c IN symptom_causes      THEN 1 ELSE 0 END +
-                  CASE WHEN c IN feature_causes      THEN 1 ELSE 0 END +
-                  CASE WHEN c IN env_causes          THEN 1 ELSE 0 END +
-                  CASE WHEN c IN comp_causes         THEN 1 ELSE 0 END) AS match_score
+                 (CASE WHEN c IN symptom_causes       THEN 1 ELSE 0 END +
+                  CASE WHEN c IN feature_causes       THEN 1 ELSE 0 END +
+                  CASE WHEN c IN job_feature_causes   THEN 1 ELSE 0 END +
+                  CASE WHEN c IN env_causes           THEN 1 ELSE 0 END +
+                  CASE WHEN c IN comp_causes          THEN 1 ELSE 0 END) AS match_score
 
             OPTIONAL MATCH (c)-[:solved_by]->(r:Resolution)
             RETURN c.id          AS cause_id,
@@ -228,6 +242,7 @@ class Neo4jBackend(GraphDatabaseBackend):
                 query,
                 symptoms=symptoms or [],
                 task_features=task_features or [],
+                job_features=job_features or [],
                 environment_factors=environment_factors or [],
                 components=components or [],
                 limit=limit,

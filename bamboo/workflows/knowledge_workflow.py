@@ -10,24 +10,44 @@ from bamboo.database.vector_database_client import VectorDatabaseClient
 
 
 class KnowledgeState(TypedDict):
-    """State for knowledge extraction workflow."""
+    """State for the knowledge-extraction workflow.
+
+    Attributes:
+        email_text:     Email thread for the incident.
+        task_data:      Structured task fields (``taskID`` + ``status`` are the
+                        composite unique identifier).
+        external_data:  External environmental metadata.
+        task_logs:      *Task-level* log output keyed by source name
+                        (e.g. ``{"jedi": "...", "harvester": "..."}``).
+        job_logs:       *Job-level* log output keyed by a stable source name
+                        (e.g. ``{"pilot": "...", "payload": "..."}``).
+        jobs_data:      List of raw job attribute dicts for aggregated
+                        :class:`~bamboo.models.graph_element.JobFeatureNode`
+                        extraction.
+        extracted_graph: Serialised :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`
+                        (set after extraction).
+        summary:        LLM-generated narrative summary (set after extraction).
+        status:         Workflow status string.
+        error:          Error message if ``status == "error"``.
+        graph_id:       Composite incident identifier
+                        ``"<taskID>:<status>"`` (set after extraction).
+    """
 
     email_text: str
     task_data: Optional[dict[str, Any]]
     external_data: Optional[dict[str, Any]]
+    task_logs: Optional[dict[str, str]]
+    job_logs: Optional[dict[str, str]]
+    jobs_data: Optional[list[dict[str, Any]]]
     extracted_graph: Optional[dict[str, Any]]
     summary: Optional[str]
     status: str
     error: Optional[str]
-
-    # Derived composite identifier: "<taskID>:<task_status>" (or just "<taskID>"
-    # when status is absent).  Set after extraction so downstream nodes can
-    # reference the graph without re-computing it.
     graph_id: Optional[str]
 
 
 async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
-    """Extract knowledge from sources."""
+    """Extract knowledge from all available sources and persist to both DBs."""
     try:
         graph_db = GraphDatabaseClient()
         vector_db = VectorDatabaseClient()
@@ -41,6 +61,9 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
             email_text=state["email_text"],
             task_data=state["task_data"],
             external_data=state["external_data"],
+            task_logs=state.get("task_logs"),
+            job_logs=state.get("job_logs"),
+            jobs_data=state.get("jobs_data"),
         )
 
         await graph_db.close()
@@ -78,7 +101,6 @@ async def validate_extraction_node(state: KnowledgeState) -> KnowledgeState:
     if state["status"] == "error":
         return state
 
-    # Basic validation
     if not state.get("extracted_graph"):
         return {
             **state,
@@ -93,14 +115,12 @@ async def validate_extraction_node(state: KnowledgeState) -> KnowledgeState:
 
 
 def create_knowledge_workflow() -> StateGraph:
-    """Create knowledge extraction workflow."""
+    """Create and compile the knowledge-extraction LangGraph workflow."""
     workflow = StateGraph(KnowledgeState)
 
-    # Add nodes
     workflow.add_node("extract", extract_knowledge_node)
     workflow.add_node("validate", validate_extraction_node)
 
-    # Add edges
     workflow.set_entry_point("extract")
     workflow.add_edge("extract", "validate")
     workflow.add_edge("validate", END)

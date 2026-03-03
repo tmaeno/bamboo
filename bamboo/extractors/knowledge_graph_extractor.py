@@ -44,7 +44,9 @@ class KnowledgeGraphExtractor:
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph and assign stable node IDs.
 
@@ -56,8 +58,16 @@ class KnowledgeGraphExtractor:
             email_text:    Email thread or communication text.
             task_data:     Structured task/issue data as a flat dict.
             external_data: External metadata as a flat dict.
-            logs:          Raw log output keyed by source name
-                           (e.g. ``{"pilot": "...", "payload": "..."}``).
+            task_logs:     *Task-level* log output keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``).
+                           Extracted nodes are tagged ``log_level="task"``.
+            job_logs:      *Job-level* log output keyed by a stable source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``, NOT
+                           a raw PanDA job ID).
+                           Extracted nodes are tagged ``log_level="job"``.
+            jobs_data:     List of raw job attribute dicts used for aggregated
+                           :class:`~bamboo.models.graph_element.JobFeatureNode`
+                           extraction.
 
         Returns:
             :class:`KnowledgeGraph` with all nodes carrying stable UUIDs.
@@ -66,7 +76,9 @@ class KnowledgeGraphExtractor:
             email_text=email_text,
             task_data=task_data,
             external_data=external_data,
-            logs=logs,
+            task_logs=task_logs,
+            job_logs=job_logs,
+            jobs_data=jobs_data,
         )
 
         for node in graph.nodes:

@@ -41,11 +41,21 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> KnowledgeGraph:
-        """Extract using LLM-based approach."""
+        """Extract using LLM-based approach.
+
+        ``job_logs`` and ``jobs_data`` are merged into the combined input text
+        alongside ``task_logs`` so the LLM sees the full picture.  More structured
+        job-level processing (aggregation, bucketing) requires the Panda
+        strategy; this strategy treats all inputs as unstructured prose.
+        """
         # Combine all input sources
-        input_data = self._prepare_input(email_text, task_data, external_data, logs)
+        input_data = self._prepare_input(
+            email_text, task_data, external_data, task_logs, job_logs, jobs_data
+        )
 
         # Use LLM to extract structured graph
         prompt = EXTRACTION_PROMPT.format(input_data=input_data)
@@ -90,9 +100,18 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         email_text: str,
         task_data: dict[str, Any],
         external_data: dict[str, Any],
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> str:
-        """Prepare combined input for LLM."""
+        """Prepare combined input for the LLM.
+
+        All sources are concatenated as labelled sections.  Task-level and
+        job-level logs are labelled differently so the LLM can distinguish
+        their provenance.  When ``jobs_data`` is provided a brief summary
+        (total count, failed count) is included rather than the full list to
+        avoid context-window bloat.
+        """
         sections = []
 
         if email_text:
@@ -106,9 +125,23 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
                 f"EXTERNAL INFORMATION:\n{json.dumps(external_data, indent=2)}"
             )
 
-        for source_name, source_log in (logs or {}).items():
+        for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():
-                sections.append(f"LOG OUTPUT ({source_name}):\n{source_log}")
+                sections.append(f"TASK-LEVEL LOG ({source_name}):\n{source_log}")
+
+        for source_name, source_log in (job_logs or {}).items():
+            if source_log and source_log.strip():
+                sections.append(f"JOB-LEVEL LOG ({source_name}):\n{source_log}")
+
+        if jobs_data:
+            total = len(jobs_data)
+            failed = sum(
+                1 for j in jobs_data if str(j.get("jobStatus", "")) != "finished"
+            )
+            sections.append(
+                f"JOB SUMMARY: {total} jobs total, {failed} failed "
+                f"({int(failed / total * 100)}% failure rate)."
+            )
 
         return "\n\n".join(sections)
 

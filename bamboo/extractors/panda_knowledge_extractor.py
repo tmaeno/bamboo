@@ -66,6 +66,7 @@ from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     GraphRelationship,
+    JobFeatureNode,
     RelationType,
     ResolutionNode,
     SymptomNode,
@@ -824,7 +825,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         email_text: str = "",
         task_data: Optional[dict[str, Any]] = None,
         external_data: Optional[dict[str, Any]] = None,
-        logs: Optional[dict[str, str]] = None,
+        task_logs: Optional[dict[str, str]] = None,
+        job_logs: Optional[dict[str, str]] = None,
+        jobs_data: Optional[list[dict[str, Any]]] = None,
     ) -> KnowledgeGraph:
         nodes: list = []
         relationships: list[GraphRelationship] = []
@@ -1006,11 +1009,29 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
 
-        for source_name, source_log in (logs or {}).items():
+        # Task-level logs (orchestration services: JEDI, Harvester, …)
+        for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():
-                log_nodes, log_rels = await self._extract_from_log(source_name, source_log)
+                log_nodes, log_rels = await self._extract_from_log(
+                    source_name, source_log, log_level="task"
+                )
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
+
+        # Job-level logs (execution workers: pilot, Athena/payload, …)
+        for source_name, source_log in (job_logs or {}).items():
+            if source_log and source_log.strip():
+                log_nodes, log_rels = await self._extract_from_log(
+                    source_name, source_log, log_level="job"
+                )
+                nodes.extend(log_nodes)
+                relationships.extend(log_rels)
+
+        # Aggregated job data → JobFeatureNodes + SymptomNodes + ComponentNodes
+        if jobs_data:
+            job_nodes, job_rels = await self._extract_from_jobs(jobs_data, nodes)
+            nodes.extend(job_nodes)
+            relationships.extend(job_rels)
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         logger.info(
@@ -1021,20 +1042,168 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         return graph
 
     # ------------------------------------------------------------------
+    # Job data extraction
+    # ------------------------------------------------------------------
+
+    async def _extract_from_jobs(
+        self,
+        jobs_data: list[dict[str, Any]],
+        existing_nodes: list,
+    ) -> tuple[list, list[GraphRelationship]]:
+        """Aggregate job records into JobFeatureNodes plus related graph elements.
+
+        Uses :class:`~bamboo.extractors.job_data_aggregator.JobDataAggregator`
+        to derive stable, reusable patterns from the raw job list, then:
+
+        1. Creates a :class:`~bamboo.models.graph_element.JobFeatureNode` for
+           each aggregated ``(attribute, value)`` pair.
+        2. Classifies each error signal through the error classifier to produce
+           additional :class:`~bamboo.models.graph_element.SymptomNode` values
+           (deduplicated against already-extracted task-level SymptomNodes).
+        3. Creates :class:`~bamboo.models.graph_element.ComponentNode` values
+           for dominant pilot version and worker type.
+        4. Creates :class:`~bamboo.models.graph_element.TaskContextNode` values
+           (vector DB only) for representative ``errorDiag`` strings.
+        5. Emits ``has_job_pattern`` edges from every task-level
+           :class:`~bamboo.models.graph_element.SymptomNode` in
+           *existing_nodes* to each new :class:`JobFeatureNode`, so the graph
+           can answer "what job-execution patterns are associated with this
+           symptom?".
+
+        Args:
+            jobs_data:      List of raw job attribute dicts.
+            existing_nodes: Nodes already extracted earlier in this call
+                            (used to find existing SymptomNodes for the
+                            ``has_job_pattern`` edges).
+
+        Returns:
+            Tuple of ``(new_nodes, new_relationships)``.
+        """
+        from bamboo.extractors.job_data_aggregator import JobDataAggregator
+
+        aggregator = JobDataAggregator()
+        agg = aggregator.aggregate(jobs_data)
+
+        nodes: list = []
+        relationships: list[GraphRelationship] = []
+
+        # 1. JobFeatureNodes
+        job_feature_nodes: list[JobFeatureNode] = []
+        for attribute, value, job_count in agg.feature_items:
+            node = JobFeatureNode(
+                name=f"{attribute}={value}",
+                attribute=attribute,
+                value=value,
+                job_count=job_count,
+                description=(
+                    f"Job-level aggregated pattern: {attribute} = {value} "
+                    f"(derived from {job_count} of {agg.total_jobs} jobs)"
+                ),
+                metadata={
+                    "source": "job_aggregation",
+                    "total_jobs": agg.total_jobs,
+                    "failed_jobs": agg.failed_jobs,
+                },
+            )
+            job_feature_nodes.append(node)
+            nodes.append(node)
+
+        # 2. SymptomNodes from error signals (dedup against existing symptoms)
+        existing_symptom_names: set[str] = {
+            n.name
+            for n in existing_nodes
+            if hasattr(n, "node_type") and "SYMPTOM" in str(n.node_type)
+        }
+        new_symptom_nodes: list[SymptomNode] = []
+        for signal in agg.error_signals:
+            category, confidence = await self._classify_error(signal)
+            if category in existing_symptom_names:
+                continue
+            existing_symptom_names.add(category)
+            symptom = SymptomNode(
+                name=category,
+                description=signal,
+                metadata={
+                    "source": "job_error_signal",
+                    "classifier_confidence": confidence,
+                    "raw_signal": signal,
+                },
+            )
+            new_symptom_nodes.append(symptom)
+            nodes.append(symptom)
+
+        # 3. ComponentNodes from component signals
+        for comp_name, comp_system in agg.component_signals:
+            nodes.append(
+                ComponentNode(
+                    name=comp_name,
+                    system=comp_system,
+                    description=f"Dominant {comp_system} version observed in jobs",
+                    metadata={"source": "job_aggregation"},
+                )
+            )
+
+        # 4. TaskContextNodes for representative errorDiag texts (vector DB only)
+        for diag_text in agg.context_texts:
+            nodes.append(
+                TaskContextNode(
+                    name="job_error_diag",
+                    description=diag_text,
+                    metadata={"source": "job_aggregation", "log_level": "job"},
+                )
+            )
+
+        # 5. has_job_pattern edges: every Symptom (existing + new) → each JobFeatureNode
+        all_symptom_nodes: list = [
+            n
+            for n in existing_nodes
+            if hasattr(n, "node_type") and "SYMPTOM" in str(n.node_type)
+        ] + new_symptom_nodes
+
+        for symptom in all_symptom_nodes:
+            for jf_node in job_feature_nodes:
+                relationships.append(
+                    GraphRelationship(
+                        source_id=symptom.name,
+                        target_id=jf_node.name,
+                        relation_type=RelationType.HAS_JOB_PATTERN,
+                        confidence=1.0,
+                    )
+                )
+
+        logger.debug(
+            "PandaKnowledgeExtractor: jobs_data (%d jobs) → "
+            "%d JobFeatureNodes, %d new SymptomNodes, %d ComponentNodes, "
+            "%d TaskContextNodes, %d has_job_pattern edges",
+            agg.total_jobs,
+            len(job_feature_nodes),
+            len(new_symptom_nodes),
+            len([n for n in nodes if hasattr(n, "system")]),
+            len(agg.context_texts),
+            len(relationships),
+        )
+        return nodes, relationships
+
+    # ------------------------------------------------------------------
     # Log extraction
     # ------------------------------------------------------------------
 
     async def _extract_from_log(
-        self, source_name: str, log_text: str
+        self, source_name: str, log_text: str, log_level: str = "task"
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Symptom/Component/Task_Context from one log source.
 
         Args:
-            source_name: Identifies the log origin (e.g. ``"pilot"``,
-                         ``"payload"``).  Stored in every node's metadata so
-                         the graph can distinguish which component produced
-                         which symptom.
+            source_name: Identifies the log origin (e.g. ``"jedi"``,
+                         ``"pilot"``, ``"payload"``).  Stored in every node's
+                         metadata so the graph can distinguish which component
+                         produced which symptom.
             log_text:    Raw log content for this source.
+            log_level:   ``"task"`` for orchestration-layer logs (JEDI,
+                         Harvester, etc.) or ``"job"`` for execution-layer logs
+                         (pilot, Athena/payload, etc.).  Stored in every
+                         extracted node's metadata so callers can filter by
+                         provenance level.
 
         Cause and Resolution are intentionally excluded — logs record *what*
         happened, not *why* or how to fix it.  Symptom names are canonicalised
@@ -1055,10 +1224,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             raw_name = node_data["name"]
             node_type_str = node_data.get("node_type", "")
 
-            # Tag every node with the log source so downstream queries can
-            # filter by origin (e.g. "only symptoms from the pilot log").
+            # Tag every node with both the log source and the log level so
+            # downstream queries can filter by origin (e.g. "symptoms from
+            # job-level pilot logs only").
             node_data = dict(node_data)
             node_data.setdefault("metadata", {})["log_source"] = source_name
+            node_data["metadata"]["log_level"] = log_level
 
             # Canonicalize Symptom names through the error classifier so they
             # merge with SymptomNodes produced from errorDialog.

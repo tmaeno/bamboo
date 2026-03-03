@@ -86,19 +86,23 @@ class GraphDatabaseBackend(ABC):
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
+        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Find candidate causes ranked by evidence breadth.
 
-        Each clue type (symptom, feature, environment, component) that links to
-        a cause adds +1 to its ``match_score``, so causes corroborated by
-        multiple clue types rank above those matched by only one.
+        Each clue type (symptom, task feature, job feature, environment,
+        component) that links to a cause contributes +1 to its
+        ``match_score``, so causes corroborated by multiple clue types rank
+        above those matched by only one.
 
         Args:
             symptoms:             Symptom node names.
             task_features:        Task-feature node names.
+            job_features:         Job-feature node names (aggregated execution
+                                  patterns, e.g. ``"site_failure_rate=AGLT2:high"``).
             environment_factors:  Environment node names.
             components:           Component node names.
             limit:                Maximum number of causes to return.

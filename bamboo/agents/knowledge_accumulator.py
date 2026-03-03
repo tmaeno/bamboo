@@ -57,7 +57,9 @@ class KnowledgeAccumulator:
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
@@ -76,8 +78,16 @@ class KnowledgeAccumulator:
                            together form the composite unique identifier used
                            to derive ``graph_id``.
             external_data: External environmental factors.
-            logs:          Raw log output keyed by source name
-                           (e.g. ``{"pilot": "...", "payload": "..."}``).
+            task_logs:     *Task-level* log output keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``).
+                           Extracted nodes are tagged ``log_level="task"``.
+            job_logs:      *Job-level* log output keyed by a stable source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``, NOT a
+                           raw PanDA job ID).
+                           Extracted nodes are tagged ``log_level="job"``.
+            jobs_data:     List of raw job attribute dicts used for aggregated
+                           :class:`~bamboo.models.graph_element.JobFeatureNode`
+                           extraction.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -98,7 +108,9 @@ class KnowledgeAccumulator:
             email_text=email_text,
             task_data=task_data,
             external_data=external_data,
-            logs=logs,
+            task_logs=task_logs,
+            job_logs=job_logs,
+            jobs_data=jobs_data,
         )
         graph.metadata["graph_id"] = graph_id
 
@@ -123,6 +135,10 @@ class KnowledgeAccumulator:
                 "has_email": bool(email_text),
                 "has_task_data": bool(task_data),
                 "has_external_data": bool(external_data),
+                "has_task_logs": bool(task_logs),
+                "has_job_logs": bool(job_logs),
+                "has_jobs_data": bool(jobs_data),
+                "jobs_count": len(jobs_data) if jobs_data else 0,
             },
         )
 
@@ -202,7 +218,7 @@ class KnowledgeAccumulator:
         Cause and Resolution nodes are intentionally excluded: their canonical
         names are already precisely indexed in the graph database.
         """
-        _INDEXABLE = {"Task_Context", "Symptom"}
+        _INDEXABLE = {"Task_Context", "Symptom", "Job_Feature"}
         insights = []
         for node in graph.nodes:
             if node.description and node.node_type.value in _INDEXABLE:

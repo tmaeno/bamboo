@@ -71,15 +71,21 @@ class ReasoningNavigator:
         because they are only available via vector search — they are not
         stored in the graph database.
 
+        ``JobFeatureNode`` values are kept separately from ``TaskFeatureNode``
+        so graph queries can score them independently: a cause corroborated by
+        both task-level and job-level features ranks higher.
+
         Args:
             graph: A :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`.
 
         Returns:
-            Dict with keys ``symptoms``, ``task_features``, ``task_contexts``,
-            ``environment_factors``, ``components``, ``context``.
+            Dict with keys ``symptoms``, ``task_features``, ``job_features``,
+            ``task_contexts``, ``environment_factors``, ``components``,
+            ``context``.
         """
         symptoms = []
         task_features = []
+        job_features = []
         task_contexts = []
         environment_factors = []
         components = []
@@ -91,6 +97,8 @@ class ReasoningNavigator:
             elif "TASK_CONTEXT" in node_type_str:
                 if node.description:
                     task_contexts.append(node.description)
+            elif "JOB_FEATURE" in node_type_str:
+                job_features.append(node.name)
             elif "TASK_FEATURE" in node_type_str or "FEATURE" in node_type_str:
                 task_features.append(node.name)
             elif "ENVIRONMENT" in node_type_str:
@@ -101,6 +109,7 @@ class ReasoningNavigator:
         return {
             "symptoms": symptoms,
             "task_features": task_features,
+            "job_features": job_features,
             "task_contexts": task_contexts,
             "environment_factors": environment_factors,
             "components": components,
@@ -111,13 +120,17 @@ class ReasoningNavigator:
         self,
         task_data: dict[str, Any],
         external_data: dict[str, Any] = None,
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> AnalysisResult:
+
         """Analyse a problematic task and return a root-cause + resolution result.
 
         Pipeline:
-            1. Extract knowledge graph from structured task fields and log output.
-            2. Query graph DB for candidate causes.
+            1. Extract knowledge graph from structured task fields, logs, job
+               logs, and aggregated job data.
+            2. Query graph DB for candidate causes (task features + job features).
             3. Query vector DB for similar past cases (two-step retrieval).
             4. Ask LLM to identify the root cause.
             5. Ask LLM to draft a resolution email.
@@ -127,8 +140,16 @@ class ReasoningNavigator:
                            is used together with ``taskID`` as the composite
                            unique identifier for the incident).
             external_data: Optional supplementary metadata.
-            logs:          Raw log output keyed by source name
-                           (e.g. ``{"pilot": "...", "payload": "..."}``).
+            task_logs:     *Task-level* log output keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``).
+                           Extracted nodes are tagged ``log_level="task"``.
+            job_logs:      *Job-level* log output keyed by a stable source name
+                           (e.g. ``{"pilot": "...", "payload": "..."}``, NOT a
+                           raw PanDA job ID).
+                           Extracted nodes are tagged ``log_level="job"``.
+            jobs_data:     List of raw job attribute dicts for aggregated
+                           :class:`~bamboo.models.graph_element.JobFeatureNode`
+                           extraction.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
@@ -143,7 +164,9 @@ class ReasoningNavigator:
             email_text="",
             task_data=task_data,
             external_data=external_data,
-            logs=logs,
+            task_logs=task_logs,
+            job_logs=job_logs,
+            jobs_data=jobs_data,
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
@@ -178,6 +201,10 @@ class ReasoningNavigator:
     ) -> list[dict[str, Any]]:
         """Query the graph DB for causes that match the extracted clues.
 
+        Both task-level features and job-level features are passed so that
+        causes corroborated by execution patterns rank alongside those
+        corroborated by task configuration.
+
         Args:
             extracted_clues: Output of :meth:`_extract_clues_from_graph`.
 
@@ -188,6 +215,7 @@ class ReasoningNavigator:
         results = await self.graph_db.find_causes(
             symptoms=extracted_clues.get("symptoms"),
             task_features=extracted_clues.get("task_features"),
+            job_features=extracted_clues.get("job_features"),
             environment_factors=extracted_clues.get("environment_factors"),
             components=extracted_clues.get("components"),
             limit=10,
@@ -230,6 +258,13 @@ class ReasoningNavigator:
                 (
                     "Task_Feature",
                     "Task features: " + ", ".join(extracted_clues["task_features"]),
+                )
+            )
+        if extracted_clues.get("job_features"):
+            section_queries.append(
+                (
+                    "Job_Feature",
+                    "Job execution patterns: " + ", ".join(extracted_clues["job_features"]),
                 )
             )
         for ctx in extracted_clues.get("task_contexts", []):

@@ -1,10 +1,32 @@
 """Abstract base classes for extraction strategy plugins.
 
 An :class:`ExtractionStrategy` converts raw incident data (email thread,
-structured task fields, external metadata, log output) into a
-:class:`KnowledgeGraph`.  New strategies are registered via
+structured task fields, external metadata, task-level log output, job-level
+log output, and raw job attributes) into a :class:`KnowledgeGraph`.  New
+strategies are registered via
 :func:`~bamboo.extractors.factory.register_extraction_strategy` and selected
 at runtime through the ``EXTRACTION_STRATEGY`` configuration key.
+
+Log-level distinction
+---------------------
+Two separate log parameters are accepted:
+
+``task_logs``
+    Task-level logs produced by orchestration services (e.g. JEDI,
+    Harvester).  These describe scheduling decisions, dataset handling, and
+    task-level errors.  Every extracted node is tagged
+    ``log_level="task"`` in its metadata.
+
+``job_logs``
+    Job-level logs produced by execution workers (e.g. pilot logs, Athena /
+    payload logs).  These describe what happened inside individual job
+    processes.  Every extracted node is tagged ``log_level="job"`` in its
+    metadata.
+
+Keeping the two separate preserves provenance: a
+:class:`~bamboo.models.graph_element.ComponentNode` originating from a pilot
+log is clearly an execution-layer component, while one from a JEDI log is a
+scheduling-layer component.
 """
 
 from abc import ABC, abstractmethod
@@ -31,7 +53,9 @@ class ExtractionStrategy(ABC):
         email_text: str = "",
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
-        logs: dict[str, str] = None,
+        task_logs: dict[str, str] = None,
+        job_logs: dict[str, str] = None,
+        jobs_data: list[dict[str, Any]] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
 
@@ -44,13 +68,22 @@ class ExtractionStrategy(ABC):
                            ``None``.
             external_data: External metadata (metrics, JIRA fields, etc.) as a
                            flat dict.  May be ``None``.
-            logs:          Raw log output from one or more sources, keyed by
-                           source name (e.g. ``{"pilot": "...", "payload": "..."}``)
-                           May be ``None``.  Each source is passed to the LLM
-                           separately to extract :class:`SymptomNode`,
-                           :class:`ComponentNode`, and :class:`TaskContextNode`
-                           nodes; Cause and Resolution are intentionally
-                           excluded (those come from email and graph reasoning).
+            task_logs:     *Task-level* log output from orchestration services
+                           (e.g. JEDI, Harvester), keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``)
+                           May be ``None``.  Extracted nodes are tagged
+                           ``log_level="task"`` in their metadata.
+            job_logs:      *Job-level* log output from execution workers
+                           (e.g. pilot, Athena/payload), keyed by a stable
+                           source name such as ``"pilot"`` or ``"payload"``
+                           (NOT a raw PanDA job ID).  May be ``None``.
+                           Extracted nodes are tagged ``log_level="job"``
+                           in their metadata.
+            jobs_data:     List of raw job attribute dicts (one per PanDA job).
+                           Used by :class:`JobDataAggregator` to derive
+                           aggregated :class:`JobFeatureNode` values, dominant
+                           error signals, and representative context texts.
+                           May be ``None``.
 
         Returns:
             :class:`KnowledgeGraph` containing the extracted nodes and

@@ -102,6 +102,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
+        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
@@ -110,9 +111,10 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         # Map each clue type to its node-type substring and relationship type
         clue_groups = [
             (symptoms or [], "SYMPTOM", "indicate"),
-            (task_features or [], "FEATURE", "contribute_to"),
+            (task_features or [], "TASK_FEATURE", "contribute_to"),
+            (job_features or [], "JOB_FEATURE", "contribute_to"),
             (environment_factors or [], "ENVIRONMENT", "contribute_to"),
-            (components or [], "COMPONENT", "contribute_to"),
+            (components or [], "COMPONENT", "originated_from"),
         ]
 
         # cause_id -> {"cause": node, "match_score": int, "resolutions": list}

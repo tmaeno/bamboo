@@ -517,7 +517,10 @@ async def test_full_knowledge_extraction():
 
         result = await agent.process_knowledge(
             email_text="Sample email",
-            task_data={"task_id": "TEST-1"},
+            task_data={"taskID": "TEST-1", "status": "failed"},
+            task_logs={"jedi": "sample jedi log output"},
+            job_logs={"pilot": "sample pilot log output"},
+            jobs_data=[{"PandaID": 1, "jobStatus": "failed", "computingSite": "AGLT2"}],
         )
 
         assert result.graph.nodes
@@ -725,17 +728,18 @@ refactor: Simplify database query methods
 
 ## Graph Schema Reference
 
-The Bamboo knowledge graph consists of **17 node types** and **18 relationship types**:
+The Bamboo knowledge graph consists of **18 node types** and **19 relationship types**:
 
-### Node Types (17)
+### Node Types (18)
 
 ```
 - Symptom: Symptom messages and failures
 - Cause: Root causes of issues
 - Resolution: Solutions and fixes
 - Environment: External factors
-- Task_Feature: Task features
-- Task_Context: Task context and reproduction steps
+- Task_Feature: Task configuration attributes (discrete or bucketed)
+- Job_Feature: Aggregated job-execution patterns (site failure rates, CPU ranges, etc.)
+- Task_Context: Free-form prose fields stored in vector DB for semantic search
 - Component: System origin of causes
 - Metric: System metrics and KPIs
 - Anomaly: Detected anomalies
@@ -749,15 +753,18 @@ The Bamboo knowledge graph consists of **17 node types** and **18 relationship t
 - User: Users (operators, engineers, admins)
 ```
 
-### Relationship Types (18)
+### Relationship Types (19)
 
 ```
 Core Relationships:
 - indicate: Symptom indicates Cause
 - associated_with: Environment associated with Cause
-- contribute_to: Task_Feature/Task_Context contributes to Cause
-- originated_from: Cause originated from Component
+- contribute_to: Task_Feature / Job_Feature / Task_Context contributes to Cause
+- originated_from: Component originated_from Cause
 - solved_by: Cause solved by Resolution
+- has_job_pattern: Symptom has_job_pattern Job_Feature
+  (links a task-level symptom to the aggregated job execution patterns
+   observed across the jobs that make up the failing task)
 
 System Relationships:
 - signals: Metric signals Anomaly
@@ -786,6 +793,8 @@ User (operator) ──[performed_by]──> Action ──[affects]──> System
 Metric ──[signals]──> Anomaly ──[leads_to]──> Issue ──[reported_by]──> User
    ↓
 Symptom ──[indicate]──> Cause ──[solved_by]──> Resolution
-         ↓
-     Component ──[originated_from]──> System
+   │              ↑
+   │         Component ──[originated_from]──> System
+   │
+   └──[has_job_pattern]──> Job_Feature ──[contribute_to]──> Cause
 ```

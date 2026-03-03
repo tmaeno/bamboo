@@ -61,14 +61,16 @@ class GraphDatabaseClient:
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
+        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Find candidate causes ranked by evidence breadth across clue types."""
+        """Find candidate causes ranked by evidence breadth across all clue types."""
         return await self._backend.find_causes(
             symptoms=symptoms,
             task_features=task_features,
+            job_features=job_features,
             environment_factors=environment_factors,
             components=components,
             limit=limit,

@@ -130,8 +130,8 @@ The following files were deleted as their content is now consolidated into the 4
 - **Where**: DEVELOPMENT.md (entire file)
 
 ### Graph Schema
-- **Where**: README.md (Graph Schema section, lines ~90-100)
-- **Details**: DEVELOPMENT.md (Extension points, lines ~360+)
+- **Where**: README.md (Graph Schema section)
+- **Details**: DEVELOPMENT.md (Graph Schema Reference — 18 node types, 19 relationship types)
 
 ### Technologies
 - **Where**: README.md (Technologies section, lines ~165-175)

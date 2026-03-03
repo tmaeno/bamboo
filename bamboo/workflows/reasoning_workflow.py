@@ -10,10 +10,34 @@ from bamboo.database.vector_database_client import VectorDatabaseClient
 
 
 class ReasoningState(TypedDict):
-    """State for reasoning workflow."""
+    """State for the reasoning workflow.
+
+    Attributes:
+        task_data:          Structured task fields.
+        external_data:      Optional supplementary metadata.
+        task_logs:          *Task-level* log output keyed by source name
+                            (e.g. ``{"jedi": "...", "harvester": "..."}``).
+        job_logs:           *Job-level* log output keyed by a stable source name
+                            (e.g. ``{"pilot": "...", "payload": "..."}``).
+        jobs_data:          List of raw job attribute dicts for aggregated
+                            :class:`~bamboo.models.graph_element.JobFeatureNode`
+                            extraction.
+        extracted_features: Clue dict produced by
+                            :meth:`~bamboo.agents.reasoning_navigator.ReasoningNavigator._extract_clues_from_graph`.
+        graph_results:      Candidate causes from the graph DB.
+        vector_results:     Similar past cases from the vector DB.
+        analysis:           Root-cause analysis dict.
+        email_content:      Draft resolution email.
+        status:             Workflow status string.
+        error:              Error message if ``status == "error"``.
+        human_feedback:     ``"approve"`` or ``"reject"`` from human review step.
+    """
 
     task_data: dict[str, Any]
     external_data: Optional[dict[str, Any]]
+    task_logs: Optional[dict[str, str]]
+    job_logs: Optional[dict[str, str]]
+    jobs_data: Optional[list[dict[str, Any]]]
     extracted_features: Optional[dict[str, Any]]
     graph_results: Optional[list[dict[str, Any]]]
     vector_results: Optional[list[dict[str, Any]]]
@@ -25,7 +49,7 @@ class ReasoningState(TypedDict):
 
 
 async def analyze_task_node(state: ReasoningState) -> ReasoningState:
-    """Analyze task and determine root cause."""
+    """Analyse a problematic task and determine its root cause."""
     try:
         graph_db = GraphDatabaseClient()
         vector_db = VectorDatabaseClient()
@@ -38,6 +62,9 @@ async def analyze_task_node(state: ReasoningState) -> ReasoningState:
         result = await agent.analyze_task(
             task_data=state["task_data"],
             external_data=state["external_data"],
+            task_logs=state.get("task_logs"),
+            job_logs=state.get("job_logs"),
+            jobs_data=state.get("jobs_data"),
         )
 
         await graph_db.close()
@@ -63,9 +90,12 @@ async def analyze_task_node(state: ReasoningState) -> ReasoningState:
 
 
 async def human_review_node(state: ReasoningState) -> ReasoningState:
-    """Wait for human review and feedback."""
-    # In a real implementation, this would pause for human input
-    # For now, we'll just mark it as ready for review
+    """Wait for human review and feedback.
+
+    In a real deployment this node would pause the workflow and surface the
+    draft email to an operator.  The operator sets ``human_feedback`` to
+    ``"approve"`` or ``"reject"`` before resuming.
+    """
     return {
         **state,
         "status": "awaiting_review",
@@ -73,7 +103,7 @@ async def human_review_node(state: ReasoningState) -> ReasoningState:
 
 
 def should_send_email(state: ReasoningState) -> str:
-    """Determine if email should be sent or needs revision."""
+    """Routing function: decide next step based on human feedback."""
     if state.get("human_feedback") == "approve":
         return "send"
     elif state.get("human_feedback") == "reject":
@@ -83,25 +113,22 @@ def should_send_email(state: ReasoningState) -> str:
 
 
 def create_reasoning_workflow() -> StateGraph:
-    """Create reasoning workflow with human-in-the-loop."""
+    """Create and compile the reasoning LangGraph workflow with human-in-the-loop."""
     workflow = StateGraph(ReasoningState)
 
-    # Add nodes
     workflow.add_node("analyze", analyze_task_node)
     workflow.add_node("review", human_review_node)
 
-    # Add edges
     workflow.set_entry_point("analyze")
     workflow.add_edge("analyze", "review")
 
-    # Conditional edge based on human feedback
     workflow.add_conditional_edges(
         "review",
         should_send_email,
         {
             "send": END,
-            "revise": "analyze",  # Re-analyze with feedback
-            "review": "review",  # Stay in review state
+            "revise": "analyze",
+            "review": "review",
         },
     )
 
