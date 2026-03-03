@@ -109,7 +109,6 @@ pip install sentence-transformers langchain-huggingface
 ```env
 LLM_PROVIDER=ollama
 LLM_MODEL=llama3.2          # or mistral, gemma3, etc.
-LLM_API_KEY=                # leave it empty for local LLM, no key needed
 EMBEDDINGS_PROVIDER=local   # runs sentence-transformers in-process, no API key
 EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-dim)
 EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
