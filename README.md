@@ -14,7 +14,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ✅ **Dual Database** - Graph + Vector search  
 ✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
 ✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
-✅ **Task & Job awareness** - Task-level configuration (`Task_Feature`) and aggregated job-execution patterns (`Job_Feature`) are both first-class graph entities; logs are distinguished as task-level (orchestration) or job-level (execution)  
+✅ **Task & Job awareness** - Hierarchical insights into tasks, jobs, and their relationships
 ✅ **MCP Tools** - Domain-specific Model Context Protocol tools  
 ✅ **Human-in-Loop** - Safety through human oversight
 
