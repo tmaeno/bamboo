@@ -25,7 +25,7 @@ Prompt constants
     Normalises a raw Cause/Resolution name into a stable canonical phrase,
     optionally matching against existing names from the vector DB.
 
-``ERROR_CATEGORY_LABEL_PROMPT``
+``TASK_ERROR_CATEGORY_LABEL_PROMPT``
     Converts a raw error message into a short CamelCase error-category label.
     Used by :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryStore`.
 
@@ -41,9 +41,12 @@ Prompt constants
     Drafts a professional resolution email for a task submitter.
     Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningNavigator`.
 
-``FEATURE_EXTRACTION_PROMPT``
-    Extracts structured features from raw task and external data.
-    (Legacy; superseded by ``PandaKnowledgeExtractor`` for Panda tasks.)
+``JOB_DIAG_NORMALIZE_PROMPT``
+    Strips job-specific tokens (file names, dataset scopes, job IDs, replica
+    URLs, etc.) from a raw error diagnostic string, returning a reusable
+    canonical description of the *type* of problem.
+    Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
+    before storing job error diagnostics as ``TaskContextNode``.
 """
 
 EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to extract structured knowledge from the provided information and construct a knowledge graph.
@@ -308,7 +311,7 @@ Raw name: {raw_name}
 
 Canonical name:"""
 
-ERROR_CATEGORY_LABEL_PROMPT = """You are an error classification expert.
+TASK_ERROR_CATEGORY_LABEL_PROMPT = """You are an error classification expert.
 
 Given a raw error message from an operational system, produce a short, canonical error-category label.
 
@@ -349,7 +352,7 @@ Node types to extract:
   name = a short CamelCase label describing the error pattern, stripped of all
          incident-specific tokens (dataset names, file paths, job IDs, timestamps,
          hostnames, numeric IDs).  Use the same canonicalisation rules as
-         ERROR_CATEGORY_LABEL_PROMPT — the same structural error in two different
+         TASK_ERROR_CATEGORY_LABEL_PROMPT — the same structural error in two different
          jobs must produce the same Symptom name.
   description = one representative log line that best illustrates the error,
                 lightly redacted to remove incident-specific tokens.
@@ -412,3 +415,33 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
   ]
 }}
 """
+
+JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.
+
+A PanDA job produced the following error diagnostic message:
+
+  {diag_text}
+
+Your task is to rewrite this message as a SHORT, REUSABLE description of the
+TYPE of problem, removing all job-specific tokens so that semantically
+identical errors from different jobs produce the same output.
+
+Remove:
+- File names, dataset names, dataset scopes, LFNs, GUIDs
+- Replica URLs, storage endpoints, RSE names
+- Job IDs, task IDs, PanDA IDs, pilot IDs, process IDs
+- Timestamps, hostnames, IP addresses, port numbers
+- User names, working-group scopes
+- Any numeric identifier that is unique per job or per run
+
+Keep:
+- The error category or error type (e.g. "missing replica", "quota exceeded",
+  "stage-in failure", "payload exit code non-zero")
+- The system or component involved (e.g. "Rucio", "DDM", "pilot", "Athena")
+- The structural cause if evident (e.g. "too many files", "checksum mismatch",
+  "permission denied")
+
+Return ONLY the normalised string — no JSON, no explanation, no punctuation
+beyond what is part of the message itself.  Maximum 120 characters.
+"""
+

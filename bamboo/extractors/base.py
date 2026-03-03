@@ -80,7 +80,7 @@ class ExtractionStrategy(ABC):
                            Extracted nodes are tagged ``log_level="job"``
                            in their metadata.
             jobs_data:     List of raw job attribute dicts (one per PanDA job).
-                           Used by :class:`JobDataAggregator` to derive
+                           Used by :class:`PandaJobDataAggregator` to derive
                            aggregated :class:`JobFeatureNode` values, dominant
                            error signals, and representative context texts.
                            May be ``None``.

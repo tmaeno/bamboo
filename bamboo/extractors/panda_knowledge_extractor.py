@@ -65,7 +65,8 @@ from bamboo.llm import (
 )
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
-    ERROR_CATEGORY_LABEL_PROMPT,
+    JOB_DIAG_NORMALIZE_PROMPT,
+    TASK_ERROR_CATEGORY_LABEL_PROMPT,
 )
 from bamboo.models.graph_element import (
     CauseNode,
@@ -599,7 +600,7 @@ async def _generate_category_label(error_message: str) -> str:
     """
     llm = get_llm()
     response = await llm.ainvoke(
-        ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
+        TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
     )
     label = re.sub(r"[^A-Za-z]", "", response.content.strip())
     if not label:
@@ -607,6 +608,35 @@ async def _generate_category_label(error_message: str) -> str:
             f"LLM returned an empty or non-alphabetic label for message: {error_message!r}"
         )
     return label
+
+
+async def _normalize_diag(diag_text: str) -> str:
+    """LLM: strip job-specific tokens from a raw error diagnostic string.
+
+    Converts incident-specific messages such as::
+
+        "File user.abc.input.AOD_1234.pool.root missing at AGLT2_DATADISK"
+
+    into a reusable canonical description::
+
+        "Input file missing at storage endpoint"
+
+    so that semantically identical diagnostics from different jobs produce the
+    same embedding and collapse to a single ``TaskContextNode`` in the vector DB.
+
+    Raises:
+        ValueError: If the LLM returns an empty string.
+    """
+    llm = get_llm()
+    response = await llm.ainvoke(
+        JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text)
+    )
+    normalised = response.content.strip()
+    if not normalised:
+        raise ValueError(
+            f"LLM returned an empty normalised diag for: {diag_text!r}"
+        )
+    return normalised
 
 
 def _make_cause_resolution_label_fn(node_type: str):
@@ -1057,7 +1087,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     ) -> tuple[list, list[GraphRelationship]]:
         """Aggregate job records into JobFeatureNodes plus related graph elements.
 
-        Uses :class:`~bamboo.extractors.job_data_aggregator.JobDataAggregator`
+        Uses :class:`~bamboo.extractors.panda_job_data_aggregator.PandaJobDataAggregator`
         to derive stable, reusable patterns from the raw job list, then:
 
         1. Creates a :class:`~bamboo.models.graph_element.JobFeatureNode` for
@@ -1067,8 +1097,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
            (deduplicated against already-extracted task-level SymptomNodes).
            Error signals are prefixed with their source channel
            (``"pilot:<code>"`` or ``"payload:<code>"``).
-        3. Creates :class:`~bamboo.models.graph_element.TaskContextNode` values
-           (vector DB only) for representative diagnostic strings.
+        3. Normalises each representative diagnostic string with the LLM
+           (via :func:`_normalize_diag`) to strip job-specific tokens (file
+           names, dataset scopes, replica URLs, etc.), then creates a
+           :class:`~bamboo.models.graph_element.TaskContextNode` per unique
+           normalised string (vector DB only).  Identical problems from
+           different jobs collapse to a single node.
         4. Emits ``has_job_pattern`` edges from every task-level
            :class:`~bamboo.models.graph_element.SymptomNode` in
            *existing_nodes* to each new :class:`JobFeatureNode`, so the graph
@@ -1084,9 +1118,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         Returns:
             Tuple of ``(new_nodes, new_relationships)``.
         """
-        from bamboo.extractors.job_data_aggregator import JobDataAggregator
+        from bamboo.extractors.panda_job_data_aggregator import PandaJobDataAggregator
 
-        aggregator = JobDataAggregator()
+        aggregator = PandaJobDataAggregator()
         agg = aggregator.aggregate(jobs_data)
 
         nodes: list = []
@@ -1137,13 +1171,33 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             new_symptom_nodes.append(symptom)
             nodes.append(symptom)
 
-        # 3. TaskContextNodes for representative errorDiag texts (vector DB only)
-        for diag_text in agg.context_texts:
+        # 3. TaskContextNodes — normalise each raw diag with the LLM first to
+        #    strip job-specific tokens (file names, dataset scopes, replica URLs,
+        #    etc.) so that semantically identical messages from different jobs
+        #    collapse to a single node in the vector DB.
+        seen_normalised: set[str] = set()
+        for raw_diag in agg.context_texts:
+            try:
+                normalised = await _normalize_diag(raw_diag)
+            except ValueError as exc:
+                logger.warning(
+                    "PandaKnowledgeExtractor: diag normalisation failed (%s) — skipped: %r",
+                    exc,
+                    raw_diag,
+                )
+                continue
+            if normalised in seen_normalised:
+                continue
+            seen_normalised.add(normalised)
             nodes.append(
                 TaskContextNode(
                     name="job_error_diag",
-                    description=diag_text,
-                    metadata={"source": "job_aggregation", "log_level": "job"},
+                    description=normalised,
+                    metadata={
+                        "source": "job_aggregation",
+                        "log_level": "job",
+                        "raw_diag": raw_diag,
+                    },
                 )
             )
 

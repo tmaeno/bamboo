@@ -1,6 +1,6 @@
-"""Job-data aggregation for the Bamboo knowledge pipeline.
+"""PanDA job-data aggregation for the Bamboo knowledge pipeline.
 
-:class:`JobDataAggregator` converts a list of raw PanDA job attribute dicts
+:class:`PandaJobDataAggregator` converts a list of raw PanDA job attribute dicts
 into a small number of stable, reusable graph nodes plus a set of raw signals
 for further processing.
 
@@ -20,14 +20,17 @@ non-reusable nodes — a graph antipattern.  Instead, aggregation extracts the
 * **Continuous numeric values** (CPU time, actual memory) are bucketed using
   the same ``_BUCKETS`` thresholds as ``task_data`` continuous keys.
 
-* **Error signals** from two distinct PanDA error channels:
+* **Error signals** from three distinct PanDA error channels:
 
   - *Pilot channel* (``pilotErrorCode`` / ``pilotErrorDiag``): failures
     detected by the pilot process (e.g. lost heartbeat, stage-in failure).
     Signals are prefixed ``"pilot:<code>"``.
-  - *Payload channel* (``transExitCode``): non-zero exit
-    codes from the transformation / user payload (e.g. Athena crash).
+  - *Payload channel* (``transExitCode``): non-zero exit codes from the
+    transformation / user payload (e.g. Athena crash).
     Signals are prefixed ``"payload:<code>"``.
+  - *DDM channel* (``ddmErrorCode`` / ``ddmErrorDiag``): data-management
+    failures reported by Rucio/DDM (e.g. missing replicas, quota exceeded).
+    Signals are prefixed ``"ddm:<code>"``.
 
   Both channels are collected as raw strings for the caller to pass through
   :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`,
@@ -41,7 +44,7 @@ non-reusable nodes — a graph antipattern.  Instead, aggregation extracts the
 
 Output
 ------
-:meth:`JobDataAggregator.aggregate` returns a :class:`JobAggregationResult`
+:meth:`PandaJobDataAggregator.aggregate` returns a :class:`JobAggregationResult`
 dataclass.  The caller (``PandaKnowledgeExtractor._extract_from_jobs``) is
 responsible for:
 
@@ -79,10 +82,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Keys whose dominant value becomes a JobFeatureNode via _aggregate_discrete.
 # Keys handled by dedicated aggregation steps are excluded here:
-#   - computingSite  → _aggregate_site_failure_rates
-#   - jobStatus      → failure counting (not a feature node)
-#   - pilotErrorCode, pilotErrorDiag, transExitCode
-#                    → _aggregate_error_signals
+#   - computingSite                          → _aggregate_site_failure_rates
+#   - jobStatus                              → failure counting (not a feature node)
+#   - pilotErrorCode, pilotErrorDiag         → _aggregate_error_signals (pilot channel)
+#   - transExitCode                          → _aggregate_error_signals (payload channel)
+#   - ddmErrorCode, ddmErrorDiag             → _aggregate_error_signals (ddm channel)
 # ---------------------------------------------------------------------------
 JOB_DISCRETE_KEYS: frozenset[str] = frozenset(
     {
@@ -200,7 +204,7 @@ def _bucket_failure_rate(rate: float) -> str:
 
 @dataclass
 class JobAggregationResult:
-    """Output of :meth:`JobDataAggregator.aggregate`.
+    """Output of :meth:`PandaJobDataAggregator.aggregate`.
 
     Attributes:
         feature_items:  List of ``(attribute, value, job_count)`` tuples
@@ -231,18 +235,19 @@ class JobAggregationResult:
 # ---------------------------------------------------------------------------
 
 
-class JobDataAggregator:
-    """Aggregates a list of raw job dicts into stable, reusable knowledge signals.
+class PandaJobDataAggregator:
+    """Aggregates a list of raw PanDA job dicts into stable, reusable knowledge signals.
 
     The aggregator is stateless and has no database dependency.  Instantiate
     once and call :meth:`aggregate` for each batch of jobs.
 
     Args:
-        max_context_texts:  Maximum number of representative ``errorDiag``
-                            strings forwarded to the vector DB.
+        max_context_texts:     Maximum number of representative diagnostic
+                               strings forwarded to the vector DB.
         min_dominant_fraction: Minimum fraction a value must represent to be
-                            emitted as a dominant ``JobFeatureNode``.  Values
-                            below this are too scattered to be meaningful.
+                               emitted as a dominant ``JobFeatureNode``.
+                               Values below this are too scattered to be
+                               meaningful.
     """
 
     def __init__(
@@ -266,7 +271,7 @@ class JobDataAggregator:
 
         Returns:
             :class:`JobAggregationResult` with feature items, error signals,
-            component signals, and representative context texts.
+            and representative context texts.
         """
         if not jobs_data:
             return JobAggregationResult()
@@ -282,7 +287,7 @@ class JobDataAggregator:
         self._aggregate_error_signals(jobs_data, result)
 
         logger.debug(
-            "JobDataAggregator: %d jobs → %d feature items, %d error signals, "
+            "PandaJobDataAggregator: %d jobs → %d feature items, %d error signals, "
             "%d context texts",
             total,
             len(result.feature_items),
@@ -304,9 +309,9 @@ class JobDataAggregator:
         """Emit a JobFeatureNode for the dominant value of each discrete key.
 
         Only keys in :data:`JOB_DISCRETE_KEYS` are processed here.  Keys
-        handled by dedicated aggregation steps (error channels, component
-        signals, site failure rates) are intentionally absent from
-        ``JOB_DISCRETE_KEYS`` and are therefore never reached here.
+        handled by dedicated aggregation steps (error channels, site failure
+        rates) are intentionally absent from ``JOB_DISCRETE_KEYS`` and are
+        therefore never reached here.
         """
         for key in JOB_DISCRETE_KEYS:
             counter: Counter[str] = Counter()
@@ -397,7 +402,7 @@ class JobDataAggregator:
     ) -> None:
         """Collect error signals from pilot and payload error channels.
 
-        PanDA jobs carry two distinct error channels:
+        PanDA jobs carry three distinct error channels:
 
         * **Pilot channel** — ``pilotErrorCode`` / ``pilotErrorDiag``:
           failures detected by the pilot (e.g. lost heartbeat, stage-in
@@ -405,6 +410,9 @@ class JobDataAggregator:
         * **Payload channel** — ``transExitCode``:
           non-zero exit codes from the transformation / payload execution
           (e.g. Athena crash, user script failure).
+        * **DDM channel** — ``ddmErrorCode`` / ``ddmErrorDiag``:
+          data-management failures reported by Rucio/DDM (e.g. replication
+          errors, missing replicas, quota exceeded).
 
         For each channel, the dominant error code is added to
         ``error_signals`` for the caller to classify via
@@ -414,13 +422,11 @@ class JobDataAggregator:
 
         Error code ``"0"`` is always skipped (success / no error).
         """
-        # (error_source, error_code, diag_text)
-        ErrorEntry = tuple[str, str, str]
-
-        channels: list[tuple[str, str, str]] = [
+        channels: list[tuple[str, str, str | None]] = [
             # (source_label, code_key, diag_key)
-            ("pilot", "pilotErrorCode", "pilotErrorDiag"),
-            ("payload", "transExitCode", None),
+            ("pilot",   "pilotErrorCode", "pilotErrorDiag"),
+            ("payload", "transExitCode",  None),
+            ("ddm",     "ddmErrorCode",   "ddmErrorDiag"),
         ]
 
         seen_diags: set[str] = set()
@@ -433,7 +439,7 @@ class JobDataAggregator:
                 code = job.get(code_key)
                 if code is None or not str(code).strip() or str(code) == "0":
                     continue
-                diag = str(job.get(diag_key, "")).strip()
+                diag = str(job.get(diag_key, "")).strip() if diag_key else ""
                 pairs.append((str(code), diag))
 
             if not pairs:
@@ -456,3 +462,4 @@ class JobDataAggregator:
                         break
                 if len(result.context_texts) >= self._max_context:
                     break
+
