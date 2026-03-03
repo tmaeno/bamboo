@@ -55,19 +55,57 @@ make docker-up
 
 ### 4. Configure Environment
 
-`bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your API keys:
+`bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
 
 ```bash
-# bamboo-verify shows the exact path — copy it here
 cp <path-shown-by-bamboo-verify> .env
-
-# Edit .env and add your API keys
-# At minimum, set:
-# - OPENAI_API_KEY (or ANTHROPIC_API_KEY)
-# - NEO4J_PASSWORD (default: password)
 ```
 
-Alternatively, retrieve the path directly:
+Then edit `.env`.  The minimum required settings depend on which embeddings backend you choose:
+
+#### Option A — OpenAI for both LLM and embeddings (default, paid)
+
+```env
+LLM_API_KEY=sk-...          # Your OpenAI API key
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4-turbo-preview
+EMBEDDINGS_PROVIDER=openai  # default — reuses LLM_API_KEY automatically
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+```
+
+#### Option B — Anthropic LLM + OpenAI embeddings (both paid)
+
+```env
+LLM_API_KEY=sk-ant-...      # Your Anthropic API key
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-6
+EMBEDDINGS_PROVIDER=openai  # Anthropic has no embeddings API
+EMBEDDINGS_API_KEY=sk-...   # Separate OpenAI key for embeddings
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSION=1536
+```
+
+#### Option C — OpenAI or Anthropic LLM + local sentence-transformers embeddings (free embeddings)
+
+```bash
+# Install the extra dependencies first
+pip install sentence-transformers langchain-huggingface
+# or: pip install "bamboo[local-embeddings]"
+```
+
+```env
+LLM_API_KEY=sk-...          # OpenAI or Anthropic key for the LLM
+LLM_PROVIDER=openai         # or anthropic
+EMBEDDINGS_PROVIDER=local   # runs sentence-transformers in-process, no API key
+EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-dim)
+EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
+```
+
+> **Note:** When switching from OpenAI embeddings to local (or vice-versa) you must
+> re-populate the vector database, as the embedding dimensions and vector space differ.
+
+Alternatively, retrieve the `.env.example` path directly:
 
 ```bash
 python -c "import importlib.resources; print(importlib.resources.files('bamboo.data').joinpath('.env.example'))"
@@ -316,22 +354,11 @@ grep API_KEY .env
 python -c "
 from bamboo.config import get_settings
 s = get_settings()
-print('provider :', s.llm_provider)
-print('model    :', s.llm_model)
-print('openai   :', 'set' if s.openai_api_key else 'MISSING')
-print('anthropic:', 'set' if s.anthropic_api_key else 'MISSING')
-"
-
-# Verify the key for the configured provider is actually set
-python -c "
-from bamboo.config import get_settings
-s = get_settings()
-if s.llm_provider == 'openai' and not s.openai_api_key:
-    print('ERROR: LLM_PROVIDER=openai but OPENAI_API_KEY is not set')
-elif s.llm_provider == 'anthropic' and not s.anthropic_api_key:
-    print('ERROR: LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set')
-else:
-    print('OK: API key for', s.llm_provider, 'is set')
+print('llm_provider        :', s.llm_provider)
+print('llm_model           :', s.llm_model)
+print('llm_api_key         :', 'set' if s.llm_api_key else 'MISSING')
+print('embeddings_provider :', s.embeddings_provider)
+print('embeddings_api_key  :', 'set' if s.effective_embeddings_api_key else 'MISSING (not needed for local)')
 "
 
 # Test that the LLM client can be constructed (does not make a network call)
@@ -354,10 +381,11 @@ Common errors:
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `AuthenticationError` / `401` | Wrong or missing API key | Check `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in `.env` |
+| `AuthenticationError` / `401` | Wrong or missing API key | Check `LLM_API_KEY` (and `EMBEDDINGS_API_KEY` when `EMBEDDINGS_PROVIDER=openai`) in `.env` |
 | `ValueError: llm_provider must be...` | Invalid `LLM_PROVIDER` value | Set `LLM_PROVIDER=openai` or `LLM_PROVIDER=anthropic` |
-| `openai_api_key` is empty | `.env` not loaded | Make sure `.env` is in the working directory where you run Bamboo |
+| `llm_api_key` is empty | `.env` not loaded | Make sure `.env` is in the working directory where you run Bamboo |
 | `RateLimitError` | API quota exceeded | Check your API plan or wait and retry |
+| `ImportError: sentence-transformers` | Missing local-embeddings deps | Run `pip install sentence-transformers langchain-huggingface` |
 
 ### Import Errors
 

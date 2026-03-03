@@ -18,10 +18,19 @@ class Settings(BaseSettings):
     """Centralised application configuration.
 
     Attributes:
-        openai_api_key:           OpenAI API key (required when
-                                  ``llm_provider="openai"``).
-        anthropic_api_key:        Anthropic API key (required when
-                                  ``llm_provider="anthropic"``).
+        llm_api_key:              API key for the configured LLM provider
+                                  (OpenAI or Anthropic).
+        embeddings_api_key:       API key for the embeddings provider.
+                                  Not used when ``embeddings_provider="local"``.
+                                  Leave empty when ``llm_provider="openai"``
+                                  and ``embeddings_provider="openai"`` —
+                                  ``llm_api_key`` is reused automatically via
+                                  :attr:`effective_embeddings_api_key`.
+        embeddings_provider:      Embeddings backend: ``"openai"`` (default,
+                                  requires API key) or ``"local"`` (free,
+                                  runs ``sentence-transformers`` in-process,
+                                  no API key needed).  Anthropic does not
+                                  provide an embeddings API.
         llm_provider:             LLM backend — ``"openai"`` or
                                   ``"anthropic"``.
         llm_model:                Model name passed to the LLM SDK.
@@ -48,9 +57,10 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
+    llm_api_key: str = ""
+    embeddings_api_key: str = ""  # falls back to llm_api_key when empty
     llm_provider: Literal["openai", "anthropic"] = "openai"
+    embeddings_provider: Literal["openai", "local"] = "openai"
     llm_model: str = "gpt-4-turbo-preview"
 
     # Extraction
@@ -77,6 +87,17 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
+
+    @property
+    def effective_embeddings_api_key(self) -> str:
+        """Return the API key to use for embeddings.
+
+        Falls back to ``llm_api_key`` when ``embeddings_api_key`` is not set,
+        which is the common case when ``llm_provider="openai"`` and both the
+        LLM and embeddings share the same key.  Not used when
+        ``embeddings_provider="local"``.
+        """
+        return self.embeddings_api_key or self.llm_api_key
 
 
 @lru_cache
