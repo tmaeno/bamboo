@@ -100,35 +100,22 @@ No API keys required at all.
 ollama pull llama3.2
 # 3. Keep the server running in a separate terminal
 ollama serve
-# 4. Install the extra Python dependencies
-pip install "bamboo[local]"
-# or: pip install langchain-ollama sentence-transformers langchain-huggingface
+# 4. Install the extra dependencies for local LLM and Ollama
+pip install langchain-ollama sentence-transformers langchain-huggingface
+# Install the extra dependencies for local embeddings
+pip install sentence-transformers langchain-huggingface
 ```
 
 ```env
 LLM_PROVIDER=ollama
 LLM_MODEL=llama3.2          # or mistral, gemma3, etc.
-EMBEDDINGS_PROVIDER=local
-EMBEDDING_MODEL=all-MiniLM-L6-v2
-EMBEDDING_DIMENSION=384
-```
-
-
-```bash
-# Install the extra dependencies first
-pip install sentence-transformers langchain-huggingface
-# or: pip install "bamboo[local-embeddings]"
-```
-
-```env
-LLM_API_KEY=sk-...          # OpenAI or Anthropic key for the LLM
-LLM_PROVIDER=openai         # or anthropic
+LLM_API_KEY=                # leave it empty for local LLM, no key needed
 EMBEDDINGS_PROVIDER=local   # runs sentence-transformers in-process, no API key
 EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-dim)
 EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
 ```
 
-> **Note:** When switching from OpenAI embeddings to local (or vice-versa) you must
+> **Note:** When switching embeddings you must
 > re-populate the vector database, as the embedding dimensions and vector space differ.
 
 Alternatively, retrieve the `.env.example` path directly:
