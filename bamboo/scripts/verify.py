@@ -185,22 +185,35 @@ def check_api_keys() -> bool:
 
     ok = True
 
-    # Main LLM key
-    if s.llm_api_key:
-        _ok(f"LLM_API_KEY is set  (provider: {s.llm_provider}, model: {s.llm_model})")
+    # LLM key — not required for ollama (runs locally)
+    if s.llm_provider == "ollama":
+        _ok(f"LLM provider: ollama / {s.llm_model}  (no API key required)")
+        import urllib.request
+        ollama_base = getattr(s, "ollama_base_url", "http://localhost:11434")
+        try:
+            urllib.request.urlopen(ollama_base, timeout=2)
+            _ok(f"Ollama server is reachable at {ollama_base}")
+        except Exception:
+            _fail(
+                f"Ollama server not reachable at {ollama_base}",
+                "Run:  ollama serve\n"
+                f"    then pull the model:  ollama pull {s.llm_model}",
+            )
+            ok = False
     else:
-        _fail(
-            "LLM_API_KEY is not set",
-            "Add LLM_API_KEY=<your-key> to your .env file",
-        )
-        ok = False
+        if s.llm_api_key:
+            _ok(f"LLM_API_KEY is set  (provider: {s.llm_provider}, model: {s.llm_model})")
+        else:
+            _fail(
+                "LLM_API_KEY is not set",
+                "Add LLM_API_KEY=<your-key> to your .env file",
+            )
+            ok = False
 
     # Embeddings key — only needed when EMBEDDINGS_PROVIDER=openai
     if s.embeddings_provider == "openai":
         if s.effective_embeddings_api_key:
-            _ok(
-                f"Embeddings: openai / {s.embedding_model}  (API key is set)"
-            )
+            _ok(f"Embeddings: openai / {s.embedding_model}  (API key is set)")
         else:
             _fail(
                 "Embeddings API key is not set",
@@ -213,7 +226,6 @@ def check_api_keys() -> bool:
             f"Embeddings: local / sentence-transformers / {s.embedding_model}  "
             "(no API key required)"
         )
-        # Check the packages are actually installed
         try:
             import sentence_transformers  # noqa: F401
         except ImportError:

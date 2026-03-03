@@ -41,9 +41,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Free local embeddings (sentence-transformers, no API key required)
 local-embeddings = [
     "sentence-transformers>=2.7.0",
     "langchain-huggingface>=0.0.3",
+]
+# Free local LLM via Ollama (no API key required; install Ollama separately)
+ollama = [
+    "langchain-ollama>=0.1.0",
+]
+# Fully free setup: local LLM (Ollama) + local embeddings (sentence-transformers)
+local = [
+    "sentence-transformers>=2.7.0",
+    "langchain-huggingface>=0.0.3",
+    "langchain-ollama>=0.1.0",
 ]
 dev = [
     "pytest>=7.4.3",

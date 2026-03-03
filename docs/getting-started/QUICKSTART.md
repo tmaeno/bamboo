@@ -74,7 +74,11 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSION=1536
 ```
 
-#### Option B — Anthropic LLM + OpenAI embeddings (both paid)
+#### Option C — Anthropic LLM + OpenAI embeddings (both paid)
+
+> **Note:** `LLM_PROVIDER=anthropic` requires a **Claude API subscription**
+> (api.anthropic.com), not a claude.ai consumer subscription — they are
+> separate products with separate billing.
 
 ```env
 LLM_API_KEY=sk-ant-...      # Your Anthropic API key
@@ -86,7 +90,29 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSION=1536
 ```
 
-#### Option C — OpenAI or Anthropic LLM + local sentence-transformers embeddings (free embeddings)
+#### Option D — Fully free: Ollama (local LLM) + local embeddings
+
+No API keys required at all.
+
+```bash
+# 1. Install Ollama: https://ollama.com
+# 2. Pull a model (one-time download, ~2-8GB depending on model)
+ollama pull llama3.2
+# 3. Keep the server running in a separate terminal
+ollama serve
+# 4. Install the extra Python dependencies
+pip install "bamboo[local]"
+# or: pip install langchain-ollama sentence-transformers langchain-huggingface
+```
+
+```env
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3.2          # or mistral, gemma3, etc.
+EMBEDDINGS_PROVIDER=local
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+EMBEDDING_DIMENSION=384
+```
+
 
 ```bash
 # Install the extra dependencies first
@@ -382,10 +408,12 @@ Common errors:
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `AuthenticationError` / `401` | Wrong or missing API key | Check `LLM_API_KEY` (and `EMBEDDINGS_API_KEY` when `EMBEDDINGS_PROVIDER=openai`) in `.env` |
-| `ValueError: llm_provider must be...` | Invalid `LLM_PROVIDER` value | Set `LLM_PROVIDER=openai` or `LLM_PROVIDER=anthropic` |
+| `ValueError: llm_provider must be...` | Invalid `LLM_PROVIDER` value | Set `LLM_PROVIDER=openai`, `anthropic`, or `ollama` |
 | `llm_api_key` is empty | `.env` not loaded | Make sure `.env` is in the working directory where you run Bamboo |
 | `RateLimitError` | API quota exceeded | Check your API plan or wait and retry |
 | `ImportError: sentence-transformers` | Missing local-embeddings deps | Run `pip install sentence-transformers langchain-huggingface` |
+| `ImportError: langchain-ollama` | Missing Ollama deps | Run `pip install langchain-ollama` |
+| Ollama connection refused | Ollama server not running | Run `ollama serve` in a separate terminal |
 
 ### Import Errors
 

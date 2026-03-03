@@ -31,8 +31,9 @@ class Settings(BaseSettings):
                                   runs ``sentence-transformers`` in-process,
                                   no API key needed).  Anthropic does not
                                   provide an embeddings API.
-        llm_provider:             LLM backend — ``"openai"`` or
-                                  ``"anthropic"``.
+        llm_provider:             LLM backend — ``"openai"``, ``"anthropic"``,
+                                  or ``"ollama"`` (free, runs locally via
+                                  Ollama; no API key needed).
         llm_model:                Model name passed to the LLM SDK.
         extraction_strategy:      Which :class:`ExtractionStrategy` to use.
         graph_database_backend:   Graph DB backend name (``"neo4j"``).
@@ -57,9 +58,9 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    llm_api_key: str = ""
+    llm_api_key: str = ""  # not required when llm_provider="ollama"
     embeddings_api_key: str = ""  # falls back to llm_api_key when empty
-    llm_provider: Literal["openai", "anthropic"] = "openai"
+    llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     embeddings_provider: Literal["openai", "local"] = "openai"
     llm_model: str = "gpt-4-turbo-preview"
 
