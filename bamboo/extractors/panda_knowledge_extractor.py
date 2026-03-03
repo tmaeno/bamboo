@@ -57,7 +57,12 @@ import re
 from typing import Any, Optional
 
 from bamboo.extractors.base import ExtractionStrategy
-from bamboo.llm import EMAIL_EXTRACTION_PROMPT, LOG_EXTRACTION_PROMPT, get_embeddings, get_llm
+from bamboo.llm import (
+    EMAIL_EXTRACTION_PROMPT,
+    LOG_EXTRACTION_PROMPT,
+    get_embeddings,
+    get_llm,
+)
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
     ERROR_CATEGORY_LABEL_PROMPT,
@@ -1027,7 +1032,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
 
-        # Aggregated job data → JobFeatureNodes + SymptomNodes + ComponentNodes
+        # Aggregated job data → JobFeatureNodes + SymptomNodes + TaskContextNodes
         if jobs_data:
             job_nodes, job_rels = await self._extract_from_jobs(jobs_data, nodes)
             nodes.extend(job_nodes)
@@ -1060,11 +1065,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         2. Classifies each error signal through the error classifier to produce
            additional :class:`~bamboo.models.graph_element.SymptomNode` values
            (deduplicated against already-extracted task-level SymptomNodes).
-        3. Creates :class:`~bamboo.models.graph_element.ComponentNode` values
-           for dominant pilot version and worker type.
-        4. Creates :class:`~bamboo.models.graph_element.TaskContextNode` values
-           (vector DB only) for representative ``errorDiag`` strings.
-        5. Emits ``has_job_pattern`` edges from every task-level
+           Error signals are prefixed with their source channel
+           (``"pilot:<code>"`` or ``"payload:<code>"``).
+        3. Creates :class:`~bamboo.models.graph_element.TaskContextNode` values
+           (vector DB only) for representative diagnostic strings.
+        4. Emits ``has_job_pattern`` edges from every task-level
            :class:`~bamboo.models.graph_element.SymptomNode` in
            *existing_nodes* to each new :class:`JobFeatureNode`, so the graph
            can answer "what job-execution patterns are associated with this
@@ -1132,18 +1137,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             new_symptom_nodes.append(symptom)
             nodes.append(symptom)
 
-        # 3. ComponentNodes from component signals
-        for comp_name, comp_system in agg.component_signals:
-            nodes.append(
-                ComponentNode(
-                    name=comp_name,
-                    system=comp_system,
-                    description=f"Dominant {comp_system} version observed in jobs",
-                    metadata={"source": "job_aggregation"},
-                )
-            )
-
-        # 4. TaskContextNodes for representative errorDiag texts (vector DB only)
+        # 3. TaskContextNodes for representative errorDiag texts (vector DB only)
         for diag_text in agg.context_texts:
             nodes.append(
                 TaskContextNode(
@@ -1153,7 +1147,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
-        # 5. has_job_pattern edges: every Symptom (existing + new) → each JobFeatureNode
+        # 4. has_job_pattern edges: every Symptom (existing + new) → each JobFeatureNode
         all_symptom_nodes: list = [
             n
             for n in existing_nodes
@@ -1173,12 +1167,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         logger.debug(
             "PandaKnowledgeExtractor: jobs_data (%d jobs) → "
-            "%d JobFeatureNodes, %d new SymptomNodes, %d ComponentNodes, "
+            "%d JobFeatureNodes, %d new SymptomNodes, "
             "%d TaskContextNodes, %d has_job_pattern edges",
             agg.total_jobs,
             len(job_feature_nodes),
             len(new_symptom_nodes),
-            len([n for n in nodes if hasattr(n, "system")]),
             len(agg.context_texts),
             len(relationships),
         )
@@ -1212,9 +1205,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         node.
         """
         llm = get_llm()
-        response = await llm.ainvoke(
-            LOG_EXTRACTION_PROMPT.format(log_text=log_text)
-        )
+        response = await llm.ainvoke(LOG_EXTRACTION_PROMPT.format(log_text=log_text))
         raw = self._parse_log_response(response.content)
 
         nodes = []

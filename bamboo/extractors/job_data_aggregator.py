@@ -7,7 +7,7 @@ for further processing.
 Design rationale
 ----------------
 Storing one graph node per job would produce millions of ephemeral,
-non-reusable nodes — a graph anti-pattern.  Instead, aggregation extracts the
+non-reusable nodes — a graph antipattern.  Instead, aggregation extracts the
 *patterns* that are meaningful across many incidents:
 
 * **Dominant discrete values** (site, transformation, queue) become
@@ -20,18 +20,23 @@ non-reusable nodes — a graph anti-pattern.  Instead, aggregation extracts the
 * **Continuous numeric values** (CPU time, actual memory) are bucketed using
   the same ``_BUCKETS`` thresholds as ``task_data`` continuous keys.
 
-* **Error signals** (``errorCode``, ``batchErrorCode``, ``errorDiag``) are
-  collected as raw strings for the caller to pass through
+* **Error signals** from two distinct PanDA error channels:
+
+  - *Pilot channel* (``pilotErrorCode`` / ``pilotErrorDiag``): failures
+    detected by the pilot process (e.g. lost heartbeat, stage-in failure).
+    Signals are prefixed ``"pilot:<code>"``.
+  - *Payload channel* (``transExitCode``): non-zero exit
+    codes from the transformation / user payload (e.g. Athena crash).
+    Signals are prefixed ``"payload:<code>"``.
+
+  Both channels are collected as raw strings for the caller to pass through
   :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`,
   which maps them to canonical :class:`~bamboo.models.graph_element.SymptomNode`
   names.
 
-* **Component signals** (pilot version, worker type) become
-  :class:`~bamboo.models.graph_element.ComponentNode` values for the caller.
-
-* **Representative error diag texts** (top-N distinct ``errorDiag`` strings
-  from the most-failing sites) are collected as ``context_texts`` for
-  :class:`~bamboo.models.graph_element.TaskContextNode` (vector DB only),
+* **Representative error diag texts** (top-N distinct diagnostic strings,
+  one per dominant error code per channel) are collected as ``context_texts``
+  for :class:`~bamboo.models.graph_element.TaskContextNode` (vector DB only),
   preserving the semantic richness of raw messages for similarity search.
 
 Output
@@ -40,11 +45,10 @@ Output
 dataclass.  The caller (``PandaKnowledgeExtractor._extract_from_jobs``) is
 responsible for:
 
-1. Instantiating :class:`JobFeatureNode` from ``feature_nodes``.
+1. Instantiating :class:`JobFeatureNode` from ``feature_items``.
 2. Classifying each string in ``error_signals`` through the error classifier
    to produce :class:`SymptomNode` instances.
-3. Creating :class:`ComponentNode` instances from ``component_signals``.
-4. Creating :class:`TaskContextNode` instances from ``context_texts`` for
+3. Creating :class:`TaskContextNode` instances from ``context_texts`` for
    vector DB indexing.
 
 The aggregator is intentionally stateless and has no database dependency —
@@ -73,25 +77,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Keys whose dominant value becomes a JobFeatureNode.
-# Excludes per-job GUIDs (PandaID, jobsetID, jediTaskID) and timestamps.
+# Keys whose dominant value becomes a JobFeatureNode via _aggregate_discrete.
+# Keys handled by dedicated aggregation steps are excluded here:
+#   - computingSite  → _aggregate_site_failure_rates
+#   - jobStatus      → failure counting (not a feature node)
+#   - pilotErrorCode, pilotErrorDiag, transExitCode
+#                    → _aggregate_error_signals
 # ---------------------------------------------------------------------------
 JOB_DISCRETE_KEYS: frozenset[str] = frozenset(
     {
-        "computingSite",
-        "cloud",
-        "queue",
-        "transformation",
+        "gshare",
         "processingType",
         "prodSourceLabel",
-        "jobStatus",
-        "workQueue",
         "resourceType",
-        "coreCount",
-        "pilotVersion",
-        "workerType",
-        "batchErrorCode",
-        "errorCode",
+        "workQueue",
     }
 )
 
@@ -103,7 +102,7 @@ JOB_CONTINUOUS_KEYS: frozenset[str] = frozenset(
     {
         "cpuConsumptionTime",
         "actualCoreCount",
-        "actualRamCount",
+        "maxRSS",
         "outputFileBytes",
         "inputFileBytes",
     }
@@ -122,11 +121,13 @@ _JOB_BUCKETS: dict[str, list[tuple[float, str]]] = {
     # Core count: integer
     "actualCoreCount": [
         (2, "1-core"),
-        (9, "2-8-cores"),
-        (float("inf"), ">8-cores"),
+        (5, "2-4-cores"),
+        (9, "4-8-cores"),
+        (17, "8-16-cores"),
+        (float("inf"), ">16-cores"),
     ],
     # Memory: MB
-    "actualRamCount": [
+    "maxRSS": [
         (512, "<512MB"),
         (2_048, "512MB-2GB"),
         (8_192, "2-8GB"),
@@ -202,24 +203,24 @@ class JobAggregationResult:
     """Output of :meth:`JobDataAggregator.aggregate`.
 
     Attributes:
-        feature_items:     List of ``(attribute, value, job_count)`` tuples
-                           ready to be turned into
-                           :class:`~bamboo.models.graph_element.JobFeatureNode`.
-        error_signals:     Raw error strings (error codes + ``errorDiag``
-                           snippets) for the caller to classify into
-                           :class:`~bamboo.models.graph_element.SymptomNode`.
-        component_signals: ``(name, system)`` pairs for the caller to create
-                           :class:`~bamboo.models.graph_element.ComponentNode`.
-        context_texts:     Representative raw ``errorDiag`` strings for
-                           :class:`~bamboo.models.graph_element.TaskContextNode`
-                           (vector DB only).
-        total_jobs:        Total number of job records processed.
-        failed_jobs:       Number of jobs with ``jobStatus != "finished"``.
+        feature_items:  List of ``(attribute, value, job_count)`` tuples
+                        ready to be turned into
+                        :class:`~bamboo.models.graph_element.JobFeatureNode`.
+        error_signals:  Raw error strings prefixed by source channel
+                        (e.g. ``"pilot:1099"``, ``"payload:139"``) for the
+                        caller to classify into
+                        :class:`~bamboo.models.graph_element.SymptomNode`.
+                        The prefix encodes the error origin so no separate
+                        ComponentNode is needed.
+        context_texts:  Representative diagnostic strings for
+                        :class:`~bamboo.models.graph_element.TaskContextNode`
+                        (vector DB only).
+        total_jobs:     Total number of job records processed.
+        failed_jobs:    Number of jobs with ``jobStatus != "finished"``.
     """
 
     feature_items: list[tuple[str, str, int]] = field(default_factory=list)
     error_signals: list[str] = field(default_factory=list)
-    component_signals: list[tuple[str, str]] = field(default_factory=list)
     context_texts: list[str] = field(default_factory=list)
     total_jobs: int = 0
     failed_jobs: int = 0
@@ -271,9 +272,7 @@ class JobDataAggregator:
             return JobAggregationResult()
 
         total = len(jobs_data)
-        failed = sum(
-            1 for j in jobs_data if str(j.get("jobStatus", "")) != "finished"
-        )
+        failed = sum(1 for j in jobs_data if str(j.get("jobStatus", "")) != "finished")
 
         result = JobAggregationResult(total_jobs=total, failed_jobs=failed)
 
@@ -281,15 +280,13 @@ class JobDataAggregator:
         self._aggregate_continuous(jobs_data, total, result)
         self._aggregate_site_failure_rates(jobs_data, total, result)
         self._aggregate_error_signals(jobs_data, result)
-        self._aggregate_component_signals(jobs_data, result)
 
         logger.debug(
             "JobDataAggregator: %d jobs → %d feature items, %d error signals, "
-            "%d component signals, %d context texts",
+            "%d context texts",
             total,
             len(result.feature_items),
             len(result.error_signals),
-            len(result.component_signals),
             len(result.context_texts),
         )
         return result
@@ -306,15 +303,12 @@ class JobDataAggregator:
     ) -> None:
         """Emit a JobFeatureNode for the dominant value of each discrete key.
 
-        Keys that are better handled by dedicated logic (``errorCode``,
-        ``batchErrorCode``, ``pilotVersion``, ``computingSite``,
-        ``jobStatus``) are excluded here — they are processed in other steps.
+        Only keys in :data:`JOB_DISCRETE_KEYS` are processed here.  Keys
+        handled by dedicated aggregation steps (error channels, component
+        signals, site failure rates) are intentionally absent from
+        ``JOB_DISCRETE_KEYS`` and are therefore never reached here.
         """
-        skip_here = {
-            "errorCode", "batchErrorCode", "pilotVersion",
-            "computingSite", "jobStatus",
-        }
-        for key in JOB_DISCRETE_KEYS - skip_here:
+        for key in JOB_DISCRETE_KEYS:
             counter: Counter[str] = Counter()
             for job in jobs_data:
                 val = job.get(key)
@@ -401,66 +395,64 @@ class JobDataAggregator:
         jobs_data: list[dict[str, Any]],
         result: JobAggregationResult,
     ) -> None:
-        """Collect distinct error codes and representative errorDiag strings.
+        """Collect error signals from pilot and payload error channels.
 
-        Error codes (``errorCode``, ``batchErrorCode``) are emitted as raw
-        strings in ``error_signals`` for the caller to classify via
+        PanDA jobs carry two distinct error channels:
+
+        * **Pilot channel** — ``pilotErrorCode`` / ``pilotErrorDiag``:
+          failures detected by the pilot (e.g. lost heartbeat, stage-in
+          failure, CPU limit exceeded).
+        * **Payload channel** — ``transExitCode``:
+          non-zero exit codes from the transformation / payload execution
+          (e.g. Athena crash, user script failure).
+
+        For each channel, the dominant error code is added to
+        ``error_signals`` for the caller to classify via
         :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`.
+        One representative diagnostic string per dominant code is added to
+        ``context_texts`` (vector DB only, up to ``MAX_CONTEXT_TEXTS``).
 
-        Representative ``errorDiag`` texts — one per dominant error code —
-        are added to ``context_texts`` (vector DB only, up to
-        ``MAX_CONTEXT_TEXTS``).
+        Error code ``"0"`` is always skipped (success / no error).
         """
-        # Collect (error_code, error_diag) pairs from failing jobs
-        error_pairs: list[tuple[str, str]] = []
-        for job in jobs_data:
-            if str(job.get("jobStatus", "")) == "finished":
-                continue
-            for code_key in ("errorCode", "batchErrorCode"):
-                code = job.get(code_key)
-                if code is not None and str(code).strip() and str(code) != "0":
-                    diag = str(job.get("errorDiag", "")).strip()
-                    error_pairs.append((str(code), diag))
+        # (error_source, error_code, diag_text)
+        ErrorEntry = tuple[str, str, str]
 
-        # Dominant error codes
-        code_counter: Counter[str] = Counter(code for code, _ in error_pairs)
-        for code, _ in code_counter.most_common():
-            if code not in result.error_signals:
-                result.error_signals.append(code)
+        channels: list[tuple[str, str, str]] = [
+            # (source_label, code_key, diag_key)
+            ("pilot", "pilotErrorCode", "pilotErrorDiag"),
+            ("payload", "transExitCode", None),
+        ]
 
-        # Representative errorDiag texts — one per dominant code, deduped
         seen_diags: set[str] = set()
-        for code, _ in code_counter.most_common():
-            for c, diag in error_pairs:
-                if c == code and diag and diag not in seen_diags:
-                    seen_diags.add(diag)
-                    result.context_texts.append(diag)
-                    break
-            if len(result.context_texts) >= self._max_context:
-                break
 
-    def _aggregate_component_signals(
-        self,
-        jobs_data: list[dict[str, Any]],
-        result: JobAggregationResult,
-    ) -> None:
-        """Emit component signals for dominant pilot version and worker type.
-
-        ``pilotVersion`` → ComponentNode(system="PanDA pilot")
-        ``workerType``   → ComponentNode(system="computing grid")
-        """
-        component_sources = {
-            "pilotVersion": "PanDA pilot",
-            "workerType": "computing grid",
-        }
-        for key, system in component_sources.items():
-            counter: Counter[str] = Counter()
+        for source, code_key, diag_key in channels:
+            pairs: list[tuple[str, str]] = []  # (code, diag)
             for job in jobs_data:
-                val = str(job.get(key, "")).strip()
-                if val:
-                    counter[val] += 1
-            if not counter:
-                continue
-            dominant, _ = counter.most_common(1)[0]
-            result.component_signals.append((dominant, system))
+                if str(job.get("jobStatus", "")) == "finished":
+                    continue
+                code = job.get(code_key)
+                if code is None or not str(code).strip() or str(code) == "0":
+                    continue
+                diag = str(job.get(diag_key, "")).strip()
+                pairs.append((str(code), diag))
 
+            if not pairs:
+                continue
+
+            code_counter: Counter[str] = Counter(code for code, _ in pairs)
+
+            # Dominant error codes → error_signals (prefixed with source)
+            for code, _ in code_counter.most_common():
+                signal = f"{source}:{code}"
+                if signal not in result.error_signals:
+                    result.error_signals.append(signal)
+
+            # One representative diag per dominant code → context_texts
+            for code, _ in code_counter.most_common():
+                for c, diag in pairs:
+                    if c == code and diag and diag not in seen_diags:
+                        seen_diags.add(diag)
+                        result.context_texts.append(diag)
+                        break
+                if len(result.context_texts) >= self._max_context:
+                    break

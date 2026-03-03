@@ -269,7 +269,6 @@ class TestCanonicalNodeStore:
 
 
 class TestErrorCategoryStore:
-
     def _make_store(self, search_results: list) -> ErrorCategoryStore:
         store = ErrorCategoryStore(
             vector_client=_make_fake_vector_client(search_results),
@@ -379,7 +378,6 @@ class TestErrorCategoryClassifier:
 
 
 class TestPandaKnowledgeExtractor:
-
     def _extractor(self, category="Timeout", confidence=0.9) -> PandaKnowledgeExtractor:
         return PandaKnowledgeExtractor(
             error_classifier=_make_mock_classifier(category, confidence),
@@ -732,7 +730,6 @@ _LLM_EMAIL_RESPONSE = """{
 
 
 class TestPandaEmailExtraction:
-
     def _make_mock_llm(self, response_text: str = _LLM_EMAIL_RESPONSE):
         mock_response = MagicMock()
         mock_response.content = response_text

@@ -124,7 +124,6 @@ class ReasoningNavigator:
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
     ) -> AnalysisResult:
-
         """Analyse a problematic task and return a root-cause + resolution result.
 
         Pipeline:
@@ -264,7 +263,8 @@ class ReasoningNavigator:
             section_queries.append(
                 (
                     "Job_Feature",
-                    "Job execution patterns: " + ", ".join(extracted_clues["job_features"]),
+                    "Job execution patterns: "
+                    + ", ".join(extracted_clues["job_features"]),
                 )
             )
         for ctx in extracted_clues.get("task_contexts", []):
@@ -402,7 +402,9 @@ class ReasoningNavigator:
 
         raw_task_id = task_data.get("taskID") or "unknown"
         task_status = task_data.get("status")
-        composite_task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
+        composite_task_id = (
+            f"{raw_task_id}:{task_status}" if task_status else raw_task_id
+        )
         prompt = EMAIL_GENERATION_PROMPT.format(
             task_id=composite_task_id,
             task_description=task_data.get("description", ""),
