@@ -141,10 +141,11 @@ The interactive mode provides:
 The Knowledge Extraction Agent processes input data in several steps:
 
 1. **Extraction**: Uses LLM to extract structured graph from unstructured data
-2. **Canonicalization**: Normalizes node names to avoid duplicates
-3. **Graph Storage**: Stores nodes and relationships in the graph database
-4. **Summarization**: Generates summary using LLM
-5. **Vector Storage**: Stores summary and key insights in the vector database
+2. **Job aggregation**: Aggregates raw job records into stable `Job_Feature` nodes (dominant site, failure rates, CPU ranges, dominant pilot version, etc.)
+3. **Canonicalization**: Normalizes node names to avoid duplicates
+4. **Graph Storage**: Stores nodes and relationships in the graph database
+5. **Summarization**: Generates summary using LLM
+6. **Vector Storage**: Stores summary and key insights in the vector database
 
 ### Reasoning Agent
 
@@ -195,8 +196,10 @@ The core knowledge graph schema used by the incident-analysis pipeline:
 Symptom       -[indicate]->        Cause  -[solved_by]->  Resolution
 Environment   -[associated_with]-> Cause
 Task_Feature  -[contribute_to]->   Cause
+Job_Feature   -[contribute_to]->   Cause
 Task_Context  -[contribute_to]->   Cause
 Component     -[originated_from]-> Cause
+Symptom       -[has_job_pattern]-> Job_Feature
 ```
 
 ### Core Node Types
@@ -206,18 +209,31 @@ Component     -[originated_from]-> Cause
 | `Cause` | Root cause of the incident |
 | `Resolution` | Solution or fix applied |
 | `Environment` | External factor contributing to the cause (e.g. OS, runtime version) |
-| `Task_Feature` | Discrete task attribute stored as `attribute=value` (e.g. `RAM=4GB`) |
+| `Task_Feature` | Discrete task *configuration* attribute stored as `attribute=value` (e.g. `coreCount=8`) |
+| `Job_Feature` | Aggregated job *execution* pattern stored as `attribute=value` (e.g. `site_failure_rate=AGLT2:high(>50%)`, `cpuConsumptionTime=1-6h`) |
 | `Component` | System component where the cause originated |
 | `Task_Context` | Free-form prose context — stored in vector database only, not in graph |
 
 ### Core Relationships
-| Relationship | From → To                           | Description                                                       |
-|-------------|-------------------------------------|-------------------------------------------------------------------|
-| `indicate` | Symptom → Cause                     | Symptom points to a root cause                                    |
-| `solved_by` | Cause → Resolution                  | Cause is resolved by a resolution                                 |
-| `contribute_to` | Task_Feature / Task_Context → Cause | Feature or context contributes to a cause                         |
-| `originated_from` | Component → Cause                   | Cause originated in a component                                   |
-| `associated_with` | Environment → Cause                 | Cause associated with an external factor |
+| Relationship | From → To | Description |
+|---|---|---|
+| `indicate` | Symptom → Cause | Symptom points to a root cause |
+| `solved_by` | Cause → Resolution | Cause is resolved by a resolution |
+| `contribute_to` | Task_Feature / Job_Feature / Task_Context → Cause | Feature or context contributes to a cause |
+| `originated_from` | Component → Cause | Cause originated in a component |
+| `associated_with` | Environment → Cause | Cause associated with an external factor |
+| `has_job_pattern` | Symptom → Job_Feature | Links a task-level symptom to the aggregated job-execution patterns observed across the failing jobs |
+
+### Log-level distinction
+
+Two separate log parameters flow through the pipeline:
+
+| Parameter | Source | Node tag |
+|---|---|---|
+| `task_logs` | Orchestration services (JEDI, Harvester, …) | `log_level="task"` |
+| `job_logs` | Execution workers (pilot, Athena/payload, …) | `log_level="job"` |
+
+Both are processed by the same LLM log-extraction path but every extracted node is tagged with its provenance level, allowing graph queries to filter by origin.
 
 > Extended node types (Metric, Anomaly, Issue, System, Pattern, Optimization, Event, Action, Dependency, User) and relationships are available for future extraction strategies.
 
