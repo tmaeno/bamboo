@@ -8,9 +8,11 @@ Environment variables are case-insensitive and can be set directly or via a
 ``.env`` file in the project root.  See ``README.md`` for the full list.
 """
 
+import re
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +58,28 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
+
+    @field_validator(
+        "llm_api_key", "embeddings_api_key", "llm_provider", "embeddings_provider",
+        "llm_model", "extraction_strategy", "graph_database_backend",
+        "vector_database_backend", "neo4j_uri", "neo4j_username", "neo4j_password",
+        "neo4j_database", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
+        "log_level", "embedding_model",
+        mode="before",
+    )
+    @classmethod
+    def _strip_inline_comments(cls, value: Any) -> Any:
+        """Strip inline ``# …`` comments from string values read from ``.env``.
+
+        ``python-dotenv`` does not remove inline comments, so a line such as::
+
+            QDRANT_API_KEY=  # Optional, leave empty for local instance
+
+        would otherwise set the field to ``"# Optional, leave empty for local instance"``.
+        """
+        if isinstance(value, str):
+            return re.sub(r"\s*#.*$", "", value).strip()
+        return value
 
     # LLM
     llm_api_key: str = ""  # not required when llm_provider="ollama"
