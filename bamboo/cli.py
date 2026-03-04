@@ -71,13 +71,30 @@ async def populate_knowledge_interactive():
 
     task_dict = None
     if Confirm.ask("Do you have task data?"):
-        task_path = Prompt.ask("Enter path to task JSON file")
-        try:
-            with open(task_path) as f:
-                task_dict = json.load(f)
-        except Exception as e:
-            console.print(f"[red]Error reading task file: {e}[/red]")
-            return
+        use_panda = Confirm.ask(
+            "Fetch task data directly from PanDA by task ID?", default=False
+        )
+        if use_panda:
+            task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+            try:
+                from bamboo.utils.panda_client import fetch_task_data
+
+                with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
+                    task_dict = await fetch_task_data(int(task_id_str))
+                console.print(
+                    f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
+                )
+            except Exception as e:
+                console.print(f"[red]Error fetching task from PanDA: {e}[/red]")
+                return
+        else:
+            task_path = Prompt.ask("Enter path to task JSON file")
+            try:
+                with open(task_path) as f:
+                    task_dict = json.load(f)
+            except Exception as e:
+                console.print(f"[red]Error reading task file: {e}[/red]")
+                return
 
     external_dict = None
     if Confirm.ask("Do you have external data?"):
@@ -122,13 +139,31 @@ async def analyze_task_interactive():
     """Interactive task analysis."""
     console.print("\n[bold cyan]Analyze Problematic Task[/bold cyan]")
 
-    task_path = Prompt.ask("Enter path to task JSON file")
-    try:
-        with open(task_path) as f:
-            task_dict = json.load(f)
-    except Exception as e:
-        console.print(f"[red]Error reading task file: {e}[/red]")
-        return
+    task_dict = None
+    use_panda = Confirm.ask(
+        "Fetch task data directly from PanDA by task ID?", default=False
+    )
+    if use_panda:
+        task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+        try:
+            from bamboo.utils.panda_client import fetch_task_data
+
+            with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
+                task_dict = await fetch_task_data(int(task_id_str))
+            console.print(
+                f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
+            )
+        except Exception as e:
+            console.print(f"[red]Error fetching task from PanDA: {e}[/red]")
+            return
+    else:
+        task_path = Prompt.ask("Enter path to task JSON file")
+        try:
+            with open(task_path) as f:
+                task_dict = json.load(f)
+        except Exception as e:
+            console.print(f"[red]Error reading task file: {e}[/red]")
+            return
 
     external_dict = None
     if Confirm.ask("Do you have external data?"):
@@ -184,6 +219,52 @@ async def analyze_task_interactive():
     finally:
         await graph_db.close()
         await vector_db.close()
+
+
+@cli.command("fetch-task")
+@click.argument("task_id", type=int)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Save the fetched task data as JSON to this file path.",
+)
+def fetch_task_cmd(task_id, output):
+    """Fetch task details from PanDA and display or save them.
+
+    TASK_ID is the PanDA jediTaskID to look up.
+
+    Examples:
+
+    \b
+      bamboo fetch-task 12345
+      bamboo fetch-task 12345 --output task_12345.json
+    """
+
+    async def _run():
+        from bamboo.utils.panda_client import fetch_task_data
+
+        with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
+            data = await fetch_task_data(task_id)
+        return data
+
+    try:
+        data = asyncio.run(_run())
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise SystemExit(1)
+
+    if output:
+        import json as _json
+        from pathlib import Path
+
+        Path(output).write_text(_json.dumps(data, indent=2))
+        console.print(f"[green]✓ Task {task_id} data saved to {output}[/green]")
+    else:
+        import json as _json
+
+        console.print_json(_json.dumps(data))
 
 
 async def query_knowledge_interactive():

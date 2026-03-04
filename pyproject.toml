@@ -38,6 +38,7 @@ dependencies = [
     "email-validator>=2.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",
+    "panda-client-light>=1.6.11",
 ]
 
 [project.optional-dependencies]

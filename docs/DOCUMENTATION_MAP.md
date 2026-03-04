@@ -1,236 +1,117 @@
-# Bamboo Documentation - Consolidated
+# Bamboo Documentation Map
 
-This document provides an overview of the consolidated Bamboo documentation structure.
-
-## Documentation Files (4 Essential Files)
-
-### 1. **README.md** (197 lines)
-Main project documentation containing:
-- Project overview and acronym explanation
-- Quick start guide
-- Agent descriptions (all 6 agents)
-- Key features and architecture overview
-- Graph schema
-- MCP tools overview
-- Technology stack
-- Installation instructions
-- Usage examples for each agent type
-- Development and licensing info
-
-**When to use**: Start here for project overview
-
-### 2. **QUICKSTART.md** (295 lines)
-Getting started guide containing:
-- Prerequisites and system requirements
-- Step-by-step setup instructions
-- Database configuration
-- LLM API setup
-- Verification procedures
-- Running agents and MCP server
-- Troubleshooting guide
-- Example usage
-- Next steps
-
-**When to use**: Follow this to set up your environment
-
-### 3. **DEVELOPMENT.md** (735 lines)
-Developer guide containing:
-- Development setup
-- Code style and standards (PEP 8, async/await, error handling)
-- Extension points (adding node types, relationships, queries, prompts, sub-agents, workflows)
-- Testing guide (unit tests, integration tests)
-- Debugging procedures
-- Performance optimization
-- Deployment guide
-- Contributing guidelines
-- Resources and references
-
-**When to use**: Reference this when developing features or extending Bamboo
-
-### 4. **MCP_TOOLS.md** (456+ lines)
-MCP tools documentation containing:
-- Tool categories overview (20 tools across 5 categories)
-- Knowledge tools (4 tools)
-- Diagnostic tools (4 tools)
-- Automation tools (4 tools)
-- Monitoring tools (4 tools)
-- Optimization tools (4 tools)
-- Usage examples
-- Implementation status (all placeholders)
-- File structure
-- Development instructions
-
-**When to use**: Reference this when using or implementing MCP tools
-
-## Deleted Files (9 Redundant Files)
-
-The following files were deleted as their content is now consolidated into the 4 essential files:
-
-1. **ABOUT_BAMBOO.md** → Merged into README.md
-2. **ACRONYM_UPDATE.md** → Merged into README.md  
-3. **AGENTS_GUIDE.md** → Merged into README.md
-4. **ARCHITECTURE.md** → Merged into README.md and DEVELOPMENT.md
-5. **PROJECT_COMPLETE.md** → Merged into README.md
-6. **PROJECT_SUMMARY.md** → Merged into README.md
-7. **UPGRADE_SUMMARY.md** → Merged into README.md
-8. **VISUAL_GUIDE.md** → Merged into README.md
-9. **MCP_TOOLS_SUMMARY.md** → Merged into MCP_TOOLS.md
-10. **START_HERE.md** → Merged into README.md
-
-## Documentation at a Glance
-
-| Purpose | File | Lines |
-|---------|------|-------|
-| Overview & Reference | README.md | 197 |
-| Setup & Installation | QUICKSTART.md | 295 |
-| Development & Extension | DEVELOPMENT.md | 735 |
-| MCP Tools Reference | MCP_TOOLS.md | 456+ |
-| **Total** | **4 files** | **~1,683 lines** |
-
-## Reading Path
-
-### For New Users
-1. **README.md** (5 min) - Understand what Bamboo is
-2. **QUICKSTART.md** (10 min) - Set up the environment
-3. Run `python verify_installation.py`
-4. Try `python -m bamboo.cli interactive`
-
-### For Developers
-1. **README.md** - Project overview
-2. **QUICKSTART.md** - Environment setup
-3. **DEVELOPMENT.md** - Deep dive into architecture and code
-4. Explore agent code in `bamboo/agents/`
-
-### For MCP Tool Users
-1. **README.md** - Agent overview
-2. **MCP_TOOLS.md** - Tool reference
-3. Check tool implementations in `bamboo/mcp_tools/`
-
-### For MCP Tool Developers
-1. **README.md** - Project overview
-2. **MCP_TOOLS.md** - Tool architecture
-3. **DEVELOPMENT.md** - Development practices
-4. Implement tools per DEVELOPMENT.md extension guide
-
-## Key Information by Topic
-
-### Agents
-- **Where**: README.md (Agents section, lines ~35-50)
-- **Details**: DEVELOPMENT.md (Extension section, lines ~360+)
-
-### Setup
-- **Where**: QUICKSTART.md (entire file)
-- **Reference**: README.md (Installation section, lines ~110-120)
-
-### MCP Tools
-- **Where**: MCP_TOOLS.md (entire file)
-- **Overview**: README.md (MCP Tools section, lines ~105-115)
-
-### Development
-- **Where**: DEVELOPMENT.md (entire file)
-
-### Graph Schema
-- **Where**: README.md (Graph Schema section)
-- **Details**: DEVELOPMENT.md (Graph Schema Reference — 18 node types, 19 relationship types)
-
-### Technologies
-- **Where**: README.md (Technologies section, lines ~165-175)
-
-## File Statistics
-
-### Consolidation Results
-
-**Before Consolidation:**
-- 12 markdown files
-- ~3,000+ lines of documentation
-- Significant redundancy and duplication
-- Confusing navigation
-
-**After Consolidation:**
-- 4 markdown files
-- ~1,683 lines of focused documentation
-- Single source of truth for each topic
-- Clear reading paths
-
-**Reduction:**
-- Files: 66% reduction (12 → 4)
-- Redundancy: Eliminated
-- Clarity: Improved
-
-## Navigation Guide
-
-```
-START
-  ↓
-README.md (What is Bamboo?)
-  ↓
-QUICKSTART.md (How to set up?)
-  ↓
-Choose Path:
-  ├─ User → Use agents and MCP tools
-  ├─ Developer → DEVELOPMENT.md
-  └─ MCP Tool Dev → MCP_TOOLS.md
-```
-
-## Content Summary
-
-### README.md
-- ✅ Project overview
-- ✅ All 6 agents described
-- ✅ Architecture overview
-- ✅ Quick start
-- ✅ Usage examples
-- ✅ Technologies
-- ✅ Features and status
-
-### QUICKSTART.md
-- ✅ Prerequisites
-- ✅ Setup steps
-- ✅ Configuration
-- ✅ Verification
-- ✅ Usage examples
-- ✅ Troubleshooting
-- ✅ Next steps
-
-### DEVELOPMENT.md
-- ✅ Development setup
-- ✅ Code standards
-- ✅ Extension points (5 types)
-- ✅ Testing guide
-- ✅ Debugging
-- ✅ Performance
-- ✅ Deployment
-- ✅ Contributing
-
-### MCP_TOOLS.md
-- ✅ 20 tools overview
-- ✅ Tool categories
-- ✅ Usage examples
-- ✅ Implementation status
-- ✅ File structure
-- ✅ Development guide
-
-## Maintenance Notes
-
-When updating documentation:
-
-1. **New Agent?** → Update README.md (Agents section)
-2. **Setup Changes?** → Update QUICKSTART.md
-3. **New Development Practice?** → Update DEVELOPMENT.md
-4. **New MCP Tool?** → Update MCP_TOOLS.md
-
-## Benefits of Consolidation
-
-✅ **Reduced Redundancy** - One source of truth per topic  
-✅ **Easier Navigation** - Clear, focused files  
-✅ **Faster Updates** - No need to sync multiple files  
-✅ **Better Organization** - Logical grouping  
-✅ **Improved Readability** - Focused content  
-✅ **Easier Onboarding** - Clear reading path  
+All documentation lives directly in the `docs/` directory.  The `database-plugins/`
+subdirectory is the only exception — it contains multiple related reference files for
+the database plugin system.
 
 ---
 
-**Last Updated**: 2026-02-18  
-**Documentation Version**: 1.1  
-**Consolidated from**: 12 markdown files into 4 essential files
+## Documentation Files
 
+### [`README.md`](README.md)
+Main project documentation.
+- Project overview and acronym explanation
+- Agent descriptions
+- Architecture overview, graph schema
+- MCP tools overview
+- Technology stack, installation, usage examples
+
+**When to use**: Start here for a project overview.
+
+---
+
+### [`QUICKSTART.md`](QUICKSTART.md)
+Step-by-step setup guide.
+- Prerequisites and system requirements
+- Installation and database configuration
+- LLM / API key setup
+- Verification procedures
+- Running agents and the MCP server
+- Troubleshooting
+
+**When to use**: Follow this to set up your environment.
+
+---
+
+### [`DEVELOPMENT.md`](DEVELOPMENT.md)
+Developer reference.
+- Development setup and code style (PEP 8, async/await, error handling)
+- Extension points: node types, relationships, queries, prompts, sub-agents, workflows
+- Testing guide (unit tests, integration tests)
+- Debugging, performance optimisation, deployment
+- Contributing guidelines
+
+**When to use**: Reference this when developing features or extending Bamboo.
+
+---
+
+### [`EXTRACTION_PLUGIN_SYSTEM.md`](EXTRACTION_PLUGIN_SYSTEM.md)
+Extraction strategy plugin system.
+- Supported strategies: `panda`, `llm`, `rule_based`, `jira`, `github`, `generic`
+- How to register a custom strategy
+- Strategy selection and factory API
+
+**When to use**: Reference this when adding or choosing an extraction strategy.
+
+---
+
+### [`PANDA_INTEGRATION.md`](PANDA_INTEGRATION.md)
+PanDA integration reference.
+- `bamboo/utils/panda_client.py` API (`fetch_task_data`)
+- Server configuration (`PANDA_URL` / `PANDA_URL_SSL`)
+- CLI usage: `--task-id`, `bamboo fetch-task`
+- Programmatic usage and interactive mode
+- Error handling and testing
+
+**When to use**: Reference this when fetching task data directly from PanDA.
+
+---
+
+### [`database-plugins/`](database-plugins/)
+Graph database and vector database plugin system (multiple reference files).
+- `DATABASE_PLUGINS.md` — overview
+- `DATABASE_PLUGINS_IMPLEMENTATION.md` — implementation guide
+- `DATABASE_PLUGINS_EXAMPLES.md` — code examples
+- `DATABASE_PLUGINS_QUICK_REFERENCE.md` — quick reference
+- `DATABASE_PLUGINS_FINAL_CHECKLIST.md` — checklist
+- `DATABASE_PLUGINS_INDEX.md` / `INDEX.md` — index
+
+**When to use**: Reference this when adding a new graph database or vector database backend.
+
+---
+
+## Documentation at a Glance
+
+| File | Purpose |
+|------|---------|
+| `README.md` | Project overview and quick start |
+| `QUICKSTART.md` | Full setup and installation guide |
+| `DEVELOPMENT.md` | Developer guide and extension points |
+| `EXTRACTION_PLUGIN_SYSTEM.md` | Extraction strategy plugin API |
+| `PANDA_INTEGRATION.md` | PanDA live-fetch integration |
+| `database-plugins/` | Graph / vector database plugin system |
+
+---
+
+## Reading Paths
+
+### New users
+1. `README.md` — understand what Bamboo is
+2. `QUICKSTART.md` — set up the environment
+3. Run `bamboo-verify`
+
+### PanDA operators
+1. `README.md` — project overview
+2. `QUICKSTART.md` — environment setup
+3. `PANDA_INTEGRATION.md` — fetch tasks directly from PanDA
+
+### Developers
+1. `README.md` — project overview
+2. `QUICKSTART.md` — environment setup
+3. `DEVELOPMENT.md` — architecture and code conventions
+4. `EXTRACTION_PLUGIN_SYSTEM.md` — adding extraction strategies
+5. `database-plugins/` — adding database backends
+
+---
+
+**Last Updated**: 2026-03-04
