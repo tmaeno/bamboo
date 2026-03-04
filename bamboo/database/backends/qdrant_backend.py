@@ -135,6 +135,68 @@ class QdrantBackend(VectorDatabaseBackend):
             for result in results
         ]
 
+    async def get_summaries_by_graph_ids(
+        self, graph_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Fetch ``Summary`` section entries for the given graph IDs.
+
+        Queries Qdrant with a payload filter that matches ``section=Summary``
+        AND ``graph_id`` in *graph_ids*, then returns the points in the same
+        dict shape as :meth:`search_similar`.
+
+        Args:
+            graph_ids: List of graph IDs whose summaries are requested.
+
+        Returns:
+            List of summary dicts with keys ``id``, ``score``, ``content``,
+            ``entry``, and ``metadata``.  ``score`` is always ``1.0`` because
+            these are exact-match lookups, not similarity searches.
+        """
+        if not graph_ids:
+            return []
+
+        results = []
+        for graph_id in graph_ids:
+            try:
+                points, _ = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="section",
+                                match=models.MatchValue(value="Summary"),
+                            ),
+                            models.FieldCondition(
+                                key="graph_id",
+                                match=models.MatchValue(value=graph_id),
+                            ),
+                        ]
+                    ),
+                    limit=1,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    results.append(
+                        {
+                            "id": point.id,
+                            "score": 1.0,
+                            "content": point.payload.get("content", ""),
+                            "entry": point.payload.get("entry", ""),
+                            "metadata": {
+                                k: v
+                                for k, v in point.payload.items()
+                                if k not in ["content", "entry"]
+                            },
+                        }
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch summary for graph_id=%s: %s", graph_id, e
+                )
+
+        return results
+
     async def delete_document(self, doc_id: str) -> bool:
         """Delete a document by ID."""
         try:
