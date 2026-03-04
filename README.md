@@ -66,7 +66,7 @@ For detailed setup: see [Quick Start](docs/QUICKSTART.md).
 
 ## Documentation Map
 
-[Documentation Map](docs/DOCUMENTATION_MAP.md) provides an index of all documentation files and when to use each.
+See [docs/README.md](docs/README.md) for a full index of all documentation and recommended reading paths.
 
 ## License
 

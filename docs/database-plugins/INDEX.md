@@ -28,7 +28,6 @@ bamboo/
 ├── README.md (main project README)
 ├── QUICKSTART.md
 ├── DEVELOPMENT.md
-├── DOCUMENTATION_MAP.md
 ├── docs/
 │   └── database-plugins/  (← Documentation is here!)
 │       ├── INDEX.md       (this file - navigation hub)
