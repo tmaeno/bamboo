@@ -39,10 +39,11 @@ def interactive():
         console.print("\n[bold]Main Menu:[/bold]")
         console.print("1. Populate knowledge base")
         console.print("2. Analyze problematic task")
-        console.print("3. Query knowledge graph")
-        console.print("4. Exit")
+        console.print("3. Query knowledge graph (graph database)")
+        console.print("4. Query knowledge base (vector database)")
+        console.print("5. Exit")
 
-        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4"])
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -51,6 +52,8 @@ def interactive():
         elif choice == "3":
             asyncio.run(query_knowledge_interactive())
         elif choice == "4":
+            asyncio.run(query_vector_interactive())
+        elif choice == "5":
             console.print("[green]Goodbye![/green]")
             break
 
@@ -267,9 +270,81 @@ def fetch_task_cmd(task_id, output):
         console.print_json(_json.dumps(data))
 
 
+async def query_vector_interactive():
+    """Interactive vector database (semantic similarity) search."""
+    console.print("\n[bold cyan]Query Knowledge Base (Vector Database)[/bold cyan]")
+
+    query_text = Prompt.ask("Enter search query (free-form text)")
+
+    limit_str = Prompt.ask("Maximum number of results", default="5")
+    try:
+        limit = int(limit_str)
+    except ValueError:
+        limit = 5
+
+    threshold_str = Prompt.ask("Minimum similarity score (0.0 – 1.0)", default="0.5")
+    try:
+        score_threshold = float(threshold_str)
+    except ValueError:
+        score_threshold = 0.5
+
+    # Optional section filter (Summary, KeyInsight, canonical_node::*, etc.)
+    section_filter = None
+    if Confirm.ask("Filter by section?", default=False):
+        section_filter = Prompt.ask(
+            "Section name (e.g. Summary, KeyInsight, canonical_node::Cause)"
+        ).strip()
+
+    vector_db = VectorDatabaseClient()
+
+    try:
+        await vector_db.connect()
+
+        from bamboo.llm import get_embeddings
+
+        with console.status("[bold green]Embedding query..."):
+            embeddings = get_embeddings()
+            query_embedding = embeddings.embed_query(query_text)
+
+        filter_conditions = {"section": section_filter} if section_filter else None
+
+        with console.status("[bold green]Searching vector database..."):
+            results = await vector_db.search_similar(
+                query_embedding=query_embedding,
+                limit=limit,
+                score_threshold=score_threshold,
+                filter_conditions=filter_conditions,
+            )
+
+        if not results:
+            console.print("[yellow]No results found above the similarity threshold.[/yellow]")
+            return
+
+        console.print(f"\n[bold green]Found {len(results)} result(s):[/bold green]\n")
+        for i, hit in enumerate(results, 1):
+            score = hit.get("score", 0.0)
+            content = hit.get("content", "").strip()
+            metadata = hit.get("metadata", {})
+            section = metadata.get("section", "—")
+            graph_id = metadata.get("graph_id", "—")
+
+            console.print(
+                Panel(
+                    content,
+                    title=f"[bold]#{i}  score={score:.3f}  section={section}  graph_id={graph_id}[/bold]",
+                    border_style="cyan",
+                )
+            )
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+    finally:
+        await vector_db.close()
+
+
 async def query_knowledge_interactive():
     """Interactive knowledge graph querying."""
-    console.print("\n[bold cyan]Query Knowledge Graph[/bold cyan]")
+    console.print("\n[bold cyan]Query Knowledge Graph (Graph Database)[/bold cyan]")
 
     query_type = Prompt.ask(
         "Query type",
