@@ -20,7 +20,7 @@ console = Console()
 
 @click.group()
 def cli():
-    """Bamboo - AI Agent System for Operational Task Analysis."""
+    """Bamboo - Bolstered Assistance for Managing and Building Operations and Oversight."""
     setup_logging()
 
 
@@ -30,7 +30,7 @@ def interactive():
     console.print(
         Panel.fit(
             "[bold blue]Bamboo Interactive Mode[/bold blue]\n"
-            "AI Agent System for Operational Task Analysis",
+            "Bolstered Assistance for Managing and Building Operations and Oversight",
             border_style="blue",
         )
     )
