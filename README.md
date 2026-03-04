@@ -61,39 +61,20 @@ docker-compose up -d
 bamboo interactive
 ```
 
-### Fetch a PanDA task directly
-
-```bash
-# Inspect raw task data from a live PanDA server
-bamboo fetch-task 12345
-
-# Populate the knowledge base using a live task (no local JSON file needed)
-bamboo-populate --task-id 12345
-
-# Analyze a live task
-bamboo-analyze --task-id 12345
-```
-
-For detailed setup: see [docs/QUICKSTART.md](docs/QUICKSTART.md)
-
-
-## Documentation
-
-| File | Purpose |
-|------|---------|
-| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Full setup and installation guide |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Developer guide and extension points |
-| [docs/EXTRACTION_PLUGIN_SYSTEM.md](docs/EXTRACTION_PLUGIN_SYSTEM.md) | Extraction strategy plugin API |
-| [docs/PANDA_INTEGRATION.md](docs/PANDA_INTEGRATION.md) | PanDA live-fetch integration |
-| [docs/database-plugins/](docs/database-plugins/) | Graph / vector database plugin system |
+For detailed setup: see [Quick Start](docs/QUICKSTART.md).
 
 
 ## Development
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for:
+See [Development Guide](docs/DEVELOPMENT.md) for:
 - Development setup and code style
 - Extension points (agents, tools, node types)
 - Testing and deployment guides
+
+
+## Documentation Map
+
+[Documentation Map](docs/DOCUMENTATION_MAP.md) provides an index of all documentation files and when to use each.
 
 ## License
 
