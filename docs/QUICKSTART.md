@@ -39,7 +39,7 @@ This checks that all modules import correctly, CLI entry points are registered, 
 cp <path-shown-by-bamboo-verify> .env
 ```
 
-Then edit `.env`.  The minimum required settings depend on which embeddings backend you choose:
+Then edit `.env`.  The minimum required settings depend on which LLM and embeddings backend you choose:
 
 
 #### OpenAI Option — OpenAI for both LLM and embeddings (default, paid)
