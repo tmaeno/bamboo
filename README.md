@@ -11,10 +11,11 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ## Key Features
 
 ✅ **Multi-Agent Architecture**  
-✅ **Dual Database** - Graph + Vector search  
+✅ **Dual Database** - Graph database (Neo4j) + Vector database (Qdrant)  
 ✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
 ✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
 ✅ **Hierarchical Workload Insights** - Full visibility across tasks, jobs, and their dependencies  
+✅ **PanDA Integration** - Fetch task data live from a PanDA server by task ID  
 ✅ **MCP Tools** - Domain-specific Model Context Protocol tools  
 ✅ **Human-in-Loop** - Safety through human oversight
 
@@ -22,12 +23,17 @@ An intelligent multi-agent AI framework for system automation and operations, le
 - **Knowledge Accumulation** - Learns from operational data, builds knowledge database
 - **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
 
-### Sub-agents
+### Sub-Agents
+
+#### In Knowledge Accumulation Agent
 - **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
-- **Graph Summarization** - Summarizes graph data for quick insights
-- **Node Canonicalization** - Transforms diverse node data into a canonical format
+- **Node Canonicalization** - Normalises diverse node names into a stable canonical form
+- **Graph Summarization** - Summarises graph data for quick insights
 - **Feature Classification** - Classifies node features for better reasoning
-- **Output Synthesis** - Synthesizes outputs from various agents into coherent responses
+
+#### In Reasoning Navigation Agent
+- **Knowledge Extraction** - Extracts features from task data for querying
+- **Output Synthesis** - Synthesises outputs from various agents into coherent responses
 
 ### Agents to come
 - **Automation Agent** - Plans and executes operational workflows
@@ -42,7 +48,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 # 1. Install
 pip install .
 
-# 2. Verify — prints the exact cp command for your .env setup
+# 2. Verify the installation
 bamboo-verify
 
 # 3. Copy .env.example (path shown by bamboo-verify) and add your API keys
@@ -55,12 +61,36 @@ docker-compose up -d
 bamboo interactive
 ```
 
-For detailed setup: see [QUICKSTART.md](docs/getting-started/QUICKSTART.md)
+### Fetch a PanDA task directly
+
+```bash
+# Inspect raw task data from a live PanDA server
+bamboo fetch-task 12345
+
+# Populate the knowledge base using a live task (no local JSON file needed)
+bamboo-populate --task-id 12345
+
+# Analyze a live task
+bamboo-analyze --task-id 12345
+```
+
+For detailed setup: see [docs/QUICKSTART.md](docs/QUICKSTART.md)
+
+
+## Documentation
+
+| File | Purpose |
+|------|---------|
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | Full setup and installation guide |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Developer guide and extension points |
+| [docs/EXTRACTION_PLUGIN_SYSTEM.md](docs/EXTRACTION_PLUGIN_SYSTEM.md) | Extraction strategy plugin API |
+| [docs/PANDA_INTEGRATION.md](docs/PANDA_INTEGRATION.md) | PanDA live-fetch integration |
+| [docs/database-plugins/](docs/database-plugins/) | Graph / vector database plugin system |
 
 
 ## Development
 
-See [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) for:
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for:
 - Development setup and code style
 - Extension points (agents, tools, node types)
 - Testing and deployment guides

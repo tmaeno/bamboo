@@ -1,19 +1,24 @@
 # Bamboo Documentation
 
-Welcome to the Bamboo documentation! This is your hub for all project documentation.
+Welcome to the Bamboo documentation. This is your hub for all project documentation.
 
-## 📚 Documentation Sections
+## 📚 Documentation
 
-### 🚀 [Getting Started](./getting-started/QUICKSTART.md)
-Quick start guide to get up and running with Bamboo.
+### 🚀 [Quick Start Guide](QUICKSTART.md)
+Step-by-step guide to install Bamboo, configure databases and API keys, and run your first agent.
 
-### 🔌 [Database Plugin System](./database-plugins/INDEX.md)
-Documentation for the database plugin architecture, including backend support (graph database, vector database, In-Memory) and configuration.
+### 🔌 [Database Plugin System](database-plugins/INDEX.md)
+Graph database (Neo4j) and vector database (Qdrant) plugin architecture, backend configuration, and how to add new backends.
 
-### 🧩 [Knowledge Extraction Strategies](./extraction-strategies/EXTRACTION_PLUGIN_SYSTEM.md)
-Documentation for the pluggable knowledge extraction system, including available strategies and how to add custom extractors.
+### 🧩 [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md)
+Pluggable knowledge extraction strategies (`panda`, `llm`, `rule_based`, …), how to select one, and how to register a custom extractor.
 
-### 👨‍💻 [Development](./development/DEVELOPMENT.md)
-Development guide for contributing to Bamboo.
+### 🐼 [PanDA Integration](PANDA_INTEGRATION.md)
+Fetch task data live from a PanDA server by `jediTaskID` — no local JSON file required.  Covers `bamboo fetch-task`, `--task-id`, server configuration, and error handling.
+
+### 👨‍💻 [Development Guide](DEVELOPMENT.md)
+Development setup, code style, extension points (agents, node types, relationships, prompts), testing, and deployment.
 
 ---
+
+See [DOCUMENTATION_MAP.md](DOCUMENTATION_MAP.md) for a full index and recommended reading paths.
