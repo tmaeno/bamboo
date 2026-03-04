@@ -33,6 +33,7 @@ bamboo-verify
 ```
 
 This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
+
 `bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
 
 ```bash
