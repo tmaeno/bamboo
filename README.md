@@ -64,14 +64,6 @@ bamboo interactive
 For detailed setup: see [Quick Start](docs/QUICKSTART.md).
 
 
-## Development
-
-See [Development Guide](docs/DEVELOPMENT.md) for:
-- Development setup and code style
-- Extension points (agents, tools, node types)
-- Testing and deployment guides
-
-
 ## Documentation Map
 
 [Documentation Map](docs/DOCUMENTATION_MAP.md) provides an index of all documentation files and when to use each.
