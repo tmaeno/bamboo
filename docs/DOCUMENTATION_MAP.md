@@ -8,7 +8,7 @@ the database plugin system.
 
 ## Documentation Files
 
-### [`README.md`](README.md)
+### [Project Overview](README.md)
 Main project documentation.
 - Project overview and acronym explanation
 - Agent descriptions
@@ -20,7 +20,7 @@ Main project documentation.
 
 ---
 
-### [`QUICKSTART.md`](QUICKSTART.md)
+### [Quick Start Guide](QUICKSTART.md)
 Step-by-step setup guide.
 - Prerequisites and system requirements
 - Installation and database configuration
@@ -33,7 +33,7 @@ Step-by-step setup guide.
 
 ---
 
-### [`DEVELOPMENT.md`](DEVELOPMENT.md)
+### [Development Guide](DEVELOPMENT.md)
 Developer reference.
 - Development setup and code style (PEP 8, async/await, error handling)
 - Extension points: node types, relationships, queries, prompts, sub-agents, workflows
@@ -45,7 +45,7 @@ Developer reference.
 
 ---
 
-### [`EXTRACTION_PLUGIN_SYSTEM.md`](EXTRACTION_PLUGIN_SYSTEM.md)
+### [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md)
 Extraction strategy plugin system.
 - Supported strategies: `panda`, `llm`, `rule_based`, `jira`, `github`, `generic`
 - How to register a custom strategy
@@ -55,7 +55,7 @@ Extraction strategy plugin system.
 
 ---
 
-### [`PANDA_INTEGRATION.md`](PANDA_INTEGRATION.md)
+### [PanDA Integration](PANDA_INTEGRATION.md)
 PanDA integration reference.
 - `bamboo/utils/panda_client.py` API (`fetch_task_data`)
 - Server configuration (`PANDA_URL` / `PANDA_URL_SSL`)
@@ -67,7 +67,7 @@ PanDA integration reference.
 
 ---
 
-### [`database-plugins/`](database-plugins/)
+### [Database Plugin System](database-plugins/INDEX.md)
 Graph database and vector database plugin system (multiple reference files).
 - `DATABASE_PLUGINS.md` — overview
 - `DATABASE_PLUGINS_IMPLEMENTATION.md` — implementation guide
@@ -80,37 +80,25 @@ Graph database and vector database plugin system (multiple reference files).
 
 ---
 
-## Documentation at a Glance
-
-| File | Purpose |
-|------|---------|
-| `README.md` | Project overview and quick start |
-| `QUICKSTART.md` | Full setup and installation guide |
-| `DEVELOPMENT.md` | Developer guide and extension points |
-| `EXTRACTION_PLUGIN_SYSTEM.md` | Extraction strategy plugin API |
-| `PANDA_INTEGRATION.md` | PanDA live-fetch integration |
-| `database-plugins/` | Graph / vector database plugin system |
-
----
 
 ## Reading Paths
 
 ### New users
-1. `README.md` — understand what Bamboo is
-2. `QUICKSTART.md` — set up the environment
+1. [Project Overview](README.md) — understand what Bamboo is
+2. [Quick Start Guide](QUICKSTART.md) — set up the environment
 3. Run `bamboo-verify`
 
 ### PanDA operators
-1. `README.md` — project overview
-2. `QUICKSTART.md` — environment setup
-3. `PANDA_INTEGRATION.md` — fetch tasks directly from PanDA
+1. [Project Overview](README.md) — project overview
+2. [Quick Start Guide](QUICKSTART.md) — environment setup
+3. [PanDA Integration](PANDA_INTEGRATION.md) — fetch tasks directly from PanDA
 
 ### Developers
-1. `README.md` — project overview
-2. `QUICKSTART.md` — environment setup
-3. `DEVELOPMENT.md` — architecture and code conventions
-4. `EXTRACTION_PLUGIN_SYSTEM.md` — adding extraction strategies
-5. `database-plugins/` — adding database backends
+1. [Project Overview](README.md) — project overview
+2. [Quick Start Guide](QUICKSTART.md) — environment setup
+3. [Development Guide](DEVELOPMENT.md) — architecture and code conventions
+4. [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) — adding extraction strategies
+5. [Database Plugin System](database-plugins/INDEX.md) — adding database backends
 
 ---
 
