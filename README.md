@@ -51,13 +51,10 @@ pip install .
 # 2. Verify the installation
 bamboo-verify
 
-# 3. Copy .env.example (path shown by bamboo-verify) and add your API keys
-cp <path-from-bamboo-verify> .env
-
-# 4. Start databases
+# 3. Start databases
 docker-compose up -d
 
-# 5. Try it
+# 4. Try it
 bamboo interactive
 ```
 

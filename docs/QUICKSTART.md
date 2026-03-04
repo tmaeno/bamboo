@@ -33,28 +33,6 @@ bamboo-verify
 ```
 
 This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
-
-> **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
-
-### 3. Start Database Services
-
-```bash
-# Start graph database and vector database using Docker Compose
-docker-compose up -d
-
-# Wait about 10 seconds for services to be ready
-# Graph database will be available at http://localhost:7474
-# Vector database will be available at http://localhost:6333
-```
-
-Or use the Makefile:
-
-```bash
-make docker-up
-```
-
-### 4. Configure Environment
-
 `bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
 
 ```bash
@@ -63,7 +41,8 @@ cp <path-shown-by-bamboo-verify> .env
 
 Then edit `.env`.  The minimum required settings depend on which embeddings backend you choose:
 
-#### Option A — OpenAI for both LLM and embeddings (default, paid)
+
+#### OpenAI Option — OpenAI for both LLM and embeddings (default, paid)
 
 ```env
 LLM_API_KEY=sk-...          # Your OpenAI API key
@@ -74,7 +53,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSION=1536
 ```
 
-#### Option C — Anthropic LLM + OpenAI embeddings (both paid)
+#### Hybrid Option — Anthropic LLM + OpenAI embeddings (both paid)
 
 > **Note:** `LLM_PROVIDER=anthropic` requires a **Claude API subscription**
 > (api.anthropic.com), not a claude.ai consumer subscription — they are
@@ -90,7 +69,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSION=1536
 ```
 
-#### Option D — Fully free: Ollama (local LLM) + local embeddings
+#### Free Option — Fully free: Ollama (local LLM) + local embeddings
 
 No API keys required at all.
 
@@ -114,16 +93,27 @@ EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-d
 EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
 ```
 
-> **Note:** When switching embeddings you must
-> re-populate the vector database, as the embedding dimensions and vector space differ.
 
-Alternatively, retrieve the `.env.example` path directly:
+> **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
+
+### 3. Start Database Services
 
 ```bash
-python -c "import importlib.resources; print(importlib.resources.files('bamboo.data').joinpath('.env.example'))"
+# Start graph database and vector database using Docker Compose
+docker-compose up -d
+
+# Wait about 10 seconds for services to be ready
+# Graph database will be available at http://localhost:7474
+# Vector database will be available at http://localhost:6333
 ```
 
-### 5. Test the Setup
+Or use the Makefile:
+
+```bash
+make docker-up
+```
+
+### 4. Test the Setup
 
 ```bash
 # Start the interactive CLI

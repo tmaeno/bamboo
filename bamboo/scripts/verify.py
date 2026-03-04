@@ -276,16 +276,12 @@ def main() -> int:
         print(f"✓ All {total} checks passed — Bamboo is ready to use!")
         print()
         print("Next steps:")
-        print(f"  1. cp {_env_example_path()} .env")
         print(
-            "     Edit .env and add your API keys (OPENAI_API_KEY / ANTHROPIC_API_KEY)"
+            "  1. docker compose up -d   (use docker-compose.yml from the project source)"
         )
-        print(
-            "  2. docker compose up -d   (use docker-compose.yml from the project source)"
-        )
-        print("  3. bamboo interactive")
+        print("  2. bamboo interactive")
         print()
-        print("Full guide: docs/getting-started/QUICKSTART.md  (in the project source)")
+        print("Full guide: docs/QUICKSTART.md  (in the project source)")
         return 0
     else:
         print(f"✗ {total - passed} check(s) failed  ({passed}/{total} passed)")
