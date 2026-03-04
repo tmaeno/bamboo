@@ -82,7 +82,9 @@ async def populate_knowledge_interactive():
             try:
                 from bamboo.utils.panda_client import fetch_task_data
 
-                with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
+                with console.status(
+                    f"[bold green]Fetching task {task_id_str} from PanDA..."
+                ):
                     task_dict = await fetch_task_data(int(task_id_str))
                 console.print(
                     f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
@@ -151,7 +153,9 @@ async def analyze_task_interactive():
         try:
             from bamboo.utils.panda_client import fetch_task_data
 
-            with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
+            with console.status(
+                f"[bold green]Fetching task {task_id_str} from PanDA..."
+            ):
                 task_dict = await fetch_task_data(int(task_id_str))
             console.print(
                 f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
@@ -317,7 +321,9 @@ async def query_vector_interactive():
             )
 
         if not results:
-            console.print("[yellow]No results found above the similarity threshold.[/yellow]")
+            console.print(
+                "[yellow]No results found above the similarity threshold.[/yellow]"
+            )
             return
 
         console.print(f"\n[bold green]Found {len(results)} result(s):[/bold green]\n")

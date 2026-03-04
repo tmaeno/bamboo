@@ -424,9 +424,9 @@ class PandaJobDataAggregator:
         """
         channels: list[tuple[str, str, str | None]] = [
             # (source_label, code_key, diag_key)
-            ("pilot",   "pilotErrorCode", "pilotErrorDiag"),
-            ("payload", "transExitCode",  None),
-            ("ddm",     "ddmErrorCode",   "ddmErrorDiag"),
+            ("pilot", "pilotErrorCode", "pilotErrorDiag"),
+            ("payload", "transExitCode", None),
+            ("ddm", "ddmErrorCode", "ddmErrorDiag"),
         ]
 
         seen_diags: set[str] = set()
@@ -462,4 +462,3 @@ class PandaJobDataAggregator:
                         break
                 if len(result.context_texts) >= self._max_context:
                     break
-

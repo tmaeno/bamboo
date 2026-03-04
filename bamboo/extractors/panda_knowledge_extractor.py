@@ -628,14 +628,10 @@ async def _normalize_diag(diag_text: str) -> str:
         ValueError: If the LLM returns an empty string.
     """
     llm = get_llm()
-    response = await llm.ainvoke(
-        JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text)
-    )
+    response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
     normalised = response.content.strip()
     if not normalised:
-        raise ValueError(
-            f"LLM returned an empty normalised diag for: {diag_text!r}"
-        )
+        raise ValueError(f"LLM returned an empty normalised diag for: {diag_text!r}")
     return normalised
 
 

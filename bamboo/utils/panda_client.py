@@ -89,7 +89,3 @@ async def fetch_task_data(task_id: int | str) -> dict[str, Any]:
         len(data),
     )
     return data
-
-
-
-

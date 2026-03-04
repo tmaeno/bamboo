@@ -161,6 +161,7 @@ def check_api_keys() -> bool:
     # Step 1: does a .env file exist in the current working directory?    #
     # ------------------------------------------------------------------ #
     import os
+
     env_path = Path(os.getcwd()) / ".env"
     if not env_path.exists():
         example = _env_example_path()
@@ -176,6 +177,7 @@ def check_api_keys() -> bool:
     # ------------------------------------------------------------------ #
     try:
         from bamboo.config import get_settings
+
         s = get_settings()
     except Exception as exc:
         return _fail(
@@ -189,6 +191,7 @@ def check_api_keys() -> bool:
     if s.llm_provider == "ollama":
         _ok(f"LLM provider: ollama / {s.llm_model}  (no API key required)")
         import urllib.request
+
         ollama_base = getattr(s, "ollama_base_url", "http://localhost:11434")
         try:
             urllib.request.urlopen(ollama_base, timeout=2)
@@ -202,7 +205,9 @@ def check_api_keys() -> bool:
             ok = False
     else:
         if s.llm_api_key:
-            _ok(f"LLM_API_KEY is set  (provider: {s.llm_provider}, model: {s.llm_model})")
+            _ok(
+                f"LLM_API_KEY is set  (provider: {s.llm_provider}, model: {s.llm_model})"
+            )
         else:
             _fail(
                 "LLM_API_KEY is not set",

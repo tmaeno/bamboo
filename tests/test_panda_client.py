@@ -122,6 +122,7 @@ class TestFetchTaskDataErrors:
             del sys.modules[key]
 
         import builtins
+
         real_import = builtins.__import__
 
         def _block_pandaclient(name, *args, **kwargs):
@@ -151,4 +152,3 @@ class TestFetchTaskDataErrors:
         with ctx:
             with pytest.raises(RuntimeError, match="PANDA_URL"):
                 await fetch_task_data(12345)
-

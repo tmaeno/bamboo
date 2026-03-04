@@ -149,5 +149,3 @@ def get_embeddings() -> Embeddings:
         f"Unsupported embeddings provider: {settings.embeddings_provider!r}. "
         "Supported values: 'openai', 'local'."
     )
-
-
