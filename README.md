@@ -66,7 +66,7 @@ For detailed setup: see [Quick Start](docs/QUICKSTART.md).
 
 ## Documentation Map
 
-See [docs/README.md](docs/README.md) for a full index of all documentation and recommended reading paths.
+See [Documentation Map](docs/README.md) for a full index of all documentation and recommended reading paths.
 
 ## License
 
