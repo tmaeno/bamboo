@@ -60,6 +60,7 @@ class KnowledgeAccumulator:
         task_logs: dict[str, str] = None,
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
+        dry_run: bool = False,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
@@ -88,6 +89,11 @@ class KnowledgeAccumulator:
             jobs_data:     List of raw job attribute dicts used for aggregated
                            :class:`~bamboo.models.graph_element.JobFeatureNode`
                            extraction.
+            dry_run:       When ``True``, extraction and summarisation are
+                           performed normally but **no data is written** to
+                           either the graph database or the vector database.
+                           Useful for previewing what would be stored before
+                           committing.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -114,10 +120,18 @@ class KnowledgeAccumulator:
         )
         graph.metadata["graph_id"] = graph_id
 
-        await self._store_graph(graph)
+        if dry_run:
+            logger.info(
+                "KnowledgeAccumulator: dry-run mode — skipping all database writes"
+            )
+        else:
+            await self._store_graph(graph)
+
         summary = await self._generate_summary(graph)
         key_insights = await self._extract_key_insights(graph)
-        await self._store_in_vector_db(graph, summary, key_insights)
+
+        if not dry_run:
+            await self._store_in_vector_db(graph, summary, key_insights)
 
         logger.info(
             "KnowledgeAccumulator: extraction completed for graph '%s' "

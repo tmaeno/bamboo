@@ -114,6 +114,11 @@ async def populate_knowledge_interactive():
     graph_db = GraphDatabaseClient()
     vector_db = VectorDatabaseClient()
 
+    dry_run = Confirm.ask(
+        "\nRun in [bold]dry-run mode[/bold] (extract & preview without writing to databases)?",
+        default=False,
+    )
+
     try:
         await graph_db.connect()
         await vector_db.connect()
@@ -125,13 +130,32 @@ async def populate_knowledge_interactive():
                 email_text=email_text,
                 task_data=task_dict,
                 external_data=external_dict,
+                dry_run=True,  # always preview first
             )
 
-        console.print("\n[bold green]✓ Knowledge extracted successfully![/bold green]")
+        console.print("\n[bold green]✓ Extraction preview complete[/bold green]")
         console.print(f"\n[bold]Summary:[/bold]\n{result.summary}")
         console.print("\n[bold]Statistics:[/bold]")
         console.print(f"  Nodes: {len(result.graph.nodes)}")
         console.print(f"  Relationships: {len(result.graph.relationships)}")
+
+        if dry_run:
+            console.print(
+                "\n[yellow]Dry-run mode: no data was written to the databases.[/yellow]"
+            )
+        else:
+            if not Confirm.ask("\nCommit this data to the databases?", default=True):
+                console.print("[yellow]Aborted — no data written.[/yellow]")
+                return
+
+            with console.status("[bold green]Writing to databases..."):
+                await agent._store_graph(result.graph)
+                await agent._store_in_vector_db(
+                    result.graph,
+                    result.summary,
+                    await agent._extract_key_insights(result.graph),
+                )
+            console.print("[bold green]✓ Knowledge stored successfully![/bold green]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     Attributes:
         llm_api_key:              API key for the configured LLM provider
                                   (OpenAI or Anthropic).
-        embeddings_api_key:       API key for the embeddings provider.
+        embeddings_api_key:       API key for the embeddings' provider.
                                   Not used when ``embeddings_provider="local"``.
                                   Leave empty when ``llm_provider="openai"``
                                   and ``embeddings_provider="openai"`` —
@@ -60,11 +60,23 @@ class Settings(BaseSettings):
     )
 
     @field_validator(
-        "llm_api_key", "embeddings_api_key", "llm_provider", "embeddings_provider",
-        "llm_model", "extraction_strategy", "graph_database_backend",
-        "vector_database_backend", "neo4j_uri", "neo4j_username", "neo4j_password",
-        "neo4j_database", "qdrant_url", "qdrant_api_key", "qdrant_collection_name",
-        "log_level", "embedding_model",
+        "llm_api_key",
+        "embeddings_api_key",
+        "llm_provider",
+        "embeddings_provider",
+        "llm_model",
+        "extraction_strategy",
+        "graph_database_backend",
+        "vector_database_backend",
+        "neo4j_uri",
+        "neo4j_username",
+        "neo4j_password",
+        "neo4j_database",
+        "qdrant_url",
+        "qdrant_api_key",
+        "qdrant_collection_name",
+        "log_level",
+        "embedding_model",
         mode="before",
     )
     @classmethod
