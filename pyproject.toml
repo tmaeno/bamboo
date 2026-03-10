@@ -76,7 +76,7 @@ where = ["."]
 include = ["bamboo*"]
 
 [tool.setuptools.package-data]
-"bamboo" = ["data/.env.example"]
+"bamboo" = ["data/.env.example", "data/completions/_bamboo", "data/completions/_bamboo.bash"]
 
 [tool.black]
 line-length = 88

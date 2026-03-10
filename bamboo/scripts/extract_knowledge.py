@@ -126,6 +126,7 @@ async def _run_extraction(email_text, task_dict, external_dict, output=None):
 
         # Node breakdown by type
         from collections import Counter
+
         type_counts = Counter(n.node_type.value for n in result.graph.nodes)
         click.echo("\nNode types:")
         for node_type, count in sorted(type_counts.items()):
@@ -173,4 +174,3 @@ async def _run_extraction(email_text, task_dict, external_dict, output=None):
 
 if __name__ == "__main__":
     main()
-

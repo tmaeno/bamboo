@@ -1,9 +1,10 @@
 """Interactive CLI for Bamboo."""
 
-import asyncio  # still needed for asyncio.run() for the async agent pipelines
-import json
 import os
 import sys
+
+import asyncio  # still needed for asyncio.run() for the async agent pipelines
+import json
 
 import click
 from rich.console import Console
@@ -23,60 +24,142 @@ console = Console()
 # Shell completion — auto-installed on first run
 # ---------------------------------------------------------------------------
 
-_COMPLETION_LINES = {
-    "zsh":  'eval "$(_BAMBOO_COMPLETE=zsh_source bamboo)"',
-    "bash": 'eval "$(_BAMBOO_COMPLETE=bash_source bamboo)"',
-}
-_RC_FILES = {
-    "zsh":  "~/.zshrc",
-    "bash": "~/.bashrc",
-}
-# Sentinel written alongside the activation line so we only ever add it once.
+# Sentinel written into rc files so we only ever add it once.
 _COMPLETION_MARKER = "# bamboo shell completion (auto-installed)"
+
+# NOTE: completion scripts are NOT defined here.
+# The single source of truth is:
+#   bamboo/data/completions/_bamboo       (zsh)
+#   bamboo/data/completions/_bamboo.bash  (bash)
+# cli.py reads them via importlib.resources — no hardcoded copy anywhere.
+
+
+def _completion_script(filename: str) -> str:
+    """Read a completion script from the installed package data.
+
+    ``bamboo/data/completions/`` is the single source of truth.
+    ``~/.zsh/completions/_bamboo`` is always derived from it, never the
+    other way around — so they are guaranteed to be identical.
+    """
+    import importlib.resources as pkg_resources
+
+    ref = pkg_resources.files("bamboo.data.completions").joinpath(filename)
+    return ref.read_text(encoding="utf-8")
 
 
 def _ensure_completion() -> None:
-    """Silently add the completion activation line to the user's shell rc file.
+    """Silently install shell completion on first run.
 
-    Called once per ``cli()`` invocation.  Does nothing if:
-    - The shell is not zsh or bash (e.g. fish, tcsh).
-    - The activation line is already present.
-    - The rc file is not writable.
-    - We are running inside a Click completion session (avoid recursion).
-    - stdout is not a TTY (non-interactive script / CI environment).
+    Writes the packaged completion script to the user's completion directory.
+    No subprocess, no Python startup at Tab time — instant response.
+    Does nothing if already installed, not a TTY, or shell is unsupported.
     """
-    # Don't interfere with Click's own completion machinery.
     if os.environ.get("_BAMBOO_COMPLETE"):
         return
-    # Only auto-install in interactive terminals.
     if not sys.stdout.isatty():
         return
 
     shell = os.path.basename(os.environ.get("SHELL", "")).lower()
-    if shell not in _COMPLETION_LINES:
-        return
 
-    rc_path = os.path.expanduser(_RC_FILES[shell])
-    activation = _COMPLETION_LINES[shell]
+    if shell == "zsh":
+        _install_zsh_completion()
+    elif shell == "bash":
+        _install_bash_completion()
+
+
+def _install_zsh_completion() -> None:
+    """Write _bamboo from package data to ~/.zsh/completions/ and wire ~/.zshrc."""
+    comp_dir = os.path.expanduser("~/.zsh/completions")
+    comp_file = os.path.join(comp_dir, "_bamboo")
+    rc_path = os.path.expanduser("~/.zshrc")
 
     try:
+        script = _completion_script("_bamboo")
+
+        # Keep installed file in sync with package data — only write on change.
+        os.makedirs(comp_dir, exist_ok=True)
         try:
-            existing = open(rc_path).read()
+            with open(comp_file) as f:
+                current = f.read()
+        except FileNotFoundError:
+            current = ""
+        if current != script:
+            with open(comp_file, "w") as f:
+                f.write(script)
+
+        try:
+            with open(rc_path) as f:
+                existing = f.read()
         except FileNotFoundError:
             existing = ""
 
         if _COMPLETION_MARKER in existing:
-            return  # already installed
+            # fpath already wired — patch in compinit if missing (upgrade path).
+            compinit_line = "autoload -Uz compinit && compinit"
+            if compinit_line not in existing:
+                patched = existing.replace(
+                    f"fpath=('{comp_dir}' $fpath)\n",
+                    f"fpath=('{comp_dir}' $fpath)\n{compinit_line}\n",
+                )
+                with open(rc_path, "w") as f:
+                    f.write(patched)
+            return
 
-        with open(rc_path, "a") as f:
-            f.write(f"\n{_COMPLETION_MARKER}\n{activation}\n")
+        fpath_line = f"fpath=('{comp_dir}' $fpath)"
+        compinit_line = "autoload -Uz compinit && compinit"
+        new_content = (
+            f"{_COMPLETION_MARKER}\n"
+            f"{fpath_line}\n"
+            f"{compinit_line}\n"
+            f"{existing}"
+        )
+        with open(rc_path, "w") as f:
+            f.write(new_content)
 
         console.print(
-            f"[dim]✓ Tab-completion added to {_RC_FILES[shell]}. "
-            f"Run [bold]exec {shell}[/bold] to activate.[/dim]"
+            "[dim]✓ Tab-completion installed. "
+            "Run [bold]exec zsh[/bold] to activate.[/dim]"
         )
     except Exception:
-        pass  # never break the CLI over a completion housekeeping failure
+        pass
+
+
+def _install_bash_completion() -> None:
+    """Write static bash completion script to ~/.bash_completion.d/bamboo."""
+    comp_dir = os.path.expanduser("~/.bash_completion.d")
+    comp_file = os.path.join(comp_dir, "bamboo")
+    rc_path = os.path.expanduser("~/.bashrc")
+
+    try:
+        os.makedirs(comp_dir, exist_ok=True)
+        try:
+            with open(comp_file) as f:
+                current = f.read()
+        except FileNotFoundError:
+            current = ""
+        if current != _completion_script("_bamboo.bash"):
+            with open(comp_file, "w") as f:
+                f.write(_completion_script("_bamboo.bash"))
+
+        try:
+            with open(rc_path) as f:
+                existing = f.read()
+        except FileNotFoundError:
+            existing = ""
+
+        if _COMPLETION_MARKER in existing:
+            return
+
+        source_line = f"source '{comp_file}'"
+        with open(rc_path, "a") as f:
+            f.write(f"\n{_COMPLETION_MARKER}\n{source_line}\n")
+
+        console.print(
+            "[dim]✓ Tab-completion installed. "
+            "Run [bold]exec bash[/bold] to activate.[/dim]"
+        )
+    except Exception:
+        pass
 
 
 @click.group()
@@ -634,7 +717,6 @@ def verify_cmd():
     from bamboo.scripts.verify import main as _main
 
     sys.exit(_main())
-
 
 
 if __name__ == "__main__":
