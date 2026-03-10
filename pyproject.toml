@@ -67,9 +67,6 @@ dev = [
 
 [project.scripts]
 bamboo = "bamboo.cli:cli"
-bamboo-populate = "bamboo.scripts.populate_knowledge:main"
-bamboo-analyze = "bamboo.scripts.analyze_task:main"
-bamboo-verify = "bamboo.scripts.verify:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/bamboo"

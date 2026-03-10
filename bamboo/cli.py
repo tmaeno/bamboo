@@ -420,5 +420,95 @@ async def query_knowledge_interactive():
         await graph_db.close()
 
 
+@cli.command("populate")
+@click.option(
+    "--email-thread",
+    type=click.Path(exists=True),
+    help="Path to email thread text file",
+)
+@click.option(
+    "--task-data",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to task data JSON file. Mutually exclusive with --task-id.",
+)
+@click.option(
+    "--task-id",
+    type=int,
+    default=None,
+    help=(
+        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. "
+        "Mutually exclusive with --task-data."
+    ),
+)
+@click.option(
+    "--external-data",
+    type=click.Path(exists=True),
+    help="Path to external data JSON file",
+)
+def populate_cmd(email_thread, task_data, task_id, external_data):
+    """Populate knowledge base from various sources."""
+    from bamboo.scripts.populate_knowledge import main as _main
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        _main,
+        email_thread=email_thread,
+        task_data=task_data,
+        task_id=task_id,
+        external_data=external_data,
+    )
+
+
+@cli.command("analyze")
+@click.option(
+    "--task-data",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to task data JSON file. Mutually exclusive with --task-id.",
+)
+@click.option(
+    "--task-id",
+    type=int,
+    default=None,
+    help=(
+        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. "
+        "Mutually exclusive with --task-data."
+    ),
+)
+@click.option(
+    "--external-data",
+    type=click.Path(exists=True),
+    help="Path to external data JSON file",
+)
+@click.option(
+    "--output",
+    type=click.Path(),
+    help="Path to save analysis results",
+)
+def analyze_cmd(task_data, task_id, external_data, output):
+    """Analyze a problematic task and generate a resolution."""
+    from bamboo.scripts.analyze_task import main as _main
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        _main,
+        task_data=task_data,
+        task_id=task_id,
+        external_data=external_data,
+        output=output,
+    )
+
+
+@cli.command("verify")
+def verify_cmd():
+    """Verify that the Bamboo package is correctly installed."""
+    import sys
+
+    from bamboo.scripts.verify import main as _main
+
+    sys.exit(_main())
+
+
 if __name__ == "__main__":
     cli()

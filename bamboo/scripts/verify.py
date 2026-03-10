@@ -3,7 +3,7 @@
 
 After installation, run from any directory:
 
-    bamboo-verify
+    bamboo verify
 """
 
 import importlib.resources
@@ -84,17 +84,24 @@ def check_submodule_imports() -> bool:
 def check_cli_entry_points() -> bool:
     print("CLI entry points")
     ok = True
-    for cmd in ("bamboo", "bamboo-populate", "bamboo-analyze"):
+    for args in (
+        ["bamboo", "--help"],
+        ["bamboo", "interactive", "--help"],
+        ["bamboo", "populate", "--help"],
+        ["bamboo", "analyze", "--help"],
+        ["bamboo", "verify", "--help"],
+    ):
         result = subprocess.run(
-            [cmd, "--help"],
+            args,
             capture_output=True,
             text=True,
         )
+        cmd_str = " ".join(args)
         if result.returncode == 0:
-            _ok(f"`{cmd} --help` works")
+            _ok(f"`{cmd_str}` works")
         else:
             _fail(
-                f"`{cmd}` not found or errored",
+                f"`{cmd_str}` not found or errored",
                 "Run: pip install .  (entry points are registered on install)",
             )
             ok = False
@@ -168,7 +175,7 @@ def check_api_keys() -> bool:
         _fail(
             ".env file not found in the current directory",
             f"Run:  cp {example} .env\n"
-            "    then edit .env and add your API keys, then re-run bamboo-verify",
+            "    then edit .env and add your API keys, then re-run bamboo verify",
         )
         return False
 
@@ -182,7 +189,7 @@ def check_api_keys() -> bool:
     except Exception as exc:
         return _fail(
             f"could not load settings: {exc}",
-            f"Check that {env_path} is valid and re-run bamboo-verify",
+            f"Check that {env_path} is valid and re-run bamboo verify",
         )
 
     ok = True
@@ -291,7 +298,7 @@ def main() -> int:
     else:
         print(f"✗ {total - passed} check(s) failed  ({passed}/{total} passed)")
         print()
-        print("Fix the issues above, then re-run: bamboo-verify")
+        print("Fix the issues above, then re-run: bamboo verify")
         return 1
 
 

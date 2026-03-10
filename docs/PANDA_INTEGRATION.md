@@ -70,15 +70,15 @@ export PANDA_URL_SSL=https://mypanda.example.org
 **Populate knowledge base** from a live task (instead of a local JSON file):
 
 ```bash
-bamboo-populate --task-id 12345
-bamboo-populate --task-id 12345 --email-thread incident.txt
+bamboo populate --task-id 12345
+bamboo populate --task-id 12345 --email-thread incident.txt
 ```
 
 **Analyze a task** fetched directly from PanDA:
 
 ```bash
-bamboo-analyze --task-id 12345
-bamboo-analyze --task-id 12345 --output result.json
+bamboo analyze --task-id 12345
+bamboo analyze --task-id 12345 --output result.json
 ```
 
 `--task-id` and `--task-data` are mutually exclusive on both commands.

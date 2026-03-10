@@ -18,10 +18,7 @@ Graph database (Neo4j) and vector database (Qdrant) plugin architecture, backend
 Pluggable knowledge extraction strategies (`panda`, `llm`, `rule_based`, …), how to select one, and how to register a custom extractor.
 
 ### 🐼 [PanDA Integration](PANDA_INTEGRATION.md)
-Fetch task data live from a PanDA server by `jediTaskID` — no local JSON file required.
-- PanDA configuration (`PANDA_URL` / `PANDA_URL_SSL`)
-- CLI usage: `--task-id`, `bamboo fetch-task`
-- Programmatic usage, interactive mode, error handling and testing
+Fetch task and job data live from PanDA — no local JSON file required.
 
 ### 👨‍💻 [Development Guide](DEVELOPMENT.md)
 Development setup, code style, extension points (agents, node types, relationships, prompts), testing, and deployment.
@@ -32,7 +29,7 @@ Development setup, code style, extension points (agents, node types, relationshi
 
 ### New users
 1. [Quick Start Guide](QUICKSTART.md) — set up the environment
-2. Run `bamboo-verify`
+2. Run `bamboo verify`
 
 ### PanDA operators
 1. [Quick Start Guide](QUICKSTART.md) — environment setup

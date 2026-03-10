@@ -29,12 +29,12 @@ pip install ".[dev]"
 
 ```bash
 # Works from any directory after pip install .
-bamboo-verify
+bamboo verify
 ```
 
 This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
 
-`bamboo-verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
+`bamboo verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
 
 ```bash
 cp <path-shown-by-bamboo-verify> .env
@@ -137,7 +137,7 @@ python -m bamboo.scripts.populate_knowledge \
 Or using the CLI shortcut:
 
 ```bash
-bamboo-populate \
+bamboo populate \
   --email-thread examples/sample_email.txt \
   --task-data examples/sample_task.json
 ```
@@ -154,7 +154,7 @@ python -m bamboo.scripts.analyze_task \
 Or using the CLI shortcut:
 
 ```bash
-bamboo-analyze \
+bamboo analyze \
   --task-data examples/sample_task.json \
   --output results.json
 ```

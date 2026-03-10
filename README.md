@@ -11,7 +11,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ## Key Features
 
 ✅ **Multi-Agent Architecture**  
-✅ **Dual Database** - Graph database (Neo4j) + Vector database (Qdrant)  
+✅ **Dual Database** - Graph database + Vector database  
 ✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
 ✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
 ✅ **Hierarchical Workload Insights** - Full visibility across tasks, jobs, and their dependencies  
@@ -49,7 +49,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 pip install .
 
 # 2. Verify the installation
-bamboo-verify
+bamboo verify
 
 # 3. Start databases
 docker-compose up -d

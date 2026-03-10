@@ -3,7 +3,7 @@
 
 After `pip install .` the preferred way to verify is:
 
-    bamboo-verify          # works from any directory
+    bamboo verify          # works from any directory
 
 This file exists so that contributors working inside the project source tree
 can also run:
