@@ -161,26 +161,55 @@ def _env_example_path() -> str:
         return "<bamboo-install-dir>/bamboo/data/.env.example"
 
 
+def _check_duplicate_env_keys(env_path: str) -> list[str]:
+    """Return a list of keys that appear more than once in the .env file."""
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key = line.split("=", 1)[0].strip()
+                counts[key] += 1
+    return [key for key, n in counts.items() if n > 1]
+
+
 def check_api_keys() -> bool:
-    print("API keys")
+    print("API keys / settings")
 
-    # ------------------------------------------------------------------ #
-    # Step 1: does a .env file exist in the current working directory?    #
-    # ------------------------------------------------------------------ #
-    import os
+    from bamboo.config import _find_env_file
 
-    env_path = Path(os.getcwd()) / ".env"
-    if not env_path.exists():
+    env_path = _find_env_file()
+    if not env_path:
         example = _env_example_path()
+        user_cfg = Path.home() / ".config" / "bamboo" / ".env"
         _fail(
-            ".env file not found in the current directory",
-            f"Run:  cp {example} .env\n"
-            "    then edit .env and add your API keys, then re-run bamboo verify",
+            ".env file not found",
+            f"Copy the example and edit it:\n"
+            f"    cp {example} .env          # project-local (any parent of cwd)\n"
+            f"    # or for a permanent user-level location:\n"
+            f"    mkdir -p {user_cfg.parent} && cp {example} {user_cfg}\n"
+            f"Then re-run: bamboo verify",
         )
         return False
 
+    _ok(f".env loaded from: {env_path}")
+
+    # Warn about duplicate keys — the last value wins but the first is silently ignored.
+    dupes = _check_duplicate_env_keys(env_path)
+    if dupes:
+        for key in dupes:
+            _fail(
+                f"Duplicate key in .env: {key}",
+                f"Remove the duplicate — only the last value is used.\n"
+                f"    Open {env_path} and keep only one {key}= line.",
+            )
+        return False
+
     # ------------------------------------------------------------------ #
-    # Step 2: load settings and check keys                                #
+    # Load settings and report active values                              #
     # ------------------------------------------------------------------ #
     try:
         from bamboo.config import get_settings
@@ -191,6 +220,12 @@ def check_api_keys() -> bool:
             f"could not load settings: {exc}",
             f"Check that {env_path} is valid and re-run bamboo verify",
         )
+
+    _ok(
+        f"embeddings_provider={s.embeddings_provider!r}  "
+        f"embedding_model={s.embedding_model!r}  "
+        f"embedding_dimension={s.embedding_dimension}"
+    )
 
     ok = True
 

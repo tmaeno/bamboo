@@ -8,12 +8,41 @@ Environment variables are case-insensitive and can be set directly or via a
 ``.env`` file in the project root.  See ``README.md`` for the full list.
 """
 
+import logging
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_log = logging.getLogger(__name__)
+
+
+def _find_env_file() -> str | None:
+    """Return the path of the first ``.env`` file found.
+
+    Search order:
+    1. Current working directory, then each parent up to the filesystem root.
+    2. The directory two levels above this module (project root when installed
+       in editable / development mode).
+    3. ``~/.config/bamboo/.env`` — user-level fallback, useful when running
+       bamboo from arbitrary directories (e.g. home directory).
+
+    Returns ``None`` if no ``.env`` file is found anywhere.
+    """
+    candidates: list[Path] = [
+        *[parent / ".env" for parent in [Path.cwd(), *Path.cwd().parents]],
+        Path(__file__).parent.parent / ".env",
+        Path.home() / ".config" / "bamboo" / ".env",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            _log.debug("Settings: loading .env from %s", candidate)
+            return str(candidate)
+    _log.debug("Settings: no .env file found — using environment variables only")
+    return None
 
 
 class Settings(BaseSettings):
@@ -54,7 +83,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_find_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
@@ -102,8 +131,8 @@ class Settings(BaseSettings):
 
     # Extraction
     extraction_strategy: Literal[
-        "llm", "rule_based", "jira", "github", "generic", "panda"
-    ] = "llm"
+        "llm", "panda"
+    ] = "panda"
 
     # Database backend selection
     graph_database_backend: Literal["neo4j"] = "neo4j"
@@ -157,4 +186,11 @@ def get_settings() -> Settings:
     The ``.env`` file (if present) is read on the first call; subsequent calls
     return the cached instance without re-reading the file.
     """
-    return Settings()
+    s = Settings()
+    _log.debug(
+        "Settings active: llm_provider=%s llm_model=%s "
+        "embeddings_provider=%s embedding_model=%s embedding_dimension=%s",
+        s.llm_provider, s.llm_model,
+        s.embeddings_provider, s.embedding_model, s.embedding_dimension,
+    )
+    return s
