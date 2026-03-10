@@ -17,13 +17,12 @@ Typical workflow::
 import asyncio
 import json
 import sys
+import traceback
 from pathlib import Path
 
 import click
 
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.database.graph_database_client import GraphDatabaseClient
-from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.utils.logging import setup_logging
 
 
@@ -100,15 +99,11 @@ def main(email_thread, task_data, task_id, external_data, output):
 
 async def _run_extraction(email_text, task_dict, external_dict, output=None):
     """Run extraction in dry-run mode and print the result."""
-    neo4j = GraphDatabaseClient()
-    qdrant = VectorDatabaseClient()
+    # Dry-run needs no database connections at all — skip Neo4j and Qdrant.
+    # Pass None so KnowledgeAccumulator skips all DB calls.
+    agent = KnowledgeAccumulator(graph_db=None, vector_db=None)
 
     try:
-        await neo4j.connect()
-        await qdrant.connect()
-
-        agent = KnowledgeAccumulator(neo4j, qdrant)
-
         click.echo("Extracting knowledge (dry-run — nothing will be written)...")
         result = await agent.process_knowledge(
             email_text=email_text,
@@ -165,11 +160,22 @@ async def _run_extraction(email_text, task_dict, external_dict, output=None):
             click.echo(f"\n✓ Graph preview saved to {output}")
 
     except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+        click.echo(f"\nError: {e}", err=True)
+        click.echo("\n--- Traceback ---", err=True)
+        traceback.print_exc()
+        # Give a specific hint for the most common cause: wrong PyTorch version
+        msg = str(e)
+        if "nn" in msg or "torch" in msg.lower() or "pytorch" in msg.lower():
+            click.echo(
+                "\nHint: This looks like a PyTorch version incompatibility.\n"
+                "sentence-transformers requires PyTorch >= 2.4, but an older version\n"
+                "is installed.  Fix with:\n\n"
+                "  pip install --upgrade torch\n\n"
+                "Or switch to OpenAI embeddings (no local PyTorch needed):\n"
+                "  EMBEDDINGS_PROVIDER=openai in your .env",
+                err=True,
+            )
         sys.exit(1)
-    finally:
-        await neo4j.close()
-        await qdrant.close()
 
 
 if __name__ == "__main__":

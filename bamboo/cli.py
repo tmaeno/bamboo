@@ -3,7 +3,7 @@
 import os
 import sys
 
-import asyncio  # still needed for asyncio.run() for the async agent pipelines
+import asyncio
 import json
 
 import click
@@ -12,10 +12,6 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.agents.reasoning_navigator import ReasoningNavigator
-from bamboo.database.graph_database_client import GraphDatabaseClient
-from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.utils.logging import setup_logging
 
 console = Console()
@@ -205,6 +201,10 @@ def interactive():
 
 async def populate_knowledge_interactive():
     """Interactive knowledge population."""
+    from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.database.vector_database_client import VectorDatabaseClient
+
     console.print("\n[bold cyan]Populate Knowledge Base[/bold cyan]")
 
     email_text = ""
@@ -311,6 +311,10 @@ async def populate_knowledge_interactive():
 
 async def analyze_task_interactive():
     """Interactive task analysis."""
+    from bamboo.agents.reasoning_navigator import ReasoningNavigator
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.database.vector_database_client import VectorDatabaseClient
+
     console.print("\n[bold cyan]Analyze Problematic Task[/bold cyan]")
 
     task_dict = None
@@ -449,6 +453,8 @@ def fetch_task_cmd(task_id, output, verbose):
 
 async def query_vector_interactive():
     """Interactive vector database (semantic similarity) search."""
+    from bamboo.database.vector_database_client import VectorDatabaseClient
+
     console.print("\n[bold cyan]Query Knowledge Base (Vector Database)[/bold cyan]")
 
     query_text = Prompt.ask("Enter search query (free-form text)")
@@ -523,6 +529,8 @@ async def query_vector_interactive():
 
 async def query_knowledge_interactive():
     """Interactive knowledge graph querying."""
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+
     console.print("\n[bold cyan]Query Knowledge Graph (Graph Database)[/bold cyan]")
 
     query_type = Prompt.ask(

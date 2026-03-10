@@ -57,9 +57,21 @@ class ReasoningNavigator:
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
-        self.llm = get_llm()
-        self.embeddings = get_embeddings()
+        self._llm = None
+        self._embeddings = None
         self.extractor = KnowledgeGraphExtractor()
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm()
+        return self._llm
+
+    @property
+    def embeddings(self):
+        if self._embeddings is None:
+            self._embeddings = get_embeddings()
+        return self._embeddings
 
     # ------------------------------------------------------------------
     # Public API

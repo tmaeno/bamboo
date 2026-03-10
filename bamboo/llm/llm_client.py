@@ -140,10 +140,20 @@ def get_embeddings() -> Embeddings:
             raise ImportError(
                 "EMBEDDINGS_PROVIDER=local requires 'sentence-transformers' and "
                 "'langchain-huggingface'.\n"
-                "Install them with:  "
-                "pip install sentence-transformers langchain-huggingface"
+                "Install them with:  pip install 'bamboo[local-embeddings]'"
             ) from exc
-        return HuggingFaceEmbeddings(model_name=settings.embedding_model)
+        try:
+            return HuggingFaceEmbeddings(model_name=settings.embedding_model)
+        except (NameError, AttributeError) as exc:
+            # transformers>=4.45 breaks with torch<2.4:
+            #   NameError: name 'nn' is not defined
+            raise RuntimeError(
+                f"Failed to initialise local embeddings ({exc}).\n\n"
+                "This is a torch / transformers version conflict.\n"
+                "Fix by pinning transformers:\n\n"
+                "  pip install 'transformers<4.45'\n\n"
+                "This pins transformers<4.45, which is compatible with torch 2.2.x.\n\n"
+            ) from exc
 
     raise ValueError(
         f"Unsupported embeddings provider: {settings.embeddings_provider!r}. "

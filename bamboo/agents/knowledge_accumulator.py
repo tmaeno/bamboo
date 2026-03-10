@@ -48,9 +48,25 @@ class KnowledgeAccumulator:
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
-        self.llm = get_llm()
-        self.embeddings = get_embeddings()
+        self._llm = None        # lazy — initialised on first use
+        self._embeddings = None # lazy — initialised on first use (not needed for dry-run)
         self.extractor = KnowledgeGraphExtractor()
+
+    # ------------------------------------------------------------------
+    # Lazy accessors — heavy imports deferred until actually needed
+    # ------------------------------------------------------------------
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = get_llm()
+        return self._llm
+
+    @property
+    def embeddings(self):
+        if self._embeddings is None:
+            self._embeddings = get_embeddings()
+        return self._embeddings
 
     async def process_knowledge(
         self,
