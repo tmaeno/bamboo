@@ -52,7 +52,6 @@ def main(email_thread, task_data, task_id, external_data):
     if task_data and task_id:
         raise click.UsageError("--task-data and --task-id are mutually exclusive.")
 
-    # Load data
     email_text = ""
     if email_thread:
         email_text = Path(email_thread).read_text()
@@ -61,27 +60,25 @@ def main(email_thread, task_data, task_id, external_data):
     if task_data:
         task_dict = json.loads(Path(task_data).read_text())
 
-    external_dict = None
-    if external_data:
-        external_dict = json.loads(Path(external_data).read_text())
-
-    # Run extraction (task_id is resolved inside the async function when provided)
-    asyncio.run(extract_knowledge(email_text, task_dict, external_dict, task_id))
-
-
-async def extract_knowledge(email_text, task_dict, external_dict, task_id=None):
-    """Extract and store knowledge."""
-    # Fetch task data from PanDA if a task_id was given instead of a file.
     if task_id is not None:
         from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
 
         click.echo(f"Fetching task data from PanDA for task_id={task_id}...")
         try:
-            task_dict = await fetch_task_data(task_id)
+            task_dict = fetch_task_data(task_id)
         except Exception as e:
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
+    external_dict = None
+    if external_data:
+        external_dict = json.loads(Path(external_data).read_text())
+
+    asyncio.run(_extract_knowledge(email_text, task_dict, external_dict))
+
+
+async def _extract_knowledge(email_text, task_dict, external_dict):
+    """Extract and store knowledge."""
     neo4j = GraphDatabaseClient()
     qdrant = VectorDatabaseClient()
 

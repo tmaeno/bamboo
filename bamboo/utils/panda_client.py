@@ -1,8 +1,8 @@
-"""Thin async wrapper around ``pandaclient.Client.get_task_details_json``.
+"""Synchronous wrapper around ``pandaclient.Client.get_task_details_json``.
 
-This module provides :func:`fetch_task_data` — a single async helper that
-retrieves full task details from a live PanDA server and returns them as a
-plain Python ``dict`` ready for use as ``task_data`` in the Bamboo pipeline.
+This module provides :func:`fetch_task_data` — a helper that retrieves full
+task details from a live PanDA server and returns them as a plain Python
+``dict`` ready for use as ``task_data`` in the Bamboo pipeline.
 
 PanDA server configuration
 --------------------------
@@ -14,15 +14,10 @@ environment:
 
 Set these variables (or place them in your ``.env`` file) to point at a
 different PanDA instance (e.g. a development server).
-
-The function runs the blocking ``Client.get_task_details_json`` call in a
-thread-pool executor so it can be awaited from async code without
-blocking the event loop.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -32,11 +27,8 @@ logger = logging.getLogger(__name__)
 _PANDA_OK = 0
 
 
-async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
+def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
     """Fetch full task details from PanDA and return them as a ``dict``.
-
-    The function calls :func:`pandaclient.Client.get_task_details_json` in a
-    thread-pool executor so it does not block the event loop.
 
     Args:
         task_id: The PanDA ``jediTaskID`` to look up (int or numeric string).
@@ -54,7 +46,7 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
     Raises:
         ImportError:  If ``panda-client-light`` is not installed.
         RuntimeError: If the PanDA server returns a non-zero status code or
-                      ``None`` data.
+                      an error response.
         ValueError:   If *task_id* cannot be converted to ``int``.
     """
     try:
@@ -72,11 +64,7 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
 
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
-    loop = asyncio.get_event_loop()
-    status, data = await loop.run_in_executor(
-        None,
-        lambda: Client.get_task_details_json(task_id_int, verbose=verbose),
-    )
+    status, data = Client.get_task_details_json(task_id_int, verbose=verbose)
 
     if status != _PANDA_OK:
         raise RuntimeError(
@@ -92,14 +80,12 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
         )
 
     if not data[0]:
-        # Some versions of panda-client-light return a (status, data) tuple on error
         raise RuntimeError(
             f"PanDA gave the following error message for task_id={task_id_int}: {data[-1]}."
         )
 
-    # Unpack the actual data from the (status, data) tuple
     data = data[1]
-    
+
     logger.info(
         "Successfully fetched task details for task_id=%s (%d fields)",
         task_id_int,

@@ -4,7 +4,7 @@ import logging
 from typing import Any, Optional
 
 try:
-    from qdrant_client import QdrantClient as QdrantClientSDK
+    from qdrant_client import AsyncQdrantClient
     from qdrant_client import models
     from qdrant_client.models import Distance, PointStruct, VectorParams
 except ImportError as e:
@@ -25,21 +25,20 @@ class QdrantBackend(VectorDatabaseBackend):
     def __init__(self):
         """Initialize Qdrant backend."""
         self.settings = get_settings()
-        self.client: Optional[QdrantClientSDK] = None
+        self.client: Optional[AsyncQdrantClient] = None
         self.collection_name = self.settings.qdrant_collection_name
 
     async def connect(self):
         """Establish connection to Qdrant."""
         try:
             if self.settings.qdrant_api_key:
-                self.client = QdrantClientSDK(
+                self.client = AsyncQdrantClient(
                     url=self.settings.qdrant_url,
                     api_key=self.settings.qdrant_api_key,
                 )
             else:
-                self.client = QdrantClientSDK(url=self.settings.qdrant_url)
+                self.client = AsyncQdrantClient(url=self.settings.qdrant_url)
 
-            # Create collection if it doesn't exist
             await self._ensure_collection()
             logger.info("Successfully connected to Qdrant")
         except Exception as e:
@@ -49,16 +48,15 @@ class QdrantBackend(VectorDatabaseBackend):
     async def close(self):
         """Close Qdrant connection."""
         if self.client:
-            self.client.close()
+            await self.client.close()
             logger.info("Qdrant connection closed")
 
     async def _ensure_collection(self):
         """Ensure collection exists with proper configuration."""
-        collections = self.client.get_collections().collections
-        collection_names = [collection.name for collection in collections]
-
-        if self.collection_name not in collection_names:
-            self.client.create_collection(
+        response = await self.client.get_collections()
+        existing = {c.name for c in response.collections}
+        if self.collection_name not in existing:
+            await self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
                     size=self.settings.embedding_dimension,
@@ -79,14 +77,9 @@ class QdrantBackend(VectorDatabaseBackend):
         point = PointStruct(
             id=vector_id,
             vector=embedding,
-            payload={
-                "content": content,
-                "section": section,
-                **metadata,
-            },
+            payload={"content": content, "section": section, **metadata},
         )
-
-        self.client.upsert(
+        await self.client.upsert(
             collection_name=self.collection_name,
             points=[point],
         )
@@ -100,9 +93,9 @@ class QdrantBackend(VectorDatabaseBackend):
         filter_conditions: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Search for similar documents in Qdrant."""
-        search_filter = None
+        query_filter = None
         if filter_conditions:
-            search_filter = models.Filter(
+            query_filter = models.Filter(
                 must=[
                     models.FieldCondition(
                         key=key,
@@ -112,53 +105,41 @@ class QdrantBackend(VectorDatabaseBackend):
                 ]
             )
 
-        results = self.client.search(
+        response = await self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
+            query_filter=query_filter,
             limit=limit,
             score_threshold=score_threshold,
-            query_filter=search_filter,
+            with_payload=True,
         )
 
         return [
             {
-                "id": result.id,
-                "score": result.score,
-                "content": result.payload.get("content", ""),
-                "entry": result.payload.get("entry", ""),
+                "id": point.id,
+                "score": point.score,
+                "content": point.payload.get("content", ""),
+                "entry": point.payload.get("entry", ""),
                 "metadata": {
                     k: v
-                    for k, v in result.payload.items()
-                    if k not in ["content", "entry"]
+                    for k, v in point.payload.items()
+                    if k not in ("content", "entry")
                 },
             }
-            for result in results
+            for point in response.points
         ]
 
     async def get_summaries_by_graph_ids(
         self, graph_ids: list[str]
     ) -> list[dict[str, Any]]:
-        """Fetch ``Summary`` section entries for the given graph IDs.
-
-        Queries Qdrant with a payload filter that matches ``section=Summary``
-        AND ``graph_id`` in *graph_ids*, then returns the points in the same
-        dict shape as :meth:`search_similar`.
-
-        Args:
-            graph_ids: List of graph IDs whose summaries are requested.
-
-        Returns:
-            List of summary dicts with keys ``id``, ``score``, ``content``,
-            ``entry``, and ``metadata``.  ``score`` is always ``1.0`` because
-            these are exact-match lookups, not similarity searches.
-        """
+        """Fetch ``Summary`` section entries for the given graph IDs."""
         if not graph_ids:
             return []
 
         results = []
         for graph_id in graph_ids:
             try:
-                points, _ = self.client.scroll(
+                points, _ = await self.client.scroll(
                     collection_name=self.collection_name,
                     scroll_filter=models.Filter(
                         must=[
@@ -186,7 +167,7 @@ class QdrantBackend(VectorDatabaseBackend):
                             "metadata": {
                                 k: v
                                 for k, v in point.payload.items()
-                                if k not in ["content", "entry"]
+                                if k not in ("content", "entry")
                             },
                         }
                     )
@@ -194,13 +175,12 @@ class QdrantBackend(VectorDatabaseBackend):
                 logger.warning(
                     "Failed to fetch summary for graph_id=%s: %s", graph_id, e
                 )
-
         return results
 
     async def delete_document(self, doc_id: str) -> bool:
         """Delete a document by ID."""
         try:
-            self.client.delete(
+            await self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=models.PointIdsList(points=[doc_id]),
             )
@@ -212,9 +192,10 @@ class QdrantBackend(VectorDatabaseBackend):
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a specific document by ID."""
         try:
-            points = self.client.retrieve(
+            points = await self.client.retrieve(
                 collection_name=self.collection_name,
                 ids=[doc_id],
+                with_payload=True,
             )
             if points:
                 point = points[0]
@@ -225,7 +206,7 @@ class QdrantBackend(VectorDatabaseBackend):
                     "metadata": {
                         k: v
                         for k, v in point.payload.items()
-                        if k not in ["content", "entry"]
+                        if k not in ("content", "entry")
                     },
                 }
         except Exception as e:

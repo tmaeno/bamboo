@@ -1,6 +1,6 @@
 """Interactive CLI for Bamboo."""
 
-import asyncio
+import asyncio  # still needed for asyncio.run() for the async agent pipelines
 import json
 
 import click
@@ -85,7 +85,7 @@ async def populate_knowledge_interactive():
                 with console.status(
                     f"[bold green]Fetching task {task_id_str} from PanDA..."
                 ):
-                    task_dict = await fetch_task_data(int(task_id_str))
+                    task_dict = fetch_task_data(int(task_id_str))
                 console.print(
                     f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
                 )
@@ -180,7 +180,7 @@ async def analyze_task_interactive():
             with console.status(
                 f"[bold green]Fetching task {task_id_str} from PanDA..."
             ):
-                task_dict = await fetch_task_data(int(task_id_str))
+                task_dict = fetch_task_data(int(task_id_str))
             console.print(
                 f"[green]✓ Fetched {len(task_dict)} fields for task {task_id_str}[/green]"
             )
@@ -281,15 +281,11 @@ def fetch_task_cmd(task_id, output, verbose):
       bamboo fetch-task 12345 --verbose
     """
 
-    async def _run():
-        from bamboo.utils.panda_client import fetch_task_data
-
-        with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
-            data = await fetch_task_data(task_id, verbose=verbose)
-        return data
+    from bamboo.utils.panda_client import fetch_task_data
 
     try:
-        data = asyncio.run(_run())
+        with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
+            data = fetch_task_data(task_id, verbose=verbose)
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise SystemExit(1)
