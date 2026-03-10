@@ -464,6 +464,66 @@ def populate_cmd(email_thread, task_data, task_id, external_data):
     )
 
 
+@cli.command("extract")
+@click.option(
+    "--email-thread",
+    type=click.Path(exists=True),
+    help="Path to email thread text file",
+)
+@click.option(
+    "--task-data",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to task data JSON file. Mutually exclusive with --task-id.",
+)
+@click.option(
+    "--task-id",
+    type=int,
+    default=None,
+    help=(
+        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. "
+        "Mutually exclusive with --task-data."
+    ),
+)
+@click.option(
+    "--external-data",
+    type=click.Path(exists=True),
+    help="Path to external data JSON file",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Save the extracted graph as JSON to this file path.",
+)
+def extract_cmd(email_thread, task_data, task_id, external_data, output):
+    """Extract knowledge graph and preview it without writing to any database.
+
+    Runs the full extraction pipeline (LLM calls, error classification, graph
+    construction) and prints a summary of what *would* be stored by
+    ``bamboo populate``.  Nothing is written to Neo4j or Qdrant.
+
+    Examples:
+
+    \b
+      bamboo extract --task-id 12345
+      bamboo extract --task-data task.json --email-thread email.txt
+      bamboo extract --task-data task.json --output graph_preview.json
+    """
+    from bamboo.scripts.extract_knowledge import main as _main
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        _main,
+        email_thread=email_thread,
+        task_data=task_data,
+        task_id=task_id,
+        external_data=external_data,
+        output=output,
+    )
+
+
 @cli.command("analyze")
 @click.option(
     "--task-data",
