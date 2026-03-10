@@ -117,55 +117,32 @@ make docker-up
 ### 4. Test the Setup
 
 ```bash
-# Start the interactive CLI
-python -m bamboo.cli interactive
+bamboo interactive
 ```
 
 ## Usage Examples
 
 ### Example 1: Populate Knowledge Base
 
-Using sample data:
-
 ```bash
-python -m bamboo.scripts.populate_knowledge \
+bamboo populate \
   --email-thread examples/sample_email.txt \
   --task-data examples/sample_task.json \
   --external-data examples/sample_external.json
 ```
 
-Or using the CLI shortcut:
-
-```bash
-bamboo populate \
-  --email-thread examples/sample_email.txt \
-  --task-data examples/sample_task.json
-```
-
 ### Example 2: Analyze a Task
-
-```bash
-python -m bamboo.scripts.analyze_task \
-  --task-data examples/sample_task.json \
-  --external-data examples/sample_external.json \
-  --output results.json
-```
-
-Or using the CLI shortcut:
 
 ```bash
 bamboo analyze \
   --task-data examples/sample_task.json \
+  --external-data examples/sample_external.json \
   --output results.json
 ```
 
 ### Example 3: Interactive Mode
 
 ```bash
-# Start interactive mode
-python -m bamboo.cli interactive
-
-# Or use the installed command
 bamboo interactive
 ```
 

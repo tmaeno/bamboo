@@ -2,6 +2,8 @@
 
 import asyncio  # still needed for asyncio.run() for the async agent pipelines
 import json
+import os
+import sys
 
 import click
 from rich.console import Console
@@ -17,11 +19,71 @@ from bamboo.utils.logging import setup_logging
 
 console = Console()
 
+# ---------------------------------------------------------------------------
+# Shell completion — auto-installed on first run
+# ---------------------------------------------------------------------------
+
+_COMPLETION_LINES = {
+    "zsh":  'eval "$(_BAMBOO_COMPLETE=zsh_source bamboo)"',
+    "bash": 'eval "$(_BAMBOO_COMPLETE=bash_source bamboo)"',
+}
+_RC_FILES = {
+    "zsh":  "~/.zshrc",
+    "bash": "~/.bashrc",
+}
+# Sentinel written alongside the activation line so we only ever add it once.
+_COMPLETION_MARKER = "# bamboo shell completion (auto-installed)"
+
+
+def _ensure_completion() -> None:
+    """Silently add the completion activation line to the user's shell rc file.
+
+    Called once per ``cli()`` invocation.  Does nothing if:
+    - The shell is not zsh or bash (e.g. fish, tcsh).
+    - The activation line is already present.
+    - The rc file is not writable.
+    - We are running inside a Click completion session (avoid recursion).
+    - stdout is not a TTY (non-interactive script / CI environment).
+    """
+    # Don't interfere with Click's own completion machinery.
+    if os.environ.get("_BAMBOO_COMPLETE"):
+        return
+    # Only auto-install in interactive terminals.
+    if not sys.stdout.isatty():
+        return
+
+    shell = os.path.basename(os.environ.get("SHELL", "")).lower()
+    if shell not in _COMPLETION_LINES:
+        return
+
+    rc_path = os.path.expanduser(_RC_FILES[shell])
+    activation = _COMPLETION_LINES[shell]
+
+    try:
+        try:
+            existing = open(rc_path).read()
+        except FileNotFoundError:
+            existing = ""
+
+        if _COMPLETION_MARKER in existing:
+            return  # already installed
+
+        with open(rc_path, "a") as f:
+            f.write(f"\n{_COMPLETION_MARKER}\n{activation}\n")
+
+        console.print(
+            f"[dim]✓ Tab-completion added to {_RC_FILES[shell]}. "
+            f"Run [bold]exec {shell}[/bold] to activate.[/dim]"
+        )
+    except Exception:
+        pass  # never break the CLI over a completion housekeeping failure
+
 
 @click.group()
 def cli():
     """Bamboo - Bolstered Assistance for Managing and Building Operations and Oversight."""
     setup_logging()
+    _ensure_completion()
 
 
 @cli.command()
@@ -572,6 +634,7 @@ def verify_cmd():
     from bamboo.scripts.verify import main as _main
 
     sys.exit(_main())
+
 
 
 if __name__ == "__main__":
