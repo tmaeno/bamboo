@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _PANDA_OK = 0
 
 
-async def fetch_task_data(task_id: int | str) -> dict[str, Any]:
+async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
     """Fetch full task details from PanDA and return them as a ``dict``.
 
     The function calls :func:`pandaclient.Client.get_task_details_json` in a
@@ -40,6 +40,10 @@ async def fetch_task_data(task_id: int | str) -> dict[str, Any]:
 
     Args:
         task_id: The PanDA ``jediTaskID`` to look up (int or numeric string).
+        verbose: If ``True``, the underlying ``panda-client-light`` library
+            will print every curl command it constructs and the raw server
+            response to stdout, which is useful for diagnosing network or
+            authentication issues.
 
     Returns:
         A ``dict`` containing the task details as returned by the PanDA
@@ -62,12 +66,16 @@ async def fetch_task_data(task_id: int | str) -> dict[str, Any]:
         ) from exc
 
     task_id_int = int(task_id)
+
+    if verbose:
+        logging.getLogger("bamboo").setLevel(logging.DEBUG)
+
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
     loop = asyncio.get_event_loop()
     status, data = await loop.run_in_executor(
         None,
-        lambda: Client.get_task_details_json(task_id_int),
+        lambda: Client.get_task_details_json(task_id_int, verbose=verbose),
     )
 
     if status != _PANDA_OK or data is None:

@@ -16,17 +16,21 @@ All PanDA-facing helpers live here so they can be reused by extractors, agents, 
 the CLI without creating circular imports.  New functions (e.g. job-list fetching, task-status
 polling) should be added to this module.
 
-### `fetch_task_data(task_id)`
+### `fetch_task_data(task_id, verbose=False)`
 
 ```python
 from bamboo.utils.panda_client import fetch_task_data
 
 task_data = await fetch_task_data(12345)
+
+# with full communication logging
+task_data = await fetch_task_data(12345, verbose=True)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `task_id` | `int` or `str` | PanDA `jediTaskID` |
+| `verbose` | `bool` | If `True`, prints every curl command and raw server response to stdout. Useful for debugging auth or network issues. Default: `False`. |
 
 **Returns** – a `dict` of task fields exactly as returned by the PanDA server, ready to pass
 as `task_data` to `KnowledgeAccumulator` or any extraction strategy.
@@ -81,7 +85,20 @@ python -c "from pandaclient import Client; print(Client.get_access_token())"
 
 ## Usage
 
-### Via CLI scripts
+### Via CLI commands
+
+**Inspect raw task data** without running the full pipeline:
+
+```bash
+# Print JSON to stdout
+bamboo fetch-task 12345
+
+# Save to a file
+bamboo fetch-task 12345 --output task_12345.json
+
+# Show all curl commands and raw server responses (debug auth/network issues)
+bamboo fetch-task 12345 --verbose
+```
 
 **Populate knowledge base** from a live task (instead of a local JSON file):
 
@@ -99,17 +116,6 @@ bamboo analyze --task-id 12345 --output result.json
 
 `--task-id` and `--task-data` are mutually exclusive on both commands.
 
-### Via the `bamboo` CLI
-
-Inspect raw task data without running the full pipeline:
-
-```bash
-# Print JSON to stdout
-bamboo fetch-task 12345
-
-# Save to a file
-bamboo fetch-task 12345 --output task_12345.json
-```
 
 ### Programmatically
 

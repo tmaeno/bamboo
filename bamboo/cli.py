@@ -261,7 +261,14 @@ async def analyze_task_interactive():
     default=None,
     help="Save the fetched task data as JSON to this file path.",
 )
-def fetch_task_cmd(task_id, output):
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Print every curl command and raw server response (useful for debugging auth/network issues).",
+)
+def fetch_task_cmd(task_id, output, verbose):
     """Fetch task details from PanDA and display or save them.
 
     TASK_ID is the PanDA jediTaskID to look up.
@@ -271,13 +278,14 @@ def fetch_task_cmd(task_id, output):
     \b
       bamboo fetch-task 12345
       bamboo fetch-task 12345 --output task_12345.json
+      bamboo fetch-task 12345 --verbose
     """
 
     async def _run():
         from bamboo.utils.panda_client import fetch_task_data
 
         with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
-            data = await fetch_task_data(task_id)
+            data = await fetch_task_data(task_id, verbose=verbose)
         return data
 
     try:
