@@ -44,7 +44,7 @@ The call to `pandaclient.Client.get_task_details_json` is wrapped in
 
 ---
 
-## Server Configuration
+## Server Configuration and Obtaining Access Tokens
 
 `panda-client-light` reads the server URL from environment variables.  Set them in your
 `.env` file or shell before running Bamboo:
@@ -60,6 +60,22 @@ To point at a development or local PanDA instance:
 export PANDA_URL=http://mypanda.example.org:25080
 export PANDA_URL_SSL=https://mypanda.example.org
 ```
+
+Other configuration parameters (e.g. `PANDA_AUTH`) can be set as needed — refer to the
+[PanDA client setup guide](https://panda-wms.readthedocs.io/en/latest/client/panda-client.html#setup)
+for the full list.
+
+Then you need to obtain an access token for authentication. This typically involves:
+
+```bash
+python -c "from pandaclient import Client; print(Client.get_access_token())"
+```
+
+> **macOS note:** if you see an error about invalid credentials, you may need to install
+> Python's SSL certificates first:
+> ```bash
+> /Applications/Python\ 3.x/Install\ Certificates.command
+> ```
 
 ---
 
