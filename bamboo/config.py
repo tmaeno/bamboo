@@ -125,6 +125,19 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
 
+    # Privacy: comma-separated extra task-data field names to redact before
+    # any data is sent to an LLM.  Added on top of the built-in defaults in
+    # ``bamboo.utils.sanitize.SENSITIVE_TASK_KEYS``.
+    # Example: SENSITIVE_TASK_KEYS=myCustomField,anotherField
+    sensitive_task_keys: str = ""
+
+    # Privacy: HMAC salt used to pseudonymise sensitive field values before
+    # they are stored in the graph/vector databases.  Change this to rotate
+    # all pseudonyms.  If left empty, a fixed built-in default is used
+    # (suitable for development; set a random secret in production).
+    # Example: PSEUDONYM_SALT=some-secret-string
+    pseudonym_salt: str = ""
+
     @property
     def effective_embeddings_api_key(self) -> str:
         """Return the API key to use for embeddings.

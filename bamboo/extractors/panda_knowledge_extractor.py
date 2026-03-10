@@ -80,8 +80,17 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
+from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Keys in task_data that identify a person or organisation and must never be
+# stored as graph nodes or sent to an LLM.  These are silently skipped during
+# extraction.  Imported from bamboo.utils.sanitize so both the extraction layer
+# and the LLM-prompting layer share a single authoritative list.
+# ---------------------------------------------------------------------------
+# SENSITIVE_TASK_KEYS is imported from bamboo.utils.sanitize (see import above).
 
 # ---------------------------------------------------------------------------
 # Keys in task_data that carry free-form prose (→ TaskContextNode).
@@ -123,12 +132,12 @@ UNSTRUCTURED_TASK_KEYS: frozenset[str] = frozenset(
 # - Continuous numeric fields (ramCount, walltime, diskIO, etc.) must NOT
 #   appear here; they belong in CONTINUOUS_TASK_KEYS and are bucketed into
 #   range labels before becoming TaskFeatureNodes.
+# - Identity / sensitive fields (userName, workingGroup, etc.) must NOT appear
+#   here; they live in SENSITIVE_TASK_KEYS and are silently skipped.
 # ---------------------------------------------------------------------------
 DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
     {
-        "userName",
         "prodSourceLabel",
-        "workingGroup",
         "vo",
         "coreCount",
         "taskType",
@@ -145,7 +154,6 @@ DISCRETE_TASK_KEYS: frozenset[str] = frozenset(
         "ioIntensityUnit",
         "reqID",
         "site",
-        "countryGroup",
         "campaign",
         "goal",
         "cpuTimeUnit",
@@ -762,6 +770,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         cli_argument_keys: Optional[frozenset[str]] = None,
         task_creation_context_args: Optional[frozenset[str]] = None,
         task_creation_skip_args: Optional[frozenset[str]] = None,
+        sensitive_keys: Optional[frozenset[str]] = None,
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
@@ -782,6 +791,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                                          whose values are pure identifiers / GUIDs with no
                                          semantic signal → dropped entirely
                                          (TASK_CREATION_SKIP_ARGS).
+            sensitive_keys:              Override the set of task_data fields that identify
+                                         a person or organisation and must never be stored
+                                         in any database or sent to an LLM
+                                         (SENSITIVE_TASK_KEYS).
             error_classifier:            Custom ErrorCategoryClassifier (for testing).
             cause_store:                 Custom CanonicalNodeStore for Cause nodes (for testing).
             resolution_store:            Custom CanonicalNodeStore for Resolution nodes (for testing).
@@ -812,6 +825,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             task_creation_skip_args
             if task_creation_skip_args is not None
             else TASK_CREATION_SKIP_ARGS
+        )
+        self._sensitive_task_keys: frozenset[str] = (
+            sensitive_keys if sensitive_keys is not None else SENSITIVE_TASK_KEYS
         )
         self._error_classifier: ErrorCategoryClassifier = (
             error_classifier or ErrorCategoryClassifier()
@@ -874,6 +890,24 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             )
 
         for key, value in (task_data or {}).items():
+            # Sensitive fields (userName, prodUserName, prodUserID) must never
+            # be stored as raw values.  Pseudonymise them: the same real value
+            # always maps to the same opaque token (e.g. "user-a3f2c1"), so
+            # graph relationships across incidents that share the same user are
+            # preserved — without storing or forwarding the real identity.
+            if key in self._sensitive_task_keys:
+                if value:
+                    pseudo = pseudonymise(key, str(value))
+                    nodes.append(
+                        self._make_feature_node(
+                            attribute=key,
+                            value=pseudo,
+                            description=f"Pseudonymised identity field: {key}",
+                            source="task_data/pseudonymised",
+                        )
+                    )
+                continue
+
             if key == "errorDialog":
                 # Dedicated handling: produce a SymptomNode whose name is the
                 # canonical error category and whose description is the raw

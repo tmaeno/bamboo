@@ -77,6 +77,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from bamboo.utils.sanitize import pseudonymise_dict
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -275,6 +277,11 @@ class PandaJobDataAggregator:
         """
         if not jobs_data:
             return JobAggregationResult()
+
+        # Pseudonymise identity fields in every job record before any
+        # aggregation step can store or forward them.  This mirrors the
+        # same protection applied to task_data in PandaKnowledgeExtractor.
+        jobs_data = [pseudonymise_dict(job) for job in jobs_data]
 
         total = len(jobs_data)
         failed = sum(1 for j in jobs_data if str(j.get("jobStatus", "")) != "finished")

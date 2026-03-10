@@ -34,6 +34,7 @@ from bamboo.llm import (
     get_llm,
 )
 from bamboo.models.knowledge_entity import AnalysisResult
+from bamboo.utils.sanitize import sanitize_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -351,8 +352,8 @@ class ReasoningNavigator:
         logger.info("ReasoningNavigator: identifying root cause with LLM")
 
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
-            task_info=json.dumps(task_data, indent=2),
-            external_info=json.dumps(external_data or {}, indent=2),
+            task_info=json.dumps(sanitize_for_llm(task_data), indent=2),
+            external_info=json.dumps(sanitize_for_llm(external_data) or {}, indent=2),
             graph_results=json.dumps(graph_results, indent=2),
             vector_results=json.dumps(
                 [
