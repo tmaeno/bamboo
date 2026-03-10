@@ -14,9 +14,25 @@ from bamboo.utils.logging import setup_logging
 
 
 @click.command()
-@click.option("--task-data", type=click.Path(exists=True), default=None, help="Path to task data JSON file. Mutually exclusive with --task-id.")
-@click.option("--task-id", type=int, default=None, help=("PanDA jediTaskID — fetch task data directly from PanDA instead of a file. Requires PANDA_URL / PANDA_URL_SSL to be set (or uses the CERN defaults). Mutually exclusive with --task-data."))
-@click.option("--external-data", type=click.Path(exists=True), help="Path to external data JSON file")
+@click.option(
+    "--task-data",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to task data JSON file. Mutually exclusive with --task-id.",
+)
+@click.option(
+    "--task-id",
+    type=int,
+    default=None,
+    help=(
+        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. Requires PANDA_URL / PANDA_URL_SSL to be set (or uses the CERN defaults). Mutually exclusive with --task-data."
+    ),
+)
+@click.option(
+    "--external-data",
+    type=click.Path(exists=True),
+    help="Path to external data JSON file",
+)
 @click.option("--output", type=click.Path(), help="Path to save analysis results")
 def main(task_data, task_id, external_data, output):
     """Analyze a problematic task and generate a resolution.
