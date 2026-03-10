@@ -298,12 +298,12 @@ def fetch_task_cmd(task_id, output, verbose):
         import json as _json
         from pathlib import Path
 
-        Path(output).write_text(_json.dumps(data, indent=2))
+        Path(output).write_text(_json.dumps(data, indent=2, default=str))
         console.print(f"[green]✓ Task {task_id} data saved to {output}[/green]")
     else:
         import json as _json
 
-        console.print_json(_json.dumps(data))
+        console.print_json(_json.dumps(data, default=str))
 
 
 async def query_vector_interactive():

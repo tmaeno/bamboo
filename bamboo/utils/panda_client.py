@@ -78,19 +78,28 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
         lambda: Client.get_task_details_json(task_id_int, verbose=verbose),
     )
 
-    if status != _PANDA_OK or data is None:
+    if status != _PANDA_OK:
         raise RuntimeError(
             f"PanDA returned status={status} for task_id={task_id_int}. "
             "Check that the task ID is valid and the PanDA server is reachable "
             "(PANDA_URL / PANDA_URL_SSL environment variables)."
         )
 
-    if not isinstance(data, dict):
+    if not isinstance(data, tuple):
         raise RuntimeError(
             f"Unexpected response type from PanDA: {type(data).__name__!r}. "
-            f"Expected dict, got: {data!r}"
+            f"Expected tuple, got: {data!r}"
         )
 
+    if not data[0]:
+        # Some versions of panda-client-light return a (status, data) tuple on error
+        raise RuntimeError(
+            f"PanDA gave the following error message for task_id={task_id_int}: {data[-1]}."
+        )
+
+    # Unpack the actual data from the (status, data) tuple
+    data = data[1]
+    
     logger.info(
         "Successfully fetched task details for task_id=%s (%d fields)",
         task_id_int,
