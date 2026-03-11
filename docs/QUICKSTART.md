@@ -92,6 +92,9 @@ LLM_MODEL=llama3.2          # or mistral, gemma3, etc.
 EMBEDDINGS_PROVIDER=local   # runs sentence-transformers in-process, no API key
 EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-dim)
 EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
+# Optional but recommended: avoids HuggingFace Hub rate-limiting on model downloads.
+# Get a free token at https://huggingface.co/settings/tokens
+HF_TOKEN=
 ```
 
 
@@ -368,6 +371,7 @@ Common errors:
 | `ImportError: sentence-transformers` | Missing local-embeddings deps | Run `pip install sentence-transformers langchain-huggingface` |
 | `ImportError: langchain-ollama` | Missing Ollama deps | Run `pip install langchain-ollama` |
 | Ollama connection refused | Ollama server not running | Run `ollama serve` in a separate terminal |
+| HuggingFace Hub rate-limit warning | `HF_TOKEN` not set | Add `HF_TOKEN=<token>` to `.env` — free token at https://huggingface.co/settings/tokens |
 
 ### Import Errors
 
