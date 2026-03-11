@@ -14,6 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
+from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -40,6 +41,11 @@ def _find_env_file() -> str | None:
     for candidate in candidates:
         if candidate.exists():
             _log.debug("Settings: loading .env from %s", candidate)
+            # load_dotenv() sets ALL keys in the file as real os.environ entries.
+            # This is necessary for variables that are not declared as Settings
+            # fields (e.g. HF_TOKEN, PANDA_URL, PANDA_AUTH …) so that external
+            # libraries which read os.environ directly can pick them up.
+            load_dotenv(candidate, override=False)
             return str(candidate)
     _log.debug("Settings: no .env file found — using environment variables only")
     return None
@@ -86,6 +92,7 @@ class Settings(BaseSettings):
         env_file=_find_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",  # silently skip env vars not declared as fields (e.g. PANDA_*, HF_TOKEN)
     )
 
     @field_validator(
