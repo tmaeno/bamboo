@@ -207,6 +207,16 @@ class VectorDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def collection_exists(self) -> bool:
+        """Return ``True`` if the backing collection/index exists and is ready.
+
+        Used as a pre-flight check before the first vector operation so that
+        callers can emit a clear, actionable error rather than catching an
+        opaque low-level exception from the database driver.
+        """
+        pass
+
+    @abstractmethod
     async def delete_document(self, doc_id: str) -> bool:
         """Delete the point with the given ID.
 

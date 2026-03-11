@@ -17,7 +17,7 @@ services:
       - bamboo-network
 
   qdrant:
-    image: qdrant/qdrant:v1.7.4
+    image: qdrant/qdrant:v1.13.6
     ports:
       - "6333:6333"  # HTTP
       - "6334:6334"  # gRPC

@@ -178,6 +178,11 @@ class QdrantBackend(VectorDatabaseBackend):
                 )
         return results
 
+    async def collection_exists(self) -> bool:
+        """Return True if the Qdrant collection exists."""
+        response = await self.client.get_collections()
+        return self.collection_name in {c.name for c in response.collections}
+
     async def delete_document(self, doc_id: str) -> bool:
         """Delete a document by ID."""
         try:

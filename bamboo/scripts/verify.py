@@ -6,6 +6,7 @@ After installation, run from any directory:
     bamboo verify
 """
 
+import asyncio
 import importlib.resources
 import subprocess
 import sys
@@ -285,6 +286,94 @@ def check_api_keys() -> bool:
     return ok
 
 
+def check_database_connections() -> bool:
+    """Connect to Neo4j and Qdrant, creating the vector collection if absent."""
+    print("Database connections")
+
+    async def _probe():
+        from bamboo.database.graph_database_client import GraphDatabaseClient
+        from bamboo.database.vector_database_client import VectorDatabaseClient
+
+        results = {}
+
+        # --- graph database (Neo4j) ---
+        neo4j = GraphDatabaseClient()
+        try:
+            await neo4j.connect()
+            results["neo4j"] = True
+        except Exception as exc:
+            results["neo4j_error"] = str(exc)
+            results["neo4j"] = False
+        finally:
+            try:
+                await neo4j.close()
+            except Exception:
+                pass
+
+        # --- vector database (Qdrant) ---
+        qdrant = VectorDatabaseClient()
+        try:
+            # connect() calls _ensure_collection(), which creates the
+            # collection if it does not yet exist — intentional side-effect.
+            await qdrant.connect()
+            collection_existed = await qdrant.collection_exists()
+            results["qdrant"] = True
+            results["qdrant_collection_created"] = not collection_existed
+            # Smoke-test: run a real search to catch server/client version
+            # mismatches early (e.g. qdrant-client ≥ 1.10 uses /query which
+            # requires Qdrant server ≥ 1.10; older servers return a bare 404).
+            from bamboo.config import get_settings as _gs
+            _dim = _gs().embedding_dimension
+            await qdrant.search_similar(
+                query_embedding=[0.0] * _dim,
+                limit=1,
+                score_threshold=0.0,
+            )
+            results["qdrant_search_ok"] = True
+        except Exception as exc:
+            results["qdrant_error"] = str(exc)
+            results["qdrant"] = False
+        finally:
+            try:
+                await qdrant.close()
+            except Exception:
+                pass
+
+        return results
+
+    try:
+        results = asyncio.run(_probe())
+    except Exception as exc:
+        return _fail(f"database probe failed: {exc}")
+
+    ok = True
+
+    if results.get("neo4j"):
+        _ok("graph database (Neo4j) is reachable")
+    else:
+        _fail(
+            f"graph database (Neo4j) not reachable: {results.get('neo4j_error', '?')}",
+            "Start Neo4j with:  docker compose up -d",
+        )
+        ok = False
+
+    if results.get("qdrant"):
+        if results.get("qdrant_collection_created"):
+            _ok("vector database (Qdrant) is reachable — collection created")
+        else:
+            _ok("vector database (Qdrant) is reachable — collection already exists")
+    else:
+        _fail(
+            f"vector database (Qdrant) not reachable or search failed: {results.get('qdrant_error', '?')}",
+            "If Qdrant is not running:  docker compose up -d\n"
+            "    If you see a 404 error: your Qdrant server is too old for the\n"
+            "    installed qdrant-client. Update with:  docker compose pull && docker compose up -d",
+        )
+        ok = False
+
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -302,6 +391,7 @@ def main() -> int:
         check_cli_entry_points,
         check_key_dependencies,
         check_api_keys,
+        check_database_connections,
     ]
 
     results = []
@@ -323,10 +413,8 @@ def main() -> int:
         print(f"✓ All {total} checks passed — Bamboo is ready to use!")
         print()
         print("Next steps:")
-        print(
-            "  1. docker compose up -d   (use docker-compose.yml from the project source)"
-        )
-        print("  2. bamboo interactive")
+        print("  bamboo populate --task-id <id>   # ingest your first task")
+        print("  bamboo interactive               # start the reasoning session")
         print()
         print("Full guide: docs/QUICKSTART.md  (in the project source)")
         return 0

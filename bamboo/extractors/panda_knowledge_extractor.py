@@ -50,10 +50,10 @@ The store starts empty and grows organically as incidents are processed.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
+import uuid
 from typing import Any, Optional
 
 from bamboo.extractors.base import ExtractionStrategy
@@ -451,10 +451,13 @@ def _parse_cli_arguments(raw: str) -> list[tuple[str, str]]:
 
 
 def _canonical_vector_id(node_type: str, label: str) -> str:
-    """Stable, URL-safe vector ID for a canonical node of any type."""
-    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", label)
-    digest = hashlib.md5(f"canonical::{node_type}::{label}".encode()).hexdigest()
-    return f"canonical-{node_type.lower()}-{slug[:24]}-{digest[:8]}"
+    """Stable, deterministic UUID v5 for a canonical node of any type.
+
+    Qdrant requires point IDs to be either an unsigned integer or a UUID.
+    UUID v5 is used here because it is deterministic (same inputs always
+    produce the same UUID) and universally accepted as a valid Qdrant ID.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"canonical::{node_type}::{label}"))
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +515,12 @@ class CanonicalNodeStore:
 
             self._vector_client = VectorDatabaseClient()
             await self._vector_client.connect()
+            if not await self._vector_client.collection_exists():
+                raise RuntimeError(
+                    "Vector database collection does not exist. "
+                    "Run `bamboo populate` (or your setup script) to initialise it "
+                    "before processing tasks."
+                )
         return self._vector_client
 
     async def _store(self, label: str, auto_generated: bool = True) -> str:
@@ -1048,6 +1057,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # Bucket the raw numeric into a range label so incidents with
                 # different but similar values share the same node.
                 raw = str(value) if value is not None else ""
+                # ignore missing/empty values rather than creating a "missing" bucket
+                if not raw:
+                    continue
                 bucketed = _bucket_value(key, raw)
                 if bucketed == raw:
                     logger.warning(
@@ -1565,5 +1577,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         try:
             return await self._error_classifier.classify(error_message)
         except Exception as exc:
-            logger.warning("Error classification failed: %s", exc)
+            logger.debug(
+                "Error classification traceback for message %r:",
+                error_message[:120],
+                exc_info=True,
+            )
+            logger.warning(
+                "Error classification failed for message %r: %s: %s",
+                error_message[:120],
+                type(exc).__name__,
+                exc,
+            )
             return "Unknown", 0.0

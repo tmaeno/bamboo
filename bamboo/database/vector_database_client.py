@@ -72,6 +72,10 @@ class VectorDatabaseClient:
         """Delete the point with the given ID."""
         return await self._backend.delete_document(doc_id)
 
+    async def collection_exists(self) -> bool:
+        """Return True if the backing collection exists and is ready."""
+        return await self._backend.collection_exists()
+
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a single point by ID."""
         return await self._backend.get_document(doc_id)
