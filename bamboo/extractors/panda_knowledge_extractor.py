@@ -80,9 +80,11 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
+from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Keys in task_data that identify a person or organisation and must never be
@@ -922,17 +924,36 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # canonical error category and whose description is the raw
                 # message text (preserved for traceability and vector search).
                 if value:
-                    category, confidence = await self._classify_error(str(value))
+                    str_value = str(value)
+                    category, confidence = await self._classify_error(str_value)
                     nodes.append(
                         SymptomNode(
                             name=category,
-                            description=str(value),
+                            description=str_value,
                             metadata={
                                 "source": "error_classifier",
                                 "classifier_confidence": confidence,
                             },
                         )
                     )
+                    # If errorDialog contains embedded HTML log links (e.g.
+                    # <a href="http://aipanda059.cern.ch:25080/cache/jedilog/4003574">log</a>)
+                    # fetch each linked file and extract knowledge from it just
+                    # like an explicitly supplied brokerage log.
+                    for log_url in extract_log_urls(str_value):
+                        log_content = await async_fetch_log_content(log_url)
+                        if log_content:
+                            source_name = "brokerage_log"
+                            logger.info(
+                                "PandaKnowledgeExtractor: extracting from linked log "
+                                "'%s' (%d chars) fetched from %s",
+                                source_name, len(log_content), log_url,
+                            )
+                            log_nodes, log_rels = await self._extract_from_log(
+                                source_name, log_content, log_level="task"
+                            )
+                            nodes.extend(log_nodes)
+                            relationships.extend(log_rels)
             elif key == "status":
                 # Task status (e.g. "failed", "broken") describes the failure
                 # state of the task, not a configuration attribute.  It is stored

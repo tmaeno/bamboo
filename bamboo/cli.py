@@ -435,8 +435,8 @@ def fetch_task_cmd(task_id, output, verbose):
       bamboo fetch-task 12345 --output task_12345.json
       bamboo fetch-task 12345 --verbose
     """
-
-    from bamboo.utils.panda_client import fetch_task_data
+    import json as _json
+    from bamboo.utils.panda_client import extract_log_urls, fetch_log_url, fetch_task_data
 
     try:
         with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
@@ -446,15 +446,33 @@ def fetch_task_cmd(task_id, output, verbose):
         raise SystemExit(1)
 
     if output:
-        import json as _json
         from pathlib import Path
-
         Path(output).write_text(_json.dumps(data, indent=2, default=str))
         console.print(f"[green]✓ Task {task_id} data saved to {output}[/green]")
     else:
-        import json as _json
-
         console.print_json(_json.dumps(data, default=str))
+
+    # When --verbose, extract any log URLs embedded in errorDialog and print them.
+    if verbose:
+        error_dialog = data.get("errorDialog", "") or ""
+        log_urls = extract_log_urls(str(error_dialog))
+        if log_urls:
+            console.print(f"\n[bold]Linked log files in errorDialog:[/bold]")
+            for url in log_urls:
+                console.print(f"  [cyan]{url}[/cyan]")
+                content = fetch_log_url(url)
+                if content:
+                    # Show first 100 lines to avoid flooding the terminal.
+                    lines = content.splitlines()
+                    preview = "\n".join(lines[:100])
+                    if len(lines) > 100:
+                        preview += f"\n[dim]… ({len(lines) - 100} more lines)[/dim]"
+                    console.print(
+                        f"\n[dim]── {url} ({len(lines)} lines) ──[/dim]\n{preview}\n"
+                    )
+                else:
+                    console.print(f"  [yellow]Could not fetch log from {url}[/yellow]")
+
 
 
 async def query_vector_interactive():

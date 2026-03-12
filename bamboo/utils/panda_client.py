@@ -19,12 +19,81 @@ different PanDA instance (e.g. a development server).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # Status code returned by panda-client-light on success.
 _PANDA_OK = 0
+
+# Matches <a href="URL">...</a> in HTML fragments (e.g. errorDialog values).
+_HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
+
+
+def extract_log_urls(text: str) -> list[str]:
+    """Return all href URLs found in HTML anchor tags within *text*."""
+    return _HREF_RE.findall(text)
+
+
+def fetch_log_url(url: str, timeout: float = 30.0) -> str | None:
+    """Fetch a plain-text log file from *url* synchronously.
+
+    Returns the content as a string, or ``None`` on any error.
+    Used by ``bamboo fetch-task --verbose`` to display linked log files.
+    """
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("fetch_log_url: httpx not installed — cannot fetch %s", url)
+        return None
+    try:
+        response = httpx.get(url, timeout=timeout, follow_redirects=True)
+        if response.status_code != 200:
+            logger.warning("fetch_log_url: %s returned HTTP %s", url, response.status_code)
+            return None
+        return response.text
+    except Exception as exc:
+        logger.warning("fetch_log_url: failed to fetch %s: %s", url, exc)
+        return None
+
+
+async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None:
+    """Async version of :func:`fetch_log_url` — used inside async extractors.
+
+    Returns the response body as a string, or ``None`` on any error
+    (network failure, non-200 status, non-text content-type).
+    Failures are logged at WARNING level and never interrupt extraction.
+    """
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("async_fetch_log_content: httpx not installed — cannot fetch %s", url)
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(url)
+        if response.status_code != 200:
+            logger.warning(
+                "async_fetch_log_content: %s returned HTTP %s — skipping",
+                url, response.status_code,
+            )
+            return None
+        content_type = response.headers.get("content-type", "")
+        if "text" not in content_type and "json" not in content_type:
+            logger.warning(
+                "async_fetch_log_content: %s has non-text content-type %r — skipping",
+                url, content_type,
+            )
+            return None
+        text = response.text
+        logger.info("async_fetch_log_content: fetched %d chars from %s", len(text), url)
+        return text
+    except Exception as exc:
+        logger.warning("async_fetch_log_content: failed to fetch %s: %s", url, exc)
+        return None
+
+
 
 
 def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
