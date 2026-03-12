@@ -51,5 +51,3 @@ def setup_logging() -> None:
         lg.setLevel(logging.ERROR)
         for handler in lg.handlers:
             handler.setLevel(logging.ERROR)
-
-

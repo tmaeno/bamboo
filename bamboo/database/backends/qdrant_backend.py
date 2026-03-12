@@ -38,7 +38,9 @@ class QdrantBackend(VectorDatabaseBackend):
                     check_compatibility=False,
                 )
             else:
-                self.client = AsyncQdrantClient(url=self.settings.qdrant_url, check_compatibility=False)
+                self.client = AsyncQdrantClient(
+                    url=self.settings.qdrant_url, check_compatibility=False
+                )
 
             await self._ensure_collection()
             logger.info("Successfully connected to Qdrant")

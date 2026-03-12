@@ -165,6 +165,7 @@ def _env_example_path() -> str:
 def _check_duplicate_env_keys(env_path: str) -> list[str]:
     """Return a list of keys that appear more than once in the .env file."""
     from collections import Counter
+
     counts: Counter[str] = Counter()
     with open(env_path) as f:
         for line in f:
@@ -323,6 +324,7 @@ def check_database_connections() -> bool:
             # mismatches early (e.g. qdrant-client ≥ 1.10 uses /query which
             # requires Qdrant server ≥ 1.10; older servers return a bare 404).
             from bamboo.config import get_settings as _gs
+
             _dim = _gs().embedding_dimension
             await qdrant.search_similar(
                 query_embedding=[0.0] * _dim,

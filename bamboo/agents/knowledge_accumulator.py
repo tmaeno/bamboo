@@ -48,8 +48,10 @@ class KnowledgeAccumulator:
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
-        self._llm = None        # lazy — initialised on first use
-        self._embeddings = None # lazy — initialised on first use (not needed for dry-run)
+        self._llm = None  # lazy — initialised on first use
+        self._embeddings = (
+            None  # lazy — initialised on first use (not needed for dry-run)
+        )
         self.extractor = KnowledgeGraphExtractor()
 
     # ------------------------------------------------------------------

@@ -137,9 +137,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4-turbo-preview"
 
     # Extraction
-    extraction_strategy: Literal[
-        "llm", "panda"
-    ] = "panda"
+    extraction_strategy: Literal["llm", "panda"] = "panda"
 
     # Database backend selection
     graph_database_backend: Literal["neo4j"] = "neo4j"
@@ -197,7 +195,10 @@ def get_settings() -> Settings:
     _log.debug(
         "Settings active: llm_provider=%s llm_model=%s "
         "embeddings_provider=%s embedding_model=%s embedding_dimension=%s",
-        s.llm_provider, s.llm_model,
-        s.embeddings_provider, s.embedding_model, s.embedding_dimension,
+        s.llm_provider,
+        s.llm_model,
+        s.embeddings_provider,
+        s.embedding_model,
+        s.embedding_dimension,
     )
     return s

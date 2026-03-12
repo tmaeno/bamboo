@@ -436,7 +436,11 @@ def fetch_task_cmd(task_id, output, verbose):
       bamboo fetch-task 12345 --verbose
     """
     import json as _json
-    from bamboo.utils.panda_client import extract_log_urls, fetch_log_url, fetch_task_data
+    from bamboo.utils.panda_client import (
+        extract_log_urls,
+        fetch_log_url,
+        fetch_task_data,
+    )
 
     try:
         with console.status(f"[bold green]Fetching task {task_id} from PanDA..."):
@@ -447,6 +451,7 @@ def fetch_task_cmd(task_id, output, verbose):
 
     if output:
         from pathlib import Path
+
         Path(output).write_text(_json.dumps(data, indent=2, default=str))
         console.print(f"[green]✓ Task {task_id} data saved to {output}[/green]")
     else:
@@ -472,7 +477,6 @@ def fetch_task_cmd(task_id, output, verbose):
                     )
                 else:
                     console.print(f"  [yellow]Could not fetch log from {url}[/yellow]")
-
 
 
 async def query_vector_interactive():

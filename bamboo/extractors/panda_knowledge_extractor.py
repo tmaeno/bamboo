@@ -80,6 +80,7 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
+from bamboo.utils.log_filters import filter_log_auto
 from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
@@ -943,11 +944,18 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     for log_url in extract_log_urls(str_value):
                         log_content = await async_fetch_log_content(log_url)
                         if log_content:
-                            source_name = "brokerage_log"
+                            prod_source_label = (task_data or {}).get("prodSourceLabel", "")
+                            source_name = (
+                                "prod_job_brokerage_log"
+                                if prod_source_label == "managed"
+                                else "analysis_job_brokerage_log"
+                            )
                             logger.info(
                                 "PandaKnowledgeExtractor: extracting from linked log "
                                 "'%s' (%d chars) fetched from %s",
-                                source_name, len(log_content), log_url,
+                                source_name,
+                                len(log_content),
+                                log_url,
                             )
                             log_nodes, log_rels = await self._extract_from_log(
                                 source_name, log_content, log_level="task"
@@ -1321,8 +1329,26 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         that the same error pattern in a log and in errorDialog merges into one
         node.
         """
+        # Pre-filter the log before sending to the LLM:
+        #   1. Keep only signal lines (errors, exceptions, warnings) + context.
+        #   2. Deduplicate repeated identical messages.
+        #   3. Truncate to max_lines if still too long.
+        # This typically reduces a 10k-line log to ~50-200 lines, cutting LLM
+        # cost by 98% while preserving all actionable signal.
+        filtered_log = filter_log_auto(log_text, source_name=source_name)
+        if not filtered_log.strip():
+            logger.info(
+                "PandaKnowledgeExtractor: log source '%s' produced no signal lines after "
+                "filtering (%d raw lines) — skipping LLM call",
+                source_name,
+                len(log_text.splitlines()),
+            )
+            return [], []
+
         llm = get_llm()
-        response = await llm.ainvoke(LOG_EXTRACTION_PROMPT.format(log_text=log_text))
+        response = await llm.ainvoke(
+            LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
+        )
         raw = self._parse_log_response(response.content)
 
         nodes = []

@@ -18,6 +18,7 @@ different PanDA instance (e.g. a development server).
 
 from __future__ import annotations
 
+import gzip
 import logging
 import re
 from typing import Any
@@ -50,7 +51,9 @@ def fetch_log_url(url: str, timeout: float = 30.0) -> str | None:
     try:
         response = httpx.get(url, timeout=timeout, follow_redirects=True)
         if response.status_code != 200:
-            logger.warning("fetch_log_url: %s returned HTTP %s", url, response.status_code)
+            logger.warning(
+                "fetch_log_url: %s returned HTTP %s", url, response.status_code
+            )
             return None
         return response.text
     except Exception as exc:
@@ -68,7 +71,9 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
     try:
         import httpx
     except ImportError:
-        logger.warning("async_fetch_log_content: httpx not installed — cannot fetch %s", url)
+        logger.warning(
+            "async_fetch_log_content: httpx not installed — cannot fetch %s", url
+        )
         return None
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -76,24 +81,41 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
         if response.status_code != 200:
             logger.warning(
                 "async_fetch_log_content: %s returned HTTP %s — skipping",
-                url, response.status_code,
+                url,
+                response.status_code,
             )
             return None
         content_type = response.headers.get("content-type", "")
-        if "text" not in content_type and "json" not in content_type:
+        content_encoding = response.headers.get("content-encoding", "")
+        is_gzip = (
+            "gzip" in content_encoding
+            or "application/gzip" in content_type
+            or url.endswith(".gz")
+        )
+        if is_gzip:
+            try:
+                text = gzip.decompress(response.content).decode("utf-8", errors="replace")
+            except Exception as exc:
+                logger.warning(
+                    "async_fetch_log_content: failed to decompress gzip from %s: %s",
+                    url,
+                    exc,
+                )
+                return None
+        elif "text" not in content_type and "json" not in content_type:
             logger.warning(
                 "async_fetch_log_content: %s has non-text content-type %r — skipping",
-                url, content_type,
+                url,
+                content_type,
             )
             return None
-        text = response.text
+        else:
+            text = response.text
         logger.info("async_fetch_log_content: fetched %d chars from %s", len(text), url)
         return text
     except Exception as exc:
         logger.warning("async_fetch_log_content: failed to fetch %s: %s", url, exc)
         return None
-
-
 
 
 def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
