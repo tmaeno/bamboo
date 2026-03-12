@@ -69,11 +69,18 @@ def _install_zsh_completion() -> None:
     comp_file = os.path.join(comp_dir, "_bamboo")
     rc_path = os.path.expanduser("~/.zshrc")
 
+    # compinit -u silently skips the "insecure directories" prompt.
+    # chmod 755 on the directory is belt-and-suspenders: it ensures the dir
+    # is not group/world-writable, which is what triggers the warning.
+    COMPINIT_LINE = "autoload -Uz compinit && compinit -u"
+
     try:
         script = _completion_script("_bamboo")
 
         # Keep installed file in sync with package data — only write on change.
         os.makedirs(comp_dir, exist_ok=True)
+        # Ensure the directory is not group/world-writable (zsh security check).
+        os.chmod(comp_dir, 0o755)
         try:
             with open(comp_file) as f:
                 current = f.read()
@@ -90,23 +97,22 @@ def _install_zsh_completion() -> None:
             existing = ""
 
         if _COMPLETION_MARKER in existing:
-            # fpath already wired — patch in compinit if missing (upgrade path).
-            compinit_line = "autoload -Uz compinit && compinit"
-            if compinit_line not in existing:
+            # Already installed — patch compinit to use -u if it doesn't already.
+            # This fixes existing installs that got the old compinit without -u.
+            if "compinit -u" not in existing:
                 patched = existing.replace(
-                    f"fpath=('{comp_dir}' $fpath)\n",
-                    f"fpath=('{comp_dir}' $fpath)\n{compinit_line}\n",
+                    "autoload -Uz compinit && compinit\n",
+                    f"{COMPINIT_LINE}\n",
                 )
                 with open(rc_path, "w") as f:
                     f.write(patched)
             return
 
         fpath_line = f"fpath=('{comp_dir}' $fpath)"
-        compinit_line = "autoload -Uz compinit && compinit"
         new_content = (
             f"{_COMPLETION_MARKER}\n"
             f"{fpath_line}\n"
-            f"{compinit_line}\n"
+            f"{COMPINIT_LINE}\n"
             f"{existing}"
         )
         with open(rc_path, "w") as f:
