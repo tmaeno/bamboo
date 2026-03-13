@@ -228,6 +228,107 @@ class TestFilterLogAuto:
 
 
 # ---------------------------------------------------------------------------
+# New-format production brokerage-log fixture
+# ---------------------------------------------------------------------------
+# Differences introduced in the newer AtlasProdJobBroker log format:
+#   • Microsecond-precision timestamps (6 decimal digits)
+#   • SW/HW progress line has a parenthetical annotation:
+#       "398 candidates (398 with AUTO, 0 with ANY) passed SW/HW check"
+#   • "no candidates" appears AFTER the summary header, not before it
+#   • Multiple progress lines with the same count (96) for different checks
+_PROD_BROKERAGE_LOG_NEW_FORMAT = """\
+2026-03-13 10:13:41.001898 : start currentPriority=175
+2026-03-13 10:13:41.002019 : Network weights are ACTIVE!
+2026-03-13 10:13:41.019083 : cloud=WORLD has 1591 candidates
+2026-03-13 10:13:41.285365 :   skip site=IFIC_ARC_TEST due to status=test criteria=-status
+2026-03-13 10:13:41.285653 :   skip site=praguelcg2_LUMI_MCORE due to status=offline criteria=-status
+2026-03-13 10:13:41.292743 : 1106 candidates passed site status check
+2026-03-13 10:13:41.314697 : 1106 candidates passed link check
+2026-03-13 10:13:41.315147 :   skip site=NERSC_Perlmutter_Test/MCORE_VHIMEM due to zero share criteria=-zeroshare
+2026-03-13 10:13:41.315184 :   skip site=UKI-LT2-IC-HEP_SL7_UCORE/SCORE due to zero share criteria=-zeroshare
+2026-03-13 10:13:41.322988 : 967 candidates passed zero share check
+2026-03-13 10:13:41.323268 :   skip site=TACC-FRONTERA-ES since it is only for jumbo jobs criteria=-jumbo
+2026-03-13 10:13:41.324413 :   skip site=NERSC_Perlmutter_ES2 since it is only for jumbo jobs criteria=-jumbo
+2026-03-13 10:13:41.324721 : 965 candidates passed jumbo job check
+2026-03-13 10:13:41.354762 :   skip site=TRIUMF/MCORE_HIMEM due to core mismatch site:8 <> task:1 criteria=-cpucore
+2026-03-13 10:13:41.354788 :   skip site=UKI-NORTHGRID-LANCS-HEP-CEPH/MCORE_VHIMEM due to core mismatch site:8 <> task:1 criteria=-cpucore
+2026-03-13 10:13:41.364927 : 478 candidates passed for core count check with policy=unuse
+2026-03-13 10:13:41.366224 :   skip site=UKI-LT2-QMUL_GPU with AUTO due to missing SW cache=AthGeneration-23.6.64:x86_64-el9-gcc14-opt criteria=-cache
+2026-03-13 10:13:41.366280 :   skip site=UKI-SOUTHGRID-RALPP_GPU with AUTO due to missing SW cache=AthGeneration-23.6.64:x86_64-el9-gcc14-opt criteria=-cache
+2026-03-13 10:13:41.367968 : 398 candidates (398 with AUTO, 0 with ANY) passed SW/HW check
+2026-03-13 10:13:41.368034 :   skip site=wuppertal/SCORE_VHIMEM due to job RAM shortage 3001(site lower limit) greater than 642 criteria=-highmemory
+2026-03-13 10:13:41.368070 :   skip site=SARA-MATRIX_VHIMEM/SCORE_HIMEM due to job RAM shortage 6000.25(site lower limit) greater than 642 criteria=-highmemory
+2026-03-13 10:13:41.374157 : 98 candidates passed memory check 714(MB)
+2026-03-13 10:13:41.381906 : 98 candidates passed scratch disk check minDiskCount>1915 MB
+2026-03-13 10:13:41.387135 :   skip site=praguelcg2_Barbora_SCORE due to site walltime insufficient criteria=-zerowalltime
+2026-03-13 10:13:41.387747 : 96 candidates passed walltime check cpuTime*nEventsPerJob=0.0*1000(mHS06sPerEvent)
+2026-03-13 10:13:41.388531 : 96 candidates passed EventService check
+2026-03-13 10:13:41.389820 : 96 candidates passed transferring check
+2026-03-13 10:13:41.389997 : 96 candidates passed T1 weight check
+2026-03-13 10:13:41.390289 : 96 candidates passed full chain (False) check
+2026-03-13 10:13:41.423607 : 96 candidates passed pilot activity check
+2026-03-13 10:13:41.852559 :   skip site=BNL since the number of missing input files is too large (260 > 100) for IO intensive task (885 > 501 kBPerS) criteria=-io
+2026-03-13 10:13:41.852606 :   skip site=TW-FTT since the number of missing input files is too large (260 > 100) for IO intensive task (885 > 501 kBPerS) criteria=-io
+2026-03-13 10:13:41.854178 : 2 candidates passed IO check
+2026-03-13 10:13:41.854232 : 2 candidates passed temporary problem check
+2026-03-13 10:13:42.170044 :   skip site=UKI-LT2-QMUL since nDefined_rt+nActivated_rt+nStarting_rt=48 with gshare+resource_type is greater than max criteria=-cap_rt
+2026-03-13 10:13:42.170072 :   skip site=IN2P3-LAPP since nDefined_rt+nActivated_rt+nStarting_rt=1338 with gshare+resource_type is greater than max criteria=-cap_rt
+2026-03-13 10:13:42.170072 : available sites all capped
+2026-03-13 10:13:42.170118 :
+2026-03-13 10:13:42.170144 : ===== Job brokerage summary =====
+2026-03-13 10:13:42.170174 : the number of initial candidates: 1591
+2026-03-13 10:13:42.170206 :  1591 -> 1106 candidates,  31% cut : status check
+2026-03-13 10:13:42.170234 :  1106 -> 967 candidates,  13% cut : zero share check
+2026-03-13 10:13:42.170252 :   967 -> 965 candidates,   1% cut : jumbo job check
+2026-03-13 10:13:42.170275 :   965 -> 478 candidates,  51% cut : core count check
+2026-03-13 10:13:42.170293 :   478 -> 398 candidates,  17% cut : SW/HW check
+2026-03-13 10:13:42.170317 :   398 ->  98 candidates,  76% cut : memory check
+2026-03-13 10:13:42.170334 :    98 ->  96 candidates,   3% cut : walltime check
+2026-03-13 10:13:42.170355 :    96 ->   2 candidates,  98% cut : IO check
+2026-03-13 10:13:42.170376 :     2 ->   0 candidates, 100% cut : final check
+2026-03-13 10:13:42.170407 : the number of final candidates: 0
+2026-03-13 10:13:42.170432 :
+2026-03-13 10:13:42.170466 : no candidates
+"""
+
+
+class TestProdBrokerageNewFormat:
+    """Tests for the newer AtlasProdJobBroker log format (microsecond timestamps,
+    parenthetical SW/HW progress line, 'no candidates' after the summary header)."""
+
+    def test_detects_new_format(self):
+        assert filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT) is not None
+
+    def test_summary_included(self):
+        result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
+        assert "Job brokerage summary" in result
+        assert "memory check" in result
+        assert "IO check" in result
+
+    def test_sw_hw_progress_line_sets_boundary(self):
+        # Bug fix: "398 candidates (398 with AUTO, 0 with ANY) passed SW/HW check"
+        # must be recognised so the memory-check section slice is correct.
+        # The memory-check skip lines should be captured (not the whole body).
+        result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
+        assert "highmemory" in result or "wuppertal" in result or "SARA-MATRIX" in result
+
+    def test_no_candidates_in_final_selection(self):
+        # Bug fix: "no candidates" appears after the summary header in the new
+        # format — it must still surface in the ## Final selection section.
+        result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
+        assert "no candidates" in result
+        assert "## Final selection" in result
+
+    def test_cap_rt_skip_lines_included(self):
+        result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
+        assert "cap_rt" in result or "UKI-LT2-QMUL" in result
+
+    def test_no_data_availability_section(self):
+        result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
+        assert "## Data availability" not in result
+
+
+# ---------------------------------------------------------------------------
 # Production brokerage-log fixture (AtlasProdJobBroker style)
 # ---------------------------------------------------------------------------
 # Key differences vs analysis log:

@@ -67,8 +67,10 @@ _BROKERAGE_SUMMARY_ENTRY_RE: re.Pattern = re.compile(
 )
 
 # Progress milestone lines that mark the end of each filter stage.
+# The optional non-capturing group handles parenthetical annotations such as
+# "398 candidates (398 with AUTO, 0 with ANY) passed SW/HW check".
 _BROKERAGE_PROGRESS_RE: re.Pattern = re.compile(
-    r"(\d+)\s+candidates?\s+(?:passed|have input data|for final check)",
+    r"(\d+)\s+candidates?(?:\s*\([^)]*\))?\s+(?:passed|have input data|for final check)",
     re.IGNORECASE,
 )
 
@@ -219,9 +221,11 @@ def _brokerage_filter_impl(
 
     # 4. Final outcome: selected sites or "no candidates"
     use_lines = [line for line in body_lines if _BROKERAGE_USE_SITE_RE.search(line)]
+    # "no candidates" may appear either in the body (older log format) or after
+    # the summary header (newer production log format) — search both.
     no_cand = [
         line
-        for line in body_lines
+        for line in body_lines + summary_lines
         if re.search(r"\bno candidates\b", line, re.IGNORECASE)
     ]
     if use_lines or no_cand:
