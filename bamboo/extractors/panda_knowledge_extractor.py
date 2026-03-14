@@ -81,6 +81,7 @@ from bamboo.models.graph_element import (
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.log_filters import filter_log_auto
+from bamboo.utils.narrator import say
 from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
@@ -618,6 +619,8 @@ async def _generate_category_label(error_message: str) -> str:
 
     Raises on any LLM failure so nothing is stored when classification fails.
     """
+    preview = error_message[:60].replace("\n", " ")
+    say(f"Asking AI to generate error category label for: \"{preview}{'...' if len(error_message) > 60 else ''}\"")
     llm = get_llm()
     response = await llm.ainvoke(
         TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
@@ -647,6 +650,8 @@ async def _normalize_diag(diag_text: str) -> str:
     Raises:
         ValueError: If the LLM returns an empty string.
     """
+    preview = diag_text[:60].replace("\n", " ")
+    say(f"Asking AI to normalize diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
     llm = get_llm()
     response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
     normalised = response.content.strip()
@@ -667,6 +672,7 @@ def _make_cause_resolution_label_fn(node_type: str):
             existing_names="(handled by vector search — normalise wording only)",
             raw_name=raw_name,
         )
+        say(f"Asking AI to canonicalize {node_type}: \"{raw_name[:60]}\"")
         response = await llm.ainvoke(prompt)
         canonical = response.content.strip().strip('"').strip("'")
         if not canonical:
@@ -891,6 +897,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         nodes: list = []
         relationships: list[GraphRelationship] = []
 
+        task_id = (task_data or {}).get("taskID")
+        task_status = (task_data or {}).get("status")
+        if task_id:
+            say(f"Starting extraction for task {task_id} (status: {task_status or 'unknown'}).")
+
         for key, value in (external_data or {}).items():
             nodes.append(
                 self._make_feature_node(
@@ -926,7 +937,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # message text (preserved for traceability and vector search).
                 if value:
                     str_value = str(value)
+                    preview = str_value[:80].replace("\n", " ")
+                    say(f"Found errorDialog: \"{preview}{'...' if len(str_value) > 80 else ''}\"")
+                    say("Classifying error category...")
                     category, confidence = await self._classify_error(str_value)
+                    say(f"Classified as: {category} (confidence: {confidence:.2f})")
                     nodes.append(
                         SymptomNode(
                             name=category,
@@ -942,6 +957,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     # fetch each linked file and extract knowledge from it just
                     # like an explicitly supplied brokerage log.
                     for log_url in extract_log_urls(str_value):
+                        say(f"Found a link to a log. Downloading from {log_url} ...")
                         log_content = await async_fetch_log_content(log_url)
                         if log_content:
                             prod_source_label = (task_data or {}).get("prodSourceLabel", "")
@@ -949,6 +965,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                                 "prod_job_brokerage_log"
                                 if prod_source_label == "managed"
                                 else "analysis_job_brokerage_log"
+                            )
+                            say(
+                                f"Downloaded {len(log_content):,} chars. "
+                                f"Analyzing as {source_name}..."
                             )
                             logger.info(
                                 "PandaKnowledgeExtractor: extracting from linked log "
@@ -1111,6 +1131,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 pass
 
         if email_text and email_text.strip():
+            say(f"Processing email thread ({len(email_text):,} chars). Extracting causes and resolutions...")
             email_nodes, email_rels = await self._extract_from_email(email_text)
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
@@ -1118,6 +1139,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         # Task-level logs (orchestration services: JEDI, Harvester, …)
         for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():
+                say(f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)...")
                 log_nodes, log_rels = await self._extract_from_log(
                     source_name, source_log, log_level="task"
                 )
@@ -1127,6 +1149,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         # Job-level logs (execution workers: pilot, Athena/payload, …)
         for source_name, source_log in (job_logs or {}).items():
             if source_log and source_log.strip():
+                say(f"Processing job log '{source_name}' ({len(source_log.splitlines()):,} lines)...")
                 log_nodes, log_rels = await self._extract_from_log(
                     source_name, source_log, log_level="job"
                 )
@@ -1135,11 +1158,13 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         # Aggregated job data → JobFeatureNodes + SymptomNodes + TaskContextNodes
         if jobs_data:
+            say(f"Aggregating data from {len(jobs_data):,} jobs...")
             job_nodes, job_rels = await self._extract_from_jobs(jobs_data, nodes)
             nodes.extend(job_nodes)
             relationships.extend(job_rels)
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
+        say(f"Extraction complete: {len(nodes)} nodes, {len(relationships)} relationships.")
         logger.info(
             "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
             len(nodes),
@@ -1290,6 +1315,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     )
                 )
 
+        say(
+            f"Jobs analysis: {len(job_feature_nodes)} feature patterns, "
+            f"{len(new_symptom_nodes)} new symptom(s), "
+            f"{len(seen_normalised)} diagnostic context(s)."
+        )
         logger.debug(
             "PandaKnowledgeExtractor: jobs_data (%d jobs) → "
             "%d JobFeatureNodes, %d new SymptomNodes, "
@@ -1335,8 +1365,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         #   3. Truncate to max_lines if still too long.
         # This typically reduces a 10k-line log to ~50-200 lines, cutting LLM
         # cost by 98% while preserving all actionable signal.
+        raw_lines = len(log_text.splitlines())
+        say(f"Filtering {source_name} log ({raw_lines:,} lines) to extract signal...")
         filtered_log = filter_log_auto(log_text, source_name=source_name)
         if not filtered_log.strip():
+            say(f"No signal found in {source_name} log — skipping AI analysis.")
             logger.info(
                 "PandaKnowledgeExtractor: log source '%s' produced no signal lines after "
                 "filtering (%d raw lines) — skipping LLM call",
@@ -1345,6 +1378,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             )
             return [], []
 
+        filtered_lines = len(filtered_log.splitlines())
+        say(
+            f"Filtered to {filtered_lines:,} lines "
+            f"({raw_lines - filtered_lines:,} noise lines removed). "
+            f"Asking AI to analyze {source_name}..."
+        )
         llm = get_llm()
         response = await llm.ainvoke(
             LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
@@ -1400,6 +1439,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
+        say(
+            f"Found {len(nodes)} node(s) and {len(relationships)} relationship(s) "
+            f"in {source_name}."
+        )
         logger.debug(
             "PandaKnowledgeExtractor: log source '%s' yielded %d nodes, %d relationships",
             source_name,
@@ -1475,6 +1518,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         two different emails produces the same node name and is merged correctly
         by ``get_or_create_canonical_node`` in the graph database.
         """
+        say("Asking AI to extract causes and resolutions from email thread...")
         llm = get_llm()
         response = await llm.ainvoke(
             EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)
@@ -1528,6 +1572,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
+        say(f"Got {len(nodes)} node(s) and {len(relationships)} relationship(s) from email.")
         logger.debug(
             "PandaKnowledgeExtractor: email yielded %d nodes, %d relationships",
             len(nodes),

@@ -678,7 +678,14 @@ def populate_cmd(email_thread, task_data, task_id, external_data):
     default=None,
     help="Save the extracted graph as JSON to this file path.",
 )
-def extract_cmd(email_thread, task_data, task_id, external_data, output):
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Stream live agent-style narration of each extraction step.",
+)
+def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose):
     """Extract knowledge graph and preview it without writing to any database.
 
     Runs the full extraction pipeline (LLM calls, error classification, graph
@@ -691,6 +698,7 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output):
       bamboo extract --task-id 12345
       bamboo extract --task-data task.json --email-thread email.txt
       bamboo extract --task-data task.json --output graph_preview.json
+      bamboo extract --task-id 12345 --verbose
     """
     from bamboo.scripts.extract_knowledge import main as _main
 
@@ -702,6 +710,7 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output):
         task_id=task_id,
         external_data=external_data,
         output=output,
+        verbose=verbose,
     )
 
 

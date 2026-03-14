@@ -60,7 +60,14 @@ from bamboo.utils.logging import setup_logging
     default=None,
     help="Save the extracted graph as JSON to this file path.",
 )
-def main(email_thread, task_data, task_id, external_data, output):
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Stream live agent-style narration of each extraction step.",
+)
+def main(email_thread, task_data, task_id, external_data, output, verbose):
     """Extract knowledge graph and preview it without writing to any database.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -94,11 +101,19 @@ def main(email_thread, task_data, task_id, external_data, output):
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    asyncio.run(_run_extraction(email_text, task_dict, external_dict, output))
+    asyncio.run(_run_extraction(email_text, task_dict, external_dict, output, verbose=verbose))
 
 
-async def _run_extraction(email_text, task_dict, external_dict, output=None):
+async def _run_extraction(email_text, task_dict, external_dict, output=None, verbose=False):
     """Run extraction in dry-run mode and print the result."""
+    if verbose:
+        from rich.console import Console
+
+        from bamboo.utils.narrator import set_narrator
+
+        _console = Console()
+        set_narrator(lambda msg: _console.print(f"[dim cyan]  →[/dim cyan] {msg}"))
+
     # Dry-run needs no database connections at all — skip Neo4j and Qdrant.
     # Pass None so KnowledgeAccumulator skips all DB calls.
     agent = KnowledgeAccumulator(graph_db=None, vector_db=None)
