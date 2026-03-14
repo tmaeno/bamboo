@@ -60,25 +60,30 @@ def main(email_thread, task_data, task_id, external_data):
     if task_data:
         task_dict = json.loads(Path(task_data).read_text())
 
-    if task_id is not None:
-        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
-
-        click.echo(f"Fetching task data from PanDA for task_id={task_id}...")
-        try:
-            task_dict = fetch_task_data(task_id)
-        except Exception as e:
-            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
-            sys.exit(1)
-
     external_dict = None
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    asyncio.run(_extract_knowledge(email_text, task_dict, external_dict))
+    asyncio.run(_extract_knowledge(email_text, task_dict, task_id, external_dict))
 
 
-async def _extract_knowledge(email_text, task_dict, external_dict):
+async def _extract_knowledge(email_text, task_dict, task_id, external_dict):
     """Extract and store knowledge."""
+    from rich.console import Console
+
+    from bamboo.utils.narrator import set_narrator, thinking
+
+    set_narrator(Console())
+
+    if task_id is not None:
+        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+
+        try:
+            task_dict = await fetch_task_data(task_id)
+        except Exception as e:
+            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
+            sys.exit(1)
+
     neo4j = GraphDatabaseClient()
     qdrant = VectorDatabaseClient()
 

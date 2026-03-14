@@ -87,35 +87,33 @@ def main(email_thread, task_data, task_id, external_data, output, verbose):
     if task_data:
         task_dict = json.loads(Path(task_data).read_text())
 
-    if task_id is not None:
-        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
-
-        click.echo(f"Fetching task data from PanDA for task_id={task_id}...")
-        try:
-            task_dict = fetch_task_data(task_id)
-        except Exception as e:
-            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
-            sys.exit(1)
-
     external_dict = None
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
     asyncio.run(
-        _run_extraction(email_text, task_dict, external_dict, output, verbose=verbose)
+        _run_extraction(email_text, task_dict, task_id, external_dict, output, verbose=verbose)
     )
 
 
 async def _run_extraction(
-    email_text, task_dict, external_dict, output=None, verbose=False
+    email_text, task_dict, task_id, external_dict, output=None, verbose=False
 ):
     """Run extraction in dry-run mode and print the result."""
-    if verbose:
-        from rich.console import Console
+    from rich.console import Console
 
-        from bamboo.utils.narrator import set_narrator
+    from bamboo.utils.narrator import set_narrator, thinking
 
-        set_narrator(Console())
+    set_narrator(Console(), verbose=verbose)
+
+    if task_id is not None:
+        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+
+        try:
+            task_dict = await fetch_task_data(task_id)
+        except Exception as e:
+            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
+            sys.exit(1)
 
     # Dry-run needs no database connections at all — skip Neo4j and Qdrant.
     # Pass None so KnowledgeAccumulator skips all DB calls.

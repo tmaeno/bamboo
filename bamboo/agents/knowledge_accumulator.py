@@ -235,7 +235,7 @@ class KnowledgeAccumulator:
             HumanMessage(content=prompt),
         ]
 
-        with thinking("Summarizing the narrative (this can take ~30s)..."):
+        with thinking("Working..."):
             response = await self.llm.ainvoke(messages)
         return response.content
 

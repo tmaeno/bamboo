@@ -18,10 +18,12 @@ different PanDA instance (e.g. a development server).
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import logging
 import re
 from typing import Any
+from bamboo.utils.narrator import thinking
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +122,11 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
         return None
 
 
-def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
+async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
     """Fetch full task details from PanDA and return them as a ``dict``.
+
+    The blocking ``panda-client-light`` call is offloaded to a thread pool so
+    the event loop stays responsive.
 
     Args:
         task_id: The PanDA ``jediTaskID`` to look up (int or numeric string).
@@ -140,7 +145,7 @@ def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]
         ImportError:  If ``panda-client-light`` is not installed.
         RuntimeError: If the PanDA server returns a non-zero status code or
                       an error response.
-        ValueError:   If *task_id* cannot be converted to ``int``.
+        ValueError:   If *task_id* cannot be converted to ``int``.2
     """
     try:
         from pandaclient import Client  # noqa: PLC0415  (conditional import)
@@ -157,7 +162,8 @@ def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]
 
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
-    status, data = Client.get_task_details_json(task_id_int, verbose=verbose)
+    with thinking("Working..."):
+        status, data = await asyncio.to_thread(Client.get_task_details_json, task_id_int, verbose=verbose)
 
     if status != _PANDA_OK:
         raise RuntimeError(

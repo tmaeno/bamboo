@@ -624,9 +624,10 @@ async def _generate_category_label(error_message: str) -> str:
         f"Classifying error message: \"{preview}{'...' if len(error_message) > 60 else ''}\""
     )
     llm = get_llm()
-    response = await llm.ainvoke(
-        TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
-    )
+    with thinking("Working..."):
+        response = await llm.ainvoke(   
+            TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
+        )
     label = re.sub(r"[^A-Za-z]", "", response.content.strip())
     if not label:
         raise ValueError(
@@ -655,7 +656,8 @@ async def _normalize_diag(diag_text: str) -> str:
     preview = diag_text[:60].replace("\n", " ")
     say(f"Normalizing diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
     llm = get_llm()
-    response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
+    with thinking("Working..."):
+        response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
     normalised = response.content.strip()
     if not normalised:
         raise ValueError(f"LLM returned an empty normalised diag for: {diag_text!r}")
@@ -675,7 +677,8 @@ def _make_cause_resolution_label_fn(node_type: str):
             raw_name=raw_name,
         )
         say(f'Canonicalizing {node_type}: "{raw_name[:60]}"')
-        response = await llm.ainvoke(prompt)
+        with thinking("Working..."):
+            response = await llm.ainvoke(prompt)
         canonical = response.content.strip().strip('"').strip("'")
         if not canonical:
             raise ValueError(
@@ -1401,7 +1404,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"Analyzing {source_name}..."
         )
         llm = get_llm()
-        with thinking(f"Working on {source_name}..."):
+        with thinking(f"Working..."):
             response = await llm.ainvoke(
                 LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
             )
@@ -1537,7 +1540,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         """
         say("Extracting causes and resolutions from email thread...")
         llm = get_llm()
-        with thinking("Working on email extraction..."):
+        with thinking("Working..."):
             response = await llm.ainvoke(
                 EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)
             )

@@ -1,7 +1,7 @@
 """Utility functions."""
 
 from .logging import setup_logging
-from .panda_client import fetch_task_data
+from .panda_client import fetch_task_data  # async
 from .sanitize import pseudonymise, pseudonymise_dict, sanitize_for_llm
 
 __all__ = [

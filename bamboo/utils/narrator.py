@@ -29,22 +29,28 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
+_verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
 
 
-def set_narrator(console: Console) -> Token:
+def set_narrator(console: Console, verbose: bool = False) -> Token:
     """Activate *console* as the narrator for the current task context.
+
+    When *verbose* is ``True``, :func:`say` prints messages.  The spinner
+    from :func:`thinking` is always active regardless of *verbose*.
 
     Returns the :class:`~contextvars.Token` so the caller can restore the
     previous state with ``_console.reset(token)`` if needed.
     """
+    _verbose.set(verbose)
     return _console.set(console)
 
 
 def say(msg: str) -> None:
-    """Print *msg* to the narrator console (no-op when none is set)."""
-    c = _console.get()
-    if c is not None:
-        c.print(f"[dim cyan]  →[/dim cyan] {msg}")
+    """Print *msg* to the narrator console (no-op when none is set or not verbose)."""
+    if _verbose.get():
+        c = _console.get()
+        if c is not None:
+            c.print(f"[dim cyan]  →[/dim cyan] {msg}")
 
 
 @contextmanager

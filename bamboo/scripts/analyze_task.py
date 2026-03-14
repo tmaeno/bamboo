@@ -52,21 +52,11 @@ def main(task_data, task_id, external_data, output):
     if task_data:
         task_dict = json.loads(Path(task_data).read_text())
 
-    if task_id is not None:
-        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
-
-        click.echo(f"Fetching task data from PanDA for task_id={task_id}...")
-        try:
-            task_dict = fetch_task_data(task_id)
-        except Exception as e:
-            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
-            sys.exit(1)
-
     external_dict = None
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    result = asyncio.run(_analyze_task(task_dict, external_dict))
+    result = asyncio.run(_analyze_task(task_dict, task_id, external_dict))
 
     # Display results
     click.echo("\n" + "=" * 80)
@@ -104,8 +94,23 @@ def main(task_data, task_id, external_data, output):
         click.echo("Please edit the results manually.")
 
 
-async def _analyze_task(task_dict, external_dict):
+async def _analyze_task(task_dict, task_id, external_dict):
     """Run the async reasoning pipeline and return results."""
+    from rich.console import Console
+
+    from bamboo.utils.narrator import set_narrator, thinking
+
+    set_narrator(Console())
+
+    if task_id is not None:
+        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+
+        try:
+            task_dict = await fetch_task_data(task_id)
+        except Exception as e:
+            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
+            sys.exit(1)
+
     graph_db = GraphDatabaseClient()
     vector_db = VectorDatabaseClient()
 
