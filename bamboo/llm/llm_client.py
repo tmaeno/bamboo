@@ -94,6 +94,7 @@ def get_llm() -> BaseChatModel:
         return ChatOllama(
             model=settings.llm_model,
             temperature=0.7,
+            reasoning=settings.ollama_reasoning,
         )
     raise ValueError(
         f"Unsupported LLM provider: {settings.llm_provider!r}. "

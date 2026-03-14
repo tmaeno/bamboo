@@ -214,7 +214,9 @@ class TestFilterLogAuto:
 
     def test_known_source_name_routes_directly(self):
         # "analysis_job_brokerage_log" is in the registry — no detection heuristics needed.
-        result = filter_log_auto(_BROKERAGE_LOG, source_name="analysis_job_brokerage_log")
+        result = filter_log_auto(
+            _BROKERAGE_LOG, source_name="analysis_job_brokerage_log"
+        )
         assert "Job brokerage summary" in result
 
     def test_unknown_source_name_falls_through_to_detection(self):
@@ -310,7 +312,9 @@ class TestProdBrokerageNewFormat:
         # must be recognised so the memory-check section slice is correct.
         # The memory-check skip lines should be captured (not the whole body).
         result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
-        assert "highmemory" in result or "wuppertal" in result or "SARA-MATRIX" in result
+        assert (
+            "highmemory" in result or "wuppertal" in result or "SARA-MATRIX" in result
+        )
 
     def test_no_candidates_in_final_selection(self):
         # Bug fix: "no candidates" appears after the summary header in the new
@@ -440,7 +444,9 @@ class TestProdBrokerageFilter:
     # --- filter_log_auto dispatch -------------------------------------------
 
     def test_filter_log_auto_routes_via_source_name(self):
-        result = filter_log_auto(_PROD_BROKERAGE_LOG, source_name="prod_job_brokerage_log")
+        result = filter_log_auto(
+            _PROD_BROKERAGE_LOG, source_name="prod_job_brokerage_log"
+        )
         assert "Job brokerage summary" in result
         assert "## Data availability" not in result
 

@@ -81,7 +81,7 @@ from bamboo.models.graph_element import (
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.log_filters import filter_log_auto
-from bamboo.utils.narrator import say
+from bamboo.utils.narrator import say, thinking
 from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
@@ -620,7 +620,9 @@ async def _generate_category_label(error_message: str) -> str:
     Raises on any LLM failure so nothing is stored when classification fails.
     """
     preview = error_message[:60].replace("\n", " ")
-    say(f"Asking AI to generate error category label for: \"{preview}{'...' if len(error_message) > 60 else ''}\"")
+    say(
+        f"Classifying error message: \"{preview}{'...' if len(error_message) > 60 else ''}\""
+    )
     llm = get_llm()
     response = await llm.ainvoke(
         TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
@@ -651,7 +653,7 @@ async def _normalize_diag(diag_text: str) -> str:
         ValueError: If the LLM returns an empty string.
     """
     preview = diag_text[:60].replace("\n", " ")
-    say(f"Asking AI to normalize diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
+    say(f"Normalizing diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
     llm = get_llm()
     response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
     normalised = response.content.strip()
@@ -672,7 +674,7 @@ def _make_cause_resolution_label_fn(node_type: str):
             existing_names="(handled by vector search — normalise wording only)",
             raw_name=raw_name,
         )
-        say(f"Asking AI to canonicalize {node_type}: \"{raw_name[:60]}\"")
+        say(f'Canonicalizing {node_type}: "{raw_name[:60]}"')
         response = await llm.ainvoke(prompt)
         canonical = response.content.strip().strip('"').strip("'")
         if not canonical:
@@ -900,7 +902,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_id = (task_data or {}).get("taskID")
         task_status = (task_data or {}).get("status")
         if task_id:
-            say(f"Starting extraction for task {task_id} (status: {task_status or 'unknown'}).")
+            say(
+                f"Starting extraction for task {task_id} (status: {task_status or 'unknown'})."
+            )
 
         for key, value in (external_data or {}).items():
             nodes.append(
@@ -938,7 +942,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 if value:
                     str_value = str(value)
                     preview = str_value[:80].replace("\n", " ")
-                    say(f"Found errorDialog: \"{preview}{'...' if len(str_value) > 80 else ''}\"")
+                    say(
+                        f"Found errorDialog: \"{preview}{'...' if len(str_value) > 80 else ''}\""
+                    )
                     say("Classifying error category...")
                     category, confidence = await self._classify_error(str_value)
                     say(f"Classified as: {category} (confidence: {confidence:.2f})")
@@ -960,7 +966,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         say(f"Found a link to a log. Downloading from {log_url} ...")
                         log_content = await async_fetch_log_content(log_url)
                         if log_content:
-                            prod_source_label = (task_data or {}).get("prodSourceLabel", "")
+                            prod_source_label = (task_data or {}).get(
+                                "prodSourceLabel", ""
+                            )
                             source_name = (
                                 "prod_job_brokerage_log"
                                 if prod_source_label == "managed"
@@ -1131,7 +1139,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 pass
 
         if email_text and email_text.strip():
-            say(f"Processing email thread ({len(email_text):,} chars). Extracting causes and resolutions...")
+            say(
+                f"Processing email thread ({len(email_text):,} chars). Extracting causes and resolutions..."
+            )
             email_nodes, email_rels = await self._extract_from_email(email_text)
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
@@ -1139,7 +1149,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         # Task-level logs (orchestration services: JEDI, Harvester, …)
         for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():
-                say(f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)...")
+                say(
+                    f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
+                )
                 log_nodes, log_rels = await self._extract_from_log(
                     source_name, source_log, log_level="task"
                 )
@@ -1149,7 +1161,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         # Job-level logs (execution workers: pilot, Athena/payload, …)
         for source_name, source_log in (job_logs or {}).items():
             if source_log and source_log.strip():
-                say(f"Processing job log '{source_name}' ({len(source_log.splitlines()):,} lines)...")
+                say(
+                    f"Processing job log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
+                )
                 log_nodes, log_rels = await self._extract_from_log(
                     source_name, source_log, log_level="job"
                 )
@@ -1164,7 +1178,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             relationships.extend(job_rels)
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
-        say(f"Extraction complete: {len(nodes)} nodes, {len(relationships)} relationships.")
+        say(
+            f"Extraction complete: {len(nodes)} nodes, {len(relationships)} relationships."
+        )
         logger.info(
             "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
             len(nodes),
@@ -1382,12 +1398,13 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         say(
             f"Filtered to {filtered_lines:,} lines "
             f"({raw_lines - filtered_lines:,} noise lines removed). "
-            f"Asking AI to analyze {source_name}..."
+            f"Analyzing {source_name}..."
         )
         llm = get_llm()
-        response = await llm.ainvoke(
-            LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
-        )
+        with thinking(f"Working on {source_name}..."):
+            response = await llm.ainvoke(
+                LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
+            )
         raw = self._parse_log_response(response.content)
 
         nodes = []
@@ -1518,11 +1535,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         two different emails produces the same node name and is merged correctly
         by ``get_or_create_canonical_node`` in the graph database.
         """
-        say("Asking AI to extract causes and resolutions from email thread...")
+        say("Extracting causes and resolutions from email thread...")
         llm = get_llm()
-        response = await llm.ainvoke(
-            EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)
-        )
+        with thinking("Working on email extraction..."):
+            response = await llm.ainvoke(
+                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)
+            )
         raw = self._parse_email_response(response.content)
 
         _store_for_type = {
@@ -1572,7 +1590,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
-        say(f"Got {len(nodes)} node(s) and {len(relationships)} relationship(s) from email.")
+        say(
+            f"Got {len(nodes)} node(s) and {len(relationships)} relationship(s) from email."
+        )
         logger.debug(
             "PandaKnowledgeExtractor: email yielded %d nodes, %d relationships",
             len(nodes),

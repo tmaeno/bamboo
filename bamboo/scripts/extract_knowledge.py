@@ -101,18 +101,21 @@ def main(email_thread, task_data, task_id, external_data, output, verbose):
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    asyncio.run(_run_extraction(email_text, task_dict, external_dict, output, verbose=verbose))
+    asyncio.run(
+        _run_extraction(email_text, task_dict, external_dict, output, verbose=verbose)
+    )
 
 
-async def _run_extraction(email_text, task_dict, external_dict, output=None, verbose=False):
+async def _run_extraction(
+    email_text, task_dict, external_dict, output=None, verbose=False
+):
     """Run extraction in dry-run mode and print the result."""
     if verbose:
         from rich.console import Console
 
         from bamboo.utils.narrator import set_narrator
 
-        _console = Console()
-        set_narrator(lambda msg: _console.print(f"[dim cyan]  →[/dim cyan] {msg}"))
+        set_narrator(Console())
 
     # Dry-run needs no database connections at all — skip Neo4j and Qdrant.
     # Pass None so KnowledgeAccumulator skips all DB calls.

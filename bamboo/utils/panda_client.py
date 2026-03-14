@@ -94,7 +94,9 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
         )
         if is_gzip:
             try:
-                text = gzip.decompress(response.content).decode("utf-8", errors="replace")
+                text = gzip.decompress(response.content).decode(
+                    "utf-8", errors="replace"
+                )
             except Exception as exc:
                 logger.warning(
                     "async_fetch_log_content: failed to decompress gzip from %s: %s",

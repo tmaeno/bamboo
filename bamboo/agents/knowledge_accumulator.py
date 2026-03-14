@@ -29,6 +29,7 @@ from bamboo.llm import (
     get_llm,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
+from bamboo.utils.narrator import say, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +206,7 @@ class KnowledgeAccumulator:
         incident narratives via semantic search.
         """
         logger.info("KnowledgeAccumulator: generating graph summary")
+        say("Generating a narrative summary of the extracted graph...")
 
         graph_data = {
             "nodes": [
@@ -233,7 +235,8 @@ class KnowledgeAccumulator:
             HumanMessage(content=prompt),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        with thinking("Summarizing the narrative (this can take ~30s)..."):
+            response = await self.llm.ainvoke(messages)
         return response.content
 
     async def _extract_key_insights(

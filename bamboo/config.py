@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic", "ollama"] = "openai"
     embeddings_provider: Literal["openai", "local"] = "openai"
     llm_model: str = "gpt-4-turbo-preview"
+    # Ollama-specific: set to False to disable chain-of-thought reasoning mode
+    # (strongly recommended for Qwen3+ models — reasoning adds 1-2 min per call)
+    ollama_reasoning: bool = True
 
     # Extraction
     extraction_strategy: Literal["llm", "panda"] = "panda"
