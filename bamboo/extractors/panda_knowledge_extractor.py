@@ -61,7 +61,7 @@ from bamboo.llm import (
     EMAIL_EXTRACTION_PROMPT,
     LOG_EXTRACTION_PROMPT,
     get_embeddings,
-    get_llm,
+    get_extraction_llm,
 )
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
@@ -623,7 +623,7 @@ async def _generate_category_label(error_message: str) -> str:
     say(
         f"Classifying error message: \"{preview}{'...' if len(error_message) > 60 else ''}\""
     )
-    llm = get_llm()
+    llm = get_extraction_llm()
     with thinking("Working..."):
         response = await llm.ainvoke(   
             TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
@@ -655,7 +655,7 @@ async def _normalize_diag(diag_text: str) -> str:
     """
     preview = diag_text[:60].replace("\n", " ")
     say(f"Normalizing diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
-    llm = get_llm()
+    llm = get_extraction_llm()
     with thinking("Working..."):
         response = await llm.ainvoke(JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text))
     normalised = response.content.strip()
@@ -668,7 +668,7 @@ def _make_cause_resolution_label_fn(node_type: str):
     """Return an async label function for Cause or Resolution nodes."""
 
     async def _fn(raw_name: str) -> str:
-        llm = get_llm()
+        llm = get_extraction_llm()
         # Pass an empty existing-names block — the VectorDB handles matching;
         # the LLM's only job here is stripping incident-specific tokens.
         prompt = CAUSE_RESOLUTION_CANONICALIZE_PROMPT.format(
@@ -999,6 +999,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # as a SymptomNode so it participates in Symptom→Cause edges.
                 if value:
                     category, confidence = await self._classify_error(str(value))
+                    say(f"Classified as: {category} (confidence: {confidence:.2f})")
                     nodes.append(
                         SymptomNode(
                             name=category,
@@ -1403,7 +1404,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"({raw_lines - filtered_lines:,} noise lines removed). "
             f"Analyzing {source_name}..."
         )
-        llm = get_llm()
+        llm = get_extraction_llm()
         with thinking(f"Working..."):
             response = await llm.ainvoke(
                 LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
@@ -1539,7 +1540,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         by ``get_or_create_canonical_node`` in the graph database.
         """
         say("Extracting causes and resolutions from email thread...")
-        llm = get_llm()
+        llm = get_extraction_llm()
         with thinking("Working..."):
             response = await llm.ainvoke(
                 EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)

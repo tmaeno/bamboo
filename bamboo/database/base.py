@@ -117,6 +117,15 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def clear_all(self) -> None:
+        """Delete every node and relationship in the database.
+
+        .. warning::
+            Irreversible.  Intended for development / testing resets only.
+        """
+        pass
+
+    @abstractmethod
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the ``frequency`` counter on a cause node by 1.
 
@@ -213,6 +222,15 @@ class VectorDatabaseBackend(ABC):
         Used as a pre-flight check before the first vector operation so that
         callers can emit a clear, actionable error rather than catching an
         opaque low-level exception from the database driver.
+        """
+        pass
+
+    @abstractmethod
+    async def clear_all(self) -> None:
+        """Drop and recreate the entire collection (all vectors deleted).
+
+        .. warning::
+            Irreversible.  Intended for development / testing resets only.
         """
         pass
 

@@ -53,34 +53,20 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from bamboo.config import get_settings
 
 
-@lru_cache
-def get_llm() -> BaseChatModel:
-    """Return the configured LangChain chat model (cached).
-
-    The provider and model name are read from :class:`~bamboo.config.Settings`.
-    Supported providers: ``"openai"``, ``"anthropic"``, ``"ollama"``.
-
-    Returns:
-        A :class:`langchain_core.language_models.BaseChatModel` instance.
-
-    Raises:
-        ValueError:  If ``llm_provider`` is not a supported value.
-        ImportError: If ``llm_provider="ollama"`` but ``langchain-ollama``
-                     is not installed.
-    """
+def _build_llm(temperature: float) -> BaseChatModel:
     settings = get_settings()
 
     if settings.llm_provider == "openai":
         return ChatOpenAI(
             model=settings.llm_model,
             api_key=settings.llm_api_key,
-            temperature=0.7,
+            temperature=temperature,
         )
     if settings.llm_provider == "anthropic":
         return ChatAnthropic(
             model=settings.llm_model,
             api_key=settings.llm_api_key,
-            temperature=0.7,
+            temperature=temperature,
         )
     if settings.llm_provider == "ollama":
         try:
@@ -93,13 +79,33 @@ def get_llm() -> BaseChatModel:
             ) from exc
         return ChatOllama(
             model=settings.llm_model,
-            temperature=0.7,
+            temperature=temperature,
             reasoning=settings.ollama_reasoning,
         )
     raise ValueError(
         f"Unsupported LLM provider: {settings.llm_provider!r}. "
         "Supported values: 'openai', 'anthropic', 'ollama'."
     )
+
+
+@lru_cache
+def get_llm() -> BaseChatModel:
+    """Return the chat model for generative tasks (summarisation, email).
+
+    Uses temperature=0.7 for natural-sounding output.
+    """
+    return _build_llm(temperature=0.7)
+
+
+@lru_cache
+def get_extraction_llm() -> BaseChatModel:
+    """Return the chat model for structured extraction tasks.
+
+    Uses temperature=0.0 for deterministic, reproducible JSON output.
+    Extraction at temperature > 0 causes the same input to produce different
+    node counts on repeated runs.
+    """
+    return _build_llm(temperature=0.0)
 
 
 @lru_cache

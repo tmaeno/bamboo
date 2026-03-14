@@ -7,7 +7,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.extractors.base import ExtractionStrategy
-from bamboo.llm import EXTRACTION_PROMPT, get_llm
+from bamboo.llm import EXTRACTION_PROMPT, get_extraction_llm
 from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
@@ -34,7 +34,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
 
     def __init__(self):
         """Initialize LLM extraction strategy."""
-        self.llm = get_llm()
+        self.llm = get_extraction_llm()
 
     async def extract(
         self,

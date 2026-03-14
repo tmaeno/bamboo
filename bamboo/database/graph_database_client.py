@@ -76,6 +76,10 @@ class GraphDatabaseClient:
             limit=limit,
         )
 
+    async def clear_all(self) -> None:
+        """Delete every node and relationship in the graph database."""
+        await self._backend.clear_all()
+
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter on a cause node."""
         return await self._backend.increment_cause_frequency(cause_id)

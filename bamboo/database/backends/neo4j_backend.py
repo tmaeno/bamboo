@@ -166,6 +166,12 @@ class Neo4jBackend(GraphDatabaseBackend):
             )
             return await result.single() is not None
 
+    async def clear_all(self) -> None:
+        """Delete every node and relationship from the Neo4j database."""
+        async with self.driver.session() as session:
+            await session.run("MATCH (n) DETACH DELETE n")
+        logger.info("Neo4j: all nodes and relationships deleted")
+
     async def find_causes(
         self,
         symptoms: list[str] = None,

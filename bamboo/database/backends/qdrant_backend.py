@@ -185,6 +185,13 @@ class QdrantBackend(VectorDatabaseBackend):
         response = await self.client.get_collections()
         return self.collection_name in {c.name for c in response.collections}
 
+    async def clear_all(self) -> None:
+        """Drop and recreate the Qdrant collection (all vectors deleted)."""
+        await self.client.delete_collection(self.collection_name)
+        logger.info("Qdrant: collection '%s' dropped", self.collection_name)
+        await self._ensure_collection()
+        logger.info("Qdrant: collection '%s' recreated", self.collection_name)
+
     async def delete_document(self, doc_id: str) -> bool:
         """Delete a document by ID."""
         try:

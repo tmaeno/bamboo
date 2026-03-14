@@ -182,6 +182,13 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
 
         return results[:limit]
 
+    async def clear_all(self) -> None:
+        """Clear all nodes and relationships from memory."""
+        self.nodes.clear()
+        self.relationships.clear()
+        self.node_index.clear()
+        logger.info("In-memory backend: all data cleared")
+
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""
         if cause_id in self.nodes:

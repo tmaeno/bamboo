@@ -139,6 +139,8 @@ class KnowledgeAccumulator:
         )
         graph.metadata["graph_id"] = graph_id
 
+        self._reconcile_cross_extractor_links(graph)
+
         if dry_run:
             logger.info(
                 "KnowledgeAccumulator: dry-run mode — skipping all database writes"
@@ -174,6 +176,71 @@ class KnowledgeAccumulator:
                 "jobs_count": len(jobs_data) if jobs_data else 0,
             },
         )
+
+    def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
+        """Create schema-defined edges that span extractor boundaries.
+
+        Each extractor (email, log, task-data) runs independently and never
+        knows about nodes produced by the others.  After merging, this step
+        adds the edges that were structurally impossible to emit during
+        extraction:
+
+            Symptom      -[indicate]->        Cause
+            Task_Feature -[contribute_to]->   Cause
+            Job_Feature  -[contribute_to]->   Cause
+            Component    -[originated_from]-> Cause
+            Environment  -[associated_with]-> Cause
+
+        Edges that already exist (emitted by an LLM pass) are not duplicated.
+        Inferred edges carry ``confidence=0.7`` to distinguish them from
+        directly extracted ones.
+        """
+        from bamboo.models.graph_element import GraphRelationship, RelationType
+
+        by_type: dict[str, list] = {}
+        for node in graph.nodes:
+            by_type.setdefault(node.node_type.value, []).append(node)
+
+        causes = by_type.get("Cause", [])
+        if not causes:
+            return
+
+        existing = {
+            (r.source_id, r.target_id, r.relation_type)
+            for r in graph.relationships
+        }
+
+        pairs = [
+            ("Symptom",      RelationType.INDICATE),
+            ("Task_Feature", RelationType.CONTRIBUTE_TO),
+            ("Job_Feature",  RelationType.CONTRIBUTE_TO),
+            ("Component",    RelationType.ORIGINATED_FROM),
+            ("Environment",  RelationType.ASSOCIATED_WITH),
+        ]
+
+        new_rels = []
+        for src_type, rel_type in pairs:
+            for src_node in by_type.get(src_type, []):
+                for cause in causes:
+                    key = (src_node.name, cause.name, rel_type)
+                    if key not in existing:
+                        new_rels.append(
+                            GraphRelationship(
+                                source_id=src_node.name,
+                                target_id=cause.name,
+                                relation_type=rel_type,
+                                confidence=0.7,
+                            )
+                        )
+                        existing.add(key)
+
+        graph.relationships.extend(new_rels)
+        if new_rels:
+            say(f"Reconciled {len(new_rels)} cross-extractor link(s) between nodes from different sources.")
+            logger.info(
+                "KnowledgeAccumulator: reconciled %d cross-extractor link(s)",
+                len(new_rels),
+            )
 
     async def _store_graph(self, graph: KnowledgeGraph):
         """Persist graph nodes and relationships to Graph database.

@@ -81,8 +81,41 @@ class KnowledgeGraphExtractor:
             jobs_data=jobs_data,
         )
 
+        # Deduplicate nodes by (type, name) — the LLM occasionally emits the
+        # same logical node twice with identical or near-identical names.
+        seen: dict[tuple, str] = {}  # (type, name) -> canonical node.id
+        deduped_nodes = []
+        id_remap: dict[str, str] = {}  # old id/name -> canonical id
+
         for node in graph.nodes:
             if not node.id:
                 node.id = str(uuid.uuid4())
+            key = (node.node_type.value, node.name)
+            if key in seen:
+                id_remap[node.id] = seen[key]
+                id_remap[node.name] = seen[key]
+            else:
+                seen[key] = node.id
+                id_remap[node.name] = node.id
+                deduped_nodes.append(node)
+
+        graph.nodes = deduped_nodes
+
+        # Remap relationship endpoints to surviving node IDs and drop
+        # self-loops that deduplication may have introduced.
+        deduped_rels = []
+        seen_rels: set[tuple] = set()
+        for rel in graph.relationships:
+            src = id_remap.get(rel.source_id, rel.source_id)
+            tgt = id_remap.get(rel.target_id, rel.target_id)
+            rel_key = (src, tgt, rel.relation_type)
+            if src == tgt or rel_key in seen_rels:
+                continue
+            rel.source_id = src
+            rel.target_id = tgt
+            seen_rels.add(rel_key)
+            deduped_rels.append(rel)
+
+        graph.relationships = deduped_rels
 
         return graph

@@ -143,6 +143,11 @@ async def _run_extraction(
         for node_type, count in sorted(type_counts.items()):
             click.echo(f"  {node_type:<30} {count}")
 
+        rel_counts = Counter(r.relation_type.value for r in result.graph.relationships)
+        click.echo("\nRelationship types:")
+        for rel_type, count in sorted(rel_counts.items()):
+            click.echo(f"  {rel_type:<30} {count}")
+
         click.echo(f"\nSummary:\n{result.summary}")
         click.echo("\n" + "=" * 70)
         click.echo("Nothing was written to Neo4j or Qdrant.")

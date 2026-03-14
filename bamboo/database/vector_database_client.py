@@ -68,6 +68,10 @@ class VectorDatabaseClient:
             query_embedding, limit, score_threshold, filter_conditions
         )
 
+    async def clear_all(self) -> None:
+        """Drop and recreate the entire vector collection."""
+        await self._backend.clear_all()
+
     async def delete_document(self, doc_id: str) -> bool:
         """Delete the point with the given ID."""
         return await self._backend.delete_document(doc_id)

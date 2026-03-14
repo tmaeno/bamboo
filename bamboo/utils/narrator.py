@@ -69,5 +69,5 @@ def thinking(msg: str) -> Generator[None, None, None]:
     if c is None:
         yield
         return
-    with c.status(f"[dim cyan]{msg}[/dim cyan]", spinner="dots"):
+    with c.status(f"[dim cyan]{msg}[/dim cyan]", spinner="bouncingBar"):
         yield

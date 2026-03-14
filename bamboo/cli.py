@@ -188,9 +188,10 @@ def interactive():
         console.print("2. Analyze problematic task")
         console.print("3. Query knowledge graph (graph database)")
         console.print("4. Query knowledge base (vector database)")
-        console.print("5. Exit")
+        console.print("5. [red]Cleanup databases[/red]")
+        console.print("6. Exit")
 
-        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5"])
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -201,6 +202,8 @@ def interactive():
         elif choice == "4":
             asyncio.run(query_vector_interactive())
         elif choice == "5":
+            asyncio.run(cleanup_databases_interactive())
+        elif choice == "6":
             console.print("[green]Goodbye![/green]")
             break
 
@@ -603,6 +606,57 @@ async def query_knowledge_interactive():
         console.print(f"[red]Error: {e}[/red]")
     finally:
         await graph_db.close()
+
+
+async def cleanup_databases_interactive():
+    """Interactive database cleanup — lets the user wipe graph DB, vector DB, or both."""
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+    from bamboo.database.vector_database_client import VectorDatabaseClient
+
+    console.print("\n[bold red]Cleanup Databases[/bold red]")
+    console.print(
+        "[yellow]Warning: this permanently deletes data and cannot be undone.[/yellow]"
+    )
+
+    target = Prompt.ask(
+        "What do you want to clear?",
+        choices=["graph", "vector", "both", "cancel"],
+        default="cancel",
+    )
+
+    if target == "cancel":
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    confirmed = Confirm.ask(
+        f"[bold red]Are you sure you want to clear the {target} database(s)?[/bold red]",
+        default=False,
+    )
+    if not confirmed:
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    if target in ("graph", "both"):
+        graph_db = GraphDatabaseClient()
+        try:
+            await graph_db.connect()
+            await graph_db.clear_all()
+            console.print("[green]Graph database cleared.[/green]")
+        except Exception as e:
+            console.print(f"[red]Graph DB error: {e}[/red]")
+        finally:
+            await graph_db.close()
+
+    if target in ("vector", "both"):
+        vector_db = VectorDatabaseClient()
+        try:
+            await vector_db.connect()
+            await vector_db.clear_all()
+            console.print("[green]Vector database cleared.[/green]")
+        except Exception as e:
+            console.print(f"[red]Vector DB error: {e}[/red]")
+        finally:
+            await vector_db.close()
 
 
 @cli.command("populate")
