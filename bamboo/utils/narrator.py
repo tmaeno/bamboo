@@ -90,7 +90,10 @@ def thinking(msg: str) -> Generator[None, None, None]:
         n_dots = 10
         counter = 0
         while not stop_event.is_set():
-            dots = "." * (counter % n_dots + 1)
+            if (counter // n_dots) % 2 == 0:
+                dots = "." * (counter % n_dots + 1)
+            else:
+                dots = "." * (n_dots - (counter % n_dots))
             label = Text.from_markup(
                 f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg}{dots}[/cyan]"
             )

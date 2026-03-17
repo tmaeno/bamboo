@@ -26,7 +26,7 @@ from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (
     SUMMARIZATION_PROMPT,
     get_embeddings,
-    get_llm,
+    get_summary_llm,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
 from bamboo.utils.narrator import say, thinking
@@ -62,7 +62,7 @@ class KnowledgeAccumulator:
     @property
     def llm(self):
         if self._llm is None:
-            self._llm = get_llm()
+            self._llm = get_summary_llm()
         return self._llm
 
     @property

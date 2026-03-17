@@ -98,6 +98,16 @@ def get_llm() -> BaseChatModel:
 
 
 @lru_cache
+def get_summary_llm() -> BaseChatModel:
+    """Return the chat model for summarisation tasks.
+
+    Uses ``LLM_SUMMARY_TEMPERATURE`` (default 0.3) — low enough to produce
+    consistent summaries across repeated runs while still allowing natural prose.
+    """
+    return _build_llm(temperature=get_settings().llm_summary_temperature)
+
+
+@lru_cache
 def get_extraction_llm() -> BaseChatModel:
     """Return the chat model for structured extraction tasks.
 

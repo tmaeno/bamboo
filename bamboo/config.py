@@ -138,6 +138,9 @@ class Settings(BaseSettings):
     # Ollama-specific: set to False to disable chain-of-thought reasoning mode
     # (strongly recommended for Qwen3+ models — reasoning adds 1-2 min per call)
     ollama_reasoning: bool = True
+    # Summarization temperature — lower = more consistent across runs.
+    # Set to 0.0 for fully deterministic summaries; 0.7 for creative prose.
+    llm_summary_temperature: float = 0.3
 
     # Extraction
     extraction_strategy: Literal["llm", "panda"] = "panda"
