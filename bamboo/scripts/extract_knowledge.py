@@ -150,6 +150,44 @@ async def _run_extraction(
         for rel_type, count in sorted(rel_counts.items()):
             click.echo(f"  {rel_type:<30} {count}")
 
+        if verbose:
+            click.echo("\n--- Node details ---")
+            from collections import defaultdict
+
+            nodes_by_type: dict = defaultdict(list)
+            for n in result.graph.nodes:
+                nodes_by_type[n.node_type.value].append(n)
+            for type_name in sorted(nodes_by_type):
+                click.echo(f"\n[{type_name}]")
+                for n in nodes_by_type[type_name]:
+                    click.echo(f"  • {n.name}")
+                    if n.description:
+                        # wrap long descriptions at 80 chars
+                        desc = n.description.replace("\n", " ")
+                        if len(desc) > 120:
+                            desc = desc[:117] + "..."
+                        click.echo(f"    {desc}")
+                    # type-specific extra fields
+                    extras = {}
+                    if hasattr(n, "confidence") and n.confidence != 1.0:
+                        extras["confidence"] = f"{n.confidence:.2f}"
+                    if hasattr(n, "steps") and n.steps:
+                        extras["steps"] = len(n.steps)
+                    if hasattr(n, "attribute"):
+                        extras["attribute"] = n.attribute
+                    if hasattr(n, "severity") and n.severity:
+                        extras["severity"] = n.severity
+                    if extras:
+                        click.echo("    " + "  ".join(f"{k}={v}" for k, v in extras.items()))
+
+            click.echo("\n--- Relationships ---")
+            for r in sorted(
+                result.graph.relationships,
+                key=lambda r: (r.relation_type.value, r.source_id),
+            ):
+                conf = f"  [{r.confidence:.2f}]" if r.confidence != 1.0 else ""
+                click.echo(f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}")
+
         click.echo(f"\nSummary:\n{result.summary}")
         click.echo("\n" + "=" * 70)
         click.echo("Nothing was written to Neo4j or Qdrant.")

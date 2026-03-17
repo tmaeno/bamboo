@@ -99,7 +99,7 @@ def thinking(msg: str) -> Generator[None, None, None]:
             )
             live.update(Columns([spinner, label]))
             counter += 1
-            time.sleep(0.3)  # Faster dots feel more responsive
+            time.sleep(0.1)  # Faster dots feel more responsive
 
     with Live("", refresh_per_second=10, transient=True) as live:
         # Start the "dots" animation in the background
