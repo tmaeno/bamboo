@@ -92,7 +92,9 @@ def main(email_thread, task_data, task_id, external_data, output, verbose):
         external_dict = json.loads(Path(external_data).read_text())
 
     asyncio.run(
-        _run_extraction(email_text, task_dict, task_id, external_dict, output, verbose=verbose)
+        _run_extraction(
+            email_text, task_dict, task_id, external_dict, output, verbose=verbose
+        )
     )
 
 

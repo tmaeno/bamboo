@@ -206,16 +206,15 @@ class KnowledgeAccumulator:
             return
 
         existing = {
-            (r.source_id, r.target_id, r.relation_type)
-            for r in graph.relationships
+            (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
         }
 
         pairs = [
-            ("Symptom",      RelationType.INDICATE),
+            ("Symptom", RelationType.INDICATE),
             ("Task_Feature", RelationType.CONTRIBUTE_TO),
-            ("Job_Feature",  RelationType.CONTRIBUTE_TO),
-            ("Component",    RelationType.ORIGINATED_FROM),
-            ("Environment",  RelationType.ASSOCIATED_WITH),
+            ("Job_Feature", RelationType.CONTRIBUTE_TO),
+            ("Component", RelationType.ORIGINATED_FROM),
+            ("Environment", RelationType.ASSOCIATED_WITH),
         ]
 
         new_rels = []
@@ -236,7 +235,9 @@ class KnowledgeAccumulator:
 
         graph.relationships.extend(new_rels)
         if new_rels:
-            say(f"Reconciled {len(new_rels)} cross-extractor link(s) between nodes from different sources.")
+            say(
+                f"Reconciled {len(new_rels)} cross-extractor link(s) between nodes from different sources."
+            )
             logger.info(
                 "KnowledgeAccumulator: reconciled %d cross-extractor link(s)",
                 len(new_rels),
@@ -302,7 +303,7 @@ class KnowledgeAccumulator:
             HumanMessage(content=prompt),
         ]
 
-        with thinking("Working..."):
+        with thinking("Working"):
             response = await self.llm.ainvoke(messages)
         return response.content
 

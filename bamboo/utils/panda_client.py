@@ -162,8 +162,10 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
 
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
-    with thinking("Working..."):
-        status, data = await asyncio.to_thread(Client.get_task_details_json, task_id_int, verbose=verbose)
+    with thinking("Working"):
+        status, data = await asyncio.to_thread(
+            Client.get_task_details_json, task_id_int, verbose=verbose
+        )
 
     if status != _PANDA_OK:
         raise RuntimeError(

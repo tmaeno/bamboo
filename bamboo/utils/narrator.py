@@ -21,12 +21,18 @@ without any global state.
 
 from __future__ import annotations
 
+import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import TYPE_CHECKING, Generator
+import time
+from typing import Generator
+import threading
 
-if TYPE_CHECKING:
-    from rich.console import Console
+from rich.live import Live
+from rich.spinner import Spinner
+from rich.console import Console
+from rich.text import Text
+from rich.columns import Columns
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
@@ -63,11 +69,43 @@ def thinking(msg: str) -> Generator[None, None, None]:
         with thinking("Summarizing the graph..."):
             response = await llm.ainvoke(prompt)
 
+    The label is prefixed with the caller's module name, e.g.
+    ``[knowledge_accumulator] Summarizing the graph...``
+
     No-op when no narrator console is active.
     """
     c = _console.get()
     if c is None:
         yield
         return
-    with c.status(f"[dim cyan]{msg}[/dim cyan]", spinner="bouncingBar"):
-        yield
+    caller = inspect.stack()[2]
+    module = inspect.getmodule(caller[0])
+    module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
+
+    spinner = Spinner("dots")
+    stop_event = threading.Event()
+
+    # This function runs in a background thread to update the spinner label with animated dots
+    def update_loop(live):
+        n_dots = 10
+        counter = 0
+        while not stop_event.is_set():
+            dots = "." * (counter % n_dots + 1)
+            label = Text.from_markup(
+                f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg}{dots}[/cyan]"
+            )
+            live.update(Columns([spinner, label]))
+            counter += 1
+            time.sleep(0.3)  # Faster dots feel more responsive
+
+    with Live("", refresh_per_second=10, transient=True) as live:
+        # Start the "dots" animation in the background
+        thread = threading.Thread(target=update_loop, args=(live,), daemon=True)
+        thread.start()
+
+        try:
+            yield  # The code inside the 'with' block runs HERE
+        finally:
+            # Tell the background thread to stop when the 'with' block finishes
+            stop_event.set()
+            thread.join(timeout=0.1)
