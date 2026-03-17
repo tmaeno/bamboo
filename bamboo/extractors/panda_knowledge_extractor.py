@@ -58,6 +58,7 @@ from typing import Any, Optional
 
 from bamboo.extractors.base import ExtractionStrategy
 from bamboo.llm import (
+    BROKERAGE_LOG_EXTRACTION_PROMPT,
     EMAIL_EXTRACTION_PROMPT,
     LOG_EXTRACTION_PROMPT,
     get_embeddings,
@@ -80,7 +81,7 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
-from bamboo.utils.log_filters import filter_log_auto
+from bamboo.utils.log_filters import filter_log_auto, source_name_for_task
 from bamboo.utils.narrator import say, thinking
 from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
@@ -971,13 +972,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         say(f"Found a link to a log. Downloading from {log_url} ...")
                         log_content = await async_fetch_log_content(log_url)
                         if log_content:
-                            prod_source_label = (task_data or {}).get(
-                                "prodSourceLabel", ""
-                            )
-                            source_name = (
-                                "prod_job_brokerage_log"
-                                if prod_source_label == "managed"
-                                else "analysis_job_brokerage_log"
+                            source_name = source_name_for_task(
+                                (task_data or {}).get("prodSourceLabel", "") or ""
                             )
                             say(
                                 f"Downloaded {len(log_content):,} chars. "
@@ -1406,10 +1402,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"({raw_lines - filtered_lines:,} noise lines removed). "
             f"Analyzing {source_name}..."
         )
+        prompt = (
+            BROKERAGE_LOG_EXTRACTION_PROMPT
+            if "brokerage" in source_name
+            else LOG_EXTRACTION_PROMPT
+        )
         llm = get_extraction_llm()
         with thinking(f"Working"):
             response = await llm.ainvoke(
-                LOG_EXTRACTION_PROMPT.format(log_text=filtered_log)
+                prompt.format(log_text=filtered_log)
             )
         raw = self._parse_log_response(response.content)
 
@@ -1519,6 +1520,13 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             )
         if node_type == NodeType.TASK_CONTEXT:
             return TaskContextNode(**base)
+        if node_type == NodeType.TASK_FEATURE:
+            attribute = node_data.get("attribute") or ""
+            value = node_data.get("value") or ""
+            # Fall back to splitting "attribute=value" from name if fields absent
+            if not attribute and "=" in base["name"]:
+                attribute, _, value = base["name"].partition("=")
+            return TaskFeatureNode(**base, attribute=attribute, value=value)
 
         logger.warning(
             "PandaKnowledgeExtractor: node_type '%s' is not permitted in log extraction — skipped",

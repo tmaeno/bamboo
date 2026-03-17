@@ -21,6 +21,13 @@ Prompt constants
     same error, captures the components named in stack traces or log prefixes,
     and stores the surrounding prose as Task_Context for vector search.
 
+``BROKERAGE_LOG_EXTRACTION_PROMPT``
+    Extracts a ``Symptom`` (placement outcome: ``BrokerageNoCandidates`` /
+    ``BrokerageCandidateFound``), ``Task_Feature`` nodes for the structured
+    task constraints visible in the log (memory requirement, IO intensity,
+    data locality, etc.), and ``Task_Context`` nodes for the dominant filter
+    stages.  Reuses existing node types; no brokerage-specific types needed.
+
 ``CAUSE_RESOLUTION_CANONICALIZE_PROMPT``
     Normalises a raw Cause/Resolution name into a stable canonical phrase,
     optionally matching against existing names from the vector DB.
@@ -410,6 +417,74 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
       "source_name": "...",
       "target_name": "...",
       "relation_type": "originated_from|contribute_to",
+      "confidence": 0.0
+    }}
+  ]
+}}
+"""
+
+BROKERAGE_LOG_EXTRACTION_PROMPT = """You are an expert in distributed computing and grid job scheduling reading a pre-filtered PanDA job-brokerage log.
+
+The log shows the result of a site-selection (brokerage) run.  The broker itself ran correctly.
+Your goal is to extract reusable, task-agnostic knowledge so that recurring placement patterns
+become visible across many tasks.
+
+Extract ONLY the following node types:
+
+- Symptom: The final placement outcome.
+  name = "BrokerageNoCandidates" | "BrokerageCandidateFound"
+  description = the "no candidates" or "selected site=X" line (lightly redacted).
+  severity = "critical" if no site was found, "info" otherwise.
+  metadata.initial_candidates = integer (from summary header, if present)
+  metadata.final_candidates = integer (from summary footer, if present)
+  Emit exactly ONE Symptom node.
+
+- Task_Feature: A structured, comparable task constraint visible in the log that contributed
+  to the placement outcome.  Use the canonical "attribute=value" format for name.
+  Extract only constraints the log makes explicit — do not infer.
+  Examples (use these exact attribute names where applicable):
+    memory_requirement=<low|medium|high>   (from job_minramcount; low<1000MB, medium<4000MB, high>=4000MB)
+    io_intensity=<low|high>                (from "IO intensity N"; high if N > 500)
+    data_locality=<single_site|few_sites|well_distributed>  (from "available at N sites"; single if N<=2)
+    input_availability=<complete|partial>  (from missing-files check; partial if any files missing)
+    cpu_cores=<N>                          (from core mismatch lines, task side only)
+  Strip all numeric thresholds and site names from the name — keep only the category value.
+  Emit one Task_Feature per distinct constraint.  Omit constraints not mentioned in the log.
+
+- Task_Context: Free-form context about the dominant filter stages for vector search.
+  Emit 1–3 nodes for the stages with the largest % cut.
+  name = snake_case, e.g. "io_check_bottleneck", "memory_check_bottleneck".
+  description = the summary line showing the candidate drop, lightly redacted.
+
+Relationships to emit:
+- Task_Feature -[contribute_to]-> Symptom
+- Task_Context -[contribute_to]-> Symptom
+
+Canonicalization:
+- Strip ALL incident-specific tokens from names: no dataset names, site names, job IDs,
+  numeric thresholds, or timestamps.
+
+Brokerage log:
+{log_text}
+
+Output ONLY a valid JSON object — no explanation, no markdown fences:
+{{
+  "nodes": [
+    {{
+      "node_type": "Symptom|Task_Feature|Task_Context",
+      "name": "...",
+      "description": "...",
+      "severity": "critical|warning|info|null",
+      "attribute": "...|null",
+      "value": "...|null",
+      "metadata": {{}}
+    }}
+  ],
+  "relationships": [
+    {{
+      "source_name": "...",
+      "target_name": "...",
+      "relation_type": "contribute_to",
       "confidence": 0.0
     }}
   ]

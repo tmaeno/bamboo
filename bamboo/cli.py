@@ -189,9 +189,10 @@ def interactive():
         console.print("3. Query knowledge graph (graph database)")
         console.print("4. Query knowledge base (vector database)")
         console.print("5. [red]Cleanup databases[/red]")
-        console.print("6. Exit")
+        console.print("6. Preview log filter")
+        console.print("7. Exit")
 
-        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6"])
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -204,6 +205,8 @@ def interactive():
         elif choice == "5":
             asyncio.run(cleanup_databases_interactive())
         elif choice == "6":
+            asyncio.run(preview_log_filter_interactive())
+        elif choice == "7":
             console.print("[green]Goodbye![/green]")
             break
 
@@ -606,6 +609,131 @@ async def query_knowledge_interactive():
         console.print(f"[red]Error: {e}[/red]")
     finally:
         await graph_db.close()
+
+
+async def preview_log_filter_interactive():
+    """Fetch a log and show how the filter reduces it."""
+    from bamboo.utils.log_filters import SOURCE_FILTER_REGISTRY, filter_log, filter_log_auto, source_name_for_task
+    from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
+
+    console.print("\n[bold cyan]Preview Log Filter[/bold cyan]")
+
+    # --- source ---
+    source = Prompt.ask(
+        "Log source",
+        choices=["task-id","url", "file"],
+        default="task-id",
+    )
+
+    raw: str | None = None
+    label = ""
+    suggested_filter: str | None = None  # set when prodSourceLabel is known
+
+    if source == "task-id":
+        task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+        try:
+            task_data = await fetch_task_data_for_filter(task_id_str)
+        except Exception as e:
+            console.print(f"[red]Error fetching task: {e}[/red]")
+            return
+
+        suggested_filter = source_name_for_task(
+            task_data.get("prodSourceLabel", "") or ""
+        )
+
+        error_dialog = task_data.get("errorDialog", "") or ""
+        log_urls = extract_log_urls(str(error_dialog))
+        if not log_urls:
+            console.print("[yellow]No log URLs found in errorDialog.[/yellow]")
+            return
+
+        if len(log_urls) == 1:
+            chosen_url = log_urls[0]
+        else:
+            console.print("\n[bold]Available log URLs:[/bold]")
+            for i, u in enumerate(log_urls, 1):
+                console.print(f"  {i}. {u}")
+            idx_str = Prompt.ask(
+                "Select URL number",
+                choices=[str(i) for i in range(1, len(log_urls) + 1)],
+                default="1",
+            )
+            chosen_url = log_urls[int(idx_str) - 1]
+
+        label = chosen_url
+        with console.status(f"[bold green]Fetching {chosen_url} ..."):
+            raw = await async_fetch_log_content(chosen_url)
+    elif source == "url":
+        url = Prompt.ask("Enter log URL")
+        label = url
+        with console.status(f"[bold green]Fetching {url} ..."):
+            raw = await async_fetch_log_content(url)
+    else:  # file
+        path = Prompt.ask("Enter path to log file")
+        label = path
+        try:
+            with open(path) as f:
+                raw = f.read()
+        except Exception as e:
+            console.print(f"[red]Error reading file: {e}[/red]")
+            return
+
+    if not raw:
+        console.print("[yellow]Could not retrieve log content.[/yellow]")
+        return
+
+    # --- filter choice ---
+    filter_choices = ["auto", "generic"] + list(SOURCE_FILTER_REGISTRY.keys())
+    default_idx = (
+        str(filter_choices.index(suggested_filter) + 1)
+        if suggested_filter and suggested_filter in filter_choices
+        else "1"
+    )
+    console.print("\n[bold]Available filters:[/bold]")
+    for i, name in enumerate(filter_choices, 1):
+        suffix = "  [dim](try each specialised filter, fall back to generic)[/dim]" if name == "auto" else ""
+        suffix = "  [dim](head + tail + signal lines)[/dim]" if name == "generic" else suffix
+        tag = "  [green](suggested)[/green]" if name == suggested_filter else ""
+        console.print(f"  {i}. {name}{suffix}{tag}")
+
+    idx_str = Prompt.ask(
+        "Select filter",
+        choices=[str(i) for i in range(1, len(filter_choices) + 1)],
+        default=default_idx,
+    )
+    chosen_filter = filter_choices[int(idx_str) - 1]
+
+    with console.status("[bold green]Filtering..."):
+        if chosen_filter == "auto":
+            filtered = filter_log_auto(raw)
+        elif chosen_filter == "generic":
+            filtered = filter_log(raw)
+        else:
+            filtered = SOURCE_FILTER_REGISTRY[chosen_filter](raw) or filter_log(raw)
+
+    raw_lines = raw.count("\n")
+    filtered_lines = filtered.count("\n")
+    reduction = 100 * (1 - filtered_lines / max(raw_lines, 1))
+
+    console.print(
+        f"\n[dim]── {label} ──[/dim]\n"
+        f"[bold]Filter:[/bold] {chosen_filter}  "
+        f"[bold]Original:[/bold] {raw_lines} lines  "
+        f"[bold]Filtered:[/bold] {filtered_lines} lines  "
+        f"[bold]Reduction:[/bold] {reduction:.0f}%\n"
+    )
+    console.print(Panel(filtered, title=f"Filtered log [{chosen_filter}]", border_style="green"))
+
+    if Confirm.ask("\nShow raw log?", default=False):
+        console.print(Panel(raw, title="Raw log", border_style="dim"))
+
+
+async def fetch_task_data_for_filter(task_id_str: str) -> dict:
+    """Thin wrapper so preview_log_filter_interactive can fetch task data."""
+    from bamboo.utils.panda_client import fetch_task_data
+
+    with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
+        return await fetch_task_data(int(task_id_str))
 
 
 async def cleanup_databases_interactive():

@@ -342,6 +342,23 @@ SOURCE_FILTER_REGISTRY: dict[str, object] = {
 }
 
 
+def source_name_for_task(prod_source_label: str) -> str:
+    """Return the :data:`SOURCE_FILTER_REGISTRY` key appropriate for a PanDA task.
+
+    Args:
+        prod_source_label: Value of ``task_data["prodSourceLabel"]``.
+
+    Returns:
+        ``"prod_job_brokerage_log"`` for managed (production) tasks,
+        ``"analysis_job_brokerage_log"`` for everything else.
+    """
+    return (
+        "prod_job_brokerage_log"
+        if prod_source_label == "managed"
+        else "analysis_job_brokerage_log"
+    )
+
+
 def filter_log_auto(
     log_text: str,
     source_name: "str | None" = None,

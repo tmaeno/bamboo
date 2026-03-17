@@ -14,6 +14,7 @@ single-import access across the rest of the package.
 
 from .llm_client import get_embeddings, get_extraction_llm, get_llm, get_summary_llm
 from .prompts import (
+    BROKERAGE_LOG_EXTRACTION_PROMPT,
     CAUSE_IDENTIFICATION_PROMPT,
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
     JOB_DIAG_NORMALIZE_PROMPT,
@@ -30,6 +31,7 @@ __all__ = [
     "get_extraction_llm",
     "get_summary_llm",
     "get_embeddings",
+    "BROKERAGE_LOG_EXTRACTION_PROMPT",
     "EXTRACTION_PROMPT",
     "EMAIL_EXTRACTION_PROMPT",
     "LOG_EXTRACTION_PROMPT",
