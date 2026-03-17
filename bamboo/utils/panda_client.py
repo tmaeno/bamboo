@@ -89,12 +89,15 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
             return None
         content_type = response.headers.get("content-type", "")
         content_encoding = response.headers.get("content-encoding", "")
-        is_gzip = (
-            "gzip" in content_encoding
-            or "application/gzip" in content_type
+        # httpx transparently decompresses Content-Encoding: gzip, so
+        # response.content/.text is already plain text in that case.
+        # Only manually decompress when the payload itself is a raw gzip
+        # blob (indicated by Content-Type or a .gz URL suffix).
+        needs_manual_decompress = (
+            "application/gzip" in content_type
             or url.endswith(".gz")
-        )
-        if is_gzip:
+        ) and "gzip" not in content_encoding
+        if needs_manual_decompress:
             try:
                 text = gzip.decompress(response.content).decode(
                     "utf-8", errors="replace"
@@ -106,13 +109,6 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
                     exc,
                 )
                 return None
-        elif "text" not in content_type and "json" not in content_type:
-            logger.warning(
-                "async_fetch_log_content: %s has non-text content-type %r — skipping",
-                url,
-                content_type,
-            )
-            return None
         else:
             text = response.text
         logger.info("async_fetch_log_content: fetched %d chars from %s", len(text), url)
