@@ -491,6 +491,35 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
 }}
 """
 
+DESCRIPTION_CANONICALIZE_PROMPT = """You are a knowledge-graph canonicalization expert.
+
+Below is a JSON array of node descriptions extracted from an operational incident report.
+Each description may contain task-instance-specific tokens that make it non-reusable across incidents.
+
+Rewrite EACH description to be task-agnostic while preserving its semantic meaning:
+
+Remove or replace with a generic placeholder:
+- Specific URLs, log links, HTML tags
+- Numeric counts, percentages, and statistics that are specific to one run
+  (e.g. "1179 -> 9 candidates, 99% cut" → "99% filtered")
+- Dataset names, file paths, output filenames, LFNs, GUIDs
+- Task IDs, job IDs, PanDA IDs, pilot IDs
+- Hostnames, IP addresses, site names
+- Timestamps, user names
+
+Keep:
+- The error type, failure mode, or check name
+- The overall semantic meaning and relevant system/component names
+- Structural descriptions (e.g. "all candidates filtered at memory check")
+
+If a description is already generic (no instance-specific data), return it unchanged.
+
+Input: {descriptions_json}
+
+Return a JSON array of the rewritten descriptions in the SAME ORDER as the input.
+Return ONLY the JSON array — no explanation, no markdown code fences.
+"""
+
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.
 
 A PanDA job produced the following error diagnostic message:

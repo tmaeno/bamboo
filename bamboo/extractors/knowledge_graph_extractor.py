@@ -118,4 +118,8 @@ class KnowledgeGraphExtractor:
 
         graph.relationships = deduped_rels
 
+        from bamboo.utils.canonicalize import canonicalize_descriptions  # noqa: PLC0415
+
+        await canonicalize_descriptions(graph.nodes)
+
         return graph
