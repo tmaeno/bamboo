@@ -267,7 +267,7 @@ def _brokerage_filter_impl(
 def filter_analysis_job_brokerage_log(
     log_text: str,
     top_cuts: int = 3,
-    max_skipped_sites: int = 10,
+    max_skipped_sites: int = 20,
 ) -> "str | None":
     """Dedicated pre-filter for AtlasBroker-style analysis job brokerage logs.
 
@@ -311,7 +311,7 @@ def filter_analysis_job_brokerage_log(
 def filter_prod_job_brokerage_log(
     log_text: str,
     top_cuts: int = 3,
-    max_skipped_sites: int = 10,
+    max_skipped_sites: int = 20,
 ) -> "str | None":
     """Dedicated pre-filter for AtlasProdJobBroker-style production job brokerage logs.
 
