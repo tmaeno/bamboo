@@ -502,7 +502,11 @@ Remove or replace with a generic placeholder:
 - Specific URLs, log links, HTML tags
 - Numeric counts, percentages, and statistics that are specific to one run
   (e.g. "1179 -> 9 candidates, 99% cut" → "99% filtered")
-- Dataset names, file paths, output filenames, LFNs, GUIDs
+- Dataset names, file paths, output filenames, LFNs, GUIDs — replace the ENTIRE
+  string (including all scope:name.component.component... structure) with a
+  single placeholder such as <dataset_name>; do NOT preserve the internal
+  dot-separated or colon-separated structure as individual sub-placeholders
+  (e.g. "mc23:mc23.604924.Py8.deriv.DAOD.e8599_r16083" → "<dataset_name>")
 - Task IDs, job IDs, PanDA IDs, pilot IDs
 - Hostnames, IP addresses, site names
 - Timestamps, user names

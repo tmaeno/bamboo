@@ -29,6 +29,7 @@ from typing import Generator
 import threading
 
 from rich.live import Live
+from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.console import Console
 from rich.text import Text
@@ -57,6 +58,31 @@ def say(msg: str) -> None:
         c = _console.get()
         if c is not None:
             c.print(f"[dim cyan]  →[/dim cyan] {msg}")
+
+
+def show_block(title: str, content: str, max_lines: int = 60) -> None:
+    """Print *content* inside a labelled panel (no-op when not verbose).
+
+    Long content is truncated to *max_lines* lines with a note showing how
+    many lines were omitted, so the terminal is not flooded.
+
+    Args:
+        title:     Panel border title, e.g. ``"brokerage_log (filtered)"``.
+        content:   The text to display.
+        max_lines: Maximum lines before truncation (default 60).
+    """
+    if not _verbose.get():
+        return
+    c = _console.get()
+    if c is None:
+        return
+    lines = content.splitlines()
+    n_lines = len(lines)
+    if n_lines > max_lines:
+        body = "\n".join(lines[:max_lines]) + f"\n[dim]... {n_lines - max_lines} more lines omitted ...[/dim]"
+    else:
+        body = "\n".join(lines)
+    c.print(Panel(body, title=f"[bold cyan]{title}[/bold cyan]", border_style="dim cyan"))
 
 
 @contextmanager

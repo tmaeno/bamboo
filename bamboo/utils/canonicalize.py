@@ -14,6 +14,8 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from bamboo.utils.narrator import thinking
+
 if TYPE_CHECKING:
     from bamboo.models.graph_element import BaseNode
 
@@ -51,7 +53,8 @@ async def canonicalize_descriptions(nodes: list[BaseNode]) -> None:
         descriptions_json=json.dumps(descriptions, ensure_ascii=False)
     )
     try:
-        response = await get_extraction_llm().ainvoke([HumanMessage(content=prompt)])
+        with thinking("Working"):
+            response = await get_extraction_llm().ainvoke([HumanMessage(content=prompt)])
         raw = response.content.strip()
         # Strip optional markdown code fences the model may add
         if raw.startswith("```"):

@@ -107,7 +107,7 @@ _BROKERAGE_PROBLEMATIC_RE: re.Pattern = re.compile(
 def _brokerage_filter_impl(
     log_text: str,
     top_cuts: int,
-    max_skip_lines_per_section: int,
+    max_skipped_sites: int,
     include_data_avail: bool,
     fn_name: str,
 ) -> "str | None":
@@ -166,24 +166,32 @@ def _brokerage_filter_impl(
         if m and int(m.group(1)) not in n_to_idx:
             n_to_idx[int(m.group(1))] = i
 
-    # --- Collect skip lines for the top-impact filter stages --------------
-    top_section_details: "list[tuple[int, int, float, str, list[str]]]" = []
-    if summary_entries:
-        for n_before, n_after, cut_pct, check_name in sorted(
-            summary_entries, key=lambda e: e[2], reverse=True
-        )[:top_cuts]:
-            start = n_to_idx.get(n_before, 0)
-            # n_after may be 0 (final check eliminated all candidates) and
-            # therefore absent from n_to_idx; fall back to end of body.
-            end = n_to_idx.get(n_after, len(body_lines))
-            section_skips = [
+    # --- Collect skip lines for all filter stages -------------------------
+    # All stages get a section header so the LLM sees the complete funnel
+    # shape.  Skip lines are only collected for the top_cuts highest-impact
+    # stages to keep the output concise; the rest receive a brief note.
+    sorted_entries = sorted(summary_entries, key=lambda e: e[2], reverse=True)
+    top_cut_names: "set[str]" = {check_name for _, _, _, check_name in sorted_entries[:top_cuts]}
+    # Include=True: collect skip lines.  Include=False: header-only.
+    all_section_details: "list[tuple[int, int, float, str, list[str], bool]]" = []
+    for n_before, n_after, cut_pct, check_name in sorted_entries:
+        start = n_to_idx.get(n_before, 0)
+        # n_after may be 0 (final check eliminated all candidates) and
+        # therefore absent from n_to_idx; fall back to end of body.
+        end = n_to_idx.get(n_after, len(body_lines))
+        include_skips = check_name in top_cut_names
+        section_skips = (
+            [
                 line
                 for line in body_lines[start : end + 1]
                 if _BROKERAGE_SKIP_RE.search(line)
             ]
-            top_section_details.append(
-                (n_before, n_after, cut_pct, check_name, section_skips)
-            )
+            if include_skips
+            else []
+        )
+        all_section_details.append(
+            (n_before, n_after, cut_pct, check_name, section_skips, include_skips)
+        )
 
     # --- Build output -----------------------------------------------------
     parts: "list[str]" = []
@@ -197,19 +205,26 @@ def _brokerage_filter_impl(
             parts.append("## Data availability")
             parts.extend(data_lines)
 
-    # 2. Skip reasons for the highest-impact stages
-    for n_before, n_after, cut_pct, check_name, skips in top_section_details:
-        if not skips:
-            continue
+    # 2. Filter stage sections — all stages get a header; skip lines only for top_cuts
+    for n_before, n_after, cut_pct, check_name, skips, include_skips in all_section_details:
         parts.append(
             f"\n## Filter stage: {check_name}  "
             f"({cut_pct:.0f}% cut, {n_before}→{n_after} candidates)"
         )
-        parts.extend(skips[:max_skip_lines_per_section])
-        if len(skips) > max_skip_lines_per_section:
-            parts.append(
-                f"  ... ({len(skips) - max_skip_lines_per_section} more skip lines not shown)"
-            )
+        if skips:
+            if n_before - n_after > max_skipped_sites:
+                parts.append(
+                    f"  ({n_before - n_after} sites skipped — too many to list individually)"
+                )
+            else:
+                parts.extend(skips)
+        elif include_skips:
+            # We searched this stage but found no per-site skip lines —
+            # sites were filtered silently (e.g. input data check).
+            parts.append("  (no per-site skip lines — sites filtered implicitly)")
+        else:
+            # Stage is below the top_cuts threshold; skip lines not collected.
+            parts.append("  (skip lines not shown — not among the highest-impact stages)")
 
     # 3. Problematic-site / user-queue-throttle lines
     problematic = [
@@ -252,7 +267,7 @@ def _brokerage_filter_impl(
 def filter_analysis_job_brokerage_log(
     log_text: str,
     top_cuts: int = 3,
-    max_skip_lines_per_section: int = 10,
+    max_skipped_sites: int = 10,
 ) -> "str | None":
     """Dedicated pre-filter for AtlasBroker-style analysis job brokerage logs.
 
@@ -276,7 +291,7 @@ def filter_analysis_job_brokerage_log(
         log_text:                Raw brokerage log content.
         top_cuts:                Number of highest-% filter stages whose
                                  skip lines to include in the output.
-        max_skip_lines_per_section: Hard cap on skip lines shown per stage
+        max_skipped_sites: Hard cap on skip lines shown per stage
                                  (excess is replaced by an omitted-count note).
 
     Returns:
@@ -287,7 +302,7 @@ def filter_analysis_job_brokerage_log(
     return _brokerage_filter_impl(
         log_text,
         top_cuts=top_cuts,
-        max_skip_lines_per_section=max_skip_lines_per_section,
+        max_skipped_sites=max_skipped_sites,
         include_data_avail=True,
         fn_name="filter_analysis_job_brokerage_log",
     )
@@ -296,7 +311,7 @@ def filter_analysis_job_brokerage_log(
 def filter_prod_job_brokerage_log(
     log_text: str,
     top_cuts: int = 3,
-    max_skip_lines_per_section: int = 10,
+    max_skipped_sites: int = 10,
 ) -> "str | None":
     """Dedicated pre-filter for AtlasProdJobBroker-style production job brokerage logs.
 
@@ -309,7 +324,7 @@ def filter_prod_job_brokerage_log(
         log_text:                Raw production brokerage log content.
         top_cuts:                Number of highest-% filter stages whose
                                  skip lines to include in the output.
-        max_skip_lines_per_section: Hard cap on skip lines shown per stage
+        max_skipped_sites: Hard cap on skip lines shown per stage
                                  (excess is replaced by an omitted-count note).
 
     Returns:
@@ -320,7 +335,7 @@ def filter_prod_job_brokerage_log(
     return _brokerage_filter_impl(
         log_text,
         top_cuts=top_cuts,
-        max_skip_lines_per_section=max_skip_lines_per_section,
+        max_skipped_sites=max_skipped_sites,
         include_data_avail=False,
         fn_name="filter_prod_job_brokerage_log",
     )

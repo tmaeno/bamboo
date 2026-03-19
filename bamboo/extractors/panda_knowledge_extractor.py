@@ -82,7 +82,7 @@ from bamboo.models.graph_element import (
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.log_filters import filter_log_auto, source_name_for_task
-from bamboo.utils.narrator import say, thinking
+from bamboo.utils.narrator import say, show_block, thinking
 from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 from bamboo.utils.sanitize import SENSITIVE_TASK_KEYS, pseudonymise
 
@@ -1402,6 +1402,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"({raw_lines - filtered_lines:,} noise lines removed). "
             f"Analyzing {source_name}..."
         )
+        show_block(f"{source_name} (filtered)", filtered_log)
         prompt = (
             BROKERAGE_LOG_EXTRACTION_PROMPT
             if "brokerage" in source_name

@@ -1,15 +1,18 @@
 """Interactive CLI for Bamboo."""
 
+import atexit
 import os
+import readline
 import sys
 
 import asyncio
 import json
 
+import re
+
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from bamboo.utils.logging import setup_logging
@@ -171,9 +174,88 @@ def cli():
     _ensure_completion()
 
 
+_HISTORY_FILE = os.path.expanduser("~/.bamboo_history")
+_readline_initialized = False
+
+
+def _setup_readline() -> None:
+    """Load readline history and arrange for it to be saved on exit."""
+    global _readline_initialized
+    if _readline_initialized:
+        return
+    _readline_initialized = True
+    try:
+        readline.read_history_file(_HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(500)
+    atexit.register(readline.write_history_file, _HISTORY_FILE)
+
+
+_RICH_MARKUP_RE = re.compile(r"\[/?[^\]]*\]")
+
+
+def _strip_markup(text: str) -> str:
+    return _RICH_MARKUP_RE.sub("", text)
+
+
+def _ask(
+    prompt: str,
+    *,
+    default: "str | None" = None,
+    choices: "list[str] | None" = None,
+) -> str:
+    """Readline-compatible replacement for rich.prompt.Prompt.ask.
+
+    Calls input(prompt) directly so readline knows the cursor position and
+    up/down arrow history recall works without garbling the prompt.
+    """
+    plain = _strip_markup(prompt)
+    if choices:
+        plain += f" [{'/'.join(choices)}]"
+    if default is not None:
+        plain += f" ({default})"
+    plain += ": "
+    while True:
+        try:
+            answer = input(plain).strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit(0)
+        if not answer:
+            if default is not None:
+                return default
+            continue
+        if choices and answer not in choices:
+            console.print(f"[yellow]  Please select one of: {', '.join(choices)}[/yellow]")
+            continue
+        return answer
+
+
+def _confirm(prompt: str, *, default: "bool | None" = None) -> bool:
+    """Readline-compatible replacement for rich.prompt.Confirm.ask."""
+    plain = _strip_markup(prompt)
+    hint = "[Y/n]" if default is True else "[y/N]" if default is False else "[y/n]"
+    full = f"{plain} {hint}: "
+    while True:
+        try:
+            answer = input(full).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit(0)
+        if not answer:
+            if default is not None:
+                return default
+            continue
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        console.print("[yellow]  Please enter y or n.[/yellow]")
+
+
 @cli.command()
 def interactive():
     """Start interactive mode."""
+    _setup_readline()
     console.print(
         Panel.fit(
             "[bold blue]Bamboo Interactive Mode[/bold blue]\n"
@@ -192,7 +274,7 @@ def interactive():
         console.print("6. Preview log filter")
         console.print("7. Exit")
 
-        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7"])
+        choice = _ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -220,8 +302,8 @@ async def populate_knowledge_interactive():
     console.print("\n[bold cyan]Populate Knowledge Base[/bold cyan]")
 
     email_text = ""
-    if Confirm.ask("Do you have an email thread?"):
-        email_path = Prompt.ask("Enter path to email text file")
+    if _confirm("Do you have an email thread?"):
+        email_path = _ask("Enter path to email text file")
         try:
             with open(email_path) as f:
                 email_text = f.read()
@@ -230,12 +312,12 @@ async def populate_knowledge_interactive():
             return
 
     task_dict = None
-    if Confirm.ask("Do you have task data?"):
-        use_panda = Confirm.ask(
+    if _confirm("Do you have task data?"):
+        use_panda = _confirm(
             "Fetch task data directly from PanDA by task ID?", default=False
         )
         if use_panda:
-            task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+            task_id_str = _ask("Enter PanDA jediTaskID")
             try:
                 from bamboo.utils.panda_client import fetch_task_data
 
@@ -250,7 +332,7 @@ async def populate_knowledge_interactive():
                 console.print(f"[red]Error fetching task from PanDA: {e}[/red]")
                 return
         else:
-            task_path = Prompt.ask("Enter path to task JSON file")
+            task_path = _ask("Enter path to task JSON file")
             try:
                 with open(task_path) as f:
                     task_dict = json.load(f)
@@ -259,8 +341,8 @@ async def populate_knowledge_interactive():
                 return
 
     external_dict = None
-    if Confirm.ask("Do you have external data?"):
-        external_path = Prompt.ask("Enter path to external JSON file")
+    if _confirm("Do you have external data?"):
+        external_path = _ask("Enter path to external JSON file")
         try:
             with open(external_path) as f:
                 external_dict = json.load(f)
@@ -271,7 +353,7 @@ async def populate_knowledge_interactive():
     graph_db = GraphDatabaseClient()
     vector_db = VectorDatabaseClient()
 
-    dry_run = Confirm.ask(
+    dry_run = _confirm(
         "\nRun in [bold]dry-run mode[/bold] (extract & preview without writing to databases)?",
         default=False,
     )
@@ -301,7 +383,7 @@ async def populate_knowledge_interactive():
                 "\n[yellow]Dry-run mode: no data was written to the databases.[/yellow]"
             )
         else:
-            if not Confirm.ask("\nCommit this data to the databases?", default=True):
+            if not _confirm("\nCommit this data to the databases?", default=True):
                 console.print("[yellow]Aborted — no data written.[/yellow]")
                 return
 
@@ -330,11 +412,11 @@ async def analyze_task_interactive():
     console.print("\n[bold cyan]Analyze Problematic Task[/bold cyan]")
 
     task_dict = None
-    use_panda = Confirm.ask(
+    use_panda = _confirm(
         "Fetch task data directly from PanDA by task ID?", default=False
     )
     if use_panda:
-        task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+        task_id_str = _ask("Enter PanDA jediTaskID")
         try:
             from bamboo.utils.panda_client import fetch_task_data
 
@@ -349,7 +431,7 @@ async def analyze_task_interactive():
             console.print(f"[red]Error fetching task from PanDA: {e}[/red]")
             return
     else:
-        task_path = Prompt.ask("Enter path to task JSON file")
+        task_path = _ask("Enter path to task JSON file")
         try:
             with open(task_path) as f:
                 task_dict = json.load(f)
@@ -358,8 +440,8 @@ async def analyze_task_interactive():
             return
 
     external_dict = None
-    if Confirm.ask("Do you have external data?"):
-        external_path = Prompt.ask("Enter path to external JSON file")
+    if _confirm("Do you have external data?"):
+        external_path = _ask("Enter path to external JSON file")
         try:
             with open(external_path) as f:
                 external_dict = json.load(f)
@@ -400,10 +482,10 @@ async def analyze_task_interactive():
             Panel(result.email_content, title="Email Draft", border_style="blue")
         )
 
-        if Confirm.ask("\nDo you approve this analysis?"):
+        if _confirm("\nDo you approve this analysis?"):
             console.print("[green]✓ Analysis approved![/green]")
         else:
-            feedback = Prompt.ask("Please provide feedback for improvement")
+            feedback = _ask("Please provide feedback for improvement")
             console.print(f"[yellow]Feedback recorded: {feedback}[/yellow]")
 
     except Exception as e:
@@ -491,15 +573,15 @@ async def query_vector_interactive():
 
     console.print("\n[bold cyan]Query Knowledge Base (Vector Database)[/bold cyan]")
 
-    query_text = Prompt.ask("Enter search query (free-form text)")
+    query_text = _ask("Enter search query (free-form text)")
 
-    limit_str = Prompt.ask("Maximum number of results", default="5")
+    limit_str = _ask("Maximum number of results", default="5")
     try:
         limit = int(limit_str)
     except ValueError:
         limit = 5
 
-    threshold_str = Prompt.ask("Minimum similarity score (0.0 – 1.0)", default="0.5")
+    threshold_str = _ask("Minimum similarity score (0.0 – 1.0)", default="0.5")
     try:
         score_threshold = float(threshold_str)
     except ValueError:
@@ -507,8 +589,8 @@ async def query_vector_interactive():
 
     # Optional section filter (Summary, KeyInsight, canonical_node::*, etc.)
     section_filter = None
-    if Confirm.ask("Filter by section?", default=False):
-        section_filter = Prompt.ask(
+    if _confirm("Filter by section?", default=False):
+        section_filter = _ask(
             "Section name (e.g. Summary, KeyInsight, canonical_node::Cause)"
         ).strip()
 
@@ -567,7 +649,7 @@ async def query_knowledge_interactive():
 
     console.print("\n[bold cyan]Query Knowledge Graph (Graph Database)[/bold cyan]")
 
-    query_type = Prompt.ask(
+    query_type = _ask(
         "Query type",
         choices=["error", "features"],
         default="error",
@@ -579,10 +661,10 @@ async def query_knowledge_interactive():
         await graph_db.connect()
 
         if query_type == "error":
-            error_name = Prompt.ask("Enter error message or keyword")
+            error_name = _ask("Enter error message or keyword")
             results = await graph_db.find_causes(errors=[error_name], limit=10)
         else:
-            features_str = Prompt.ask("Enter features (comma-separated)")
+            features_str = _ask("Enter features (comma-separated)")
             features = [f.strip() for f in features_str.split(",")]
             results = await graph_db.find_causes(task_features=features, limit=10)
 
@@ -619,7 +701,7 @@ async def preview_log_filter_interactive():
     console.print("\n[bold cyan]Preview Log Filter[/bold cyan]")
 
     # --- source ---
-    source = Prompt.ask(
+    source = _ask(
         "Log source",
         choices=["task-id","url", "file"],
         default="task-id",
@@ -630,7 +712,7 @@ async def preview_log_filter_interactive():
     suggested_filter: str | None = None  # set when prodSourceLabel is known
 
     if source == "task-id":
-        task_id_str = Prompt.ask("Enter PanDA jediTaskID")
+        task_id_str = _ask("Enter PanDA jediTaskID")
         try:
             task_data = await fetch_task_data_for_filter(task_id_str)
         except Exception as e:
@@ -653,7 +735,7 @@ async def preview_log_filter_interactive():
             console.print("\n[bold]Available log URLs:[/bold]")
             for i, u in enumerate(log_urls, 1):
                 console.print(f"  {i}. {u}")
-            idx_str = Prompt.ask(
+            idx_str = _ask(
                 "Select URL number",
                 choices=[str(i) for i in range(1, len(log_urls) + 1)],
                 default="1",
@@ -664,12 +746,12 @@ async def preview_log_filter_interactive():
         with console.status(f"[bold green]Fetching {chosen_url} ..."):
             raw = await async_fetch_log_content(chosen_url)
     elif source == "url":
-        url = Prompt.ask("Enter log URL")
+        url = _ask("Enter log URL")
         label = url
         with console.status(f"[bold green]Fetching {url} ..."):
             raw = await async_fetch_log_content(url)
     else:  # file
-        path = Prompt.ask("Enter path to log file")
+        path = _ask("Enter path to log file")
         label = path
         try:
             with open(path) as f:
@@ -696,7 +778,7 @@ async def preview_log_filter_interactive():
         tag = "  [green](suggested)[/green]" if name == suggested_filter else ""
         console.print(f"  {i}. {name}{suffix}{tag}")
 
-    idx_str = Prompt.ask(
+    idx_str = _ask(
         "Select filter",
         choices=[str(i) for i in range(1, len(filter_choices) + 1)],
         default=default_idx,
@@ -724,7 +806,7 @@ async def preview_log_filter_interactive():
     )
     console.print(Panel(filtered, title=f"Filtered log [{chosen_filter}]", border_style="green"))
 
-    if Confirm.ask("\nShow raw log?", default=False):
+    if _confirm("\nShow raw log?", default=False):
         console.print(Panel(raw, title="Raw log", border_style="dim"))
 
 
@@ -746,7 +828,7 @@ async def cleanup_databases_interactive():
         "[yellow]Warning: this permanently deletes data and cannot be undone.[/yellow]"
     )
 
-    target = Prompt.ask(
+    target = _ask(
         "What do you want to clear?",
         choices=["graph", "vector", "both", "cancel"],
         default="cancel",
@@ -756,8 +838,8 @@ async def cleanup_databases_interactive():
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    confirmed = Confirm.ask(
-        f"[bold red]Are you sure you want to clear the {target} database(s)?[/bold red]",
+    confirmed = _confirm(
+        f"Are you sure you want to clear the {target} database(s)?",
         default=False,
     )
     if not confirmed:
