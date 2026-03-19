@@ -178,7 +178,9 @@ async def _run_extraction(
                     if hasattr(n, "severity") and n.severity:
                         extras["severity"] = n.severity
                     if extras:
-                        click.echo("    " + "  ".join(f"{k}={v}" for k, v in extras.items()))
+                        click.echo(
+                            "    " + "  ".join(f"{k}={v}" for k, v in extras.items())
+                        )
 
             click.echo("\n--- Relationships ---")
             for r in sorted(
@@ -186,7 +188,9 @@ async def _run_extraction(
                 key=lambda r: (r.relation_type.value, r.source_id),
             ):
                 conf = f"  [{r.confidence:.2f}]" if r.confidence != 1.0 else ""
-                click.echo(f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}")
+                click.echo(
+                    f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}"
+                )
 
         click.echo(f"\nSummary:\n{result.summary}")
         click.echo("\n" + "=" * 70)

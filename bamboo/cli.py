@@ -226,7 +226,9 @@ def _ask(
                 return default
             continue
         if choices and answer not in choices:
-            console.print(f"[yellow]  Please select one of: {', '.join(choices)}[/yellow]")
+            console.print(
+                f"[yellow]  Please select one of: {', '.join(choices)}[/yellow]"
+            )
             continue
         return answer
 
@@ -695,7 +697,12 @@ async def query_knowledge_interactive():
 
 async def preview_log_filter_interactive():
     """Fetch a log and show how the filter reduces it."""
-    from bamboo.utils.log_filters import SOURCE_FILTER_REGISTRY, filter_log, filter_log_auto, source_name_for_task
+    from bamboo.utils.log_filters import (
+        SOURCE_FILTER_REGISTRY,
+        filter_log,
+        filter_log_auto,
+        source_name_for_task,
+    )
     from bamboo.utils.panda_client import async_fetch_log_content, extract_log_urls
 
     console.print("\n[bold cyan]Preview Log Filter[/bold cyan]")
@@ -703,7 +710,7 @@ async def preview_log_filter_interactive():
     # --- source ---
     source = _ask(
         "Log source",
-        choices=["task-id","url", "file"],
+        choices=["task-id", "url", "file"],
         default="task-id",
     )
 
@@ -773,8 +780,14 @@ async def preview_log_filter_interactive():
     )
     console.print("\n[bold]Available filters:[/bold]")
     for i, name in enumerate(filter_choices, 1):
-        suffix = "  [dim](try each specialised filter, fall back to generic)[/dim]" if name == "auto" else ""
-        suffix = "  [dim](head + tail + signal lines)[/dim]" if name == "generic" else suffix
+        suffix = (
+            "  [dim](try each specialised filter, fall back to generic)[/dim]"
+            if name == "auto"
+            else ""
+        )
+        suffix = (
+            "  [dim](head + tail + signal lines)[/dim]" if name == "generic" else suffix
+        )
         tag = "  [green](suggested)[/green]" if name == suggested_filter else ""
         console.print(f"  {i}. {name}{suffix}{tag}")
 
@@ -804,7 +817,9 @@ async def preview_log_filter_interactive():
         f"[bold]Filtered:[/bold] {filtered_lines} lines  "
         f"[bold]Reduction:[/bold] {reduction:.0f}%\n"
     )
-    console.print(Panel(filtered, title=f"Filtered log [{chosen_filter}]", border_style="green"))
+    console.print(
+        Panel(filtered, title=f"Filtered log [{chosen_filter}]", border_style="green")
+    )
 
     if _confirm("\nShow raw log?", default=False):
         console.print(Panel(raw, title="Raw log", border_style="dim"))

@@ -171,7 +171,9 @@ def _brokerage_filter_impl(
     # shape.  Skip lines are only collected for the top_cuts highest-impact
     # stages to keep the output concise; the rest receive a brief note.
     sorted_entries = sorted(summary_entries, key=lambda e: e[2], reverse=True)
-    top_cut_names: "set[str]" = {check_name for _, _, _, check_name in sorted_entries[:top_cuts]}
+    top_cut_names: "set[str]" = {
+        check_name for _, _, _, check_name in sorted_entries[:top_cuts]
+    }
     # Include=True: collect skip lines.  Include=False: header-only.
     all_section_details: "list[tuple[int, int, float, str, list[str], bool]]" = []
     for n_before, n_after, cut_pct, check_name in sorted_entries:
@@ -206,7 +208,14 @@ def _brokerage_filter_impl(
             parts.extend(data_lines)
 
     # 2. Filter stage sections — all stages get a header; skip lines only for top_cuts
-    for n_before, n_after, cut_pct, check_name, skips, include_skips in all_section_details:
+    for (
+        n_before,
+        n_after,
+        cut_pct,
+        check_name,
+        skips,
+        include_skips,
+    ) in all_section_details:
         parts.append(
             f"\n## Filter stage: {check_name}  "
             f"({cut_pct:.0f}% cut, {n_before}→{n_after} candidates)"
@@ -224,7 +233,9 @@ def _brokerage_filter_impl(
             parts.append("  (no per-site skip lines — sites filtered implicitly)")
         else:
             # Stage is below the top_cuts threshold; skip lines not collected.
-            parts.append("  (skip lines not shown — not among the highest-impact stages)")
+            parts.append(
+                "  (skip lines not shown — not among the highest-impact stages)"
+            )
 
     # 3. Problematic-site / user-queue-throttle lines
     problematic = [

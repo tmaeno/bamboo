@@ -1410,9 +1410,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         )
         llm = get_extraction_llm()
         with thinking(f"Working"):
-            response = await llm.ainvoke(
-                prompt.format(log_text=filtered_log)
-            )
+            response = await llm.ainvoke(prompt.format(log_text=filtered_log))
         raw = self._parse_log_response(response.content)
 
         nodes = []

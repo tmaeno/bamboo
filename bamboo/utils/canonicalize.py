@@ -54,7 +54,9 @@ async def canonicalize_descriptions(nodes: list[BaseNode]) -> None:
     )
     try:
         with thinking("Working"):
-            response = await get_extraction_llm().ainvoke([HumanMessage(content=prompt)])
+            response = await get_extraction_llm().ainvoke(
+                [HumanMessage(content=prompt)]
+            )
         raw = response.content.strip()
         # Strip optional markdown code fences the model may add
         if raw.startswith("```"):

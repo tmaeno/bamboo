@@ -94,8 +94,7 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
         # Only manually decompress when the payload itself is a raw gzip
         # blob (indicated by Content-Type or a .gz URL suffix).
         needs_manual_decompress = (
-            "application/gzip" in content_type
-            or url.endswith(".gz")
+            "application/gzip" in content_type or url.endswith(".gz")
         ) and "gzip" not in content_encoding
         if needs_manual_decompress:
             try:

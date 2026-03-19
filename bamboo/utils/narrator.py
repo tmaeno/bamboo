@@ -79,10 +79,15 @@ def show_block(title: str, content: str, max_lines: int = 60) -> None:
     lines = content.splitlines()
     n_lines = len(lines)
     if n_lines > max_lines:
-        body = "\n".join(lines[:max_lines]) + f"\n[dim]... {n_lines - max_lines} more lines omitted ...[/dim]"
+        body = (
+            "\n".join(lines[:max_lines])
+            + f"\n[dim]... {n_lines - max_lines} more lines omitted ...[/dim]"
+        )
     else:
         body = "\n".join(lines)
-    c.print(Panel(body, title=f"[bold cyan]{title}[/bold cyan]", border_style="dim cyan"))
+    c.print(
+        Panel(body, title=f"[bold cyan]{title}[/bold cyan]", border_style="dim cyan")
+    )
 
 
 @contextmanager
