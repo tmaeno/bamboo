@@ -36,7 +36,7 @@ class TestJobDataSensitiveFields:
 
     def test_aggregator_strips_sensitive_fields(self):
         """PandaJobDataAggregator must pseudonymise sensitive fields before aggregation."""
-        from bamboo.extractors.panda_job_data_aggregator import PandaJobDataAggregator
+        from bamboo.agents.extractors.panda_job_data_aggregator import PandaJobDataAggregator
 
         jobs = [
             {

@@ -44,7 +44,7 @@ EXTRACTION_STRATEGY=llm   # Default: llm
 
 ### Basic Usage (Auto-configured)
 ```python
-from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 
 # Uses configured strategy from settings
 extractor = KnowledgeGraphExtractor()
@@ -61,7 +61,7 @@ graph = await extractor.extract_from_sources(
 
 ### Specify Strategy
 ```python
-from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 
 # Use specific strategy
 extractor = KnowledgeGraphExtractor(strategy="panda")
@@ -74,7 +74,7 @@ graph = await extractor.extract_from_sources(
 ### Get Available Strategies
 
 ```python
-from bamboo.extractors import list_extraction_strategies
+from bamboo.agents.extractors import list_extraction_strategies
 
 strategies = list_extraction_strategies()
 for strategy in strategies:
@@ -86,9 +86,9 @@ for strategy in strategies:
 ### Step 1: Create Strategy Class
 
 ```python
-# bamboo/extractors/my_system_strategy.py
+# bamboo/agents/extractors/my_system_strategy.py
 
-from bamboo.extractors.base import ExtractionStrategy
+from bamboo.agents.extractors.base import ExtractionStrategy
 from bamboo.models.knowledge_entity import KnowledgeGraph
 
 
@@ -124,8 +124,8 @@ class MySystemExtractionStrategy(ExtractionStrategy):
 
 ```python
 # In your initialization code
-from bamboo.extractors import register_extraction_strategy
-from bamboo.extractors.my_system_strategy import MySystemExtractionStrategy
+from bamboo.agents.extractors import register_extraction_strategy
+from bamboo.agents.extractors.my_system_strategy import MySystemExtractionStrategy
 
 register_extraction_strategy("mysystem", MySystemExtractionStrategy)
 ```
@@ -298,5 +298,5 @@ Potential strategies to implement:
 
 ---
 
-For more information, see the extraction strategies in `bamboo/extractors/`.
+For more information, see the extraction strategies in `bamboo/agents/extractors/`.
 

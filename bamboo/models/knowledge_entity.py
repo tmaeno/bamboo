@@ -1,7 +1,7 @@
 """Knowledge extraction result and query models.
 
 These Pydantic models represent the data transfer objects that flow between
-the extraction layer (:mod:`bamboo.extractors`), the storage layer
+the extraction layer (:mod:`bamboo.agents.extractors`), the storage layer
 (:mod:`bamboo.database`), and the reasoning layer (:mod:`bamboo.agents`).
 """
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bamboo.extractors.panda_knowledge_extractor import (
+from bamboo.agents.extractors.panda_knowledge_extractor import (
     CanonicalNodeStore,
     ErrorCategoryClassifier,
     ErrorCategoryStore,
@@ -91,7 +91,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "  TooManyFilesInDataset  "
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -104,7 +104,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "TooManyFilesInDataset"
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -120,7 +120,7 @@ class TestHelpers:
     @pytest.mark.asyncio
     async def test_generate_category_label_raises_on_llm_failure(self):
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_get_llm.side_effect = RuntimeError("no API key")
             with pytest.raises(RuntimeError, match="no API key"):
@@ -131,7 +131,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "123 !@#"
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -144,7 +144,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "input dataset exceeds file limit"
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -158,7 +158,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = ""
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -461,7 +461,7 @@ class TestPandaKnowledgeExtractor:
     @pytest.mark.asyncio
     async def test_status_not_in_discrete_keys(self):
         """'status' must not appear in DISCRETE_TASK_KEYS."""
-        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        from bamboo.agents.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
 
         assert "status" not in DISCRETE_TASK_KEYS
 
@@ -495,7 +495,7 @@ class TestPandaKnowledgeExtractor:
     @pytest.mark.asyncio
     async def test_split_rule_not_in_discrete_keys(self):
         """'splitRule' must not appear in DISCRETE_TASK_KEYS."""
-        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        from bamboo.agents.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
 
         assert "splitRule" not in DISCRETE_TASK_KEYS
 
@@ -546,7 +546,7 @@ class TestPandaKnowledgeExtractor:
 
     @pytest.mark.asyncio
     async def test_continuous_not_in_discrete_keys(self):
-        from bamboo.extractors.panda_knowledge_extractor import (
+        from bamboo.agents.extractors.panda_knowledge_extractor import (
             CONTINUOUS_TASK_KEYS,
             DISCRETE_TASK_KEYS,
         )
@@ -617,7 +617,7 @@ class TestPandaKnowledgeExtractor:
     @pytest.mark.asyncio
     async def test_job_parameters_not_in_unstructured_keys(self):
         """'jobParameters' must not appear in UNSTRUCTURED_TASK_KEYS."""
-        from bamboo.extractors.panda_knowledge_extractor import UNSTRUCTURED_TASK_KEYS
+        from bamboo.agents.extractors.panda_knowledge_extractor import UNSTRUCTURED_TASK_KEYS
 
         assert "jobParameters" not in UNSTRUCTURED_TASK_KEYS
 
@@ -630,7 +630,7 @@ class TestPandaKnowledgeExtractor:
 
     @pytest.mark.asyncio
     async def test_task_id_not_in_discrete_keys(self):
-        from bamboo.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
+        from bamboo.agents.extractors.panda_knowledge_extractor import DISCRETE_TASK_KEYS
 
         assert "taskID" not in DISCRETE_TASK_KEYS
 
@@ -752,7 +752,7 @@ class TestPandaEmailExtraction:
     async def test_email_produces_cause_resolution_context_nodes(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -769,7 +769,7 @@ class TestPandaEmailExtraction:
             resolution_label="split dataset into smaller subsets",
         )
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -783,7 +783,7 @@ class TestPandaEmailExtraction:
     async def test_canonical_name_used_in_relationship(self):
         ext = self._extractor(resolution_label="split dataset into smaller subsets")
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -802,7 +802,7 @@ class TestPandaEmailExtraction:
             resolution_store=res_store,
         )
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             await ext.extract(email_text="... incident email ...")
@@ -817,7 +817,7 @@ class TestPandaEmailExtraction:
     async def test_email_resolution_steps_parsed(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -828,7 +828,7 @@ class TestPandaEmailExtraction:
     async def test_email_relationships_created(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -840,7 +840,7 @@ class TestPandaEmailExtraction:
     async def test_email_empty_text_skips_llm(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
         ) as mock_get_llm:
             graph = await ext.extract(email_text="   ")
         mock_get_llm.assert_not_called()
@@ -860,7 +860,7 @@ class TestPandaEmailExtraction:
         }"""
         ext = self._extractor(cause_label="real cause")
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(bad_response),
         ):
             graph = await ext.extract(email_text="some email")
@@ -871,7 +871,7 @@ class TestPandaEmailExtraction:
     async def test_email_malformed_json_returns_empty(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm("not json at all"),
         ):
             graph = await ext.extract(email_text="some email")
@@ -882,7 +882,7 @@ class TestPandaEmailExtraction:
     async def test_email_and_task_data_merged(self):
         ext = self._extractor()
         with patch(
-            "bamboo.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(

@@ -3,15 +3,15 @@
 This module provides :class:`KnowledgeGraphExtractor`, the single entry point
 used by both the knowledge accumulator and the reasoning agent to produce a
 :class:`KnowledgeGraph` from raw incident data.  The actual extraction logic
-lives in the :class:`~bamboo.extractors.base.ExtractionStrategy` implementation
-selected at runtime via :func:`~bamboo.extractors.factory.get_extraction_strategy`.
+lives in the :class:`~bamboo.agents.extractors.base.ExtractionStrategy` implementation
+selected at runtime via :func:`~bamboo.agents.extractors.factory.get_extraction_strategy`.
 """
 
 import logging
 import uuid
 from typing import Any
 
-from bamboo.extractors import get_extraction_strategy
+from bamboo.agents.extractors import get_extraction_strategy
 from bamboo.models.knowledge_entity import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
@@ -21,8 +21,8 @@ class KnowledgeGraphExtractor:
     """Thin orchestrator that delegates extraction to a pluggable strategy.
 
     Responsibilities:
-    - Select and hold the active :class:`~bamboo.extractors.base.ExtractionStrategy`.
-    - Call :meth:`~bamboo.extractors.base.ExtractionStrategy.extract` with the
+    - Select and hold the active :class:`~bamboo.agents.extractors.base.ExtractionStrategy`.
+    - Call :meth:`~bamboo.agents.extractors.base.ExtractionStrategy.extract` with the
       raw input data.
     - Assign a stable UUID to every node that does not already have one.
 

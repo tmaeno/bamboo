@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bamboo.extractors.base import ExtractionStrategy
+from bamboo.agents.extractors.base import ExtractionStrategy
 from bamboo.llm import EXTRACTION_PROMPT, get_extraction_llm
 from bamboo.models.graph_element import (
     CauseNode,

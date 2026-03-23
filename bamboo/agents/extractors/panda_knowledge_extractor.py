@@ -56,7 +56,7 @@ import re
 import uuid
 from typing import Any, Optional
 
-from bamboo.extractors.base import ExtractionStrategy
+from bamboo.agents.extractors.base import ExtractionStrategy
 from bamboo.llm import (
     BROKERAGE_LOG_EXTRACTION_PROMPT,
     EMAIL_EXTRACTION_PROMPT,
@@ -1204,7 +1204,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     ) -> tuple[list, list[GraphRelationship]]:
         """Aggregate job records into JobFeatureNodes plus related graph elements.
 
-        Uses :class:`~bamboo.extractors.panda_job_data_aggregator.PandaJobDataAggregator`
+        Uses :class:`~bamboo.agents.extractors.panda_job_data_aggregator.PandaJobDataAggregator`
         to derive stable, reusable patterns from the raw job list, then:
 
         1. Creates a :class:`~bamboo.models.graph_element.JobFeatureNode` for
@@ -1235,7 +1235,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         Returns:
             Tuple of ``(new_nodes, new_relationships)``.
         """
-        from bamboo.extractors.panda_job_data_aggregator import PandaJobDataAggregator
+        from bamboo.agents.extractors.panda_job_data_aggregator import PandaJobDataAggregator
 
         aggregator = PandaJobDataAggregator()
         agg = aggregator.aggregate(jobs_data)

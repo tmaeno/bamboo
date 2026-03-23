@@ -3,7 +3,7 @@
 :func:`canonicalize_descriptions` is a shared async utility that strips
 task-instance-specific tokens from node description fields using the LLM.
 
-It is called by :class:`~bamboo.extractors.knowledge_graph_extractor.KnowledgeGraphExtractor`
+It is called by :class:`~bamboo.agents.extractors.knowledge_graph_extractor.KnowledgeGraphExtractor`
 after every extraction so the canonicalization applies uniformly regardless of
 which strategy produced the nodes.
 """

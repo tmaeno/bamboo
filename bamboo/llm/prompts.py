@@ -11,7 +11,7 @@ Prompt constants
 
 ``EMAIL_EXTRACTION_PROMPT``
     Extracts ``Cause``, ``Resolution``, and ``Task_Context`` nodes from an
-    email thread.  Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
+    email thread.  Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
 
 ``LOG_EXTRACTION_PROMPT``
     Extracts ``Symptom``, ``Component``, and ``Task_Context`` nodes from raw
@@ -34,7 +34,7 @@ Prompt constants
 
 ``TASK_ERROR_CATEGORY_LABEL_PROMPT``
     Converts a raw error message into a short CamelCase error-category label.
-    Used by :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryStore`.
+    Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.ErrorCategoryStore`.
 
 ``SUMMARIZATION_PROMPT``
     Produces a narrative summary of a knowledge graph for vector indexing.
@@ -52,7 +52,7 @@ Prompt constants
     Strips job-specific tokens (file names, dataset scopes, job IDs, replica
     URLs, etc.) from a raw error diagnostic string, returning a reusable
     canonical description of the *type* of problem.
-    Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
+    Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
     before storing job error diagnostics as ``TaskContextNode``.
 
 ``EXPLORER_TOOL_SELECTION_PROMPT``

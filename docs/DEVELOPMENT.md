@@ -180,7 +180,7 @@ class CustomTypeNode(BaseNode):
     custom_metadata: dict[str, Any] = Field(default_factory=dict)
 ```
 
-**Update extractor in `bamboo/extractors/graph_extractor.py`:**
+**Update extractor in `bamboo/agents/extractors/graph_extractor.py`:**
 
 ```python
 def _create_node(self, node_data: dict[str, Any]):

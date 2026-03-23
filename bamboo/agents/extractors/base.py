@@ -4,7 +4,7 @@ An :class:`ExtractionStrategy` converts raw incident data (email thread,
 structured task fields, external metadata, task-level log output, job-level
 log output, and raw job attributes) into a :class:`KnowledgeGraph`.  New
 strategies are registered via
-:func:`~bamboo.extractors.factory.register_extraction_strategy` and selected
+:func:`~bamboo.agents.extractors.factory.register_extraction_strategy` and selected
 at runtime through the ``EXTRACTION_STRATEGY`` configuration key.
 
 Log-level distinction
@@ -40,7 +40,7 @@ class ExtractionStrategy(ABC):
 
     Implement this class to add support for a new data source or extraction
     approach.  Register the implementation with
-    :func:`~bamboo.extractors.factory.register_extraction_strategy` so it can
+    :func:`~bamboo.agents.extractors.factory.register_extraction_strategy` so it can
     be selected via configuration.
 
     Subclasses must implement :meth:`extract`, :meth:`supports_system`,
@@ -93,7 +93,7 @@ class ExtractionStrategy(ABC):
         Returns:
             :class:`KnowledgeGraph` containing the extracted nodes and
             relationships.  Node IDs are assigned by the caller
-            (:class:`~bamboo.extractors.knowledge_graph_extractor.KnowledgeGraphExtractor`)
+            (:class:`~bamboo.agents.extractors.knowledge_graph_extractor.KnowledgeGraphExtractor`)
             after extraction.
         """
         pass

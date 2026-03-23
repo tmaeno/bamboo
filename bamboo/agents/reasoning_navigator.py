@@ -5,7 +5,7 @@ new problematic task it:
 
 1. Extracts a :class:`~bamboo.models.knowledge_entity.KnowledgeGraph` from the
    task's structured fields using the configured
-   :class:`~bamboo.extractors.base.ExtractionStrategy`.
+   :class:`~bamboo.agents.extractors.base.ExtractionStrategy`.
 2. Queries the **graph database** for candidate causes ranked by how many
    extracted clue types (symptoms, features, environment, components) point to
    them.
@@ -24,7 +24,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (

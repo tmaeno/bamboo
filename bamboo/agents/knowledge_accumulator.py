@@ -5,7 +5,7 @@ the raw data for one resolved incident (email thread, task fields, external
 metadata) it:
 
 1. Extracts a :class:`~bamboo.models.knowledge_entity.KnowledgeGraph` using
-   the configured :class:`~bamboo.extractors.base.ExtractionStrategy`.
+   the configured :class:`~bamboo.agents.extractors.base.ExtractionStrategy`.
 2. Stores nodes and relationships in **Neo4j** (graph database), merging on
    canonical names to avoid duplicate nodes.
 3. Generates a narrative summary with the LLM.
@@ -20,7 +20,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (

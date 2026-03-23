@@ -1,12 +1,12 @@
 """Extraction strategies for knowledge graph generation."""
 
-from bamboo.extractors.factory import (
+from bamboo.agents.extractors.factory import (
     get_extraction_strategy,
     list_extraction_strategies,
     register_extraction_strategy,
 )
-from bamboo.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
-from bamboo.extractors.panda_knowledge_extractor import (
+from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.panda_knowledge_extractor import (
     ErrorCategoryClassifier,
     PandaKnowledgeExtractor,
 )

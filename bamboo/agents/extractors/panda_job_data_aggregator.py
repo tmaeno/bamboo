@@ -33,7 +33,7 @@ non-reusable nodes — a graph antipattern.  Instead, aggregation extracts the
     Signals are prefixed ``"ddm:<code>"``.
 
   Both channels are collected as raw strings for the caller to pass through
-  :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`,
+  :class:`~bamboo.agents.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`,
   which maps them to canonical :class:`~bamboo.models.graph_element.SymptomNode`
   names.
 
@@ -423,7 +423,7 @@ class PandaJobDataAggregator:
 
         For each channel, the dominant error code is added to
         ``error_signals`` for the caller to classify via
-        :class:`~bamboo.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`.
+        :class:`~bamboo.agents.extractors.panda_knowledge_extractor.ErrorCategoryClassifier`.
         One representative diagnostic string per dominant code is added to
         ``context_texts`` (vector DB only, up to ``MAX_CONTEXT_TEXTS``).
 
