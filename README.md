@@ -25,17 +25,17 @@ An intelligent multi-agent AI framework for system automation and operations, le
 
 ## LLM-Driven Pipelines and Sub-Agents
 
-### In Knowledge Accumulation Agent
-- **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
-- **Node Canonicalization** - Normalises diverse node names into a stable canonical form
-- **Graph Summarization** - Summarises graph data for quick insights
-- **Feature Classification** - Classifies node features for better reasoning
+### For Knowledge Accumulation
+- **Knowledge Extractor** - Extracts knowledge graph from structured and unstructured data
+- **Node Canonicalizer** - Normalises diverse node names into a stable canonical form
+- **Graph Summarizer** - Summarises graph data for quick insights
+- **Feature Classifier** - Classifies node features for better reasoning
 - **Knowledge Reviewer** - Quality gate; evaluates the extracted graph against source data before DB writes; retries extraction with feedback up to 2 times if rejected (opt-in via `ENABLE_KNOWLEDGE_REVIEW=true`)
 - **Extra Source Explorer** - Fires once on the first reviewer rejection; selects and fetches additional data sources via the MCP tool layer, then feeds the results into the next extraction attempt
 
-### In Reasoning Navigation Agent
-- **Knowledge Extraction** - Extracts features from task data for querying
-- **Output Synthesis** - Synthesises outputs from various agents into coherent responses
+### Reasoning Navigation Agents
+- **Knowledge Extractor** - Extracts features from task data for querying
+- **Output Synthesiser** - Synthesises outputs from various agents into coherent responses
 
 ## Agents to Come
 - **Automation Agent** - Plans and executes operational workflows
