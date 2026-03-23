@@ -16,7 +16,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
 ✅ **Hierarchical Workload Insights** - Full visibility across tasks, jobs, and their dependencies  
 ✅ **PanDA Integration** - Fetch task data live from a PanDA server by task ID  
-✅ **MCP Tools** - Domain-specific Model Context Protocol tools for both reasoning and source exploration
+✅ **MCP Tools** - Domain-specific Model Context Protocol tools for both reasoning and source exploration  
 ✅ **Human-in-Loop** - Safety through human oversight
 
 ## Main Agents
