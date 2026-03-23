@@ -33,7 +33,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 - **Knowledge Reviewer** - Quality gate; evaluates the extracted graph against source data before DB writes; retries extraction with feedback up to 2 times if rejected (opt-in via `ENABLE_KNOWLEDGE_REVIEW=true`)
 - **Extra Source Explorer** - Fires once on the first reviewer rejection; selects and fetches additional data sources via the MCP tool layer, then feeds the results into the next extraction attempt
 
-### Reasoning Navigation Agents
+### For Reasoning Navigation
 - **Knowledge Extractor** - Extracts features from task data for querying
 - **Output Synthesiser** - Synthesises outputs from various agents into coherent responses
 
