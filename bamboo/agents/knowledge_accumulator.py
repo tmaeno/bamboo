@@ -34,21 +34,38 @@ from bamboo.utils.narrator import say, thinking
 logger = logging.getLogger(__name__)
 
 
+_MAX_REVIEW_RETRIES = 2
+
+
 class KnowledgeAccumulator:
     """Extracts knowledge from a resolved incident and persists it to both DBs.
 
     Args:
         graph_db:  Connected :class:`GraphDatabaseClient`.
         vector_db: Connected :class:`VectorDatabaseClient`.
+        reviewer:  Optional :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`.
+                   When provided, the extracted graph is evaluated before being
+                   stored and re-extracted (up to :data:`_MAX_REVIEW_RETRIES`
+                   times) if the reviewer finds issues.  Pass ``None`` to
+                   skip the review gate entirely (default behaviour).
+        explorer:  Optional :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
+                   When provided alongside *reviewer*, fires once on the first
+                   reviewer rejection to fetch additional source data (log
+                   files, retry chain context) before the re-extraction
+                   attempt.  Has no effect when *reviewer* is ``None``.
     """
 
     def __init__(
         self,
         graph_db: GraphDatabaseClient,
         vector_db: VectorDatabaseClient,
+        reviewer=None,
+        explorer=None,
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
+        self._reviewer = reviewer
+        self._explorer = explorer
         self._llm = None  # lazy — initialised on first use
         self._embeddings = (
             None  # lazy — initialised on first use (not needed for dry-run)
@@ -129,17 +146,88 @@ class KnowledgeAccumulator:
         else:
             graph_id = str(uuid.uuid4())
 
-        graph = await self.extractor.extract_from_sources(
-            email_text=email_text,
-            task_data=task_data,
-            external_data=external_data,
-            task_logs=task_logs,
-            job_logs=job_logs,
-            jobs_data=jobs_data,
-        )
-        graph.metadata["graph_id"] = graph_id
+        from bamboo.agents.knowledge_reviewer import build_sources_summary
 
-        self._reconcile_cross_extractor_links(graph)
+        # Local mutable copies — may be augmented by the explorer on first rejection.
+        # Original caller dicts are never mutated.
+        _task_logs = dict(task_logs or {})
+        _external_data = dict(external_data or {})
+
+        sources_summary = build_sources_summary(
+            email_text=email_text,
+            task_logs=_task_logs,
+            job_logs=job_logs,
+        )
+        review_feedback = ""
+        for attempt in range(_MAX_REVIEW_RETRIES + 1):
+            graph = await self.extractor.extract_from_sources(
+                email_text=email_text,
+                task_data=task_data,
+                external_data=_external_data,
+                task_logs=_task_logs,
+                job_logs=job_logs,
+                jobs_data=jobs_data,
+                review_feedback=review_feedback,
+            )
+            graph.metadata["graph_id"] = graph_id
+            self._reconcile_cross_extractor_links(graph)
+
+            if self._reviewer is None:
+                break
+            review_result = await self._reviewer.review(graph, sources_summary)
+            if review_result.approved or attempt >= _MAX_REVIEW_RETRIES:
+                if not review_result.approved:
+                    logger.warning(
+                        "KnowledgeAccumulator: reviewer not satisfied after %d attempt(s) — "
+                        "storing best result (confidence=%.2f)",
+                        attempt + 1,
+                        review_result.confidence,
+                    )
+                break
+            logger.info(
+                "KnowledgeAccumulator: review pass %d/%d found %d issue(s) — retrying extraction",
+                attempt + 1,
+                _MAX_REVIEW_RETRIES,
+                len(review_result.issues),
+            )
+            say(
+                f"Review pass {attempt + 1}: {len(review_result.issues)} issue(s) found — "
+                "retrying extraction with reviewer feedback."
+            )
+
+            # One-shot source exploration on the first rejection.
+            if attempt == 0 and self._explorer is not None:
+                say("Launching source explorer to fetch additional data...")
+                exploration = await self._explorer.explore(
+                    task_data=task_data or {},
+                    review_issues=review_result.issues,
+                    existing_task_logs=_task_logs,
+                )
+                if exploration.task_logs:
+                    _task_logs.update(exploration.task_logs)
+                    say(
+                        f"Explorer fetched {len(exploration.task_logs)} "
+                        "additional log source(s)."
+                    )
+                if exploration.external_data:
+                    _external_data.update(exploration.external_data)
+                    say(
+                        f"Explorer added {len(exploration.external_data)} "
+                        "external data entry(ies)."
+                    )
+                if exploration.task_logs or exploration.external_data:
+                    # Rebuild so reviewer sees the new sources on next pass.
+                    sources_summary = build_sources_summary(
+                        email_text=email_text,
+                        task_logs=_task_logs,
+                        job_logs=job_logs,
+                    )
+                logger.info(
+                    "KnowledgeAccumulator: source explorer ran %d tool call(s)",
+                    len(exploration.tool_calls),
+                )
+
+            review_feedback = review_result.feedback
 
         if dry_run:
             logger.info(
@@ -174,6 +262,9 @@ class KnowledgeAccumulator:
                 "has_job_logs": bool(job_logs),
                 "has_jobs_data": bool(jobs_data),
                 "jobs_count": len(jobs_data) if jobs_data else 0,
+                "explorer_ran": self._explorer is not None and self._reviewer is not None,
+                "explorer_logs_added": len(_task_logs) - len(task_logs or {}),
+                "explorer_external_added": len(_external_data) - len(external_data or {}),
             },
         )
 

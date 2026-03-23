@@ -54,6 +54,17 @@ Prompt constants
     canonical description of the *type* of problem.
     Used by :class:`~bamboo.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
     before storing job error diagnostics as ``TaskContextNode``.
+
+``EXPLORER_TOOL_SELECTION_PROMPT``
+    Given a reviewer's issue list and available MCP tools, selects which
+    tools to call to fill data gaps before a re-extraction attempt.
+    Used by :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
+
+``KNOWLEDGE_REVIEW_PROMPT``
+    Reviews an extracted knowledge graph for completeness, accuracy, and
+    consistency against the original sources.  Returns a structured JSON
+    verdict with issues and corrective feedback.
+    Used by :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`.
 """
 
 EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to extract structured knowledge from the provided information and construct a knowledge graph.
@@ -522,6 +533,85 @@ Input: {descriptions_json}
 
 Return a JSON array of the rewritten descriptions in the SAME ORDER as the input.
 Return ONLY the JSON array — no explanation, no markdown code fences.
+"""
+
+EXPLORER_TOOL_SELECTION_PROMPT = """You are a diagnostic data-collection agent for a PanDA computing task.
+
+A knowledge reviewer has found the following issues with the extracted knowledge graph:
+
+REVIEWER ISSUES:
+{review_issues}
+
+TASK CONTEXT (key fields only):
+{task_summary}
+
+AVAILABLE TOOLS:
+{tools_description}
+
+Your job is to select the minimal set of tools whose results are most likely to resolve the reviewer's issues.
+
+Selection rules:
+- Only select a tool if at least one reviewer issue directly implies that the tool's data is missing.
+- Do NOT select a tool speculatively — if the issues do not suggest its data is needed, omit it.
+- A tool that requires a field (e.g. retryID, errorDialog) that is absent or empty in the task context MUST NOT be selected.
+- Prefer fewer tools. One or two targeted calls is better than calling everything.
+- If no tool would help, output an empty array.
+
+Output a JSON array. Each element has exactly three keys:
+  "tool"   — the tool name exactly as listed in AVAILABLE TOOLS
+  "args"   — a JSON object matching the tool's parameters schema
+  "reason" — one sentence explaining which reviewer issue this call addresses
+
+Output ONLY the JSON array — no markdown, no explanation outside the JSON.
+
+Example (do not copy literally — populate args from the actual task context above):
+[
+  {{
+    "tool": "fetch_error_dialog_logs",
+    "args": {{"task_id": 12345, "error_dialog": "<a href=\\"http://...\\">log</a>"}},
+    "reason": "Reviewer noted Symptom nodes are too vague; log content will provide specific error codes."
+  }}
+]
+"""
+
+KNOWLEDGE_REVIEW_PROMPT = """You are an expert knowledge-graph quality reviewer.
+
+You are given:
+1. EXTRACTED GRAPH — the nodes and relationships extracted from an incident.
+2. SOURCE EXCERPTS — truncated originals (email thread, log excerpts) that the graph was built from.
+
+Your task is to evaluate the extracted graph for:
+- COMPLETENESS: Are important entities from the sources missing as nodes?
+  (e.g., an error clearly named in the source but absent from the graph)
+- ACCURACY: Are node names specific and grounded in the source text?
+  (e.g., a Symptom named just "error" when the source gives a precise error code)
+- CONSISTENCY: Are relationships directionally correct and logically sound?
+  (e.g., a Feature node contributing_to itself, or a cause with no symptoms)
+
+Rules:
+- Only flag issues that are clearly supported by the source text.
+- Do NOT fabricate nodes that are not implied by the sources.
+- A graph with no LLM-extracted nodes (email/logs absent) is always approved.
+- Minor wording differences are acceptable — only flag substantive gaps.
+
+EXTRACTED GRAPH:
+{graph_summary}
+
+SOURCE EXCERPTS:
+{sources_summary}
+
+Respond with a JSON object only — no markdown, no explanation outside the JSON:
+{{
+  "approved": true | false,
+  "confidence": <float 0.0-1.0>,
+  "issues": [
+    "<concise description of one specific problem>"
+  ],
+  "feedback": "<actionable instruction for the extractor to fix the issues, or empty string if approved>"
+}}
+
+Set "approved" to true if the graph adequately captures the key information from the sources,
+even if minor improvements are possible.  Only set false for substantive omissions or inaccuracies.
 """
 
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.

@@ -56,6 +56,7 @@ class ExtractionStrategy(ABC):
         task_logs: dict[str, str] = None,
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
+        review_feedback: str = "",
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
 
@@ -63,27 +64,31 @@ class ExtractionStrategy(ABC):
         supply any combination of sources.
 
         Args:
-            email_text:    Email thread or communication text.  May be empty.
-            task_data:     Structured task/issue data as a flat dict.  May be
-                           ``None``.
-            external_data: External metadata (metrics, JIRA fields, etc.) as a
-                           flat dict.  May be ``None``.
-            task_logs:     *Task-level* log output from orchestration services
-                           (e.g. JEDI, Harvester), keyed by source name
-                           (e.g. ``{"jedi": "...", "harvester": "..."}``)
-                           May be ``None``.  Extracted nodes are tagged
-                           ``log_level="task"`` in their metadata.
-            job_logs:      *Job-level* log output from execution workers
-                           (e.g. pilot, Athena/payload), keyed by a stable
-                           source name such as ``"pilot"`` or ``"payload"``
-                           (NOT a raw PanDA job ID).  May be ``None``.
-                           Extracted nodes are tagged ``log_level="job"``
-                           in their metadata.
-            jobs_data:     List of raw job attribute dicts (one per PanDA job).
-                           Used by :class:`PandaJobDataAggregator` to derive
-                           aggregated :class:`JobFeatureNode` values, dominant
-                           error signals, and representative context texts.
-                           May be ``None``.
+            email_text:      Email thread or communication text.  May be empty.
+            task_data:       Structured task/issue data as a flat dict.  May be
+                             ``None``.
+            external_data:   External metadata (metrics, JIRA fields, etc.) as a
+                             flat dict.  May be ``None``.
+            task_logs:       *Task-level* log output from orchestration services
+                             (e.g. JEDI, Harvester), keyed by source name
+                             (e.g. ``{"jedi": "...", "harvester": "..."}``)
+                             May be ``None``.  Extracted nodes are tagged
+                             ``log_level="task"`` in their metadata.
+            job_logs:        *Job-level* log output from execution workers
+                             (e.g. pilot, Athena/payload), keyed by a stable
+                             source name such as ``"pilot"`` or ``"payload"``
+                             (NOT a raw PanDA job ID).  May be ``None``.
+                             Extracted nodes are tagged ``log_level="job"``
+                             in their metadata.
+            jobs_data:       List of raw job attribute dicts (one per PanDA job).
+                             Used by :class:`PandaJobDataAggregator` to derive
+                             aggregated :class:`JobFeatureNode` values, dominant
+                             error signals, and representative context texts.
+                             May be ``None``.
+            review_feedback: Corrective feedback from a previous
+                             :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`
+                             pass.  Non-empty only on retry attempts; injected
+                             into LLM prompts to guide re-extraction.
 
         Returns:
             :class:`KnowledgeGraph` containing the extracted nodes and

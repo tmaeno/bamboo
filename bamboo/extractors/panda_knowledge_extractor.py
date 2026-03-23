@@ -901,6 +901,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_logs: Optional[dict[str, str]] = None,
         job_logs: Optional[dict[str, str]] = None,
         jobs_data: Optional[list[dict[str, Any]]] = None,
+        review_feedback: str = "",
     ) -> KnowledgeGraph:
         nodes: list = []
         relationships: list[GraphRelationship] = []
@@ -1144,7 +1145,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             say(
                 f"Processing email thread ({len(email_text):,} chars). Extracting causes and resolutions..."
             )
-            email_nodes, email_rels = await self._extract_from_email(email_text)
+            email_nodes, email_rels = await self._extract_from_email(
+                email_text, review_feedback=review_feedback
+            )
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
 
@@ -1155,7 +1158,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
                 )
                 log_nodes, log_rels = await self._extract_from_log(
-                    source_name, source_log, log_level="task"
+                    source_name, source_log, log_level="task", review_feedback=review_feedback
                 )
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
@@ -1167,7 +1170,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     f"Processing job log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
                 )
                 log_nodes, log_rels = await self._extract_from_log(
-                    source_name, source_log, log_level="job"
+                    source_name, source_log, log_level="job", review_feedback=review_feedback
                 )
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
@@ -1355,7 +1358,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     # ------------------------------------------------------------------
 
     async def _extract_from_log(
-        self, source_name: str, log_text: str, log_level: str = "task"
+        self,
+        source_name: str,
+        log_text: str,
+        log_level: str = "task",
+        review_feedback: str = "",
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Symptom/Component/Task_Context from one log source.
 
@@ -1403,14 +1410,20 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"Analyzing {source_name}..."
         )
         show_block(f"{source_name} (filtered)", filtered_log)
-        prompt = (
+        base_prompt = (
             BROKERAGE_LOG_EXTRACTION_PROMPT
             if "brokerage" in source_name
             else LOG_EXTRACTION_PROMPT
         )
+        feedback_section = (
+            f"\n\nREVIEWER NOTES FROM PREVIOUS ATTEMPT:\n{review_feedback}\n"
+            "Please address these issues in your extraction."
+            if review_feedback
+            else ""
+        )
         llm = get_extraction_llm()
         with thinking(f"Working"):
-            response = await llm.ainvoke(prompt.format(log_text=filtered_log))
+            response = await llm.ainvoke(base_prompt.format(log_text=filtered_log) + feedback_section)
         raw = self._parse_log_response(response.content)
 
         nodes = []
@@ -1538,7 +1551,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     # ------------------------------------------------------------------
 
     async def _extract_from_email(
-        self, email_text: str
+        self, email_text: str, review_feedback: str = ""
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Cause/Resolution/Task_Context from email.
 
@@ -1549,10 +1562,16 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         by ``get_or_create_canonical_node`` in the graph database.
         """
         say("Extracting causes and resolutions from email thread...")
+        feedback_section = (
+            f"\n\nREVIEWER NOTES FROM PREVIOUS ATTEMPT:\n{review_feedback}\n"
+            "Please address these issues in your extraction."
+            if review_feedback
+            else ""
+        )
         llm = get_extraction_llm()
         with thinking("Working"):
             response = await llm.ainvoke(
-                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text)
+                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text) + feedback_section
             )
         raw = self._parse_email_response(response.content)
 

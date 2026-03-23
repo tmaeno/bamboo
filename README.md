@@ -16,26 +16,28 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
 ✅ **Hierarchical Workload Insights** - Full visibility across tasks, jobs, and their dependencies  
 ✅ **PanDA Integration** - Fetch task data live from a PanDA server by task ID  
-✅ **MCP Tools** - Domain-specific Model Context Protocol tools  
+✅ **MCP Tools** - Domain-specific Model Context Protocol tools for both reasoning and source exploration
 ✅ **Human-in-Loop** - Safety through human oversight
 
 ## Main Agents
 - **Knowledge Accumulation** - Learns from operational data, builds knowledge database
 - **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
 
-### Sub-Agents
+## LLM-Driven Pipelines and Sub-Agents
 
-#### In Knowledge Accumulation Agent
+### In Knowledge Accumulation Agent
 - **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
 - **Node Canonicalization** - Normalises diverse node names into a stable canonical form
 - **Graph Summarization** - Summarises graph data for quick insights
 - **Feature Classification** - Classifies node features for better reasoning
+- **Knowledge Reviewer** - Quality gate; evaluates the extracted graph against source data before DB writes; retries extraction with feedback up to 2 times if rejected (opt-in via `ENABLE_KNOWLEDGE_REVIEW=true`)
+- **Extra Source Explorer** - Fires once on the first reviewer rejection; selects and fetches additional data sources via the MCP tool layer, then feeds the results into the next extraction attempt
 
-#### In Reasoning Navigation Agent
+### In Reasoning Navigation Agent
 - **Knowledge Extraction** - Extracts features from task data for querying
 - **Output Synthesis** - Synthesises outputs from various agents into coherent responses
 
-### Agents to come
+## Agents to Come
 - **Automation Agent** - Plans and executes operational workflows
 - **Anomaly Detection Agent** - Monitors metrics, detects anomalies
 - **Proactive Mitigation Agent** - Predicts failures, applies preventive measures

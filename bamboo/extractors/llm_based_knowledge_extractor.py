@@ -44,6 +44,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         task_logs: dict[str, str] = None,
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
+        review_feedback: str = "",
     ) -> KnowledgeGraph:
         """Extract using LLM-based approach.
 

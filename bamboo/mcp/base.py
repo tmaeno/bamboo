@@ -1,0 +1,69 @@
+"""Abstract base classes for MCP-style tool clients.
+
+An :class:`McpClient` exposes a catalogue of named :class:`McpTool` descriptors
+to an LLM (via :meth:`McpClient.list_tools`) and executes specific tool calls
+(via :meth:`McpClient.execute`).  Concrete subclasses implement the actual
+data-fetching logic.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class McpTool:
+    """Descriptor for a single callable tool exposed by an :class:`McpClient`.
+
+    Attributes:
+        name:              Unique tool identifier used in LLM output and
+                           dispatch (must match what :meth:`McpClient.execute`
+                           accepts as ``tool_name``).
+        description:       Plain-English description the LLM reads to decide
+                           whether to call this tool.  Should describe **when**
+                           to use it (which problem it solves), not just what
+                           it does.
+        parameters_schema: JSON Schema ``object`` describing the tool's
+                           keyword arguments.  Must match the ``**kwargs``
+                           accepted by the concrete ``execute`` implementation.
+        metadata:          Optional extra fields (e.g. cost hints, rate
+                           limits) — not shown to the LLM by default.
+    """
+
+    name: str
+    description: str
+    parameters_schema: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class McpClient(ABC):
+    """Abstract base for MCP-style tool clients.
+
+    Subclasses register tools in ``__init__`` and implement :meth:`execute`
+    to dispatch calls to the appropriate handler.
+    """
+
+    @abstractmethod
+    def list_tools(self) -> list[McpTool]:
+        """Return the full catalogue of tools this client exposes."""
+        ...
+
+    @abstractmethod
+    async def execute(self, tool_name: str, **kwargs: Any) -> Any:
+        """Execute one tool call.
+
+        Args:
+            tool_name: Name of the tool as returned by :meth:`list_tools`.
+            **kwargs:  Arguments matching the tool's ``parameters_schema``.
+
+        Returns:
+            Tool-specific result.  Shape documented per tool in the concrete
+            subclass.
+
+        Raises:
+            ValueError:   If *tool_name* is not registered.
+            RuntimeError: If the underlying data fetch fails fatally.
+        """
+        ...

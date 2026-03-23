@@ -8,11 +8,17 @@ This guide covers development practices, code organization, and extension points
 bamboo/
 ├── bamboo/                # Main package
 │   ├── agents/            # AI agent implementations
+│   │   ├── knowledge_accumulator.py    # Orchestrates extraction + review loop
+│   │   ├── knowledge_reviewer.py       # LLM quality gate (ENABLE_KNOWLEDGE_REVIEW)
+│   │   └── extra_source_explorer.py    # LLM-driven extra source fetcher
 │   ├── database/          # Database clients
 │   ├── extractors/        # Knowledge extractors
 │   ├── llm/               # LLM integration
+│   ├── mcp/               # Custom MCP tool layer (source exploration)
+│   │   ├── base.py                     # McpTool dataclass + McpClient ABC
+│   │   └── panda_mcp_client.py         # PanDA-backed MCP client
 │   ├── models/            # Data models
-│   ├── mcp_tools/         # MCP tools
+│   ├── mcp_tools/         # MCP tools (reasoning navigation)
 │   ├── workflows/         # LangGraph workflows
 │   ├── scripts/           # CLI scripts
 │   ├── utils/             # Utilities
@@ -56,7 +62,16 @@ cp "$(python -c "import importlib.resources; print(importlib.resources.files('ba
 
 # Edit .env with your settings
 # Required: OPENAI_API_KEY or ANTHROPIC_API_KEY
+
+# Optional: enable the review gate + extra source explorer
+# ENABLE_KNOWLEDGE_REVIEW=true
 ```
+
+> **`ENABLE_KNOWLEDGE_REVIEW`** — when set to `true`, each extraction attempt is evaluated by
+> `KnowledgeReviewer` before being written to the databases.  If the reviewer rejects the graph,
+> `ExtraSourceExplorer` fires once to fetch additional PanDA data sources (parent task, retry
+> chain, job diagnostics, error-dialog logs) and the extraction is retried with the enriched
+> context and reviewer feedback (up to 2 retries total).  Disabled by default.
 
 ### 4. Verify Setup
 
@@ -513,6 +528,14 @@ async def test_full_knowledge_extraction():
     await vector_db.connect()
 
     try:
+        # Optional: enable the review gate and extra source explorer
+        # from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
+        # from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+        # from bamboo.mcp.panda_mcp_client import PandaMcpClient
+        # reviewer = KnowledgeReviewer()
+        # explorer = ExtraSourceExplorer(PandaMcpClient())
+        # agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
+
         agent = KnowledgeAccumulator(graph_db, vector_db)
 
         result = await agent.process_knowledge(

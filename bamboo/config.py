@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
 
+    # Knowledge review gate: set to True to enable LLM-based quality review of
+    # extracted graphs before they are written to the databases.  When enabled,
+    # each extraction may be retried up to 2 times with reviewer feedback.
+    # Disabled by default to avoid extra LLM cost on routine accumulation runs.
+    enable_knowledge_review: bool = False
+
     # Privacy: comma-separated extra task-data field names to redact before
     # any data is sent to an LLM.  Added on top of the built-in defaults in
     # ``bamboo.utils.sanitize.SENSITIVE_TASK_KEYS``.
