@@ -20,6 +20,7 @@ from typing import Any
 
 from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
 from bamboo.mcp.base import McpClient, McpTool
+from bamboo.utils.narrator import say, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,6 @@ class ExtraSourceExplorer:
         self,
         task_data: dict[str, Any],
         review_issues: list[str],
-        existing_task_logs: dict[str, str] | None = None,
     ) -> ExplorationResult:
         """Single select-and-fetch pass.
 
@@ -101,10 +101,9 @@ class ExtraSourceExplorer:
         internal error occurs (fail-open).
 
         Args:
-            task_data:          Structured task fields from PanDA.
-            review_issues:      Issue strings from the previous
-                                :class:`~bamboo.agents.knowledge_reviewer.ReviewResult`.
-            existing_task_logs: Already-fetched log keys to avoid re-fetching.
+            task_data:     Structured task fields from PanDA.
+            review_issues: Issue strings from the previous
+                           :class:`~bamboo.agents.knowledge_reviewer.ReviewResult`.
         """
         if not review_issues or not task_data:
             return ExplorationResult()
@@ -114,13 +113,16 @@ class ExtraSourceExplorer:
 
         if not tool_calls:
             logger.info("ExtraSourceExplorer: LLM selected no tools — nothing to explore")
+            say("Explorer selected no additional tools.")
             return ExplorationResult()
 
+        tool_names = [tc["tool"] for tc in tool_calls]
         logger.info(
             "ExtraSourceExplorer: executing %d tool call(s): %s",
             len(tool_calls),
-            [tc["tool"] for tc in tool_calls],
+            tool_names,
         )
+        say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
 
         coros = [
             self._client.execute(tc["tool"], **tc.get("args", {}))
@@ -130,6 +132,10 @@ class ExtraSourceExplorer:
 
         out = ExplorationResult(tool_calls=tool_calls)
         for tc, result in zip(tool_calls, results):
+            if isinstance(result, BaseException):
+                say(f"  {tc['tool']}: failed — {result}")
+            else:
+                say(f"  {tc['tool']}: done.")
             self._merge_tool_result(tc["tool"], result, out)
 
         return out
@@ -156,7 +162,9 @@ class ExtraSourceExplorer:
         )
 
         try:
-            response = await self.llm.ainvoke(prompt)
+            say("Selecting additional data sources to fetch...")
+            with thinking("Working"):
+                response = await self.llm.ainvoke(prompt)
             return _parse_tool_calls(response.content)
         except Exception:
             logger.exception("ExtraSourceExplorer: LLM tool-selection call failed — failing open")

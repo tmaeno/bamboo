@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from bamboo.llm import KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
 from bamboo.models.knowledge_entity import KnowledgeGraph
+from bamboo.utils.narrator import say, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,23 @@ class KnowledgeReviewer:
 
         try:
             llm = get_extraction_llm()
-            response = await llm.ainvoke(
-                KNOWLEDGE_REVIEW_PROMPT.format(
-                    graph_summary=graph_summary,
-                    sources_summary=sources_summary,
+            say(f"Reviewing extracted graph ({len(graph.nodes)} nodes) against sources...")
+            with thinking("Working"):
+                response = await llm.ainvoke(
+                    KNOWLEDGE_REVIEW_PROMPT.format(
+                        graph_summary=graph_summary,
+                        sources_summary=sources_summary,
+                    )
                 )
-            )
-            return _parse_review_response(response.content)
+            result = _parse_review_response(response.content)
+            if result.approved:
+                say(f"Graph approved (confidence {result.confidence:.0%}).")
+            else:
+                say(
+                    f"Graph rejected (confidence {result.confidence:.0%}) — "
+                    f"{len(result.issues)} issue(s) found."
+                )
+            return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
             return ReviewResult(approved=True, confidence=0.0)

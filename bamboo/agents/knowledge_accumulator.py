@@ -201,7 +201,6 @@ class KnowledgeAccumulator:
                 exploration = await self._explorer.explore(
                     task_data=task_data or {},
                     review_issues=review_result.issues,
-                    existing_task_logs=_task_logs,
                 )
                 if exploration.task_logs:
                     _task_logs.update(exploration.task_logs)
