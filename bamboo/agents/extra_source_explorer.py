@@ -18,26 +18,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from bamboo.agents.knowledge_reviewer import _build_task_summary
 from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
 from bamboo.mcp.base import McpClient, McpTool
 from bamboo.utils.narrator import say, thinking
 
 logger = logging.getLogger(__name__)
-
-# Task fields forwarded to the LLM for tool-selection context.
-_TASK_SUMMARY_KEYS = (
-    "taskID",
-    "status",
-    "errorDialog",
-    "retryID",
-    "transUses",
-    "prodSourceLabel",
-    "taskName",
-    "taskType",
-    "nJobs",
-    "nJobsFinished",
-    "nJobsFailed",
-)
 
 
 @dataclass
@@ -197,6 +183,9 @@ class ExtraSourceExplorer:
         elif tool_name == "get_task_jobs_summary":
             if isinstance(result, dict):
                 out.external_data["jobs_summary"] = result
+        elif tool_name == "get_failed_job_details":
+            if isinstance(result, list):
+                out.external_data["representative_jobs"] = result
         else:
             logger.warning("ExtraSourceExplorer: unrecognised tool result for %r — skipped", tool_name)
 
@@ -205,14 +194,6 @@ class ExtraSourceExplorer:
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
-
-def _build_task_summary(task_data: dict[str, Any]) -> str:
-    """Return a compact JSON string of only the fields relevant to tool selection."""
-    subset: dict[str, Any] = {k: task_data[k] for k in _TASK_SUMMARY_KEYS if k in task_data}
-    # Truncate errorDialog — just enough to see if log URLs exist.
-    if subset.get("errorDialog"):
-        subset["errorDialog"] = str(subset["errorDialog"])[:500]
-    return json.dumps(subset, indent=2, default=str)
 
 
 def _build_tools_description(tools: list[McpTool]) -> str:

@@ -67,7 +67,7 @@ class KnowledgeGraphExtractor:
                              a raw PanDA job ID).
                              Extracted nodes are tagged ``log_level="job"``.
             jobs_data:       List of raw job attribute dicts used for aggregated
-                             :class:`~bamboo.models.graph_element.JobFeatureNode`
+                             :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
                              extraction.
             review_feedback: Corrective feedback from a previous reviewer pass;
                              forwarded to the strategy's LLM prompts on retries.

@@ -112,7 +112,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         clue_groups = [
             (symptoms or [], "SYMPTOM", "indicate"),
             (task_features or [], "TASK_FEATURE", "contribute_to"),
-            (job_features or [], "JOB_FEATURE", "contribute_to"),
+            (job_features or [], "AGGREGATED_JOB_FEATURE", "contribute_to"),
+            (job_features or [], "JOB_INSTANCE", "indicate"),
             (environment_factors or [], "ENVIRONMENT", "contribute_to"),
             (components or [], "COMPONENT", "originated_from"),
         ]

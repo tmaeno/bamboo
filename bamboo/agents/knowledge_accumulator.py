@@ -123,7 +123,7 @@ class KnowledgeAccumulator:
                            raw PanDA job ID).
                            Extracted nodes are tagged ``log_level="job"``.
             jobs_data:     List of raw job attribute dicts used for aggregated
-                           :class:`~bamboo.models.graph_element.JobFeatureNode`
+                           :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
                            extraction.
             dry_run:       When ``True``, extraction and summarisation are
                            performed normally but **no data is written** to
@@ -174,7 +174,8 @@ class KnowledgeAccumulator:
 
             if self._reviewer is None:
                 break
-            review_result = await self._reviewer.review(graph, sources_summary)
+            say(f"Running knowledge reviewer (attempt {attempt + 1}/{_MAX_REVIEW_RETRIES + 1})...")
+            review_result = await self._reviewer.review(graph, sources_summary, task_data=task_data)
             if review_result.approved or attempt >= _MAX_REVIEW_RETRIES:
                 if not review_result.approved:
                     logger.warning(
@@ -333,27 +334,44 @@ class KnowledgeAccumulator:
                 len(new_rels),
             )
 
+    # Node types that must NOT be stored in the graph database (Neo4j).
+    # These types hold unstructured prose indexed only in the vector database.
+    _GRAPH_DB_SKIP_TYPES = {"Task_Context", "Job_Instance_Context"}
+
     async def _store_graph(self, graph: KnowledgeGraph):
         """Persist graph nodes and relationships to Graph database.
 
         Nodes are merged by canonical name via
         :meth:`GraphDatabaseClient.get_or_create_canonical_node`.
+        Nodes whose type is in :attr:`_GRAPH_DB_SKIP_TYPES` (e.g.
+        ``Task_Context``, ``Job_Context``) are vector-DB-only and are silently
+        skipped here.
         Relationship source/target IDs are remapped to the actual stored IDs
         before insertion.
         """
+        graph_nodes = [
+            n for n in graph.nodes
+            if n.node_type.value not in self._GRAPH_DB_SKIP_TYPES
+        ]
         logger.info(
-            "KnowledgeAccumulator: storing %d nodes in graph DB", len(graph.nodes)
+            "KnowledgeAccumulator: storing %d/%d nodes in graph DB "
+            "(%d vector-only skipped)",
+            len(graph_nodes),
+            len(graph.nodes),
+            len(graph.nodes) - len(graph_nodes),
         )
 
         node_ids: dict[str, str] = {}
-        for node in graph.nodes:
+        for node in graph_nodes:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
             node_ids[node.id or node.name] = node_id
 
         for rel in graph.relationships:
             rel.source_id = node_ids.get(rel.source_id, rel.source_id)
             rel.target_id = node_ids.get(rel.target_id, rel.target_id)
-            await self.graph_db.create_relationship(rel)
+            # Skip relationships whose endpoints were not stored (vector-only nodes)
+            if rel.source_id in node_ids.values() and rel.target_id in node_ids.values():
+                await self.graph_db.create_relationship(rel)
 
         logger.info("KnowledgeAccumulator: graph stored successfully")
 
@@ -404,14 +422,25 @@ class KnowledgeAccumulator:
 
         Indexed node types:
         - ``Task_Context``: free-form prose fields (steps, user reports, etc.)
+        - ``Job_Context``: full diagnostic text from representative failed jobs.
         - ``Symptom``: description holds the raw error message text, which is
           worth semantic search even though the node's canonical name is the
           clean error category.
+        - ``Aggregated_Job_Feature``: description holds aggregated job pattern
+          details useful for semantic similarity search.
+        - ``Job_Instance``: description holds per-job diagnostic text for
+          cross-incident similarity search.
 
         Cause and Resolution nodes are intentionally excluded: their canonical
         names are already precisely indexed in the graph database.
         """
-        _INDEXABLE = {"Task_Context", "Symptom", "Job_Feature"}
+        _INDEXABLE = {
+            "Task_Context",
+            "Job_Instance_Context",
+            "Symptom",
+            "Aggregated_Job_Feature",
+            "Job_Instance",
+        }
         insights = []
         for node in graph.nodes:
             if node.description and node.node_type.value in _INDEXABLE:

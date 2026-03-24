@@ -82,7 +82,7 @@ class ExtractionStrategy(ABC):
                              in their metadata.
             jobs_data:       List of raw job attribute dicts (one per PanDA job).
                              Used by :class:`PandaJobDataAggregator` to derive
-                             aggregated :class:`JobFeatureNode` values, dominant
+                             aggregated :class:`AggregatedJobFeatureNode` values, dominant
                              error signals, and representative context texts.
                              May be ``None``.
             review_feedback: Corrective feedback from a previous

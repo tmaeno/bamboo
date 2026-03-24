@@ -255,6 +255,11 @@ Relationships to emit (between extracted nodes only):
 - Cause -[solved_by]-> Resolution
 - Task_Context -[contribute_to]-> Cause  (only when the context directly supports a cause)
 
+If representative job data is present in the email (e.g. site-specific failures, pilot error
+codes per site), you may also emit a Cause linked from a job pattern — but ONLY when the
+job-level diagnostic implies a cause more specific than any task-level cause already extracted.
+Do NOT duplicate the task-level cause on job-level patterns.
+
 Canonicalization:
 - If the same cause or resolution is mentioned multiple times, emit it only once.
 - Keep names concise and general (no incident-specific IDs, paths, or dataset names).
@@ -574,44 +579,69 @@ Example (do not copy literally — populate args from the actual task context ab
 ]
 """
 
-KNOWLEDGE_REVIEW_PROMPT = """You are an expert knowledge-graph quality reviewer.
+KNOWLEDGE_REVIEW_PROMPT = """You are an incident knowledge graph gap analyzer for PanDA computing tasks.
 
-You are given:
-1. EXTRACTED GRAPH — the nodes and relationships extracted from an incident.
-2. SOURCE EXCERPTS — truncated originals (email thread, log excerpts) that the graph was built from.
+Your job is to identify information that is MISSING from the graph — information that would be
+needed to fully understand the incident.
 
-Your task is to evaluate the extracted graph for:
-- COMPLETENESS: Are important entities from the sources missing as nodes?
-  (e.g., an error clearly named in the source but absent from the graph)
-- ACCURACY: Are node names specific and grounded in the source text?
-  (e.g., a Symptom named just "error" when the source gives a precise error code)
-- CONSISTENCY: Are relationships directionally correct and logically sound?
-  (e.g., a Feature node contributing_to itself, or a cause with no symptoms)
+STRICT GROUNDING RULE: Only flag a gap if it is directly implied by either:
+  (a) the graph itself — e.g. a SYMPTOM node exists but no CAUSE explains it
+  (b) the task context — numeric fields (nJobsFailed > 0), status values, or errorDialog text
+      that imply certain data exists but is absent from the graph
+Do NOT speculate about information not suggested by the graph or task context.
 
-Rules:
-- Only flag issues that are clearly supported by the source text.
-- Do NOT fabricate nodes that are not implied by the sources.
-- A graph with no LLM-extracted nodes (email/logs absent) is always approved.
-- Minor wording differences are acceptable — only flag substantive gaps.
+Evaluate for:
+- STRUCTURAL GAPS: missing nodes that the graph implies should exist
+    * SYMPTOM with no CAUSE or explanatory TASK_FEATURE/AGGREGATED_JOB_FEATURE/JOB_INSTANCE node
+    * CAUSE with no SYMPTOM (orphaned cause)
+    * Completed/finished task (status=finished/done) with no RESOLUTION node
+- SPECIFICITY GAPS: node names or descriptions too vague to be useful
+    * e.g. a Symptom named "error" or "failure" with no error code or further detail
+- CONTEXTUAL GAPS: task context that implies data exists but is not in the graph
+    * nJobsFailed > 0 but no AGGREGATED_JOB_FEATURE or JOB_INSTANCE nodes describing
+      job-level failure patterns
+    * retryID present but no cause node referencing the parent task
+    * errorDialog text mentions job-level events (e.g. "scout jobs failed", "jobs exceeded
+      walltime") but neither AGGREGATED_JOB_FEATURE nor JOB_INSTANCE nodes capture what
+      those jobs did or which sites failed
+
+Minimum requirement (always reject if not met):
+- At least one SYMPTOM node must exist.
+
+Gap-driven rejection — reject if any of the following is true:
+- A STRUCTURAL GAP was found (e.g. SYMPTOM with no explanatory node at all).
+- A SPECIFICITY GAP was found that makes a node meaningless (e.g. Symptom named "error"
+  with no further detail).
+- A CONTEXTUAL GAP was found that represents a significant missing dimension of the incident
+  (e.g. task context shows job failures but graph has no AGGREGATED_JOB_FEATURE or
+  JOB_INSTANCE nodes).
+
+Approve if: minimum requirement is met AND no significant gaps were found.
+A missing RESOLUTION alone is acceptable — the task may be unresolved.
+Minor gaps (small details that do not meaningfully impair incident understanding) may be
+noted in issues but should not cause rejection — set approved=true.
+
+When approved, set issues to an empty list.
+
+SOURCE EXCERPTS (if present): use as hints only to identify specific extractable details
+missing from the graph. Their absence does not affect the verdict.
 
 EXTRACTED GRAPH:
 {graph_summary}
 
-SOURCE EXCERPTS:
+TASK CONTEXT:
+{task_summary}
+
+SOURCE EXCERPTS (optional):
 {sources_summary}
 
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
 {{
   "approved": true | false,
   "confidence": <float 0.0-1.0>,
-  "issues": [
-    "<concise description of one specific problem>"
-  ],
-  "feedback": "<actionable instruction for the extractor to fix the issues, or empty string if approved>"
+  "issues": ["<concise gap description>"],
+  "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>"
 }}
-
-Set "approved" to true if the graph adequately captures the key information from the sources,
-even if minor improvements are possible.  Only set false for substantive omissions or inaccuracies.
 """
 
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.

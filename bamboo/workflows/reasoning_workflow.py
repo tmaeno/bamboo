@@ -20,7 +20,7 @@ class ReasoningState(TypedDict):
         job_logs:           *Job-level* log output keyed by a stable source name
                             (e.g. ``{"pilot": "...", "payload": "..."}``).
         jobs_data:          List of raw job attribute dicts for aggregated
-                            :class:`~bamboo.models.graph_element.JobFeatureNode`
+                            :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
                             extraction.
         extracted_features: Clue dict produced by
                             :meth:`~bamboo.agents.reasoning_navigator.ReasoningNavigator._extract_clues_from_graph`.

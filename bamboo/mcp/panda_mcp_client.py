@@ -2,8 +2,8 @@
 
 All tools delegate to :mod:`bamboo.utils.panda_client` helpers.  They are
 designed to fill the gaps in the standard first-pass knowledge extraction:
-log files embedded in ``errorDialog``, retry-chain context, and aggregated
-job-level failure statistics.
+log files embedded in ``errorDialog``, retry-chain context, aggregated
+job-level failure statistics, and per-job failure details.
 
 Tool catalogue
 --------------
@@ -20,6 +20,10 @@ Tool catalogue
 ``get_task_jobs_summary``
     Aggregates per-job status and error information for a task.
     Falls back gracefully if the pandaclient bulk-jobs endpoint is unavailable.
+
+``get_failed_job_details``
+    Fetches details for a small sample of representative failed jobs.
+    Prioritises scout jobs and jobs with distinct error codes.
 """
 
 from __future__ import annotations
@@ -143,12 +147,41 @@ class PandaMcpClient(McpClient):
                     "required": ["task_id"],
                 },
             ),
+            McpTool(
+                name="get_failed_job_details",
+                description=(
+                    "Fetches details for a small sample of representative failed jobs for this "
+                    "task.  Use this when the reviewer notes missing job-instance information — "
+                    "e.g. scout job failures, per-job error codes, or site-specific failures — "
+                    "and the graph lacks JOB_INSTANCE nodes.  Prioritises scout jobs and jobs "
+                    "with the most distinct error codes.  Returns a list of compact job dicts: "
+                    "jobID, computingSite, jobStatus, pilotErrorCode, pilotErrorDiag, "
+                    "transExitCode.  "
+                    "Do NOT call if the reviewer's issues are about task-level data only."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": ["integer", "string"],
+                            "description": "PanDA jediTaskID",
+                        },
+                        "max_jobs": {
+                            "type": "integer",
+                            "default": 5,
+                            "description": "Maximum number of job records to return",
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+            ),
         ]
         self._dispatch = {
             "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
             "get_parent_task": self._get_parent_task,
             "get_retry_chain": self._get_retry_chain,
             "get_task_jobs_summary": self._get_task_jobs_summary,
+            "get_failed_job_details": self._get_failed_job_details,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -352,3 +385,102 @@ class PandaMcpClient(McpClient):
                 exc,
             )
             return {"error": str(exc)}
+
+    async def _get_failed_job_details(
+        self,
+        task_id: int | str,
+        max_jobs: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Fetch details for representative failed jobs for *task_id*.
+
+        Prioritises scout jobs first (``processingType=scout``), then samples
+        failed/cancelled jobs by distinct ``pilotErrorCode``.  Returns a list
+        of compact job dicts with fields: ``jobID``, ``computingSite``,
+        ``jobStatus``, ``pilotErrorCode``, ``pilotErrorDiag``,
+        ``transExitCode``.
+
+        Returns an empty list on any error so the explorer degrades gracefully.
+        """
+        try:
+            from pandaclient import Client  # noqa: PLC0415
+        except ImportError:
+            logger.warning("PandaMcpClient.get_failed_job_details: panda-client-light not installed")
+            return []
+
+        _COMPACT_FIELDS = (
+            "jobID",
+            "computingSite",
+            "jobStatus",
+            "pilotErrorCode",
+            "pilotErrorDiag",
+            "transExitCode",
+            "processingType",
+        )
+
+        try:
+            status, job_list = await asyncio.to_thread(
+                Client.getJobIDsInBulk, int(task_id)
+            )
+            if status != 0 or not isinstance(job_list, list) or not job_list:
+                logger.warning(
+                    "PandaMcpClient.get_failed_job_details: getJobIDsInBulk returned "
+                    "status=%s for task_id=%s",
+                    status,
+                    task_id,
+                )
+                return []
+
+            # Separate scout jobs from others
+            scout_jobs = [
+                j for j in job_list
+                if str(j.get("processingType", "")).lower() == "scout"
+                and j.get("jobStatus") in ("failed", "cancelled", "closed")
+            ]
+            other_failed = [
+                j for j in job_list
+                if j not in scout_jobs
+                and j.get("jobStatus") in ("failed", "cancelled", "closed")
+            ]
+
+            # Pick up to max_jobs: scouts first, then by distinct pilotErrorCode
+            selected: list[dict[str, Any]] = list(scout_jobs[:max_jobs])
+            seen_codes: set[str] = {
+                str(j.get("pilotErrorCode", "")) for j in selected
+            }
+            for job in other_failed:
+                if len(selected) >= max_jobs:
+                    break
+                code = str(job.get("pilotErrorCode", ""))
+                if code and code not in seen_codes:
+                    selected.append(job)
+                    seen_codes.add(code)
+            # Fill remaining slots without code restriction
+            for job in other_failed:
+                if len(selected) >= max_jobs:
+                    break
+                if job not in selected:
+                    selected.append(job)
+
+            result = [
+                {k: j.get(k) for k in _COMPACT_FIELDS}
+                for j in selected
+            ]
+            logger.info(
+                "PandaMcpClient.get_failed_job_details: selected %d job(s) for task_id=%s",
+                len(result),
+                task_id,
+            )
+            return result
+        except AttributeError:
+            logger.warning(
+                "PandaMcpClient.get_failed_job_details: getJobIDsInBulk unavailable "
+                "in this pandaclient version"
+            )
+            return []
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.get_failed_job_details: failed for task_id=%s: %s",
+                task_id,
+                exc,
+            )
+            return []

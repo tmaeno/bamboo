@@ -1,10 +1,13 @@
-"""Knowledge review agent: evaluates extracted graphs before DB commit.
+"""Knowledge review agent: gap analysis of extracted graphs before DB commit.
 
 :class:`KnowledgeReviewer` sits between extraction and storage.  It calls an
-LLM to compare the extracted :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`
-against truncated originals of the source text and decides whether the
-extraction is good enough to store, or whether it should be retried with
-corrective feedback.
+LLM to evaluate whether the extracted :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`
+adequately describes the incident — identifying structural, specificity, and
+contextual gaps rather than cross-checking against source text.
+
+Gaps are grounded in either the graph itself (structural implications) or the
+available task context (e.g. nJobsFailed > 0 but no JOB_FEATURE nodes).  The
+LLM is instructed not to speculate beyond what the graph and context imply.
 
 Failure modes are handled defensively: any LLM or parse error causes the
 reviewer to return ``approved=True`` (fail-open), so a reviewer malfunction
@@ -14,10 +17,11 @@ never blocks the accumulation pipeline.
 import json
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from bamboo.llm import KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
 from bamboo.models.knowledge_entity import KnowledgeGraph
-from bamboo.utils.narrator import say, thinking
+from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +29,31 @@ logger = logging.getLogger(__name__)
 _MAX_EMAIL_CHARS = 2000
 _MAX_LOG_CHARS = 1000
 
+# Task fields forwarded to the LLM as incident context for gap detection.
+_TASK_SUMMARY_KEYS = (
+    "taskID",
+    "status",
+    "errorDialog",
+    "retryID",
+    "transUses",
+    "prodSourceLabel",
+    "taskName",
+    "taskType",
+    "nJobs",
+    "nJobsFinished",
+    "nJobsFailed",
+)
+
 
 @dataclass
 class ReviewResult:
     """Outcome of one review pass.
 
     Attributes:
-        approved:   ``True`` if the graph adequately captures the sources.
+        approved:   ``True`` if the graph adequately describes the incident.
         feedback:   Actionable instructions for the extractor (empty when approved).
         confidence: Reviewer's confidence in its verdict (0.0–1.0).
-        issues:     List of specific problems found (empty when approved).
+        issues:     List of identified gaps (empty when approved).
     """
 
     approved: bool
@@ -44,7 +63,7 @@ class ReviewResult:
 
 
 class KnowledgeReviewer:
-    """LLM-based quality gate for extracted knowledge graphs.
+    """LLM-based incident gap analyzer for extracted knowledge graphs.
 
     Call :meth:`review` after extraction and before storing to Neo4j/Qdrant.
     If the result is not approved, pass ``result.feedback`` back to the
@@ -55,49 +74,61 @@ class KnowledgeReviewer:
         self,
         graph: KnowledgeGraph,
         sources: dict[str, str],
+        task_data: dict[str, Any] | None = None,
     ) -> ReviewResult:
-        """Evaluate the extracted graph against the original sources.
+        """Evaluate the extracted graph for incident completeness.
+
+        Identifies gaps that are structurally implied by the graph or
+        contextually supported by ``task_data``.  Does not require source
+        text to be present.
 
         Args:
-            graph:   The extracted :class:`KnowledgeGraph` to evaluate.
-            sources: Mapping of source name → text excerpt.  Each value is
-                     already truncated by the caller; pass the result of
-                     :func:`build_sources_summary`.
+            graph:     The extracted :class:`KnowledgeGraph` to evaluate.
+            sources:   Mapping of source name → text excerpt (optional context
+                       hints).  Pass the result of :func:`build_sources_summary`.
+            task_data: Raw task fields from PanDA — used to detect contextual
+                       gaps (e.g. many failed jobs but no JOB_FEATURE nodes).
 
         Returns:
             :class:`ReviewResult` with the verdict and corrective feedback.
             Always returns ``approved=True`` on any internal error (fail-open).
         """
-        llm_extracted_count = sum(
-            1
-            for n in graph.nodes
-            if (n.metadata or {}).get("log_source") or (n.metadata or {}).get("source") == "email"
-        )
-        if not sources or llm_extracted_count == 0:
-            # No LLM-extracted content to review — nothing to critique.
+        if not graph.nodes:
+            say("Graph is empty — skipping review.")
             return ReviewResult(approved=True, confidence=1.0)
 
         graph_summary = _serialise_graph(graph)
-        sources_summary = _serialise_sources(sources)
+        sources_summary = _serialise_sources(sources) if sources else "(none)"
+        task_summary = _build_task_summary(task_data or {})
+
+        show_block("reviewer: task context", task_summary)
+        show_block("reviewer: graph", graph_summary)
 
         try:
             llm = get_extraction_llm()
-            say(f"Reviewing extracted graph ({len(graph.nodes)} nodes) against sources...")
+            say(f"Analysing graph for incident gaps ({len(graph.nodes)} nodes)...")
             with thinking("Working"):
                 response = await llm.ainvoke(
                     KNOWLEDGE_REVIEW_PROMPT.format(
                         graph_summary=graph_summary,
+                        task_summary=task_summary,
                         sources_summary=sources_summary,
                     )
                 )
+            show_block("reviewer: LLM response", response.content)
             result = _parse_review_response(response.content)
             if result.approved:
                 say(f"Graph approved (confidence {result.confidence:.0%}).")
             else:
                 say(
                     f"Graph rejected (confidence {result.confidence:.0%}) — "
-                    f"{len(result.issues)} issue(s) found."
+                    f"{len(result.issues)} gap(s) found."
                 )
+                if result.issues:
+                    show_block(
+                        "reviewer gaps",
+                        "\n".join(f"• {i}" for i in result.issues),
+                    )
             return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
@@ -114,11 +145,7 @@ def build_sources_summary(
     task_logs: dict[str, str] | None = None,
     job_logs: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build truncated source excerpts suitable for the reviewer.
-
-    Only text-based sources that were passed through the LLM extractor are
-    included.  Structured sources (task_data, external_data) are deterministic
-    and do not need review.
+    """Build truncated source excerpts for use as optional reviewer context.
 
     Args:
         email_text: Raw email thread.
@@ -138,6 +165,16 @@ def build_sources_summary(
         if text and text.strip():
             sources[f"job_log:{name}"] = text[:_MAX_LOG_CHARS]
     return sources
+
+
+def _build_task_summary(task_data: dict[str, Any]) -> str:
+    """Return a compact JSON string of task fields relevant to gap detection."""
+    subset: dict[str, Any] = {k: task_data[k] for k in _TASK_SUMMARY_KEYS if k in task_data}
+    if subset.get("errorDialog"):
+        subset["errorDialog"] = str(subset["errorDialog"])[:500]
+    if not subset:
+        return "(no task context available)"
+    return json.dumps(subset, indent=2, default=str)
 
 
 def _serialise_graph(graph: KnowledgeGraph) -> str:

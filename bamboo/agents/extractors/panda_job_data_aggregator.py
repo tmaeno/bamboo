@@ -11,7 +11,7 @@ non-reusable nodes — a graph antipattern.  Instead, aggregation extracts the
 *patterns* that are meaningful across many incidents:
 
 * **Dominant discrete values** (site, transformation, queue) become
-  :class:`~bamboo.models.graph_element.JobFeatureNode` with the value holding
+  :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode` with the value holding
   the dominant item and its fraction, e.g. ``"computingSite=AGLT2(73%)"``.
 
 * **Per-site failure rates** highlight whether failures are site-specific,
@@ -48,7 +48,7 @@ Output
 dataclass.  The caller (``PandaKnowledgeExtractor._extract_from_jobs``) is
 responsible for:
 
-1. Instantiating :class:`JobFeatureNode` from ``feature_items``.
+1. Instantiating :class:`AggregatedJobFeatureNode` from ``feature_items``.
 2. Classifying each string in ``error_signals`` through the error classifier
    to produce :class:`SymptomNode` instances.
 3. Creating :class:`TaskContextNode` instances from ``context_texts`` for
@@ -60,7 +60,7 @@ it is a pure Python data transformation step.
 Constants
 ---------
 ``JOB_DISCRETE_KEYS``
-    Job-attribute keys whose dominant value is worth a ``JobFeatureNode``.
+    Job-attribute keys whose dominant value is worth a ``AggregatedJobFeatureNode``.
 ``JOB_CONTINUOUS_KEYS``
     Job-attribute keys whose numeric value is bucketed before storage.
 ``_JOB_BUCKETS``
@@ -82,7 +82,7 @@ from bamboo.utils.sanitize import pseudonymise_dict
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Keys whose dominant value becomes a JobFeatureNode via _aggregate_discrete.
+# Keys whose dominant value becomes a AggregatedJobFeatureNode via _aggregate_discrete.
 # Keys handled by dedicated aggregation steps are excluded here:
 #   - computingSite                          → _aggregate_site_failure_rates
 #   - jobStatus                              → failure counting (not a feature node)
@@ -211,7 +211,7 @@ class JobAggregationResult:
     Attributes:
         feature_items:  List of ``(attribute, value, job_count)`` tuples
                         ready to be turned into
-                        :class:`~bamboo.models.graph_element.JobFeatureNode`.
+                        :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`.
         error_signals:  Raw error strings prefixed by source channel
                         (e.g. ``"pilot:1099"``, ``"payload:139"``) for the
                         caller to classify into
@@ -247,7 +247,7 @@ class PandaJobDataAggregator:
         max_context_texts:     Maximum number of representative diagnostic
                                strings forwarded to the vector DB.
         min_dominant_fraction: Minimum fraction a value must represent to be
-                               emitted as a dominant ``JobFeatureNode``.
+                               emitted as a dominant ``AggregatedJobFeatureNode``.
                                Values below this are too scattered to be
                                meaningful.
     """
@@ -313,7 +313,7 @@ class PandaJobDataAggregator:
         total: int,
         result: JobAggregationResult,
     ) -> None:
-        """Emit a JobFeatureNode for the dominant value of each discrete key.
+        """Emit a AggregatedJobFeatureNode for the dominant value of each discrete key.
 
         Only keys in :data:`JOB_DISCRETE_KEYS` are processed here.  Keys
         handled by dedicated aggregation steps (error channels, site failure
@@ -341,7 +341,7 @@ class PandaJobDataAggregator:
         total: int,
         result: JobAggregationResult,
     ) -> None:
-        """Emit a JobFeatureNode for the most common bucketed range per continuous key."""
+        """Emit a AggregatedJobFeatureNode for the most common bucketed range per continuous key."""
         for key in JOB_CONTINUOUS_KEYS:
             counter: Counter[str] = Counter()
             for job in jobs_data:
@@ -364,7 +364,7 @@ class PandaJobDataAggregator:
         total: int,
         result: JobAggregationResult,
     ) -> None:
-        """Emit per-site failure-rate JobFeatureNodes for sites with enough data.
+        """Emit per-site failure-rate AggregatedJobFeatureNodes for sites with enough data.
 
         Only sites that account for at least ``_min_fraction`` of all jobs are
         considered.  Sites whose failure rate is low are skipped (they are not

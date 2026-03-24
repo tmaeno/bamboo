@@ -5,18 +5,29 @@ The graph schema is::
     Symptom        -[indicate]->          Cause
     Environment    -[associated_with]->   Cause
     Task_Feature   -[contribute_to]->     Cause
-    Job_Feature    -[contribute_to]->     Cause
+    Aggregated_Job_Feature -[contribute_to]-> Cause
     Component      -[originated_from]->   Cause
     Cause          -[solved_by]->         Resolution
-    Symptom        -[has_job_pattern]->   Job_Feature
+    Symptom        -[has_job_pattern]->   Aggregated_Job_Feature
+    Symptom        -[has_job_instance]->  Job_Instance
+    Job_Instance   -[indicate]->          Cause  (optional — only when more specific)
 
-``TaskContextNode`` is a special case: it is only stored in the vector
-database (for semantic search) and is never persisted in the graph database.
+``TaskContextNode`` and ``JobInstanceContextNode`` are special cases: they are only
+stored in the vector database (for semantic search) and are never persisted in
+the graph database.
 
 The ``has_job_pattern`` edge connects a task-level :class:`SymptomNode` to the
-aggregated :class:`JobFeatureNode` values derived from the jobs that make up
-the failing task.  This allows graph queries of the form "what job-execution
-patterns are associated with this symptom?" without requiring per-job nodes.
+aggregated :class:`AggregatedJobFeatureNode` values derived from the jobs that
+make up the failing task.  This allows graph queries of the form "what
+job-execution patterns are associated with this symptom?" without requiring
+per-job nodes.
+
+The ``has_job_instance`` edge connects a :class:`SymptomNode` to one or more
+:class:`JobInstanceNode` values that capture specific site+error failure
+patterns from representative failed jobs.  Unlike
+:class:`AggregatedJobFeatureNode`, a ``JobInstanceNode`` encodes *which site*
+and *which error code* co-occurred, enabling cross-task merging when the same
+pattern recurs.
 """
 
 from enum import Enum
@@ -38,8 +49,10 @@ class NodeType(str, Enum):
     CAUSE = "Cause"
     RESOLUTION = "Resolution"
     TASK_FEATURE = "Task_Feature"
-    JOB_FEATURE = "Job_Feature"
+    AGGREGATED_JOB_FEATURE = "Aggregated_Job_Feature"
+    JOB_INSTANCE = "Job_Instance"
     TASK_CONTEXT = "Task_Context"
+    JOB_INSTANCE_CONTEXT = "Job_Instance_Context"
     ENVIRONMENT = "Environment"
     COMPONENT = "Component"
 
@@ -78,6 +91,7 @@ class RelationType(str, Enum):
     ORIGINATED_FROM = "originated_from"
     ASSOCIATED_WITH = "associated_with"
     HAS_JOB_PATTERN = "has_job_pattern"
+    HAS_JOB_INSTANCE = "has_job_instance"
     SIGNALS = "signals"
     LEADS_TO = "leads_to"
     HAS_COMPONENT = "has_component"
@@ -207,24 +221,25 @@ class TaskFeatureNode(BaseNode):
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class JobFeatureNode(BaseNode):
+class AggregatedJobFeatureNode(BaseNode):
     """An aggregated, reusable job-execution pattern derived from one or more jobs.
 
     Where :class:`TaskFeatureNode` captures how a *task was configured*,
-    ``JobFeatureNode`` captures how the jobs *actually executed* — site failure
-    rates, dominant error codes, CPU consumption ranges, transformation versions,
-    etc.  Individual job IDs are never stored; only the aggregated pattern is.
+    ``AggregatedJobFeatureNode`` captures how the jobs *actually executed* —
+    site failure rates, dominant error codes, CPU consumption ranges,
+    transformation versions, etc.  Individual job IDs are never stored; only
+    the aggregated pattern is.
 
     The canonical ``name`` follows the same ``"{attribute}={value}"`` convention
     as :class:`TaskFeatureNode` (e.g. ``"site_failure_rate=AGLT2:high(>50%)"``,
     ``"transformation=Athena-25.0.1"``).
 
-    ``JobFeatureNode`` participates in the same ``contribute_to → Cause`` edge
-    as ``TaskFeatureNode``, plus the ``has_job_pattern`` edge from a
-    :class:`SymptomNode`::
+    ``AggregatedJobFeatureNode`` participates in the same ``contribute_to →
+    Cause`` edge as ``TaskFeatureNode``, plus the ``has_job_pattern`` edge from
+    a :class:`SymptomNode`::
 
-        Symptom -[has_job_pattern]-> Job_Feature
-        Job_Feature -[contribute_to]-> Cause
+        Symptom -[has_job_pattern]-> Aggregated_Job_Feature
+        Aggregated_Job_Feature -[contribute_to]-> Cause
 
     Attributes:
         attribute:   Feature key, e.g. ``"site_failure_rate"``,
@@ -235,11 +250,50 @@ class JobFeatureNode(BaseNode):
         properties:  Additional key-value properties.
     """
 
-    node_type: NodeType = NodeType.JOB_FEATURE
+    node_type: NodeType = NodeType.AGGREGATED_JOB_FEATURE
     attribute: str = Field(..., description="Aggregated job feature key.")
     value: str = Field(..., description="Aggregated job feature value / label.")
     job_count: int = Field(default=0, ge=0, description="Number of jobs aggregated.")
     properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobInstanceNode(BaseNode):
+    """A canonical job failure pattern node, keyed by site + error code.
+
+    Follows the same incident-agnostic naming convention as all other node
+    types: the ``name`` encodes the *failure pattern*, not the job identity.
+    This lets the same node be reused across tasks that share the same
+    site+error combination, enabling direct multi-hop graph traversal between
+    related incidents.
+
+    Naming convention:  ``"job_failure:{site}:{error_channel}:{error_code}"``
+      e.g.              ``"job_failure:AGLT2:pilot:1099"``
+    If site is unknown: ``"job_failure:unknown:{error_channel}:{error_code}"``
+
+    ``description`` holds representative diagnostic text (``pilotErrorDiag`` /
+    ``transExitCode`` diag) from one of the failing jobs; it is embedded and
+    indexed in Qdrant for semantic similarity search across incidents.
+
+    ``JobInstanceNode`` can optionally carry a ``HAS_CAUSE`` edge when the
+    job-level diagnostic text implies a cause that is **more specific** than the
+    task-level :class:`CauseNode`.  Do not duplicate the task-level cause.
+
+    .. note::
+        ``job_id`` is NOT a field — it is incident-specific and would prevent
+        cross-task node merging.
+
+    Attributes:
+        site:          Compute site where the job ran, e.g. ``"AGLT2"``.
+        error_code:    Pilot or payload error code, e.g. ``"1099"``.
+        error_channel: Error source: ``"pilot"``, ``"payload"``, or ``"ddm"``.
+        exit_code:     Raw numeric exit code (``transExitCode``).
+    """
+
+    node_type: NodeType = NodeType.JOB_INSTANCE
+    site: Optional[str] = None
+    error_code: Optional[str] = None
+    error_channel: Optional[str] = None
+    exit_code: Optional[int] = None
 
 
 class TaskContextNode(BaseNode):
@@ -258,6 +312,31 @@ class TaskContextNode(BaseNode):
     """
 
     node_type: NodeType = NodeType.TASK_CONTEXT
+
+
+class JobInstanceContextNode(BaseNode):
+    """Full diagnostic text from representative failing jobs — vector DB only.
+
+    Stores the raw ``pilotErrorDiag`` / ``transExitCode`` diagnostic text that
+    cannot be reduced to a canonical site+error pattern but is valuable for
+    semantic similarity search (e.g. two tasks with slightly different wording
+    but the same underlying failure).
+
+    Complements :class:`JobInstanceNode`: ``JobInstanceNode`` is the graph node
+    (merged across tasks by site+error pattern), while ``JobInstanceContextNode``
+    carries the full diagnostic text for Qdrant embedding.
+
+    - ``name`` follows the same key as the corresponding ``JobInstanceNode``,
+      e.g. ``"job_instance_context:AGLT2:pilot:1099"``.
+    - ``description`` is the full diagnostic text — embedded and indexed in
+      Qdrant for semantic search.
+
+    .. important::
+        This node is **NOT** stored in the graph database (Neo4j).  It must
+        not be referenced by graph relationships.
+    """
+
+    node_type: NodeType = NodeType.JOB_INSTANCE_CONTEXT
 
 
 class ComponentNode(BaseNode):

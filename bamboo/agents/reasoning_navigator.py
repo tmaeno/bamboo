@@ -84,7 +84,7 @@ class ReasoningNavigator:
         because they are only available via vector search — they are not
         stored in the graph database.
 
-        ``JobFeatureNode`` values are kept separately from ``TaskFeatureNode``
+        ``AggregatedJobFeatureNode`` values are kept separately from ``TaskFeatureNode``
         so graph queries can score them independently: a cause corroborated by
         both task-level and job-level features ranks higher.
 
@@ -107,10 +107,17 @@ class ReasoningNavigator:
             node_type_str = str(node.node_type)
             if "SYMPTOM" in node_type_str:
                 symptoms.append(node.name)
-            elif "TASK_CONTEXT" in node_type_str:
+            elif "TASK_CONTEXT" in node_type_str or "JOB_CONTEXT" in node_type_str:
                 if node.description:
                     task_contexts.append(node.description)
-            elif "JOB_FEATURE" in node_type_str:
+            elif "JOB_INSTANCE" in node_type_str:
+                # Include job instance names and descriptions as job-level clues.
+                # The name encodes site+error pattern; description is the full
+                # diagnostic text — both are useful for graph + vector queries.
+                job_features.append(node.name)
+                if node.description:
+                    task_contexts.append(node.description)
+            elif "AGGREGATED_JOB_FEATURE" in node_type_str or "JOB_FEATURE" in node_type_str:
                 job_features.append(node.name)
             elif "TASK_FEATURE" in node_type_str or "FEATURE" in node_type_str:
                 task_features.append(node.name)
@@ -160,7 +167,7 @@ class ReasoningNavigator:
                            raw PanDA job ID).
                            Extracted nodes are tagged ``log_level="job"``.
             jobs_data:     List of raw job attribute dicts for aggregated
-                           :class:`~bamboo.models.graph_element.JobFeatureNode`
+                           :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
                            extraction.
 
         Returns:

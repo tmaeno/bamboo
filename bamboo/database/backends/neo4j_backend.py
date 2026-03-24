@@ -78,8 +78,10 @@ class Neo4jBackend(GraphDatabaseBackend):
                 "CREATE INDEX IF NOT EXISTS FOR (n:Symptom) ON (n.name)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Resolution) ON (n.success_rate)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Task_Feature) ON (n.name)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Feature) ON (n.name)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Feature) ON (n.attribute)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Aggregated_Job_Feature) ON (n.name)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Aggregated_Job_Feature) ON (n.attribute)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Instance) ON (n.name)",
+                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Instance) ON (n.site)",
             ]:
                 await session.run(query)
 
@@ -202,10 +204,13 @@ class Neo4jBackend(GraphDatabaseBackend):
             WHERE f.name IN $task_features
             WITH symptom_causes, collect(DISTINCT c2) AS feature_causes
 
-            // --- Job-feature clues ---
-            OPTIONAL MATCH (jf:Job_Feature)-[:contribute_to]->(c3:Cause)
+            // --- Job-feature clues (aggregated patterns + specific instances) ---
+            OPTIONAL MATCH (jf:Aggregated_Job_Feature)-[:contribute_to]->(c3a:Cause)
             WHERE jf.name IN $job_features
-            WITH symptom_causes, feature_causes, collect(DISTINCT c3) AS job_feature_causes
+            OPTIONAL MATCH (ji:Job_Instance)-[:indicate]->(c3b:Cause)
+            WHERE ji.name IN $job_features
+            WITH symptom_causes, feature_causes,
+                 collect(DISTINCT c3a) + collect(DISTINCT c3b) AS job_feature_causes
 
             // --- Environment clues ---
             OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c4:Cause)

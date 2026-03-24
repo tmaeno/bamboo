@@ -22,7 +22,7 @@ class KnowledgeState(TypedDict):
         job_logs:       *Job-level* log output keyed by a stable source name
                         (e.g. ``{"pilot": "...", "payload": "..."}``).
         jobs_data:      List of raw job attribute dicts for aggregated
-                        :class:`~bamboo.models.graph_element.JobFeatureNode`
+                        :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
                         extraction.
         extracted_graph: Serialised :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`
                         (set after extraction).

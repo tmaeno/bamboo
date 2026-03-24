@@ -73,7 +73,9 @@ from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     GraphRelationship,
-    JobFeatureNode,
+    AggregatedJobFeatureNode,
+    JobInstanceContextNode,
+    JobInstanceNode,
     RelationType,
     ResolutionNode,
     SymptomNode,
@@ -1175,12 +1177,22 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
 
-        # Aggregated job data → JobFeatureNodes + SymptomNodes + TaskContextNodes
+        # Aggregated job data → AggregatedJobFeatureNodes + SymptomNodes + TaskContextNodes
         if jobs_data:
             say(f"Aggregating data from {len(jobs_data):,} jobs...")
             job_nodes, job_rels = await self._extract_from_jobs(jobs_data, nodes)
             nodes.extend(job_nodes)
             relationships.extend(job_rels)
+
+        # Representative failed jobs → JobInstanceNodes + JobInstanceContextNodes
+        representative_jobs = (external_data or {}).get("representative_jobs")
+        if representative_jobs and isinstance(representative_jobs, list):
+            say(f"Extracting job instance patterns from {len(representative_jobs)} representative job(s)...")
+            inst_nodes, inst_rels = self._extract_from_representative_jobs(
+                representative_jobs, nodes
+            )
+            nodes.extend(inst_nodes)
+            relationships.extend(inst_rels)
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         say(
@@ -1202,12 +1214,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         jobs_data: list[dict[str, Any]],
         existing_nodes: list,
     ) -> tuple[list, list[GraphRelationship]]:
-        """Aggregate job records into JobFeatureNodes plus related graph elements.
+        """Aggregate job records into AggregatedJobFeatureNodes plus related graph elements.
 
         Uses :class:`~bamboo.agents.extractors.panda_job_data_aggregator.PandaJobDataAggregator`
         to derive stable, reusable patterns from the raw job list, then:
 
-        1. Creates a :class:`~bamboo.models.graph_element.JobFeatureNode` for
+        1. Creates a :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode` for
            each aggregated ``(attribute, value)`` pair.
         2. Classifies each error signal through the error classifier to produce
            additional :class:`~bamboo.models.graph_element.SymptomNode` values
@@ -1222,7 +1234,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
            different jobs collapse to a single node.
         4. Emits ``has_job_pattern`` edges from every task-level
            :class:`~bamboo.models.graph_element.SymptomNode` in
-           *existing_nodes* to each new :class:`JobFeatureNode`, so the graph
+           *existing_nodes* to each new :class:`AggregatedJobFeatureNode`, so the graph
            can answer "what job-execution patterns are associated with this
            symptom?".
 
@@ -1243,10 +1255,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         nodes: list = []
         relationships: list[GraphRelationship] = []
 
-        # 1. JobFeatureNodes
-        job_feature_nodes: list[JobFeatureNode] = []
+        # 1. AggregatedJobFeatureNodes
+        job_feature_nodes: list[AggregatedJobFeatureNode] = []
         for attribute, value, job_count in agg.feature_items:
-            node = JobFeatureNode(
+            node = AggregatedJobFeatureNode(
                 name=f"{attribute}={value}",
                 attribute=attribute,
                 value=value,
@@ -1318,7 +1330,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
-        # 4. has_job_pattern edges: every Symptom (existing + new) → each JobFeatureNode
+        # 4. has_job_pattern edges: every Symptom (existing + new) → each AggregatedJobFeatureNode
         all_symptom_nodes: list = [
             n
             for n in existing_nodes
@@ -1343,12 +1355,120 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         )
         logger.debug(
             "PandaKnowledgeExtractor: jobs_data (%d jobs) → "
-            "%d JobFeatureNodes, %d new SymptomNodes, "
+            "%d AggregatedJobFeatureNodes, %d new SymptomNodes, "
             "%d TaskContextNodes, %d has_job_pattern edges",
             agg.total_jobs,
             len(job_feature_nodes),
             len(new_symptom_nodes),
             len(agg.context_texts),
+            len(relationships),
+        )
+        return nodes, relationships
+
+    # ------------------------------------------------------------------
+    # Representative job extraction
+    # ------------------------------------------------------------------
+
+    def _extract_from_representative_jobs(
+        self,
+        jobs: list[dict[str, Any]],
+        existing_nodes: list,
+    ) -> tuple[list, list[GraphRelationship]]:
+        """Create canonical JobInstanceNode + JobInstanceContextNode from representative failed jobs.
+
+        Each unique ``(site, channel, error_code)`` combination produces exactly
+        one :class:`~bamboo.models.graph_element.JobInstanceNode` (deduplicated
+        within this call).  Because names are canonical and incident-agnostic,
+        Neo4j upserts on ``name`` will merge the same pattern across tasks.
+
+        A paired :class:`~bamboo.models.graph_element.JobInstanceContextNode` (vector-DB
+        only) is also emitted for each pattern, carrying the full diagnostic text
+        for semantic similarity search.
+
+        A ``has_job_instance`` edge is created from the most relevant existing
+        :class:`~bamboo.models.graph_element.SymptomNode` to each new
+        ``JobInstanceNode``.  If no Symptom exists in the current graph the
+        edges are omitted rather than creating orphan relationships.
+
+        Args:
+            jobs:           List of compact job dicts from the explorer's
+                            ``get_failed_job_details`` tool.
+            existing_nodes: Nodes already in the graph (searched for Symptoms).
+
+        Returns:
+            Tuple of ``(new_nodes, new_relationships)``.
+        """
+        symptom_nodes = [
+            n for n in existing_nodes
+            if "SYMPTOM" in str(n.node_type)
+        ]
+
+        nodes: list = []
+        relationships: list[GraphRelationship] = []
+        seen: dict[str, JobInstanceNode] = {}  # canonical name → node
+
+        for job in jobs:
+            site = str(job.get("computingSite") or "unknown")
+            pilot_code = job.get("pilotErrorCode")
+            trans_code = job.get("transExitCode")
+
+            # Determine error channel and code
+            if pilot_code and int(pilot_code) != 0:
+                channel = "pilot"
+                code = str(pilot_code)
+            elif trans_code and int(trans_code) != 0:
+                channel = "payload"
+                code = str(trans_code)
+            else:
+                channel = "unknown"
+                code = "unknown"
+
+            canonical_name = f"job_failure:{site}:{channel}:{code}"
+            if canonical_name in seen:
+                continue  # already produced this pattern
+
+            diag_text = (
+                job.get("pilotErrorDiag")
+                or (str(trans_code) if trans_code else None)
+                or ""
+            )
+
+            inst_node = JobInstanceNode(
+                name=canonical_name,
+                description=diag_text or None,
+                site=site,
+                error_code=code,
+                error_channel=channel,
+                exit_code=int(trans_code) if trans_code else None,
+                metadata={"source": "get_failed_job_details"},
+            )
+            seen[canonical_name] = inst_node
+            nodes.append(inst_node)
+
+            # JobInstanceContextNode — vector DB only, carries full diagnostic text
+            if diag_text:
+                ctx_node = JobInstanceContextNode(
+                    name=f"job_instance_context:{site}:{channel}:{code}",
+                    description=diag_text,
+                    metadata={"source": "get_failed_job_details"},
+                )
+                nodes.append(ctx_node)
+
+            # has_job_instance edges from all Symptom nodes
+            for symptom in symptom_nodes:
+                relationships.append(
+                    GraphRelationship(
+                        source_id=symptom.name,
+                        target_id=canonical_name,
+                        relation_type=RelationType.HAS_JOB_INSTANCE,
+                    )
+                )
+
+        logger.debug(
+            "PandaKnowledgeExtractor: representative_jobs → "
+            "%d JobInstanceNode(s), %d JobInstanceContextNode(s), %d has_job_instance edges",
+            sum(1 for n in nodes if isinstance(n, JobInstanceNode)),
+            sum(1 for n in nodes if isinstance(n, JobInstanceContextNode)),
             len(relationships),
         )
         return nodes, relationships
