@@ -61,11 +61,13 @@ class KnowledgeAccumulator:
         vector_db: VectorDatabaseClient,
         reviewer=None,
         explorer=None,
+        max_review_retries: int = _MAX_REVIEW_RETRIES,
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
         self._reviewer = reviewer
         self._explorer = explorer
+        self._max_review_retries = max_review_retries
         self._llm = None  # lazy — initialised on first use
         self._embeddings = (
             None  # lazy — initialised on first use (not needed for dry-run)
@@ -159,7 +161,7 @@ class KnowledgeAccumulator:
             job_logs=job_logs,
         )
         review_feedback = ""
-        for attempt in range(_MAX_REVIEW_RETRIES + 1):
+        for attempt in range(self._max_review_retries + 1):
             graph = await self.extractor.extract_from_sources(
                 email_text=email_text,
                 task_data=task_data,
@@ -174,9 +176,9 @@ class KnowledgeAccumulator:
 
             if self._reviewer is None:
                 break
-            say(f"Running knowledge reviewer (attempt {attempt + 1}/{_MAX_REVIEW_RETRIES + 1})...")
+            say(f"Running knowledge reviewer (attempt {attempt + 1}/{self._max_review_retries + 1})...")
             review_result = await self._reviewer.review(graph, sources_summary, task_data=task_data)
-            if review_result.approved or attempt >= _MAX_REVIEW_RETRIES:
+            if review_result.approved or attempt >= self._max_review_retries:
                 if not review_result.approved:
                     logger.warning(
                         "KnowledgeAccumulator: reviewer not satisfied after %d attempt(s) — "
@@ -188,7 +190,7 @@ class KnowledgeAccumulator:
             logger.info(
                 "KnowledgeAccumulator: review pass %d/%d found %d issue(s) — retrying extraction",
                 attempt + 1,
-                _MAX_REVIEW_RETRIES,
+                self._max_review_retries,
                 len(review_result.issues),
             )
             say(

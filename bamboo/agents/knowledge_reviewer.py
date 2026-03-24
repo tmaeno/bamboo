@@ -102,7 +102,6 @@ class KnowledgeReviewer:
         task_summary = _build_task_summary(task_data or {})
 
         show_block("reviewer: task context", task_summary)
-        show_block("reviewer: graph", graph_summary)
 
         try:
             llm = get_extraction_llm()
@@ -115,7 +114,6 @@ class KnowledgeReviewer:
                         sources_summary=sources_summary,
                     )
                 )
-            show_block("reviewer: LLM response", response.content)
             result = _parse_review_response(response.content)
             if result.approved:
                 say(f"Graph approved (confidence {result.confidence:.0%}).")

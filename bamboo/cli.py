@@ -971,7 +971,17 @@ def populate_cmd(email_thread, task_data, task_id, external_data):
     default=False,
     help="Stream live agent-style narration of each extraction step.",
 )
-def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose):
+@click.option(
+    "--max-retries",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum reviewer-rejection retries (0 = no retry after first review). "
+        "Defaults to 2. Use --max-retries 1 to debug a single "
+        "extraction→review→explorer chain."
+    ),
+)
+def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose, max_retries):
     """Extract knowledge graph and preview it without writing to any database.
 
     Runs the full extraction pipeline (LLM calls, error classification, graph
@@ -985,6 +995,7 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
       bamboo extract --task-data task.json --email-thread email.txt
       bamboo extract --task-data task.json --output graph_preview.json
       bamboo extract --task-id 12345 --verbose
+      bamboo extract --task-id 12345 -v --max-retries 1
     """
     from bamboo.scripts.extract_knowledge import main as _main
 
@@ -997,6 +1008,7 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
         external_data=external_data,
         output=output,
         verbose=verbose,
+        max_retries=max_retries,
     )
 
 

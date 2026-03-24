@@ -67,7 +67,17 @@ from bamboo.utils.logging import setup_logging
     default=False,
     help="Stream live agent-style narration of each extraction step.",
 )
-def main(email_thread, task_data, task_id, external_data, output, verbose):
+@click.option(
+    "--max-retries",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum number of reviewer-rejection retries (0 = extract once, no retries). "
+        "Defaults to the configured value (2). Useful for debugging a single "
+        "extraction→review→explorer chain with --max-retries 1."
+    ),
+)
+def main(email_thread, task_data, task_id, external_data, output, verbose, max_retries):
     """Extract knowledge graph and preview it without writing to any database.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -93,13 +103,15 @@ def main(email_thread, task_data, task_id, external_data, output, verbose):
 
     asyncio.run(
         _run_extraction(
-            email_text, task_dict, task_id, external_dict, output, verbose=verbose
+            email_text, task_dict, task_id, external_dict, output,
+            verbose=verbose, max_retries=max_retries,
         )
     )
 
 
 async def _run_extraction(
-    email_text, task_dict, task_id, external_dict, output=None, verbose=False
+    email_text, task_dict, task_id, external_dict, output=None, verbose=False,
+    max_retries=None,
 ):
     """Run extraction in dry-run mode and print the result."""
     from rich.console import Console
@@ -127,7 +139,13 @@ async def _run_extraction(
     settings = get_settings()
     reviewer = KnowledgeReviewer() if settings.enable_knowledge_review else None
     explorer = ExtraSourceExplorer(PandaMcpClient()) if settings.enable_knowledge_review else None
-    agent = KnowledgeAccumulator(graph_db=None, vector_db=None, reviewer=reviewer, explorer=explorer)
+    accumulator_kwargs = {}
+    if max_retries is not None:
+        accumulator_kwargs["max_review_retries"] = max_retries
+    agent = KnowledgeAccumulator(
+        graph_db=None, vector_db=None, reviewer=reviewer, explorer=explorer,
+        **accumulator_kwargs,
+    )
 
     try:
         click.echo("Extracting knowledge (dry-run — nothing will be written)...")
