@@ -113,6 +113,7 @@ class Settings(BaseSettings):
         "qdrant_collection_name",
         "log_level",
         "embedding_model",
+        "mcp_servers_config",
         mode="before",
     )
     @classmethod
@@ -183,6 +184,12 @@ class Settings(BaseSettings):
     # (suitable for development; set a random secret in production).
     # Example: PSEUDONYM_SALT=some-secret-string
     pseudonym_salt: str = ""
+
+    # External MCP servers: optional path to a JSON file listing additional
+    # MCP servers to expose to ExtraSourceExplorer alongside PandaMcpClient.
+    # Requires the 'mcp' package: pip install 'bamboo[external-mcp]'
+    # Example: MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
+    mcp_servers_config: str = ""
 
     @property
     def effective_embeddings_api_key(self) -> str:

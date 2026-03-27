@@ -94,37 +94,41 @@ class ExtraSourceExplorer:
         if not review_issues or not task_data:
             return ExplorationResult()
 
-        tools = self._client.list_tools()
-        tool_calls = await self._select_tools(task_data, review_issues, tools)
+        await self._client.connect()
+        try:
+            tools = self._client.list_tools()
+            tool_calls = await self._select_tools(task_data, review_issues, tools)
 
-        if not tool_calls:
-            logger.info("ExtraSourceExplorer: LLM selected no tools — nothing to explore")
-            say("Explorer selected no additional tools.")
-            return ExplorationResult()
+            if not tool_calls:
+                logger.info("ExtraSourceExplorer: LLM selected no tools — nothing to explore")
+                say("Explorer selected no additional tools.")
+                return ExplorationResult()
 
-        tool_names = [tc["tool"] for tc in tool_calls]
-        logger.info(
-            "ExtraSourceExplorer: executing %d tool call(s): %s",
-            len(tool_calls),
-            tool_names,
-        )
-        say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
+            tool_names = [tc["tool"] for tc in tool_calls]
+            logger.info(
+                "ExtraSourceExplorer: executing %d tool call(s): %s",
+                len(tool_calls),
+                tool_names,
+            )
+            say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
 
-        coros = [
-            self._client.execute(tc["tool"], **tc.get("args", {}))
-            for tc in tool_calls
-        ]
-        results = await asyncio.gather(*coros, return_exceptions=True)
+            coros = [
+                self._client.execute(tc["tool"], **tc.get("args", {}))
+                for tc in tool_calls
+            ]
+            results = await asyncio.gather(*coros, return_exceptions=True)
 
-        out = ExplorationResult(tool_calls=tool_calls)
-        for tc, result in zip(tool_calls, results):
-            if isinstance(result, BaseException):
-                say(f"  {tc['tool']}: failed — {result}")
-            else:
-                say(f"  {tc['tool']}: done.")
-            self._merge_tool_result(tc["tool"], result, out)
+            out = ExplorationResult(tool_calls=tool_calls)
+            for tc, result in zip(tool_calls, results):
+                if isinstance(result, BaseException):
+                    say(f"  {tc['tool']}: failed — {result}")
+                else:
+                    say(f"  {tc['tool']}: done.")
+                self._merge_tool_result(tc["tool"], result, out)
 
-        return out
+            return out
+        finally:
+            await self._client.close()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -187,7 +191,14 @@ class ExtraSourceExplorer:
             if isinstance(result, list):
                 out.external_data["representative_jobs"] = result
         else:
-            logger.warning("ExtraSourceExplorer: unrecognised tool result for %r — skipped", tool_name)
+            # Unknown tool — likely from an external MCP server.
+            # Store raw result in external_data so the LLM extractor receives
+            # it as additional unstructured context on the next attempt.
+            logger.debug(
+                "ExtraSourceExplorer: storing raw result for unrecognised tool %r",
+                tool_name,
+            )
+            out.external_data[f"tool:{tool_name}"] = result
 
 
 # ---------------------------------------------------------------------------

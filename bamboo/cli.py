@@ -367,10 +367,10 @@ async def populate_knowledge_interactive():
         from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
         from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
         from bamboo.config import get_settings
-        from bamboo.mcp.panda_mcp_client import PandaMcpClient
+        from bamboo.mcp.factory import build_mcp_client
         settings = get_settings()
         reviewer = KnowledgeReviewer() if settings.enable_knowledge_review else None
-        explorer = ExtraSourceExplorer(PandaMcpClient()) if settings.enable_knowledge_review else None
+        explorer = ExtraSourceExplorer(build_mcp_client(settings)) if settings.enable_knowledge_review else None
         agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
 
         with console.status("[bold green]Extracting knowledge..."):

@@ -43,7 +43,27 @@ class McpClient(ABC):
 
     Subclasses register tools in ``__init__`` and implement :meth:`execute`
     to dispatch calls to the appropriate handler.
+
+    In-process clients (e.g. :class:`~bamboo.mcp.PandaMcpClient`) do not need
+    a network connection, so :meth:`connect` and :meth:`close` are no-ops by
+    default.  Clients that wrap an external server (e.g.
+    :class:`~bamboo.mcp.ExternalMcpClient`) override them to manage the
+    connection lifecycle.
     """
+
+    async def connect(self) -> None:
+        """Establish connection and discover remote tools.
+
+        Called by :class:`~bamboo.agents.ExtraSourceExplorer` before the first
+        :meth:`list_tools` call.  No-op for in-process clients.
+        """
+
+    async def close(self) -> None:
+        """Release the connection acquired by :meth:`connect`.
+
+        Called by :class:`~bamboo.agents.ExtraSourceExplorer` after all tool
+        calls have completed.  No-op for in-process clients.
+        """
 
     @abstractmethod
     def list_tools(self) -> list[McpTool]:

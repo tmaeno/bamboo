@@ -23,7 +23,8 @@ includes an optional quality-gate loop.
 │                         ├─ KnowledgeReviewer  (opt-in)      │
 │                         │                                   │
 │                         └─ ExtraSourceExplorer  (opt-in)    │
-│                                └─ PandaMcpClient            │
+│                                ├─ PandaMcpClient            │
+│                                └─ ExternalMcpClient (opt)   │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -190,29 +191,42 @@ never blocks the accumulation pipeline.
 **Enable:** `ENABLE_KNOWLEDGE_REVIEW=true` (same flag as the reviewer)
 
 Sits between the first reviewer rejection and the second extraction attempt.  One LLM call
-selects which `PandaMcpClient` tools to invoke based on the reviewer's issue list; the selected
-tools are then executed concurrently.
+selects which MCP tools to invoke based on the reviewer's issue list; the selected tools are
+then executed concurrently.  The available tool catalogue is whatever the configured MCP client
+exposes — built-in PanDA tools plus any tools from external servers.
 
 **Flow:**
 
-1. List available tools from `PandaMcpClient`.
-2. Single LLM call: given the reviewer's issues and task context, which tools should be called?
-3. Execute selected tools concurrently via `asyncio.gather`.
-4. Merge results into the next extraction pass (`task_logs` and `external_data`).
+1. `connect()` the MCP client (opens external server connections if configured).
+2. List available tools.
+3. Single LLM call: given the reviewer's issues and task context, which tools should be called?
+4. Execute selected tools concurrently via `asyncio.gather`.
+5. Merge results into the next extraction pass (`task_logs` and `external_data`).
+6. `close()` the MCP client.
 
 The explorer fires **at most once** per accumulation run (at `attempt == 0` only).
 Any tool failure is logged and skipped — the pipeline never stalls.
+
+Results from unrecognised tools (i.e. tools from external servers) are stored in
+`external_data` under the key `"tool:<name>"` and forwarded to the LLM extractor as
+unstructured additional context.
 
 **Output:** `ExplorationResult` — `task_logs`, `external_data`, `tool_calls` (for observability).
 
 ---
 
-### `PandaMcpClient`
+### MCP Client Layer
+
+The MCP client is built by `build_mcp_client()` in `bamboo/mcp/factory.py` and passed to
+`ExtraSourceExplorer` at startup.  When no external servers are configured it returns a bare
+`PandaMcpClient`; otherwise it returns a `CompositeMcpClient` that aggregates `PandaMcpClient`
+with one or more `ExternalMcpClient` instances.
+
+#### `PandaMcpClient`
 
 **File:** `bamboo/mcp/panda_mcp_client.py`
 
-The MCP client used by `ExtraSourceExplorer`.  Exposes five tools, each described to the LLM
-with a "when to use" trigger condition so the tool-selection LLM call stays reliable.
+Built-in client that exposes PanDA data tools.  No external connection needed.
 
 | Tool | Trigger condition | Returns |
 |---|---|---|
@@ -224,6 +238,50 @@ with a "when to use" trigger condition so the tool-selection LLM call stays reli
 
 All tools are safe to call concurrently.  `get_task_jobs_summary` and `get_failed_job_details`
 degrade gracefully if the pandaclient bulk-jobs endpoint is unavailable.
+
+#### `ExternalMcpClient`
+
+**File:** `bamboo/mcp/external_mcp_client.py`
+
+Connects to one external MCP server using the **StreamableHTTP** transport from the official
+`mcp` Python SDK.  Tools are discovered at connect time via `session.list_tools()` and are
+presented to the LLM alongside the built-in PanDA tools.
+
+- Requires `pip install "bamboo[external-mcp]"` (adds the `mcp>=1.0.0` package).
+- If the `mcp` package is missing or the server is unreachable, `connect()` logs the error
+  and this client contributes zero tools — the pipeline continues with PanDA tools only.
+
+#### `CompositeMcpClient`
+
+**File:** `bamboo/mcp/external_mcp_client.py`
+
+Aggregates any number of `McpClient` instances into one.  `PandaMcpClient` is always first,
+so its tool names win on any name clash with external servers.
+
+#### Configuring external MCP servers
+
+External servers are declared in a JSON file:
+
+```json
+{
+  "servers": [
+    {
+      "name": "my_atlas",
+      "url": "http://localhost:8080/mcp",
+      "headers": {"Authorization": "Bearer ${ATLAS_TOKEN}"},
+      "enabled": true
+    }
+  ]
+}
+```
+
+Header values support `${ENV_VAR}` expansion.  Point to the file via `.env`:
+
+```
+MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
+```
+
+See `bamboo/mcp/server_config.py` for the full schema.
 
 ---
 
@@ -262,6 +320,7 @@ pipeline, then drafts a resolution email for the task submitter.
 | `EXTRACTION_STRATEGY` | `panda` | `KnowledgeGraphExtractor` strategy selection |
 | `LLM_PROVIDER` | `openai` | All LLM calls across all agents |
 | `LLM_MODEL` | `gpt-4-turbo-preview` | All LLM calls across all agents |
+| `MCP_SERVERS_CONFIG` | _(empty)_ | Path to JSON file listing external MCP servers |
 
 The `--max-retries N` flag on `bamboo extract` overrides the reviewer retry limit for a single
 run without changing the default.
@@ -277,5 +336,7 @@ continues with what it has rather than aborting.
 |---|---|
 | `KnowledgeReviewer` LLM call | Returns `approved=True`, logs exception |
 | `ExtraSourceExplorer` LLM call | Returns empty `ExplorationResult`, logs exception |
-| Individual MCP tool call | Logs warning, skips that tool's results |
+| Individual MCP tool call | Logs warning, skips that tool's result |
+| `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
+| `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

@@ -42,6 +42,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# External MCP servers via StreamableHTTP transport
+external-mcp = [
+    "mcp>=1.0.0",
+]
 # Free local embeddings (sentence-transformers, no API key required)
 local-embeddings = [
     "sentence-transformers>=2.7.0",
