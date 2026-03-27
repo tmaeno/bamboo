@@ -11,21 +11,21 @@ includes an optional quality-gate loop.
 ## Pipeline Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Knowledge Accumulation                                     │
-│                                                             │
-│  incident data ──► KnowledgeAccumulator                     │
-│                         │                                   │
-│                         ├─ KnowledgeGraphExtractor          │
-│                         │      └─ PandaKnowledgeExtractor   │
+┌────────────────────────────────────────────────────────────────┐
+│  Knowledge Accumulation                                        │
+│                                                                │
+│  incident data ──► KnowledgeAccumulator                        │
+│                         │                                      │
+│                         ├─ KnowledgeGraphExtractor             │
+│                         │      └─ PandaKnowledgeExtractor      │
 │                         │            └─ PandaJobDataAggregator │
-│                         │                                   │
-│                         ├─ KnowledgeReviewer  (opt-in)      │
-│                         │                                   │
-│                         └─ ExtraSourceExplorer  (opt-in)    │
-│                                ├─ PandaMcpClient            │
-│                                └─ ExternalMcpClient (opt)   │
-└─────────────────────────────────────────────────────────────┘
+│                         │                                      │
+│                         ├─ KnowledgeReviewer                   │
+│                         │                                      │
+│                         └─ ExtraSourceExplorer                 │
+│                                ├─ PandaMcpClient               │
+│                                └─ ExternalMcpClient (opt)      │
+└────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │  Reasoning Navigation                                       │
@@ -75,7 +75,7 @@ indexing.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `ENABLE_KNOWLEDGE_REVIEW` | `false` | Enable reviewer + explorer |
+| `ENABLE_KNOWLEDGE_REVIEW` | `true` | Set to `false` to disable reviewer + explorer |
 | `--max-retries N` | `2` | Reviewer retry limit (`bamboo extract` CLI only) |
 
 **Retry loop:** on each rejection the accumulator increments `attempt`.  The
@@ -154,11 +154,11 @@ from its output.
 
 ---
 
-### `KnowledgeReviewer`  *(opt-in)*
+### `KnowledgeReviewer`
 
 **File:** `bamboo/agents/knowledge_reviewer.py`
 
-**Enable:** `ENABLE_KNOWLEDGE_REVIEW=true`
+**Disable:** `ENABLE_KNOWLEDGE_REVIEW=false`
 
 An LLM-based quality gate that evaluates the extracted graph for completeness *before* it is
 written to the databases.  It acts as a **gap analyzer** — it identifies information that
@@ -184,11 +184,11 @@ never blocks the accumulation pipeline.
 
 ---
 
-### `ExtraSourceExplorer`  *(opt-in, fires once per run)*
+### `ExtraSourceExplorer`  *(fires once per run)*
 
 **File:** `bamboo/agents/extra_source_explorer.py`
 
-**Enable:** `ENABLE_KNOWLEDGE_REVIEW=true` (same flag as the reviewer)
+**Disable:** `ENABLE_KNOWLEDGE_REVIEW=false` (same flag as the reviewer)
 
 Sits between the first reviewer rejection and the second extraction attempt.  One LLM call
 selects which MCP tools to invoke based on the reviewer's issue list; the selected tools are
@@ -316,7 +316,7 @@ pipeline, then drafts a resolution email for the task submitter.
 
 | Environment variable | Default | Affects |
 |---|---|---|
-| `ENABLE_KNOWLEDGE_REVIEW` | `false` | `KnowledgeReviewer`, `ExtraSourceExplorer` |
+| `ENABLE_KNOWLEDGE_REVIEW` | `true` | `KnowledgeReviewer`, `ExtraSourceExplorer` |
 | `EXTRACTION_STRATEGY` | `panda` | `KnowledgeGraphExtractor` strategy selection |
 | `LLM_PROVIDER` | `openai` | All LLM calls across all agents |
 | `LLM_MODEL` | `gpt-4-turbo-preview` | All LLM calls across all agents |
