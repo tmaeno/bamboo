@@ -176,11 +176,19 @@ should be present but is missing — rather than cross-checking against source t
 itself or (b) the available task context fields.  Speculation beyond the provided data is
 prohibited.
 
+**MCP tool awareness:** the reviewer receives the full MCP tool catalogue at review time.
+When a gap could be resolved by a specific tool, the reviewer annotates the issue string
+accordingly — e.g. `"nJobsFailed=47 but no JOB_INSTANCE nodes → resolvable with get_failed_job_details"`.
+This makes the explorer's downstream tool-selection more reliable without changing the
+`ReviewResult` schema.  The reviewer only sees tools that are statically registered (PanDA
+tools are always available; external server tools appear after the first `connect()`).
+
 **Fail-open:** any LLM or parse error returns `approved=True` so a reviewer malfunction
 never blocks the accumulation pipeline.
 
-**Output:** `ReviewResult` — `approved`, `confidence`, `issues` (list of gap descriptions),
-`feedback` (actionable instruction for the extractor on retry).
+**Output:** `ReviewResult` — `approved`, `confidence`, `issues` (list of gap descriptions,
+optionally annotated with `→ resolvable with <tool>`), `feedback` (actionable instruction
+for the extractor on retry).
 
 ---
 
@@ -199,7 +207,7 @@ exposes — built-in PanDA tools plus any tools from external servers.
 
 1. `connect()` the MCP client (opens external server connections if configured).
 2. List available tools.
-3. Single LLM call: given the reviewer's issues and task context, which tools should be called?
+3. Single LLM call: given the reviewer's issues (which may already name the target tool) and task context, which tools should be called?
 4. Execute selected tools concurrently via `asyncio.gather`.
 5. Merge results into the next extraction pass (`task_logs` and `external_data`).
 6. `close()` the MCP client.

@@ -75,6 +75,7 @@ class KnowledgeReviewer:
         graph: KnowledgeGraph,
         sources: dict[str, str],
         task_data: dict[str, Any] | None = None,
+        available_tools: list | None = None,
     ) -> ReviewResult:
         """Evaluate the extracted graph for incident completeness.
 
@@ -83,11 +84,15 @@ class KnowledgeReviewer:
         text to be present.
 
         Args:
-            graph:     The extracted :class:`KnowledgeGraph` to evaluate.
-            sources:   Mapping of source name → text excerpt (optional context
-                       hints).  Pass the result of :func:`build_sources_summary`.
-            task_data: Raw task fields from PanDA — used to detect contextual
-                       gaps (e.g. many failed jobs but no JOB_FEATURE nodes).
+            graph:            The extracted :class:`KnowledgeGraph` to evaluate.
+            sources:          Mapping of source name → text excerpt (optional context
+                              hints).  Pass the result of :func:`build_sources_summary`.
+            task_data:        Raw task fields from PanDA — used to detect contextual
+                              gaps (e.g. many failed jobs but no JOB_FEATURE nodes).
+            available_tools:  List of :class:`~bamboo.mcp.McpTool` descriptors that
+                              the explorer can invoke to fill gaps.  When provided,
+                              the reviewer annotates each issue with the tool that
+                              could resolve it (e.g. ``"→ resolvable with get_failed_job_details"``).
 
         Returns:
             :class:`ReviewResult` with the verdict and corrective feedback.
@@ -112,6 +117,7 @@ class KnowledgeReviewer:
                         graph_summary=graph_summary,
                         task_summary=task_summary,
                         sources_summary=sources_summary,
+                        available_tools=_format_available_tools(available_tools),
                     )
                 )
             result = _parse_review_response(response.content)
@@ -163,6 +169,13 @@ def build_sources_summary(
         if text and text.strip():
             sources[f"job_log:{name}"] = text[:_MAX_LOG_CHARS]
     return sources
+
+
+def _format_available_tools(tools: list | None) -> str:
+    """Format a list of :class:`~bamboo.mcp.McpTool` descriptors for the reviewer prompt."""
+    if not tools:
+        return "(none — no explorer configured)"
+    return "\n".join(f"- {t.name}: {t.description}" for t in tools)
 
 
 def _build_task_summary(task_data: dict[str, Any]) -> str:

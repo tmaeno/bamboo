@@ -635,6 +635,14 @@ TASK CONTEXT:
 SOURCE EXCERPTS (optional):
 {sources_summary}
 
+AVAILABLE DATA SOURCES (tool catalogue the explorer can invoke to fill gaps):
+{available_tools}
+
+When a gap in "issues" could be resolved by one of the above tools, append a note such as
+"→ resolvable with <tool_name>" to that issue string.
+Do NOT invent tool names — only reference tools listed above.
+If no tools are listed, assess gaps exactly as before.
+
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
 {{
   "approved": true | false,

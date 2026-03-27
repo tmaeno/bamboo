@@ -177,7 +177,10 @@ class KnowledgeAccumulator:
             if self._reviewer is None:
                 break
             say(f"Running knowledge reviewer (attempt {attempt + 1}/{self._max_review_retries + 1})...")
-            review_result = await self._reviewer.review(graph, sources_summary, task_data=task_data)
+            _available_tools = self._explorer._client.list_tools() if self._explorer else None
+            review_result = await self._reviewer.review(
+                graph, sources_summary, task_data=task_data, available_tools=_available_tools
+            )
             if review_result.approved or attempt >= self._max_review_retries:
                 if not review_result.approved:
                     logger.warning(
