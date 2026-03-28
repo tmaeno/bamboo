@@ -196,6 +196,9 @@ class ExtraSourceExplorer:
         elif tool_name == "get_task_input_datasets":
             if isinstance(result, list) and result:
                 out.task_logs["jedi:input_datasets"] = json.dumps(result, indent=2, default=str)
+        elif tool_name == "search_panda_server_source":
+            if isinstance(result, list) and result:
+                out.task_logs["panda_server:source_search"] = json.dumps(result, indent=2)
         else:
             # Unknown tool — likely from an external MCP server.
             # Store raw result in external_data so the LLM extractor receives

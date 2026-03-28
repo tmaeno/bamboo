@@ -245,6 +245,7 @@ Built-in client that exposes PanDA data tools.  No external connection needed.
 | `get_failed_job_details` | `JobInstanceNode` gaps: scout failures, site-specific errors | `external_data` | List of compact job dicts |
 | `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
 | `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
+| `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |
 
 All tools are safe to call concurrently.  Tools routed to `task_logs` (formatted JSON text)
 are processed by the LLM extractor alongside error dialog logs.  Tools routed to
@@ -333,6 +334,15 @@ pipeline, then drafts a resolution email for the task submitter.
 | `LLM_MODEL` | `gpt-4-turbo-preview` | All LLM calls across all agents |
 | `MCP_SERVERS_CONFIG` | _(empty)_ | Path to JSON file listing external MCP servers |
 
+The `search_panda_server_source` tool requires panda-server installed in the same environment:
+
+```
+pip install "bamboo[server-source]"
+```
+
+> **Note:** `panda-server` currently installs with full server-side dependencies.
+> This will be updated to a lightweight source-only package once one is available.
+
 The `--max-retries N` flag on `bamboo extract` overrides the reviewer retry limit for a single
 run without changing the default.
 
@@ -350,4 +360,5 @@ continues with what it has rather than aborting.
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
+| `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

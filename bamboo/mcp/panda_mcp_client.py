@@ -27,18 +27,25 @@ Tool catalogue
     distinct error codes (via ``get_job_descriptions`` with unsuccessful_only).
 
 ``get_task_jedi_details``
-    Fetches extended JEDI-level task info (scheduling parameters, split/merge
-    rules, resource allocation) via ``getJediTaskDetails``.
+    Fetches extended task info (scheduling parameters, split/merge rules,
+    resource allocation) via ``get_task_details_json``.
 
 ``get_task_input_datasets``
     Fetches input and pseudo-input dataset descriptions (file counts,
     availability) via ``get_files_in_datasets``.
+
+``search_panda_server_source``
+    Searches the locally installed panda-server source code for functions
+    or logic matching a keyword.  Used for resource estimation analysis
+    (scout → ramCount algorithm) and error message tracing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
+from pathlib import Path
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
@@ -227,6 +234,49 @@ class PandaMcpClient(McpClient):
                     "required": ["task_id"],
                 },
             ),
+            McpTool(
+                name="search_panda_server_source",
+                description=(
+                    "Searches the locally installed panda-server source code for functions "
+                    "or logic matching a keyword or phrase.  Returns matching code snippets "
+                    "with file paths and line numbers.  Useful in two scenarios:\n"
+                    "1. RESOURCE ESTIMATION: task is in pending state due to high resource "
+                    "requirements (memory, walltime, disk) that appear overestimated from "
+                    "scout jobs — search for the estimation algorithm (e.g. query='ramCount "
+                    "scout' or 'actualMemoryUsed') to explain how scout measurements were "
+                    "translated into task resource requirements.\n"
+                    "2. ERROR MESSAGE TRACING: errorDialog contains a vague or internal "
+                    "error string with no clear cause node — search for the exact error "
+                    "string to find which code path raised it and under what condition "
+                    "(e.g. query='Brokerage for scout jobs failed').\n"
+                    "Do NOT call if the errorDialog already contains a specific pilot or "
+                    "payload error code that is self-explanatory.  "
+                    "Requires panda-server: pip install \"bamboo[server-source]\"."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Keyword or phrase to search for in the panda-server source, "
+                                "e.g. 'ramCount scout', 'actualMemoryUsed', "
+                                "'Brokerage for scout jobs failed'.  "
+                                "For error messages from errorDialog, strip task/job-specific "
+                                "values (IDs, site names, numbers) and search for the static "
+                                "template portion only — e.g. for 'task 12345 at AGLT2 failed' "
+                                "use 'scout jobs failed' or 'at site failed'."
+                            ),
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Maximum number of matching snippets to return",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
         ]
         self._dispatch = {
             "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
@@ -236,6 +286,7 @@ class PandaMcpClient(McpClient):
             "get_failed_job_details": self._get_failed_job_details,
             "get_task_jedi_details": self._get_task_jedi_details,
             "get_task_input_datasets": self._get_task_input_datasets,
+            "search_panda_server_source": self._search_panda_server_source,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -529,13 +580,14 @@ class PandaMcpClient(McpClient):
         self,
         task_id: int | str,
     ) -> dict[str, Any] | None:
-        """Fetch extended JEDI-level task details for *task_id*.
+        """Fetch extended task details for *task_id* via ``get_task_details_json``.
 
-        Calls ``Client.getJediTaskDetails`` with ``withTaskInfo=True`` to obtain
-        scheduling parameters, split/merge rules, resource allocation, and
-        internal status transitions beyond what the standard task dict contains.
+        Uses the ``task/get_detailed_info`` endpoint (``output_mode="extended"``)
+        which returns scheduling parameters, split/merge rules, resource
+        allocation, and internal status fields not present in the standard task
+        dict returned by ``get_task_details_json`` alone.
 
-        Returns the enriched task dict, or ``None`` on failure.
+        Returns the detail dict, or ``None`` on failure.
         """
         try:
             from pandaclient import Client  # noqa: PLC0415
@@ -544,17 +596,17 @@ class PandaMcpClient(McpClient):
             return None
 
         try:
-            task_dict: dict[str, Any] = {"jediTaskID": int(task_id)}
-            status, result = await asyncio.to_thread(
-                Client.getJediTaskDetails, task_dict, False, True
+            status, data = await asyncio.to_thread(
+                Client.get_task_details_json, int(task_id)
             )
-            if status != 0 or not isinstance(result, dict):
+            if status != 0 or not isinstance(data, tuple) or not data[0]:
                 logger.warning(
                     "PandaMcpClient.get_task_jedi_details: returned status=%s for task_id=%s",
                     status,
                     task_id,
                 )
                 return None
+            result: dict[str, Any] = data[1]
             logger.info(
                 "PandaMcpClient.get_task_jedi_details: fetched %d field(s) for task_id=%s",
                 len(result),
@@ -606,6 +658,73 @@ class PandaMcpClient(McpClient):
             logger.warning(
                 "PandaMcpClient.get_task_input_datasets: failed for task_id=%s: %s",
                 task_id,
+                exc,
+            )
+            return []
+
+    async def _search_panda_server_source(
+        self,
+        query: str,
+        max_results: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search the locally installed panda-server source for *query*.
+
+        Locates the ``pandaserver`` package in ``site-packages``, walks all
+        ``.py`` files, and returns snippets (±10 lines) around every
+        case-insensitive match, up to *max_results*.
+
+        Returns an empty list if panda-server is not installed or on any error.
+        Install with: ``pip install "bamboo[server-source]"``.
+        """
+        spec = importlib.util.find_spec("pandaserver")
+        if spec is None or spec.origin is None:
+            logger.warning(
+                "PandaMcpClient.search_panda_server_source: pandaserver not installed — "
+                "run: pip install \"bamboo[server-source]\""
+            )
+            return []
+
+        pkg_root = Path(spec.origin).parent
+
+        def _search() -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            query_words = query.lower().split()
+            window_size = 5
+            for py_file in sorted(pkg_root.rglob("*.py")):
+                if len(results) >= max_results:
+                    break
+                try:
+                    lines = py_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                i = 0
+                while i < len(lines) and len(results) < max_results:
+                    window = " ".join(lines[i : i + window_size]).lower()
+                    if all(w in window for w in query_words):
+                        start = max(0, i - 10)
+                        end = min(len(lines), i + window_size + 10)
+                        results.append({
+                            "file": str(py_file.relative_to(pkg_root)),
+                            "line": i + 1,
+                            "context": "\n".join(lines[start:end]),
+                        })
+                        i += window_size  # skip to avoid overlapping matches
+                    else:
+                        i += 1
+            return results
+
+        try:
+            results = await asyncio.to_thread(_search)
+            logger.info(
+                "PandaMcpClient.search_panda_server_source: %d match(es) for query=%r",
+                len(results),
+                query,
+            )
+            return results
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.search_panda_server_source: failed for query=%r: %s",
+                query,
                 exc,
             )
             return []

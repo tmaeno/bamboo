@@ -46,6 +46,12 @@ dependencies = [
 external-mcp = [
     "mcp>=1.0.0",
 ]
+# PanDA server source for code search (resource estimation analysis, error tracing).
+# NOTE: panda-server currently installs with full server-side dependencies.
+# This will be updated to a lightweight source-only package once one is available.
+server-source = [
+    "panda-server",
+]
 # Free local embeddings (sentence-transformers, no API key required)
 local-embeddings = [
     "sentence-transformers>=2.7.0",
