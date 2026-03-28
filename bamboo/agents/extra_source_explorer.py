@@ -190,6 +190,12 @@ class ExtraSourceExplorer:
         elif tool_name == "get_failed_job_details":
             if isinstance(result, list):
                 out.external_data["representative_jobs"] = result
+        elif tool_name == "get_task_jedi_details":
+            if isinstance(result, dict):
+                out.task_logs["jedi:task_details"] = json.dumps(result, indent=2, default=str)
+        elif tool_name == "get_task_input_datasets":
+            if isinstance(result, list) and result:
+                out.task_logs["jedi:input_datasets"] = json.dumps(result, indent=2, default=str)
         else:
             # Unknown tool — likely from an external MCP server.
             # Store raw result in external_data so the LLM extractor receives

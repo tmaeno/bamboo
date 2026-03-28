@@ -236,16 +236,19 @@ with one or more `ExternalMcpClient` instances.
 
 Built-in client that exposes PanDA data tools.  No external connection needed.
 
-| Tool | Trigger condition | Returns |
-|---|---|---|
-| `fetch_error_dialog_logs` | Symptom nodes too vague; log evidence absent | `dict[url → content]` |
-| `get_parent_task` | `retryID` present but root cause unclear | Parent task dict |
-| `get_retry_chain` | Failure spans multiple retry attempts | List of ancestor task summaries |
-| `get_task_jobs_summary` | Job-level failure distribution missing | Status counts + top error diags |
-| `get_failed_job_details` | `JobInstanceNode` gaps: scout failures, site-specific errors | List of compact job dicts |
+| Tool | Trigger condition | Routes to | Returns |
+|---|---|---|---|
+| `fetch_error_dialog_logs` | Symptom nodes too vague; log evidence absent | `task_logs` | `dict[url → content]` |
+| `get_parent_task` | `retryID` present but root cause unclear | `external_data` | Parent task dict |
+| `get_retry_chain` | Failure spans multiple retry attempts | `external_data` | List of ancestor task summaries |
+| `get_task_jobs_summary` | Job-level failure distribution missing | `external_data` | Status counts + top error diags |
+| `get_failed_job_details` | `JobInstanceNode` gaps: scout failures, site-specific errors | `external_data` | List of compact job dicts |
+| `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
+| `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
 
-All tools are safe to call concurrently.  `get_task_jobs_summary` and `get_failed_job_details`
-degrade gracefully if the pandaclient bulk-jobs endpoint is unavailable.
+All tools are safe to call concurrently.  Tools routed to `task_logs` (formatted JSON text)
+are processed by the LLM extractor alongside error dialog logs.  Tools routed to
+`external_data` are consumed by the structured extractor path.
 
 #### `ExternalMcpClient`
 
