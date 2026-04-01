@@ -334,10 +334,9 @@ additional tools useful during exploration, notably:
 
 | Tool | Description |
 |---|---|
-| `panda_log_analysis` | AI-powered log analysis + failure classification for a job |
+| `panda_log_analysis` | Log analysis + failure classification for a job |
 | `panda_task_status` | Detailed task metadata including per-job breakdown |
 | `panda_job_status` | Individual job metadata, pilot errors, and file summary |
-| `panda_jobs_query` | Natural-language → SQL job query via DuckDB |
 | `atlas.harvester_workers` | Harvester/pilot worker stats by site |
 
 Results from these tools are stored in `external_data` under `"tool:<name>"` by the explorer's
