@@ -28,7 +28,11 @@ def build_mcp_client(settings: object) -> McpClient:
         is empty.  :class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient`
         combining PanDA tools with all *enabled* external server tools otherwise.
     """
-    from bamboo.mcp.external_mcp_client import CompositeMcpClient, ExternalMcpClient  # noqa: PLC0415
+    from bamboo.mcp.external_mcp_client import (  # noqa: PLC0415
+        CompositeMcpClient,
+        ExternalMcpClient,
+        StdioMcpClient,
+    )
     from bamboo.mcp.server_config import load_server_configs  # noqa: PLC0415
 
     clients: list[McpClient] = [PandaMcpClient()]
@@ -36,7 +40,24 @@ def build_mcp_client(settings: object) -> McpClient:
     config_path: str = getattr(settings, "mcp_servers_config", "") or ""
     if config_path:
         for cfg in load_server_configs(config_path):
-            if cfg.enabled:
+            if not cfg.enabled:
+                continue
+            if cfg.command:
+                clients.append(
+                    StdioMcpClient(
+                        cfg.name,
+                        cfg.command,
+                        cfg.args,
+                        cfg.env or None,
+                    )
+                )
+                logger.info(
+                    "build_mcp_client: registered stdio MCP server %r (%s %s)",
+                    cfg.name,
+                    cfg.command,
+                    " ".join(cfg.args),
+                )
+            else:
                 clients.append(
                     ExternalMcpClient(cfg.name, cfg.url, cfg.headers)
                 )

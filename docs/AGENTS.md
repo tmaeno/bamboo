@@ -24,7 +24,8 @@ includes an optional quality-gate loop.
 │                         │                                      │
 │                         └─ ExtraSourceExplorer                 │
 │                                ├─ PandaMcpClient               │
-│                                └─ ExternalMcpClient (opt)      │
+│                                ├─ ExternalMcpClient (opt, HTTP)│
+│                                └─ StdioMcpClient    (opt, stdio)│
 └────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -263,16 +264,31 @@ presented to the LLM alongside the built-in PanDA tools.
 - If the `mcp` package is missing or the server is unreachable, `connect()` logs the error
   and this client contributes zero tools — the pipeline continues with PanDA tools only.
 
+#### `StdioMcpClient`
+
+**File:** `bamboo/mcp/external_mcp_client.py`
+
+Connects to one external MCP server using the **stdio** transport: bamboo spawns the server
+as a subprocess and communicates over its stdin/stdout.  No separately-running server process
+is needed — bamboo manages the subprocess lifetime automatically.
+
+- Same `mcp` package requirement and fail-open behaviour as `ExternalMcpClient`.
+- The subprocess inherits the current environment plus any extra variables declared in the
+  `env` field of the server config entry.
+
 #### `CompositeMcpClient`
 
 **File:** `bamboo/mcp/external_mcp_client.py`
 
-Aggregates any number of `McpClient` instances into one.  `PandaMcpClient` is always first,
-so its tool names win on any name clash with external servers.
+Aggregates any number of `McpClient` instances (PanDA, HTTP, stdio) into one.
+`PandaMcpClient` is always first, so its tool names win on any name clash with external servers.
 
 #### Configuring external MCP servers
 
-External servers are declared in a JSON file:
+External servers are declared in a JSON file referenced by `MCP_SERVERS_CONFIG`.  Each entry
+must specify **exactly one** transport — `url` (HTTP) or `command` (stdio).
+
+**HTTP transport:**
 
 ```json
 {
@@ -287,13 +303,61 @@ External servers are declared in a JSON file:
 }
 ```
 
-Header values support `${ENV_VAR}` expansion.  Point to the file via `.env`:
+**stdio transport:**
+
+```json
+{
+  "servers": [
+    {
+      "name": "my_server",
+      "command": "python3",
+      "args": ["-m", "mypackage.server"],
+      "env": {"PYTHONPATH": "/path/to/mypackage"},
+      "enabled": true
+    }
+  ]
+}
+```
+
+Header and `env` values support `${ENV_VAR}` expansion.  Point to the file via `.env`:
 
 ```
 MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
 ```
 
 See `bamboo/mcp/server_config.py` for the full schema.
+
+#### Integrating bamboo-mcp
+
+[bamboo-mcp](https://github.com/BNLNPPS/bamboo-mcp) is a companion MCP server that provides
+additional tools useful during exploration, notably:
+
+| Tool | Description |
+|---|---|
+| `panda_log_analysis` | AI-powered log analysis + failure classification for a job |
+| `panda_task_status` | Detailed task metadata including per-job breakdown |
+| `panda_job_status` | Individual job metadata, pilot errors, and file summary |
+| `panda_jobs_query` | Natural-language → SQL job query via DuckDB |
+| `atlas.harvester_workers` | Harvester/pilot worker stats by site |
+
+Results from these tools are stored in `external_data` under `"tool:<name>"` by the explorer's
+generic fallback and forwarded to the LLM extractor as additional context.
+
+Install bamboo-mcp, then add this entry to your `mcp_servers.json`:
+
+```json
+{
+  "servers": [
+    {
+      "name": "bamboo_mcp",
+      "command": "python3",
+      "args": ["-m", "bamboo.server"],
+      "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core"},
+      "enabled": true
+    }
+  ]
+}
+```
 
 ---
 
@@ -360,5 +424,7 @@ continues with what it has rather than aborting.
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
+| `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; PanDA tools still available |
+| `StdioMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
 | `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

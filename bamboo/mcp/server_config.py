@@ -5,7 +5,9 @@ External servers are described in a JSON file whose path is set via the
 values may reference environment variables using ``${VAR_NAME}`` notation —
 they are expanded at load time so secrets stay out of the config file.
 
-Example ``mcp_servers.json``::
+Each entry must specify **exactly one** of ``url`` (HTTP) or ``command`` (stdio):
+
+HTTP example::
 
     {
       "servers": [
@@ -13,6 +15,20 @@ Example ``mcp_servers.json``::
           "name": "my_atlas",
           "url": "http://localhost:8080/mcp",
           "headers": {"Authorization": "Bearer ${ATLAS_TOKEN}"},
+          "enabled": true
+        }
+      ]
+    }
+
+stdio example (bamboo-mcp spawned as a subprocess)::
+
+    {
+      "servers": [
+        {
+          "name": "bamboo_mcp",
+          "command": "python3",
+          "args": ["-m", "bamboo.server"],
+          "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core"},
           "enabled": true
         }
       ]
@@ -50,18 +66,32 @@ def _expand_env_vars(value: str) -> str:
 class McpServerConfig(BaseModel):
     """Configuration for a single external MCP server.
 
+    Exactly one of ``url`` (HTTP transport) or ``command`` (stdio transport)
+    must be set.
+
     Attributes:
         name:    Human-readable label used in logs and tool-name disambiguation.
         url:     StreamableHTTP endpoint URL, e.g. ``http://host:8080/mcp``.
+                 Mutually exclusive with ``command``.
         headers: HTTP headers sent with every request.  Values support
+                 ``${ENV_VAR}`` expansion.  Only used when ``url`` is set.
+        command: Executable to spawn for stdio transport, e.g. ``"python3"``.
+                 Mutually exclusive with ``url``.
+        args:    Command-line arguments passed to ``command``,
+                 e.g. ``["-m", "bamboo.server"]``.
+        env:     Extra environment variables for the subprocess.  Merged on top
+                 of the current process environment.  Values support
                  ``${ENV_VAR}`` expansion.
         enabled: Set to ``false`` to skip this server without removing the
                  entry from the file.
     """
 
     name: str
-    url: str
+    url: str = ""
     headers: dict[str, str] = {}
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
     enabled: bool = True
 
     @field_validator("headers", mode="before")
@@ -70,6 +100,25 @@ class McpServerConfig(BaseModel):
         if not isinstance(v, dict):
             return v
         return {k: _expand_env_vars(str(val)) for k, val in v.items()}
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _expand_env_values(cls, v: dict) -> dict:
+        if not isinstance(v, dict):
+            return v
+        return {k: _expand_env_vars(str(val)) for k, val in v.items()}
+
+    def model_post_init(self, __context: object) -> None:
+        if not self.url and not self.command:
+            raise ValueError(
+                f"McpServerConfig({self.name!r}): must specify either 'url' (HTTP) "
+                "or 'command' (stdio)"
+            )
+        if self.url and self.command:
+            raise ValueError(
+                f"McpServerConfig({self.name!r}): 'url' and 'command' are mutually "
+                "exclusive — use one transport only"
+            )
 
 
 def load_server_configs(path: str) -> list[McpServerConfig]:

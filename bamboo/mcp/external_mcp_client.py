@@ -1,9 +1,14 @@
-"""External MCP server clients using StreamableHTTP transport.
+"""External MCP server clients.
 
 :class:`ExternalMcpClient`
-    Wraps one external MCP server.  Uses the official ``mcp`` Python SDK with
-    StreamableHTTP transport.  The ``mcp`` package is imported lazily — users
-    who only use :class:`~bamboo.mcp.PandaMcpClient` do not need it installed.
+    Wraps one external MCP server via StreamableHTTP transport.  The ``mcp``
+    package is imported lazily — users who only use
+    :class:`~bamboo.mcp.PandaMcpClient` do not need it installed.
+
+:class:`StdioMcpClient`
+    Wraps one external MCP server via stdio transport.  Spawns the server as a
+    subprocess and communicates over its stdin/stdout.  Also uses the ``mcp``
+    package lazily.
 
 :class:`CompositeMcpClient`
     Aggregates any number of :class:`~bamboo.mcp.base.McpClient` instances
@@ -180,6 +185,124 @@ class ExternalMcpClient(McpClient):
             except (json.JSONDecodeError, TypeError):
                 return texts[0]
         return texts
+
+
+class StdioMcpClient(McpClient):
+    """MCP client that spawns a server subprocess and communicates via stdio.
+
+    The server process is started on :meth:`connect` and terminated on
+    :meth:`close`.  Fail-open behaviour is identical to
+    :class:`ExternalMcpClient`: missing ``mcp`` package or subprocess failure
+    logs a warning and contributes zero tools rather than raising.
+
+    Args:
+        name:    Human-readable label for log messages.
+        command: Executable to spawn, e.g. ``"python3"``.
+        args:    Arguments, e.g. ``["-m", "bamboo.server"]``.
+        env:     Extra environment variables merged on top of the current
+                 process environment.  ``None`` means inherit as-is.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        self._name = name
+        self._command = command
+        self._args = args or []
+        self._env = env  # None → inherit; non-empty → merged in connect()
+        self._tools: list[McpTool] = []
+        self._session: Any = None
+        self._stack: AsyncExitStack | None = None
+
+    async def connect(self) -> None:
+        """Spawn the subprocess and initialise the MCP session."""
+        try:
+            from mcp import ClientSession  # noqa: PLC0415
+            from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415
+        except ImportError:
+            logger.warning(
+                "StdioMcpClient(%s): 'mcp' package not installed — "
+                "install with: pip install 'bamboo[external-mcp]'",
+                self._name,
+            )
+            return
+
+        import os  # noqa: PLC0415
+
+        merged_env: dict[str, str] | None = None
+        if self._env:
+            merged_env = {**os.environ, **self._env}
+
+        try:
+            params = StdioServerParameters(
+                command=self._command,
+                args=self._args,
+                env=merged_env,
+            )
+            self._stack = AsyncExitStack()
+            read, write = await self._stack.enter_async_context(
+                stdio_client(params)
+            )
+            self._session = await self._stack.enter_async_context(
+                ClientSession(read, write)
+            )
+            await self._session.initialize()
+            result = await self._session.list_tools()
+            self._tools = [ExternalMcpClient._convert_tool(t) for t in result.tools]
+            logger.info(
+                "StdioMcpClient(%s): spawned %s %s — %d tool(s): %s",
+                self._name,
+                self._command,
+                " ".join(self._args),
+                len(self._tools),
+                [t.name for t in self._tools],
+            )
+        except Exception as exc:
+            logger.warning(
+                "StdioMcpClient(%s): failed to start %s: %s — "
+                "this server will contribute no tools",
+                self._name,
+                self._command,
+                exc,
+            )
+            if self._stack is not None:
+                await self._stack.aclose()
+                self._stack = None
+            self._session = None
+            self._tools = []
+
+    async def close(self) -> None:
+        """Terminate the subprocess and close the session."""
+        if self._stack is not None:
+            try:
+                await self._stack.aclose()
+            except Exception as exc:
+                logger.debug(
+                    "StdioMcpClient(%s): error during close: %s", self._name, exc
+                )
+            finally:
+                self._stack = None
+                self._session = None
+
+    def list_tools(self) -> list[McpTool]:
+        return list(self._tools)
+
+    async def execute(self, tool_name: str, **kwargs: Any) -> Any:
+        if self._session is None:
+            raise RuntimeError(
+                f"StdioMcpClient({self._name}): not connected — call connect() first"
+            )
+        result = await self._session.call_tool(tool_name, kwargs)
+        if result.isError:
+            raise RuntimeError(
+                f"StdioMcpClient({self._name}): tool {tool_name!r} returned error: "
+                f"{result.content}"
+            )
+        return ExternalMcpClient._extract_content(result.content)
 
 
 class CompositeMcpClient(McpClient):
