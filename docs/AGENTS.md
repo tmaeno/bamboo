@@ -337,7 +337,8 @@ additional tools useful during exploration, notably:
 | `panda_log_analysis` | Log analysis + failure classification for a job |
 | `panda_task_status` | Detailed task metadata including per-job breakdown |
 | `panda_job_status` | Individual job metadata, pilot errors, and file summary |
-| `atlas.harvester_workers` | Harvester/pilot worker stats by site |
+| `panda_queue_info` | Look up queue and site configuration |
+| `panda_harvester_workers` | Fetch Harvester worker (pilot) counts by site |
 
 Results from these tools are stored in `external_data` under `"tool:<name>"` by the explorer's
 generic fallback and forwarded to the LLM extractor as additional context.
