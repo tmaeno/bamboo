@@ -29,10 +29,21 @@ stdio example (bamboo-mcp spawned as a subprocess)::
           "command": "python3",
           "args": ["-m", "bamboo.server"],
           "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core"},
+          "include_tools": ["panda_.*", "atlas\\..*"],
+          "exclude_tools": ["bamboo_llm_answer"],
           "enabled": true
         }
       ]
     }
+
+Tool filtering rules:
+
+* ``include_tools`` — whitelist: only tools whose name matches **any** pattern are
+  exposed.  Empty list means *allow all*.
+* ``exclude_tools`` — blacklist: tools whose name matches **any** pattern are hidden,
+  applied **after** the whitelist.  Empty list means *exclude nothing*.
+* Patterns are Python ``re.search`` expressions (partial match, case-sensitive).
+  Compile errors are caught at config-load time and reported as warnings.
 """
 
 from __future__ import annotations
@@ -43,7 +54,7 @@ import os
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +90,16 @@ class McpServerConfig(BaseModel):
                  Mutually exclusive with ``url``.
         args:    Command-line arguments passed to ``command``,
                  e.g. ``["-m", "bamboo.server"]``.
-        env:     Extra environment variables for the subprocess.  Merged on top
-                 of the current process environment.  Values support
-                 ``${ENV_VAR}`` expansion.
-        enabled: Set to ``false`` to skip this server without removing the
-                 entry from the file.
+        env:           Extra environment variables for the subprocess.  Merged on top
+                       of the current process environment.  Values support
+                       ``${ENV_VAR}`` expansion.
+        include_tools: Whitelist of ``re.search`` patterns.  When non-empty, only
+                       tools whose name matches at least one pattern are exposed.
+        exclude_tools: Blacklist of ``re.search`` patterns.  Tools whose name
+                       matches at least one pattern are hidden (applied after
+                       ``include_tools``).
+        enabled:       Set to ``false`` to skip this server without removing the
+                       entry from the file.
     """
 
     name: str
@@ -92,6 +108,8 @@ class McpServerConfig(BaseModel):
     command: str = ""
     args: list[str] = []
     env: dict[str, str] = {}
+    include_tools: list[str] = []
+    exclude_tools: list[str] = []
     enabled: bool = True
 
     @field_validator("headers", mode="before")
@@ -107,6 +125,23 @@ class McpServerConfig(BaseModel):
         if not isinstance(v, dict):
             return v
         return {k: _expand_env_vars(str(val)) for k, val in v.items()}
+
+    @field_validator("include_tools", "exclude_tools", mode="before")
+    @classmethod
+    def _validate_patterns(cls, patterns: list) -> list:
+        """Compile each pattern to catch syntax errors at config-load time."""
+        if not isinstance(patterns, list):
+            return patterns
+        valid = []
+        for p in patterns:
+            try:
+                re.compile(p)
+                valid.append(p)
+            except re.error as exc:
+                logger.warning(
+                    "McpServerConfig: invalid regex pattern %r — skipped (%s)", p, exc
+                )
+        return valid
 
     def model_post_init(self, __context: object) -> None:
         if not self.url and not self.command:

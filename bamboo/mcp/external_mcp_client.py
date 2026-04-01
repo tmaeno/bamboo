@@ -22,12 +22,41 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import AsyncExitStack
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
 
 logger = logging.getLogger(__name__)
+
+
+def _filter_tools(
+    tools: list[McpTool],
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+) -> list[McpTool]:
+    """Apply whitelist then blacklist regex filters to *tools*.
+
+    Args:
+        tools:            Full tool list returned by the server.
+        include_patterns: ``re.search`` patterns — keep only matching tools.
+                          Empty list means keep all.
+        exclude_patterns: ``re.search`` patterns — drop matching tools.
+                          Applied after ``include_patterns``.
+
+    Returns:
+        Filtered list (original order preserved).
+    """
+    result = tools
+    if include_patterns:
+        result = [t for t in result if any(re.search(p, t.name) for p in include_patterns)]
+    if exclude_patterns:
+        result = [t for t in result if not any(re.search(p, t.name) for p in exclude_patterns)]
+    if len(result) != len(tools):
+        hidden = {t.name for t in tools} - {t.name for t in result}
+        logger.debug("_filter_tools: hidden %d tool(s): %s", len(hidden), sorted(hidden))
+    return result
 
 
 class ExternalMcpClient(McpClient):
@@ -58,10 +87,14 @@ class ExternalMcpClient(McpClient):
         name: str,
         url: str,
         headers: dict[str, str] | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
     ) -> None:
         self._name = name
         self._url = url
         self._headers = headers or {}
+        self._include_tools = include_tools or []
+        self._exclude_tools = exclude_tools or []
         self._tools: list[McpTool] = []
         self._session: Any = None  # mcp.ClientSession, typed as Any for lazy import
         self._stack: AsyncExitStack | None = None
@@ -101,7 +134,11 @@ class ExternalMcpClient(McpClient):
             )
             await self._session.initialize()
             result = await self._session.list_tools()
-            self._tools = [self._convert_tool(t) for t in result.tools]
+            self._tools = _filter_tools(
+                [self._convert_tool(t) for t in result.tools],
+                self._include_tools,
+                self._exclude_tools,
+            )
             logger.info(
                 "ExternalMcpClient(%s): connected to %s — %d tool(s): %s",
                 self._name,
@@ -213,11 +250,15 @@ class StdioMcpClient(McpClient):
         command: str,
         args: list[str] | None = None,
         env: dict[str, str] | None = None,
+        include_tools: list[str] | None = None,
+        exclude_tools: list[str] | None = None,
     ) -> None:
         self._name = name
         self._command = command
         self._args = args or []
         self._env = env  # None → inherit; non-empty → merged in connect()
+        self._include_tools = include_tools or []
+        self._exclude_tools = exclude_tools or []
         self._tools: list[McpTool] = []
         self._session: Any = None
         self._stack: AsyncExitStack | None = None
@@ -260,7 +301,11 @@ class StdioMcpClient(McpClient):
             )
             await self._session.initialize()
             result = await self._session.list_tools()
-            self._tools = [ExternalMcpClient._convert_tool(t) for t in result.tools]
+            self._tools = _filter_tools(
+                [ExternalMcpClient._convert_tool(t) for t in result.tools],
+                self._include_tools,
+                self._exclude_tools,
+            )
             logger.info(
                 "StdioMcpClient(%s): spawned %s %s — %d tool(s): %s",
                 self._name,

@@ -49,6 +49,8 @@ def build_mcp_client(settings: object) -> McpClient:
                         cfg.command,
                         cfg.args,
                         cfg.env or None,
+                        cfg.include_tools or None,
+                        cfg.exclude_tools or None,
                     )
                 )
                 logger.info(
@@ -59,7 +61,13 @@ def build_mcp_client(settings: object) -> McpClient:
                 )
             else:
                 clients.append(
-                    ExternalMcpClient(cfg.name, cfg.url, cfg.headers)
+                    ExternalMcpClient(
+                        cfg.name,
+                        cfg.url,
+                        cfg.headers,
+                        cfg.include_tools or None,
+                        cfg.exclude_tools or None,
+                    )
                 )
                 logger.info(
                     "build_mcp_client: registered external MCP server %r at %s",
