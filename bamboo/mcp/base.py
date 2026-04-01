@@ -51,6 +51,11 @@ class McpClient(ABC):
     connection lifecycle.
     """
 
+    @property
+    def name(self) -> str:
+        """Human-readable client identifier used in log messages and UI."""
+        return type(self).__name__
+
     async def connect(self) -> None:
         """Establish connection and discover remote tools.
 

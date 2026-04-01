@@ -50,7 +50,7 @@ external-mcp = [
 # NOTE: panda-server currently installs with full server-side dependencies.
 # This will be updated to a lightweight source-only package once one is available.
 server-source = [
-    "panda-server",
+    "panda-server-source",
 ]
 # Free local embeddings (sentence-transformers, no API key required)
 local-embeddings = [

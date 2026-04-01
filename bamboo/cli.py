@@ -274,9 +274,10 @@ def interactive():
         console.print("4. Query knowledge base (vector database)")
         console.print("5. [red]Cleanup databases[/red]")
         console.print("6. Preview log filter")
-        console.print("7. Exit")
+        console.print("7. Check MCP servers")
+        console.print("8. Exit")
 
-        choice = _ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7"])
+        choice = _ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7", "8"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -291,6 +292,8 @@ def interactive():
         elif choice == "6":
             asyncio.run(preview_log_filter_interactive())
         elif choice == "7":
+            asyncio.run(check_mcp_servers_interactive())
+        elif choice == "8":
             console.print("[green]Goodbye![/green]")
             break
 
@@ -889,6 +892,93 @@ async def cleanup_databases_interactive():
             console.print(f"[red]Vector DB error: {e}[/red]")
         finally:
             await vector_db.close()
+
+
+async def check_mcp_servers_interactive():
+    """Connect to all configured MCP servers, list their tools, and optionally call one."""
+    from bamboo.config import get_settings
+    from bamboo.mcp.factory import build_mcp_client
+
+    console.print("\n[bold cyan]Check MCP Servers[/bold cyan]")
+
+    settings = get_settings()
+    client = build_mcp_client(settings)
+
+    console.print("Connecting...")
+    try:
+        await client.connect()
+    except Exception as e:
+        console.print(f"[red]Connection error: {e}[/red]")
+        return
+
+    try:
+        tools = client.list_tools()
+
+        if not tools:
+            console.print("[yellow]No tools available — check MCP_SERVERS_CONFIG and server logs.[/yellow]")
+            return
+
+        # Build tool → server-name map by iterating sub-clients when composite
+        from bamboo.mcp.external_mcp_client import CompositeMcpClient  # noqa: PLC0415
+        source_map: dict[str, str] = {}
+        if isinstance(client, CompositeMcpClient):
+            for sub in client._clients:
+                for t in sub.list_tools():
+                    source_map.setdefault(t.name, sub.name)
+        else:
+            for t in tools:
+                source_map[t.name] = client.name
+
+        # Display tools in a Rich table
+        table = Table(title=f"Available tools ({len(tools)})", show_lines=False)
+        table.add_column("Server", style="dim cyan", no_wrap=True)
+        table.add_column("Tool", style="cyan", no_wrap=True)
+        table.add_column("Parameters", style="dim")
+        table.add_column("Description")
+        for t in tools:
+            params = ", ".join(t.parameters_schema.get("properties", {}).keys())
+            desc = t.description or ""
+            if len(desc) > 70:
+                desc = desc[:67] + "..."
+            table.add_row(source_map.get(t.name, "?"), t.name, params, desc)
+        console.print(table)
+
+        # Optionally call a tool
+        if not _confirm("Call a tool?", default=False):
+            return
+
+        tool_names = [t.name for t in tools]
+        tool_name = _ask("Tool name", choices=tool_names)
+
+        # Show the parameter schema so the user knows what to pass
+        selected = next(t for t in tools if t.name == tool_name)
+        props = selected.parameters_schema.get("properties", {})
+        if props:
+            console.print("[dim]Parameters:[/dim]")
+            for pname, pschema in props.items():
+                ptype = pschema.get("type", "any")
+                pdesc = pschema.get("description", "")
+                console.print(f"  [cyan]{pname}[/cyan] ({ptype})  {pdesc}")
+
+        args_raw = _ask("Arguments (JSON object, or empty for none)", default="{}")
+        try:
+            args = json.loads(args_raw) if args_raw.strip() else {}
+        except json.JSONDecodeError as e:
+            console.print(f"[red]Invalid JSON: {e}[/red]")
+            return
+
+        console.print(f"Calling [cyan]{tool_name}[/cyan]...")
+        try:
+            result = await client.execute(tool_name, **args)
+            if isinstance(result, (dict, list)):
+                console.print_json(json.dumps(result, default=str, indent=2))
+            else:
+                console.print(str(result))
+        except Exception as e:
+            console.print(f"[red]Tool error: {e}[/red]")
+
+    finally:
+        await client.close()
 
 
 @cli.command("populate")

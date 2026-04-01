@@ -24,8 +24,8 @@ includes an optional quality-gate loop.
 │                         │                                      │
 │                         └─ ExtraSourceExplorer                 │
 │                                ├─ PandaMcpClient               │
-│                                ├─ ExternalMcpClient (opt, HTTP)│
-│                                └─ StdioMcpClient    (opt, stdio)│
+│                                ├─ ExternalMcpClient (HTTP)     │
+│                                └─ StdioMcpClient    (stdio)    │
 └────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -343,14 +343,14 @@ additional tools useful during exploration, notably:
 Results from these tools are stored in `external_data` under `"tool:<name>"` by the explorer's
 generic fallback and forwarded to the LLM extractor as additional context.
 
-Install bamboo-mcp, then add this entry to your `mcp_servers.json`:
+Install bamboo-mcp in a separate virtual environment, then add this entry to your `mcp_servers.json`:
 
 ```json
 {
   "servers": [
     {
       "name": "bamboo_mcp",
-      "command": "python3",
+      "command": "/separate_venv/bin/python3",
       "args": ["-m", "bamboo.server"],
       "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core"},
       "enabled": true

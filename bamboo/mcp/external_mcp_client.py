@@ -66,6 +66,10 @@ class ExternalMcpClient(McpClient):
         self._session: Any = None  # mcp.ClientSession, typed as Any for lazy import
         self._stack: AsyncExitStack | None = None
 
+    @property
+    def name(self) -> str:
+        return self._name
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -217,6 +221,10 @@ class StdioMcpClient(McpClient):
         self._tools: list[McpTool] = []
         self._session: Any = None
         self._stack: AsyncExitStack | None = None
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     async def connect(self) -> None:
         """Spawn the subprocess and initialise the MCP session."""
