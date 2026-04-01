@@ -352,7 +352,8 @@ Install bamboo-mcp in a separate virtual environment, then add this entry to you
       "name": "bamboo_mcp",
       "command": "/separate_venv/bin/python3",
       "args": ["-m", "bamboo.server"],
-      "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core"},
+      "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core",
+              "PANDA_BASE_URL": "https://bigpanda.monitor.url"},
       "enabled": true
     }
   ]
