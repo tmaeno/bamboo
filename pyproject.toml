@@ -38,30 +38,17 @@ dependencies = [
     "email-validator>=2.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",
-    "panda-client-light>=1.6.11",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
-# External MCP servers via StreamableHTTP transport
-external-mcp = [
-    "mcp>=1.0.0",
-]
-# PanDA server source for code search (resource estimation analysis, error tracing).
-# NOTE: panda-server currently installs with full server-side dependencies.
-# This will be updated to a lightweight source-only package once one is available.
-server-source = [
+# PanDA integration
+panda = [
+    "panda-client-light>=1.6.11",
     "panda-server-source",
 ]
-# Free local embeddings (sentence-transformers, no API key required)
-local-embeddings = [
-    "sentence-transformers>=2.7.0",
-    "langchain-huggingface>=0.0.3",
-]
-# Free local LLM via Ollama (no API key required; install Ollama separately)
-ollama = [
-    "langchain-ollama>=0.1.0",
-]
-# Fully free setup: local LLM (Ollama) + local embeddings (sentence-transformers)
+# Fully local setup: embeddings (sentence-transformers) + LLM (Ollama).
+# No API key required
 local = [
     "sentence-transformers>=2.7.0",
     "langchain-huggingface>=0.0.3",

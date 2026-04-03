@@ -277,6 +277,7 @@ Built-in client that exposes PanDA data tools.  No external connection needed.
 | `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
 | `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
 | `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |
+| `search_panda_docs` | Node name or error pattern requires domain-level explanation (e.g. what a task status means, when it is entered, what causes it) | `external_data` | List of `{title, url, snippet}` dicts from the official PanDA WMS documentation |
 
 All tools are safe to call concurrently.  Tools routed to `task_logs` (formatted JSON text)
 are processed by the LLM extractor alongside error dialog logs.  Tools routed to
@@ -290,7 +291,7 @@ Connects to one external MCP server using the **StreamableHTTP** transport from 
 `mcp` Python SDK.  Tools are discovered at connect time via `session.list_tools()` and are
 presented to the LLM alongside the built-in PanDA tools.
 
-- Requires `pip install "bamboo[external-mcp]"` (adds the `mcp>=1.0.0` package).
+- The `mcp` package is a main dependency — no extra install needed.
 - If the `mcp` package is missing or the server is unreachable, `connect()` logs the error
   and this client contributes zero tools — the pipeline continues with PanDA tools only.
 
@@ -432,7 +433,7 @@ pipeline, then drafts a resolution email for the task submitter.
 The `search_panda_server_source` tool requires panda-server installed in the same environment:
 
 ```
-pip install "bamboo[server-source]"
+pip install "bamboo[panda]"
 ```
 
 > **Note:** `panda-server` currently installs with full server-side dependencies.
@@ -459,4 +460,5 @@ continues with what it has rather than aborting.
 | `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; PanDA tools still available |
 | `StdioMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
 | `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
+| `search_panda_docs` (RTD site unreachable) | Logs warning, returns empty list |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

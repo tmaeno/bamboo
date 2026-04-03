@@ -38,6 +38,12 @@ Tool catalogue
     Searches the locally installed panda-server source code for functions
     or logic matching a keyword.  Used for resource estimation analysis
     (scout → ramCount algorithm) and error message tracing.
+
+``search_panda_docs``
+    Searches the official PanDA WMS documentation (readthedocs) using the
+    Sphinx client-side search index.  Returns matching page titles, URLs,
+    and text snippets.  Used to retrieve domain-level context about task
+    statuses, error patterns, and configuration parameters.
 """
 
 from __future__ import annotations
@@ -62,6 +68,12 @@ _MAX_ERROR_DIALOG_LOGS = 5
 
 # Fields kept from parent task dicts in retry-chain results (keeps LLM context compact).
 _RETRY_CHAIN_FIELDS = ("taskID", "status", "errorDialog", "retryID", "transUses")
+
+# PanDA WMS documentation base URL (Sphinx/ReadTheDocs).
+_PANDA_DOCS_BASE = "https://panda-wms.readthedocs.io/en/latest"
+
+# Module-level cache for the Sphinx search index (populated on first call).
+_sphinx_index_cache: dict[str, Any] | None = None
 
 
 class PandaMcpClient(McpClient):
@@ -251,7 +263,7 @@ class PandaMcpClient(McpClient):
                     "(e.g. query='Brokerage for scout jobs failed').\n"
                     "Do NOT call if the errorDialog already contains a specific pilot or "
                     "payload error code that is self-explanatory.  "
-                    "Requires panda-server: pip install \"bamboo[server-source]\"."
+                    "Requires panda-server: pip install \"bamboo[panda]\"."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -277,6 +289,44 @@ class PandaMcpClient(McpClient):
                     "required": ["query"],
                 },
             ),
+            McpTool(
+                name="search_panda_docs",
+                description=(
+                    "Searches the official PanDA WMS documentation for context about a "
+                    "task status, error pattern, or configuration concept.  Use this when "
+                    "a node name or error string requires domain-level explanation — what "
+                    "it means, when it occurs, and what typically causes or resolves it.  "
+                    "Examples: query='exhausted task status retry limit' to understand "
+                    "TaskStatusExhausted; query='too many files input dataset limit' to "
+                    "understand TooManyFilesInDataset; query='scout job memory overestimate' "
+                    "for resource-related pending tasks.  "
+                    "Returns up to 3 matching doc sections with page title, URL, and a "
+                    "text snippet from the relevant passage.  "
+                    "Do NOT call for errors that are already fully explained by the "
+                    "errorDialog or pilot error code alone."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Natural-language search query, e.g. "
+                                "'exhausted task status retry', "
+                                "'cpu efficiency threshold task killed', "
+                                "'scout job memory overestimate ramCount'.  "
+                                "Use lowercase words; avoid CamelCase node names."
+                            ),
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "default": 3,
+                            "description": "Maximum number of doc sections to return (1–5)",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
         ]
         self._dispatch = {
             "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
@@ -287,6 +337,7 @@ class PandaMcpClient(McpClient):
             "get_task_jedi_details": self._get_task_jedi_details,
             "get_task_input_datasets": self._get_task_input_datasets,
             "search_panda_server_source": self._search_panda_server_source,
+            "search_panda_docs": self._search_panda_docs,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -674,13 +725,13 @@ class PandaMcpClient(McpClient):
         case-insensitive match, up to *max_results*.
 
         Returns an empty list if panda-server is not installed or on any error.
-        Install with: ``pip install "bamboo[server-source]"``.
+        Install with: ``pip install "bamboo[panda]"``.
         """
         spec = importlib.util.find_spec("pandaserver")
         if spec is None or spec.origin is None:
             logger.warning(
                 "PandaMcpClient.search_panda_server_source: pandaserver not installed — "
-                "run: pip install \"bamboo[server-source]\""
+                "run: pip install \"bamboo[panda]\""
             )
             return []
 
@@ -728,3 +779,182 @@ class PandaMcpClient(McpClient):
                 exc,
             )
             return []
+
+    async def _search_panda_docs(
+        self,
+        query: str,
+        max_results: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Search the PanDA WMS documentation via the Sphinx client-side index.
+
+        Fetches ``searchindex.js`` from the RTD site (cached in-process after the
+        first call), scores documents by how many query words appear in their term
+        and title-term indices, then fetches the top-ranked pages and extracts the
+        most relevant text passage.
+
+        Returns a list of ``{"title", "url", "snippet"}`` dicts, or an empty list
+        on any network or parse error.
+        """
+        import json
+        import re
+
+        import httpx
+
+        global _sphinx_index_cache
+
+        # --- 1. Fetch and cache the Sphinx search index ---
+        if _sphinx_index_cache is None:
+            index_url = f"{_PANDA_DOCS_BASE}/searchindex.js"
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(index_url)
+                    resp.raise_for_status()
+                raw = resp.text.strip()
+                # Strip the JS wrapper: Search.setIndex({...})
+                raw = re.sub(r"^Search\.setIndex\(", "", raw).rstrip().rstrip(")")
+                _sphinx_index_cache = json.loads(raw)
+                logger.info(
+                    "PandaMcpClient.search_panda_docs: loaded sphinx index (%d docs)",
+                    len(_sphinx_index_cache.get("docnames", [])),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "PandaMcpClient.search_panda_docs: failed to fetch sphinx index: %s", exc
+                )
+                return []
+
+        index = _sphinx_index_cache
+        docnames: list[str] = index.get("docnames", [])
+        titles: list[str] = index.get("titles", [])
+        terms: dict[str, list[int] | int] = index.get("terms", {})
+        titleterms: dict[str, list[int] | int] = index.get("titleterms", {})
+
+        # --- 2. Score documents by query-term matches ---
+        words = query.lower().split()
+        scores: dict[int, int] = {}
+
+        def _add(hits: list[int] | int, weight: int) -> None:
+            for doc_idx in ([hits] if isinstance(hits, int) else hits):
+                scores[doc_idx] = scores.get(doc_idx, 0) + weight
+
+        for word in words:
+            if word in terms:
+                _add(terms[word], 1)
+            if word in titleterms:
+                _add(titleterms[word], 2)
+
+        if not scores:
+            logger.info(
+                "PandaMcpClient.search_panda_docs: no index matches for query=%r", query
+            )
+            return []
+
+        top_indices = sorted(scores, key=scores.__getitem__, reverse=True)[:max_results]
+
+        # --- 3. Fetch each matched page and extract a relevant snippet ---
+        results: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=15) as client:
+            for doc_idx in top_indices:
+                if doc_idx >= len(docnames):
+                    continue
+                url = f"{_PANDA_DOCS_BASE}/{docnames[doc_idx]}.html"
+                try:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                except Exception as exc:
+                    logger.warning(
+                        "PandaMcpClient.search_panda_docs: failed to fetch %s: %s", url, exc
+                    )
+                    continue
+                snippet = _extract_doc_snippet(resp.text, words)
+                results.append(
+                    {
+                        "title": titles[doc_idx] if doc_idx < len(titles) else docnames[doc_idx],
+                        "url": url,
+                        "snippet": snippet,
+                    }
+                )
+
+        logger.info(
+            "PandaMcpClient.search_panda_docs: %d result(s) for query=%r", len(results), query
+        )
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for search_panda_docs
+# ---------------------------------------------------------------------------
+
+def _extract_doc_snippet(html: str, query_words: list[str], max_chars: int = 500) -> str:
+    """Extract a relevant text passage from a Sphinx HTML page.
+
+    Parses the ``<div role="main">`` block, collects text paragraphs, and returns
+    the first paragraph that contains any of *query_words* (up to *max_chars*
+    characters).  Falls back to the first non-empty paragraph if none match.
+    """
+    from html.parser import HTMLParser
+
+    class _TextCollector(HTMLParser):
+        """Collects text inside <div role="main">, split by block-level tags."""
+
+        _BLOCK = frozenset(
+            {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "td", "th"}
+        )
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._in_main = False
+            self._depth = 0
+            self._buf: list[str] = []
+            self.paragraphs: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            attr_dict = dict(attrs)
+            if tag == "div" and attr_dict.get("role") == "main":
+                self._in_main = True
+                self._depth = 1
+                return
+            if self._in_main:
+                if tag == "div":
+                    self._depth += 1
+                if tag in self._BLOCK:
+                    self._flush()
+
+        def handle_endtag(self, tag: str) -> None:
+            if not self._in_main:
+                return
+            if tag == "div":
+                self._depth -= 1
+                if self._depth <= 0:
+                    self._flush()
+                    self._in_main = False
+            elif tag in self._BLOCK:
+                self._flush()
+
+        def handle_data(self, data: str) -> None:
+            if self._in_main:
+                self._buf.append(data)
+
+        def _flush(self) -> None:
+            text = " ".join(self._buf).split()
+            if text:
+                self.paragraphs.append(" ".join(text))
+            self._buf = []
+
+    collector = _TextCollector()
+    try:
+        collector.feed(html)
+    except Exception:
+        pass
+
+    paragraphs = collector.paragraphs
+    if not paragraphs:
+        return ""
+
+    # Prefer the first paragraph that contains a query word
+    lower_words = [w.lower() for w in query_words]
+    for para in paragraphs:
+        if any(w in para.lower() for w in lower_words):
+            return para[:max_chars]
+
+    return paragraphs[0][:max_chars]

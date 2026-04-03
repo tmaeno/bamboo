@@ -119,7 +119,7 @@ class ExternalMcpClient(McpClient):
         except ImportError:
             logger.warning(
                 "ExternalMcpClient(%s): 'mcp' package not installed — "
-                "install with: pip install 'bamboo[external-mcp]'",
+                "install with: pip install 'bamboo'",
                 self._name,
             )
             return
@@ -275,7 +275,7 @@ class StdioMcpClient(McpClient):
         except ImportError:
             logger.warning(
                 "StdioMcpClient(%s): 'mcp' package not installed — "
-                "install with: pip install 'bamboo[external-mcp]'",
+                "install with: pip install 'bamboo'",
                 self._name,
             )
             return

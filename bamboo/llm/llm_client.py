@@ -157,7 +157,7 @@ def get_embeddings() -> Embeddings:
             raise ImportError(
                 "EMBEDDINGS_PROVIDER=local requires 'sentence-transformers' and "
                 "'langchain-huggingface'.\n"
-                "Install them with:  pip install 'bamboo[local-embeddings]'"
+                "Install them with:  pip install 'bamboo[local]'"
             ) from exc
         try:
             return HuggingFaceEmbeddings(model_name=settings.embedding_model)
