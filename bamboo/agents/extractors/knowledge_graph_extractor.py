@@ -48,6 +48,7 @@ class KnowledgeGraphExtractor:
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
         review_feedback: str = "",
+        doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph and assign stable node IDs.
 
@@ -83,6 +84,7 @@ class KnowledgeGraphExtractor:
             job_logs=job_logs,
             jobs_data=jobs_data,
             review_feedback=review_feedback,
+            doc_hints=doc_hints,
         )
 
         # Deduplicate nodes by (type, name) — the LLM occasionally emits the

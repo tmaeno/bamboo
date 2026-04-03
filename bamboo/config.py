@@ -185,6 +185,7 @@ class Settings(BaseSettings):
     # Example: MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
     mcp_servers_config: str = ""
 
+
     @property
     def effective_embeddings_api_key(self) -> str:
         """Return the API key to use for embeddings.

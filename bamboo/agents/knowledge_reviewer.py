@@ -76,6 +76,7 @@ class KnowledgeReviewer:
         sources: dict[str, str],
         task_data: dict[str, Any] | None = None,
         available_tools: list | None = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> ReviewResult:
         """Evaluate the extracted graph for incident completeness.
 
@@ -103,10 +104,14 @@ class KnowledgeReviewer:
             return ReviewResult(approved=True, confidence=1.0)
 
         graph_summary = _serialise_graph(graph)
-        sources_summary = _serialise_sources(sources) if sources else "(none)"
         task_summary = _build_task_summary(task_data or {})
 
+        sources_summary = _serialise_sources(sources) if sources else "(none)"
+        domain_hints = _join_doc_hints(doc_hints)
+
         show_block("reviewer: task context", task_summary)
+        if doc_hints:
+            show_block("reviewer: panda docs hints", domain_hints)
 
         try:
             llm = get_extraction_llm()
@@ -117,6 +122,7 @@ class KnowledgeReviewer:
                         graph_summary=graph_summary,
                         task_summary=task_summary,
                         sources_summary=sources_summary,
+                        domain_hints=domain_hints,
                         available_tools=_format_available_tools(available_tools),
                     )
                 )
@@ -148,6 +154,7 @@ def build_sources_summary(
     email_text: str = "",
     task_logs: dict[str, str] | None = None,
     job_logs: dict[str, str] | None = None,
+    doc_hints: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build truncated source excerpts for use as optional reviewer context.
 
@@ -155,6 +162,8 @@ def build_sources_summary(
         email_text: Raw email thread.
         task_logs:  Task-level logs keyed by source name.
         job_logs:   Job-level logs keyed by source name.
+        doc_hints:  PanDA documentation hints keyed by query string (already
+                    rendered as plain text — not JSON).
 
     Returns:
         Dict mapping source label → truncated text.
@@ -168,7 +177,17 @@ def build_sources_summary(
     for name, text in (job_logs or {}).items():
         if text and text.strip():
             sources[f"job_log:{name}"] = text[:_MAX_LOG_CHARS]
+    for query, text in (doc_hints or {}).items():
+        if text and text.strip():
+            sources[f"panda_docs:{query[:40]}"] = text[:_MAX_LOG_CHARS * 3]
     return sources
+
+
+def _join_doc_hints(doc_hints: dict[str, str] | None) -> str:
+    """Concatenate all doc hint values into a single prompt string."""
+    if not doc_hints:
+        return "(none)"
+    return "\n\n".join(v for v in doc_hints.values() if v)
 
 
 def _format_available_tools(tools: list | None) -> str:

@@ -904,6 +904,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         job_logs: Optional[dict[str, str]] = None,
         jobs_data: Optional[list[dict[str, Any]]] = None,
         review_feedback: str = "",
+        doc_hints: Optional[dict[str, str]] = None,
     ) -> KnowledgeGraph:
         nodes: list = []
         relationships: list[GraphRelationship] = []
@@ -1159,15 +1160,16 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         # Task-level logs (orchestration services: JEDI, Harvester, …)
         for source_name, source_log in (task_logs or {}).items():
-            if source_log and source_log.strip():
-                say(
-                    f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
-                )
-                log_nodes, log_rels = await self._extract_from_log(
-                    source_name, source_log, log_level="task", review_feedback=review_feedback
-                )
-                nodes.extend(log_nodes)
-                relationships.extend(log_rels)
+            if not source_log or not source_log.strip():
+                continue
+            say(
+                f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
+            )
+            log_nodes, log_rels = await self._extract_from_log(
+                source_name, source_log, log_level="task", review_feedback=review_feedback
+            )
+            nodes.extend(log_nodes)
+            relationships.extend(log_rels)
 
         # Job-level logs (execution workers: pilot, Athena/payload, …)
         for source_name, source_log in (job_logs or {}).items():

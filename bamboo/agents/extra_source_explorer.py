@@ -81,6 +81,7 @@ class ExtraSourceExplorer:
         self,
         task_data: dict[str, Any],
         review_issues: list[str],
+        doc_hints: dict[str, str] | None = None,
     ) -> ExplorationResult:
         """Single select-and-fetch pass.
 
@@ -114,7 +115,7 @@ class ExtraSourceExplorer:
             # ── Plan-based path (planner configured and succeeded) ──────────
             plan = None
             if self._planner is not None:
-                plan = await self._planner.plan(task_data, review_issues, tools)
+                plan = await self._planner.plan(task_data, review_issues, tools, doc_hints=doc_hints)
 
             if plan is not None and plan.steps:
                 all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
@@ -235,6 +236,9 @@ class ExtraSourceExplorer:
         elif tool_name == "search_panda_server_source":
             if isinstance(result, list) and result:
                 out.task_logs["panda_server:source_search"] = json.dumps(result, indent=2)
+        elif tool_name == "search_panda_docs":
+            if isinstance(result, list) and result:
+                out.task_logs["panda_docs:search"] = json.dumps(result, indent=2)
         else:
             # Unknown tool — likely from an external MCP server.
             # Store raw result in external_data so the LLM extractor receives

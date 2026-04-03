@@ -110,6 +110,7 @@ class ExplorationPlanner:
         task_data: dict[str, Any],
         review_issues: list[str],
         tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
     ) -> ExplorationPlan | None:
         """Run both planning phases and return a structured plan.
 
@@ -121,15 +122,16 @@ class ExplorationPlanner:
             review_issues: Issue strings from the previous
                            :class:`~bamboo.agents.KnowledgeReviewer` result.
             tools:         Available MCP tools (already listed by the caller).
+            task_logs:     Current task_logs dict (may contain panda_docs: entries).
         """
         if not review_issues or not tools:
             return None
         try:
-            gaps = await self._analyse_gaps(task_data, review_issues, tools)
+            gaps = await self._analyse_gaps(task_data, review_issues, tools, doc_hints)
             if not gaps:
                 say("Planner found no actionable gaps — falling back to direct tool selection.")
                 return None
-            steps = await self._build_plan(gaps, task_data, tools)
+            steps = await self._build_plan(gaps, task_data, tools, doc_hints)
             plan = ExplorationPlan(gaps=gaps, steps=steps)
             say(
                 f"Exploration plan: {len(plan.steps)} step(s), "
@@ -152,6 +154,7 @@ class ExplorationPlanner:
         task_data: dict[str, Any],
         review_issues: list[str],
         tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
     ) -> list[str]:
         """LLM call 1: convert reviewer issues into structured gap descriptions.
 
@@ -159,7 +162,7 @@ class ExplorationPlanner:
         each JSON object), filtering to only those marked ``"resolvable": true``.
         Returns ``[]`` on parse error.
         """
-        from bamboo.agents.knowledge_reviewer import _build_task_summary  # noqa: PLC0415
+        from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
         from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
 
         task_summary = _build_task_summary(task_data)
@@ -170,6 +173,7 @@ class ExplorationPlanner:
             review_issues=issues_text,
             task_summary=task_summary,
             tools_description=tools_description,
+            domain_hints=_join_doc_hints(doc_hints),
         )
 
         say("Analysing information gaps...")
@@ -193,12 +197,13 @@ class ExplorationPlanner:
         gaps: list[str],
         task_data: dict[str, Any],
         tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
     ) -> list[PlanStep]:
         """LLM call 2: map gaps to ordered PlanSteps.
 
         Returns ``[]`` on parse error (triggers fallback in :meth:`plan`).
         """
-        from bamboo.agents.knowledge_reviewer import _build_task_summary  # noqa: PLC0415
+        from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
         from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
 
         task_summary = _build_task_summary(task_data)
@@ -209,6 +214,7 @@ class ExplorationPlanner:
             gaps=gaps_text,
             task_summary=task_summary,
             tools_description=tools_description,
+            domain_hints=_join_doc_hints(doc_hints),
         )
 
         say("Building exploration plan...")
@@ -219,7 +225,7 @@ class ExplorationPlanner:
 
 
 # ---------------------------------------------------------------------------
-# Private parse helpers
+# Private helpers
 # ---------------------------------------------------------------------------
 
 

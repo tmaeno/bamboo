@@ -57,6 +57,7 @@ class ExtractionStrategy(ABC):
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
         review_feedback: str = "",
+        doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
 

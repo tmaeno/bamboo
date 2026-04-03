@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -69,11 +70,17 @@ _MAX_ERROR_DIALOG_LOGS = 5
 # Fields kept from parent task dicts in retry-chain results (keeps LLM context compact).
 _RETRY_CHAIN_FIELDS = ("taskID", "status", "errorDialog", "retryID", "transUses")
 
-# PanDA WMS documentation base URL (Sphinx/ReadTheDocs).
-_PANDA_DOCS_BASE = "https://panda-wms.readthedocs.io/en/latest"
+# PanDA WMS documentation GitHub repository.
+_PANDA_DOCS_RAW_BASE = "https://raw.githubusercontent.com/PanDAWMS/panda-docs/main"
+_PANDA_DOCS_WEB_BASE = "https://github.com/PanDAWMS/panda-docs/blob/main"
+_PANDA_DOCS_TREE_URL = (
+    "https://api.github.com/repos/PanDAWMS/panda-docs/git/trees/main?recursive=1"
+)
 
-# Module-level cache for the Sphinx search index (populated on first call).
-_sphinx_index_cache: dict[str, Any] | None = None
+# In-process BM25 index: None = not yet built.
+# Built on the first search_panda_docs call from all docs/source/**/*.rst files.
+# Tuple layout: (BM25Okapi index, list of (path, paragraph_text) parallel to the corpus).
+_bm25_data: tuple | None = None
 
 
 class PandaMcpClient(McpClient):
@@ -783,97 +790,66 @@ class PandaMcpClient(McpClient):
     async def _search_panda_docs(
         self,
         query: str,
-        max_results: int = 3,
+        max_results: int = 5,
     ) -> list[dict[str, Any]]:
-        """Search the PanDA WMS documentation via the Sphinx client-side index.
+        """Search the PanDA WMS documentation using a local in-process RST cache.
 
-        Fetches ``searchindex.js`` from the RTD site (cached in-process after the
-        first call), scores documents by how many query words appear in their term
-        and title-term indices, then fetches the top-ranked pages and extracts the
-        most relevant text passage.
+        On the first call, fetches the repository file tree (Git Trees API —
+        public, no token) and then downloads every ``docs/source/**/*.rst`` file
+        concurrently from ``raw.githubusercontent.com``.  The content is cached
+        in-process so subsequent calls are instant.
 
         Returns a list of ``{"title", "url", "snippet"}`` dicts, or an empty list
         on any network or parse error.
         """
-        import json
-        import re
-
         import httpx
 
-        global _sphinx_index_cache
+        from rank_bm25 import BM25Okapi  # noqa: PLC0415
 
-        # --- 1. Fetch and cache the Sphinx search index ---
-        if _sphinx_index_cache is None:
-            index_url = f"{_PANDA_DOCS_BASE}/searchindex.js"
-            try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(index_url)
-                    resp.raise_for_status()
-                raw = resp.text.strip()
-                # Strip the JS wrapper: Search.setIndex({...})
-                raw = re.sub(r"^Search\.setIndex\(", "", raw).rstrip().rstrip(")")
-                _sphinx_index_cache = json.loads(raw)
-                logger.info(
-                    "PandaMcpClient.search_panda_docs: loaded sphinx index (%d docs)",
-                    len(_sphinx_index_cache.get("docnames", [])),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "PandaMcpClient.search_panda_docs: failed to fetch sphinx index: %s", exc
-                )
-                return []
-
-        index = _sphinx_index_cache
-        docnames: list[str] = index.get("docnames", [])
-        titles: list[str] = index.get("titles", [])
-        terms: dict[str, list[int] | int] = index.get("terms", {})
-        titleterms: dict[str, list[int] | int] = index.get("titleterms", {})
-
-        # --- 2. Score documents by query-term matches ---
-        words = query.lower().split()
-        scores: dict[int, int] = {}
-
-        def _add(hits: list[int] | int, weight: int) -> None:
-            for doc_idx in ([hits] if isinstance(hits, int) else hits):
-                scores[doc_idx] = scores.get(doc_idx, 0) + weight
-
-        for word in words:
-            if word in terms:
-                _add(terms[word], 1)
-            if word in titleterms:
-                _add(titleterms[word], 2)
-
-        if not scores:
-            logger.info(
-                "PandaMcpClient.search_panda_docs: no index matches for query=%r", query
-            )
+        bm25, paragraphs = await _build_bm25_index(httpx, BM25Okapi)
+        if bm25 is None:
             return []
 
-        top_indices = sorted(scores, key=scores.__getitem__, reverse=True)[:max_results]
+        tokens = re.findall(r"[a-z0-9]+", query.lower())
+        bm25_scores = bm25.get_scores(tokens)
 
-        # --- 3. Fetch each matched page and extract a relevant snippet ---
+        # Rank all paragraphs and collect the top ones, grouped by source file.
+        # We gather up to max_results * 3 candidate paragraphs so each file can
+        # contribute more than one passage (adjacent sections may both be relevant).
+        ranked = sorted(
+            range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
+        )
+        ranked = [i for i in ranked if bm25_scores[i] > 0]
+
+        # Collect one anchor paragraph index per source file (the highest-scoring).
+        # Paragraphs within a file are stored in document order, so we can walk
+        # forward from the anchor to grab the surrounding section context.
+        seen_paths: dict[str, int] = {}  # path → anchor paragraph index
+        for idx in ranked:
+            path = paragraphs[idx][0]
+            if path not in seen_paths:
+                seen_paths[path] = idx
+            if len(seen_paths) >= max_results:
+                break
+
         results: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=15) as client:
-            for doc_idx in top_indices:
-                if doc_idx >= len(docnames):
-                    continue
-                url = f"{_PANDA_DOCS_BASE}/{docnames[doc_idx]}.html"
-                try:
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-                except Exception as exc:
-                    logger.warning(
-                        "PandaMcpClient.search_panda_docs: failed to fetch %s: %s", url, exc
-                    )
-                    continue
-                snippet = _extract_doc_snippet(resp.text, words)
-                results.append(
-                    {
-                        "title": titles[doc_idx] if doc_idx < len(titles) else docnames[doc_idx],
-                        "url": url,
-                        "snippet": snippet,
-                    }
-                )
+        for path, anchor_idx in seen_paths.items():
+            title = path.split("/")[-1].replace(".rst", "").replace("_", " ").title()
+            # Collect the anchor paragraph + up to 8 following paragraphs from
+            # the same file to capture section bullets/prose that scored 0
+            # (they don't repeat the query term but are part of the same section).
+            context_parts: list[str] = []
+            for j in range(anchor_idx, min(anchor_idx + 9, len(paragraphs))):
+                if paragraphs[j][0] == path:
+                    context_parts.append(paragraphs[j][1])
+                else:
+                    break
+            snippet = "\n".join(context_parts)[:1500]
+            results.append({
+                "title": title,
+                "url": f"{_PANDA_DOCS_WEB_BASE}/{path}",
+                "snippet": snippet,
+            })
 
         logger.info(
             "PandaMcpClient.search_panda_docs: %d result(s) for query=%r", len(results), query
@@ -885,76 +861,93 @@ class PandaMcpClient(McpClient):
 # Module-level helpers for search_panda_docs
 # ---------------------------------------------------------------------------
 
-def _extract_doc_snippet(html: str, query_words: list[str], max_chars: int = 500) -> str:
-    """Extract a relevant text passage from a Sphinx HTML page.
+async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
+    """Build and cache the BM25 index over PanDA docs RST paragraphs.
 
-    Parses the ``<div role="main">`` block, collects text paragraphs, and returns
-    the first paragraph that contains any of *query_words* (up to *max_chars*
-    characters).  Falls back to the first non-empty paragraph if none match.
+    Phase 1: fetch the repository file tree (Git Trees API — no auth needed
+    for public repos) to discover every ``docs/source/**/*.rst`` path.
+    Phase 2: download all files concurrently from raw.githubusercontent.com.
+    Phase 3: split each file into paragraphs, clean RST markup, tokenise, and
+    build a BM25Okapi index.
+
+    Returns ``(bm25, paragraphs)`` where *paragraphs* is a list of
+    ``(path, text)`` tuples parallel to the BM25 corpus.  On any fatal error
+    returns ``(None, [])``.
     """
-    from html.parser import HTMLParser
+    global _bm25_data
+    if _bm25_data is not None:
+        return _bm25_data
 
-    class _TextCollector(HTMLParser):
-        """Collects text inside <div role="main">, split by block-level tags."""
+    _gh_headers = {
+        "User-Agent": "bamboo-panda-docs-search",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
-        _BLOCK = frozenset(
-            {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "dt", "dd", "td", "th"}
-        )
-
-        def __init__(self) -> None:
-            super().__init__()
-            self._in_main = False
-            self._depth = 0
-            self._buf: list[str] = []
-            self.paragraphs: list[str] = []
-
-        def handle_starttag(self, tag: str, attrs: list) -> None:
-            attr_dict = dict(attrs)
-            if tag == "div" and attr_dict.get("role") == "main":
-                self._in_main = True
-                self._depth = 1
-                return
-            if self._in_main:
-                if tag == "div":
-                    self._depth += 1
-                if tag in self._BLOCK:
-                    self._flush()
-
-        def handle_endtag(self, tag: str) -> None:
-            if not self._in_main:
-                return
-            if tag == "div":
-                self._depth -= 1
-                if self._depth <= 0:
-                    self._flush()
-                    self._in_main = False
-            elif tag in self._BLOCK:
-                self._flush()
-
-        def handle_data(self, data: str) -> None:
-            if self._in_main:
-                self._buf.append(data)
-
-        def _flush(self) -> None:
-            text = " ".join(self._buf).split()
-            if text:
-                self.paragraphs.append(" ".join(text))
-            self._buf = []
-
-    collector = _TextCollector()
+    # --- Phase 1: discover RST paths ---
     try:
-        collector.feed(html)
-    except Exception:
-        pass
+        async with httpx_module.AsyncClient(timeout=15) as client:
+            resp = await client.get(_PANDA_DOCS_TREE_URL, headers=_gh_headers)
+            resp.raise_for_status()
+            tree = resp.json().get("tree", [])
+    except Exception as exc:
+        logger.warning(
+            "PandaMcpClient.search_panda_docs: failed to fetch doc tree: %s", exc
+        )
+        _bm25_data = (None, [])
+        return _bm25_data
 
-    paragraphs = collector.paragraphs
-    if not paragraphs:
-        return ""
+    rst_paths = [
+        item["path"]
+        for item in tree
+        if item.get("type") == "blob"
+        and item.get("path", "").startswith("docs/source/")
+        and item["path"].endswith(".rst")
+    ]
+    logger.info(
+        "PandaMcpClient.search_panda_docs: discovered %d RST file(s)", len(rst_paths)
+    )
 
-    # Prefer the first paragraph that contains a query word
-    lower_words = [w.lower() for w in query_words]
-    for para in paragraphs:
-        if any(w in para.lower() for w in lower_words):
-            return para[:max_chars]
+    # --- Phase 2: fetch all files concurrently ---
+    async def _fetch(client: Any, path: str) -> tuple[str, str]:
+        try:
+            r = await client.get(f"{_PANDA_DOCS_RAW_BASE}/{path}")
+            r.raise_for_status()
+            return path, r.text
+        except Exception as exc:
+            logger.debug("PandaMcpClient.search_panda_docs: skipped %s: %s", path, exc)
+            return path, ""
 
-    return paragraphs[0][:max_chars]
+    async with httpx_module.AsyncClient(timeout=15) as client:
+        fetched = await asyncio.gather(*[_fetch(client, p) for p in rst_paths])
+
+    raw_files = {path: content for path, content in fetched if content}
+    logger.info(
+        "PandaMcpClient.search_panda_docs: fetched %d/%d RST file(s)",
+        len(raw_files), len(rst_paths),
+    )
+
+    # --- Phase 3: split into paragraphs and build BM25 index ---
+    def _clean(text: str) -> str:
+        text = re.sub(r"\.\. \S+::.*", "", text)           # directives
+        text = re.sub(r":[a-z]+:`([^`]*)`", r"\1", text)  # inline roles → bare text
+        text = re.sub(r"\*{1,2}([^*\n]+)\*{1,2}", r"\1", text)  # **bold** / *italic*
+        text = re.sub(r"^[=\-~^#*+]{3,}\s*$", "", text, flags=re.MULTILINE)  # underlines
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    paragraphs: list[tuple[str, str]] = []
+    for path, content in raw_files.items():
+        for raw_para in re.split(r"\n{2,}", content):
+            cleaned = _clean(raw_para)
+            if len(cleaned) > 40:
+                paragraphs.append((path, cleaned))
+
+    corpus = [re.findall(r"[a-z0-9]+", text.lower()) for _, text in paragraphs]
+    bm25 = BM25Okapi(corpus)
+
+    _bm25_data = (bm25, paragraphs)
+    logger.info(
+        "PandaMcpClient.search_panda_docs: BM25 index built over %d paragraph(s)",
+        len(paragraphs),
+    )
+    return _bm25_data

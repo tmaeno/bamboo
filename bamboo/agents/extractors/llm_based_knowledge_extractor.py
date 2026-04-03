@@ -45,6 +45,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
         review_feedback: str = "",
+        doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract using LLM-based approach.
 
@@ -55,7 +56,8 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         """
         # Combine all input sources
         input_data = self._prepare_input(
-            email_text, task_data, external_data, task_logs, job_logs, jobs_data
+            email_text, task_data, external_data, task_logs, job_logs, jobs_data,
+            doc_hints=doc_hints,
         )
 
         # Use LLM to extract structured graph
@@ -104,6 +106,7 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         task_logs: dict[str, str] = None,
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
+        doc_hints: dict[str, str] = None,
     ) -> str:
         """Prepare combined input for the LLM.
 
@@ -125,6 +128,10 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
             sections.append(
                 f"EXTERNAL INFORMATION:\n{json.dumps(external_data, indent=2)}"
             )
+
+        if doc_hints:
+            hints_text = "\n\n".join(doc_hints.values())
+            sections.append(f"DOMAIN DOCUMENTATION (PanDA system knowledge):\n{hints_text}")
 
         for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():

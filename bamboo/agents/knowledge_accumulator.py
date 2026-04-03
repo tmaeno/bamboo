@@ -155,11 +155,19 @@ class KnowledgeAccumulator:
         _task_logs = dict(task_logs or {})
         _external_data = dict(external_data or {})
 
+        # Pre-fetch PanDA documentation context before the first extraction.
+        # Stored separately from task_logs — docs are domain hints, not execution logs.
+        _doc_hints: dict[str, str] = {}
+        if self._explorer is not None:
+            _doc_hints = await self._prefetch_panda_docs(task_data or {})
+
         sources_summary = build_sources_summary(
             email_text=email_text,
             task_logs=_task_logs,
             job_logs=job_logs,
+            doc_hints=_doc_hints,
         )
+
         review_feedback = ""
         for attempt in range(self._max_review_retries + 1):
             graph = await self.extractor.extract_from_sources(
@@ -170,6 +178,7 @@ class KnowledgeAccumulator:
                 job_logs=job_logs,
                 jobs_data=jobs_data,
                 review_feedback=review_feedback,
+                doc_hints=_doc_hints,
             )
             graph.metadata["graph_id"] = graph_id
             self._reconcile_cross_extractor_links(graph)
@@ -179,7 +188,8 @@ class KnowledgeAccumulator:
             say(f"Running knowledge reviewer (attempt {attempt + 1}/{self._max_review_retries + 1})...")
             _available_tools = self._explorer._client.list_tools() if self._explorer else None
             review_result = await self._reviewer.review(
-                graph, sources_summary, task_data=task_data, available_tools=_available_tools
+                graph, sources_summary, task_data=task_data,
+                available_tools=_available_tools, doc_hints=_doc_hints,
             )
             if review_result.approved or attempt >= self._max_review_retries:
                 if not review_result.approved:
@@ -207,6 +217,7 @@ class KnowledgeAccumulator:
                 exploration = await self._explorer.explore(
                     task_data=task_data or {},
                     review_issues=review_result.issues,
+                    doc_hints=_doc_hints,
                 )
                 if exploration.task_logs:
                     _task_logs.update(exploration.task_logs)
@@ -226,6 +237,7 @@ class KnowledgeAccumulator:
                         email_text=email_text,
                         task_logs=_task_logs,
                         job_logs=job_logs,
+                        doc_hints=_doc_hints,
                     )
                 logger.info(
                     "KnowledgeAccumulator: source explorer ran %d tool call(s)",
@@ -272,6 +284,70 @@ class KnowledgeAccumulator:
                 "explorer_external_added": len(_external_data) - len(external_data or {}),
             },
         )
+
+    async def _prefetch_panda_docs(
+        self, task_data: dict[str, Any]
+    ) -> dict[str, str]:
+        """Fetch PanDA documentation hints before the first extraction pass.
+
+        Derives search queries from key ``task_data`` fields (status,
+        errorDialog) and calls ``search_panda_docs`` via PandaMcpClient.
+
+        Returns a ``doc_hints`` dict: keys are query strings, values are
+        plain rendered text (``"[Title] snippet\\n\\n[Title2] snippet2"``).
+        Returns an empty dict on any error so the caller is unaffected.
+        """
+        import re
+
+        queries: list[str] = []
+
+        status = task_data.get("status", "")
+        if status:
+            queries.append(f"task status {status}")
+
+        error_dialog = task_data.get("errorDialog", "") or ""
+        if error_dialog:
+            # Strip HTML tags and condense whitespace, then take the first
+            # ~120 chars as a search phrase (avoids sending a wall of text).
+            plain = re.sub(r"<[^>]+>", " ", error_dialog)
+            plain = " ".join(plain.split())[:120]
+            if plain:
+                queries.append(plain)
+
+        if not queries:
+            return {}
+
+        # Use PandaMcpClient directly — search_panda_docs is a built-in PanDA
+        # tool and does not need connect().  Going through the composite client
+        # would fail here because _tool_owner is only populated after connect().
+        from bamboo.mcp.panda_mcp_client import PandaMcpClient  # noqa: PLC0415
+
+        panda_client = PandaMcpClient()
+        doc_hints: dict[str, str] = {}
+        for query in queries:
+            try:
+                results = await panda_client.execute(
+                    "search_panda_docs", query=query
+                )
+                if isinstance(results, list) and results:
+                    rendered = "\n\n".join(
+                        f"[{e.get('title', '')}] {e.get('snippet', '')}".strip()
+                        for e in results if e.get("snippet")
+                    )
+                    if rendered:
+                        doc_hints[query] = rendered
+                        say(
+                            f"Pre-fetched {len(results)} PanDA doc section(s) "
+                            f"for query: {query!r}"
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "KnowledgeAccumulator._prefetch_panda_docs: "
+                    "search_panda_docs failed for query=%r: %s",
+                    query,
+                    exc,
+                )
+        return doc_hints
 
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
         """Create schema-defined edges that span extractor boundaries.

@@ -632,6 +632,17 @@ EXTRACTED GRAPH:
 TASK CONTEXT:
 {task_summary}
 
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+Use the domain documentation to:
+- Understand what a given task status (e.g. exhausted, broken, aborted) means and what
+  conditions trigger it.
+- Check whether the graph reflects the documented causes for that status.
+- Flag as a gap if the graph is missing nodes that the documentation says should be present
+  for this status (e.g. exhausted → expect nodes about CPU efficiency, scout job conditions,
+  memory usage, multi-core resource abuse).
+
 SOURCE EXCERPTS (optional):
 {sources_summary}
 
@@ -662,6 +673,12 @@ REVIEWER ISSUES:
 TASK CONTEXT:
 {task_summary}
 
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+Use the domain documentation to understand what the task status and error conditions mean,
+and to refine the gap descriptions with domain-specific terminology and expected data.
+
 AVAILABLE TOOLS (read-only catalogue — do not plan tool calls yet):
 {tools_description}
 
@@ -672,6 +689,8 @@ incident.
 Rules:
 - Ground every gap in a concrete field in the task context or a structural implication
   of the reviewer issue.
+- Use domain documentation to make gap descriptions more specific (e.g. if docs say
+  exhausted is caused by CPU efficiency or memory leaks, say which metric is missing).
 - Do NOT mention tool names — that is the next step.
 - If a reviewer issue is already fully addressed by the graph (false alarm), omit it.
 - If multiple reviewer issues describe the same missing information, merge them into one.
@@ -696,6 +715,9 @@ GAPS TO RESOLVE:
 
 TASK CONTEXT (key fields only):
 {task_summary}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
 
 AVAILABLE TOOLS:
 {tools_description}
