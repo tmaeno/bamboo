@@ -132,13 +132,15 @@ async def _run_extraction(
     # Dry-run needs no database connections at all — skip Neo4j and Qdrant.
     # Pass None so KnowledgeAccumulator skips all DB calls.
     from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
     from bamboo.config import get_settings
-    from bamboo.mcp.panda_mcp_client import PandaMcpClient
+    from bamboo.mcp.factory import build_mcp_client
 
     settings = get_settings()
-    reviewer = KnowledgeReviewer() if settings.enable_knowledge_review else None
-    explorer = ExtraSourceExplorer(PandaMcpClient()) if settings.enable_knowledge_review else None
+    reviewer = KnowledgeReviewer()
+    _mcp = build_mcp_client(settings)
+    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
     accumulator_kwargs = {}
     if max_retries is not None:
         accumulator_kwargs["max_review_retries"] = max_retries

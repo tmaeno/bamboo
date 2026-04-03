@@ -23,9 +23,11 @@ includes an optional quality-gate loop.
 │                         ├─ KnowledgeReviewer                   │
 │                         │                                      │
 │                         └─ ExtraSourceExplorer                 │
-│                                ├─ PandaMcpClient               │
-│                                ├─ ExternalMcpClient (HTTP)     │
-│                                └─ StdioMcpClient    (stdio)    │
+│                                ├─ ExplorationPlanner           │
+│                                └─ MCP client layer             │
+│                                     ├─ PandaMcpClient          │
+│                                     ├─ ExternalMcpClient (HTTP)│
+│                                     └─ StdioMcpClient  (stdio) │
 └────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
@@ -36,13 +38,15 @@ includes an optional quality-gate loop.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The optional **review–explore loop** inside `KnowledgeAccumulator` runs when
-`ENABLE_KNOWLEDGE_REVIEW=true`:
+The **review–explore loop** inside `KnowledgeAccumulator` always runs:
 
 ```
 extract → KnowledgeReviewer
               │ approved          → store
-              │ rejected (pass 0) → ExtraSourceExplorer → re-extract → KnowledgeReviewer
+              │ rejected (pass 0) → ExplorationPlanner
+              │                          │ plan OK  → ExtraSourceExplorer (step-by-step)
+              │                          │ plan None → ExtraSourceExplorer (single-wave fallback)
+              │                     → re-extract → KnowledgeReviewer
               │ rejected (pass N) → store best result (with warning)
 ```
 
@@ -76,7 +80,6 @@ indexing.
 
 | Setting | Default | Effect |
 |---|---|---|
-| `ENABLE_KNOWLEDGE_REVIEW` | `true` | Set to `false` to disable reviewer + explorer |
 | `--max-retries N` | `2` | Reviewer retry limit (`bamboo extract` CLI only) |
 
 **Retry loop:** on each rejection the accumulator increments `attempt`.  The
@@ -159,8 +162,6 @@ from its output.
 
 **File:** `bamboo/agents/knowledge_reviewer.py`
 
-**Disable:** `ENABLE_KNOWLEDGE_REVIEW=false`
-
 An LLM-based quality gate that evaluates the extracted graph for completeness *before* it is
 written to the databases.  It acts as a **gap analyzer** — it identifies information that
 should be present but is missing — rather than cross-checking against source text.
@@ -193,34 +194,63 @@ for the extractor on retry).
 
 ---
 
+### `ExplorationPlanner`  *(optional, two-phase)*
+
+**File:** `bamboo/agents/exploration_planner.py`
+
+Sits between `KnowledgeReviewer` and `ExtraSourceExplorer`.  Converts the reviewer's raw
+issue list into a structured `ExplorationPlan` via two sequential LLM calls, then hands
+the plan to the explorer for execution.
+
+**Phase 1 — Gap analysis** (`EXPLORATION_GAP_ANALYSIS_PROMPT`):  
+Given the reviewer issues and the available tool catalogue, produce a list of precise,
+tool-neutral gap descriptions — *what* specific information is missing and *why* it
+matters.  Tool names are intentionally excluded; this phase only identifies the holes.
+Output is shown as a `[planner: gap analysis]` panel in verbose mode.
+
+**Phase 2 — Step planning** (`EXPLORATION_PLAN_PROMPT`):  
+Map each resolvable gap to one or more MCP tool calls, grouped into sequential
+`PlanStep` objects.  Tools within a step are independent and run concurrently;
+steps run in order so a later step can rely on earlier steps having populated the
+extraction context.
+
+**Output:** `ExplorationPlan` — `gaps` (list of gap strings), `steps` (list of `PlanStep`).
+Each `PlanStep` has a `reason` (human-readable) and `tool_calls` (list of tool + args dicts).
+
+**Fail-open:** any error in either phase causes `plan()` to return `None`, signalling the
+explorer to fall back to its single-LLM-call `_select_tools` path.
+
+---
+
 ### `ExtraSourceExplorer`  *(fires once per run)*
 
 **File:** `bamboo/agents/extra_source_explorer.py`
 
-**Disable:** `ENABLE_KNOWLEDGE_REVIEW=false` (same flag as the reviewer)
+Sits between the first reviewer rejection and the second extraction attempt.  Executes
+the `ExplorationPlan` produced by `ExplorationPlanner` (if available) or falls back to
+a single LLM call that selects tools directly.
 
-Sits between the first reviewer rejection and the second extraction attempt.  One LLM call
-selects which MCP tools to invoke based on the reviewer's issue list; the selected tools are
-then executed concurrently.  The available tool catalogue is whatever the configured MCP client
-exposes — built-in PanDA tools plus any tools from external servers.
+**Flow (plan-based, default):**
 
-**Flow:**
-
-1. `connect()` the MCP client (opens external server connections if configured).
-2. List available tools.
-3. Single LLM call: given the reviewer's issues (which may already name the target tool) and task context, which tools should be called?
-4. Execute selected tools concurrently via `asyncio.gather`.
-5. Merge results into the next extraction pass (`task_logs` and `external_data`).
+1. `connect()` the MCP client.
+2. List available tools; pass them to `ExplorationPlanner.plan()`.
+3. Execute plan steps **sequentially**; tools within each step run concurrently via `asyncio.gather`.
+4. Log `[step N/M] <reason>` for each step in verbose mode.
+5. Merge all results into `task_logs` and `external_data` for the next extraction pass.
 6. `close()` the MCP client.
 
+**Fallback flow (no planner, or planner returns `None`):**
+
+Steps 1–2 as above, then a single LLM call (`EXPLORER_TOOL_SELECTION_PROMPT`) selects
+all tools at once and they run concurrently in a single wave.
+
 The explorer fires **at most once** per accumulation run (at `attempt == 0` only).
-Any tool failure is logged and skipped — the pipeline never stalls.
+Any individual tool failure is logged and skipped — the pipeline never stalls.
 
-Results from unrecognised tools (i.e. tools from external servers) are stored in
-`external_data` under the key `"tool:<name>"` and forwarded to the LLM extractor as
-unstructured additional context.
+Results from unrecognised tools (e.g. from external MCP servers) are stored in
+`external_data` under `"tool:<name>"` and forwarded to the LLM extractor as additional context.
 
-**Output:** `ExplorationResult` — `task_logs`, `external_data`, `tool_calls` (for observability).
+**Output:** `ExplorationResult` — `task_logs`, `external_data`, `tool_calls` (all calls across all steps, for observability).
 
 ---
 
@@ -394,7 +424,6 @@ pipeline, then drafts a resolution email for the task submitter.
 
 | Environment variable | Default | Affects |
 |---|---|---|
-| `ENABLE_KNOWLEDGE_REVIEW` | `true` | `KnowledgeReviewer`, `ExtraSourceExplorer` |
 | `EXTRACTION_STRATEGY` | `panda` | `KnowledgeGraphExtractor` strategy selection |
 | `LLM_PROVIDER` | `openai` | All LLM calls across all agents |
 | `LLM_MODEL` | `gpt-4-turbo-preview` | All LLM calls across all agents |
@@ -422,7 +451,8 @@ continues with what it has rather than aborting.
 | Component | On failure |
 |---|---|
 | `KnowledgeReviewer` LLM call | Returns `approved=True`, logs exception |
-| `ExtraSourceExplorer` LLM call | Returns empty `ExplorationResult`, logs exception |
+| `ExplorationPlanner` either LLM call | Returns `None` → explorer falls back to `_select_tools` |
+| `ExtraSourceExplorer` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |

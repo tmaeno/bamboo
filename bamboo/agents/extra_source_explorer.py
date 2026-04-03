@@ -50,18 +50,25 @@ class ExplorationResult:
 class ExtraSourceExplorer:
     """LLM-driven single-pass source explorer.
 
-    Given the reviewer's issues list and the current task data, asks the LLM
-    which MCP tools to invoke, executes them concurrently, and returns an
-    :class:`ExplorationResult` ready to be merged into the next extraction
-    attempt.
+    Given the reviewer's issues list and the current task data, either follows
+    an :class:`~bamboo.agents.exploration_planner.ExplorationPlan` (when a
+    planner is configured) or falls back to asking the LLM directly which tools
+    to call.  In both cases the selected tools are executed and their results
+    merged into an :class:`ExplorationResult`.
 
     Args:
         mcp_client: The :class:`~bamboo.mcp.base.McpClient` that provides
                     available tools and executes them.
+        planner:    Optional :class:`~bamboo.agents.exploration_planner.ExplorationPlanner`.
+                    When provided, the explorer uses its two-phase plan
+                    (gap analysis → sequential steps) instead of the single
+                    ``_select_tools`` LLM call.  Falls back to ``_select_tools``
+                    if the planner returns ``None``.
     """
 
-    def __init__(self, mcp_client: McpClient) -> None:
+    def __init__(self, mcp_client: McpClient, planner=None) -> None:
         self._client = mcp_client
+        self._planner = planner
         self._llm = None  # lazy — same pattern as KnowledgeAccumulator
 
     @property
@@ -104,6 +111,35 @@ class ExtraSourceExplorer:
                 say("Explorer selected no additional tools.")
                 return ExplorationResult()
 
+            # ── Plan-based path (planner configured and succeeded) ──────────
+            plan = None
+            if self._planner is not None:
+                plan = await self._planner.plan(task_data, review_issues, tools)
+
+            if plan is not None and plan.steps:
+                all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
+                logger.info(
+                    "ExtraSourceExplorer: executing plan — %d step(s), %d tool call(s)",
+                    len(plan.steps),
+                    len(all_tool_calls),
+                )
+                out = ExplorationResult(tool_calls=all_tool_calls)
+                for i, step in enumerate(plan.steps, 1):
+                    say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
+                    coros = [
+                        self._client.execute(tc["tool"], **tc.get("args", {}))
+                        for tc in step.tool_calls
+                    ]
+                    results = await asyncio.gather(*coros, return_exceptions=True)
+                    for tc, result in zip(step.tool_calls, results):
+                        if isinstance(result, BaseException):
+                            say(f"    {tc['tool']}: failed — {result}")
+                        else:
+                            say(f"    {tc['tool']}: done.")
+                        self._merge_tool_result(tc["tool"], result, out)
+                return out
+
+            # ── Fallback: single-wave concurrent path (no planner / plan failed) ─
             tool_names = [tc["tool"] for tc in tool_calls]
             logger.info(
                 "ExtraSourceExplorer: executing %d tool call(s): %s",

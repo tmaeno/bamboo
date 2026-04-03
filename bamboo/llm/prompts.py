@@ -652,6 +652,81 @@ Respond with a JSON object only — no markdown, no explanation outside the JSON
 }}
 """
 
+EXPLORATION_GAP_ANALYSIS_PROMPT = """You are a diagnostic gap analyst for a PanDA computing task review.
+
+A knowledge reviewer identified these issues with an extracted knowledge graph:
+
+REVIEWER ISSUES:
+{review_issues}
+
+TASK CONTEXT:
+{task_summary}
+
+AVAILABLE TOOLS (read-only catalogue — do not plan tool calls yet):
+{tools_description}
+
+Your task: for each reviewer issue, produce a precise description of the SPECIFIC
+INFORMATION that is missing from the graph and why it matters for understanding the
+incident.
+
+Rules:
+- Ground every gap in a concrete field in the task context or a structural implication
+  of the reviewer issue.
+- Do NOT mention tool names — that is the next step.
+- If a reviewer issue is already fully addressed by the graph (false alarm), omit it.
+- If multiple reviewer issues describe the same missing information, merge them into one.
+- Set "resolvable" to false if no tool in the catalogue could plausibly fill the gap.
+
+Output a JSON array only — no markdown, no explanation outside the JSON:
+[
+  {{
+    "gap": "<concise description of the specific missing information>",
+    "impact": "<one sentence: why this gap impairs incident understanding>",
+    "resolvable": true
+  }}
+]
+"""
+
+EXPLORATION_PLAN_PROMPT = """You are a diagnostic data-collection planner for a PanDA computing task.
+
+You have identified these specific information gaps that need to be filled:
+
+GAPS TO RESOLVE:
+{gaps}
+
+TASK CONTEXT (key fields only):
+{task_summary}
+
+AVAILABLE TOOLS:
+{tools_description}
+
+Your job: design an ordered execution plan of tool-call groups (steps).
+
+Step design rules:
+- Tools within one step run CONCURRENTLY — only group tools that are fully INDEPENDENT
+  of each other (neither's usefulness depends on the other's result).
+- If tool B would be most useful after tool A's results are available in the next
+  extraction pass, put B in a LATER step.
+- Each step must have a single "reason" string: what it fetches and which gap it closes.
+- Only select a tool if at least one gap directly implies that its data is needed.
+- A tool that requires a field that is absent or empty in the task context MUST NOT be
+  selected.
+- If no tool would help any gap, output an empty array.
+
+Output a JSON array of steps only — no markdown, no explanation outside the JSON:
+[
+  {{
+    "reason": "<why this step is needed and which gap it addresses>",
+    "tool_calls": [
+      {{
+        "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
+        "args": {{ }}
+      }}
+    ]
+  }}
+]
+"""
+
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.
 
 A PanDA job produced the following error diagnostic message:

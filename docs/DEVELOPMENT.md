@@ -9,7 +9,7 @@ bamboo/
 ├── bamboo/                # Main package
 │   ├── agents/            # AI agent implementations
 │   │   ├── knowledge_accumulator.py    # Orchestrates extraction + review loop
-│   │   ├── knowledge_reviewer.py       # LLM quality gate (ENABLE_KNOWLEDGE_REVIEW)
+│   │   ├── knowledge_reviewer.py       # LLM quality gate
 │   │   └── extra_source_explorer.py    # LLM-driven extra source fetcher
 │   ├── database/          # Database clients
 │   ├── extractors/        # Knowledge extractors
@@ -63,15 +63,13 @@ cp "$(python -c "import importlib.resources; print(importlib.resources.files('ba
 # Edit .env with your settings
 # Required: OPENAI_API_KEY or ANTHROPIC_API_KEY
 
-# Optional: enable the review gate + extra source explorer
-# ENABLE_KNOWLEDGE_REVIEW=true
 ```
 
-> **`ENABLE_KNOWLEDGE_REVIEW`** — when set to `true`, each extraction attempt is evaluated by
-> `KnowledgeReviewer` before being written to the databases.  If the reviewer rejects the graph,
-> `ExtraSourceExplorer` fires once to fetch additional PanDA data sources (parent task, retry
-> chain, job diagnostics, error-dialog logs) and the extraction is retried with the enriched
-> context and reviewer feedback (up to 2 retries total).  Disabled by default.
+> Each extraction attempt is evaluated by `KnowledgeReviewer` before being written to the
+> databases.  If the reviewer rejects the graph, `ExtraSourceExplorer` fires once to fetch
+> additional PanDA data sources (parent task, retry chain, job diagnostics, error-dialog logs)
+> and the extraction is retried with the enriched context and reviewer feedback (up to 2
+> retries total).
 
 ### 4. Verify Setup
 

@@ -134,21 +134,16 @@ async def main():
     await graph_db.connect()
     await vector_db.connect()
 
-    # Optional: enable the review gate + extra source explorer.
-    # KnowledgeReviewer evaluates each extracted graph before DB writes.
-    # ExtraSourceExplorer fetches additional PanDA sources (parent task,
-    # retry chain, job diagnostics, error-dialog logs) on the first rejection
-    # and feeds them into the next extraction attempt.
-    # Requires ENABLE_KNOWLEDGE_REVIEW=true in your .env.
-    #
-    # from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
-    # from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
-    # from bamboo.mcp.panda_mcp_client import PandaMcpClient
-    # reviewer = KnowledgeReviewer()
-    # explorer = ExtraSourceExplorer(PandaMcpClient())
-    # agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
+    from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
+    from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.exploration_planner import ExplorationPlanner
+    from bamboo.mcp.factory import build_mcp_client
+    from bamboo.config import get_settings
 
-    agent = KnowledgeAccumulator(graph_db, vector_db)
+    _mcp = build_mcp_client(get_settings())
+    reviewer = KnowledgeReviewer()
+    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+    agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
     result = await agent.process_knowledge(task_data=task_data)
     print(result.summary)
 
