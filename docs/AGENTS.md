@@ -277,11 +277,13 @@ Built-in client that exposes PanDA data tools.  No external connection needed.
 | `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
 | `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
 | `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |
-| `search_panda_docs` | Node name or error pattern requires domain-level explanation (e.g. what a task status means, when it is entered, what causes it) | `external_data` | List of `{title, url, snippet}` dicts from the official PanDA WMS documentation |
+| `search_panda_docs` | Node name or error pattern requires domain-level explanation (e.g. what a task status means, when it is entered, what causes it) | `doc_hints` | Plain-text snippets from the official PanDA WMS documentation, passed as domain background to the reviewer and planner (not stored as graph nodes) |
 
 All tools are safe to call concurrently.  Tools routed to `task_logs` (formatted JSON text)
 are processed by the LLM extractor alongside error dialog logs.  Tools routed to
-`external_data` are consumed by the structured extractor path.
+`external_data` are consumed by the structured extractor path.  Results from
+`search_panda_docs` go into `doc_hints`, a dedicated dict that flows to the reviewer
+and exploration planner as authoritative domain context.
 
 #### `ExternalMcpClient`
 
@@ -460,5 +462,5 @@ continues with what it has rather than aborting.
 | `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; PanDA tools still available |
 | `StdioMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
 | `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
-| `search_panda_docs` (RTD site unreachable) | Logs warning, returns empty list |
+| `search_panda_docs` (GitHub API or network error) | Logs warning, returns empty list; `doc_hints` remains empty |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

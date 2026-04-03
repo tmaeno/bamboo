@@ -25,7 +25,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 
 ## LLM-Driven Pipelines and Sub-Agents
 
-See [docs/AGENTS.md](docs/AGENTS.md) for the full agent reference — responsibilities, inputs/outputs, configuration, and failure handling for every agent in the knowledge accumulation and reasoning navigation pipelines.
+See [Agents](docs/AGENTS.md) for the full agent reference — responsibilities, inputs/outputs, configuration, and failure handling for every agent in the knowledge accumulation and reasoning navigation pipelines.
 
 ## Agents to Come
 - **Automation Agent** - Plans and executes operational workflows
