@@ -995,19 +995,23 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                             nodes.extend(log_nodes)
                             relationships.extend(log_rels)
             elif key == "status":
-                # Task status (e.g. "failed", "broken") describes the failure
-                # state of the task, not a configuration attribute.  It is stored
-                # as a SymptomNode so it participates in Symptom→Cause edges.
+                # Task status (e.g. "failed", "broken", "exhausted") describes the
+                # failure state of the task, not a configuration attribute.  It is
+                # stored as a SymptomNode so it participates in Symptom→Cause edges.
+                # PanDA task statuses are a closed vocabulary, so we derive the node
+                # name deterministically rather than asking the LLM — this prevents
+                # bare status words like "exhausted" from being misclassified as
+                # resource-exhaustion errors.
                 if value:
-                    category, confidence = await self._classify_error(str(value))
-                    say(f"Classified as: {category} (confidence: {confidence:.2f})")
+                    status_str = str(value).strip()
+                    category = "TaskStatus" + status_str.capitalize()
+                    say(f"Task status '{status_str}' → {category} (deterministic)")
                     nodes.append(
                         SymptomNode(
                             name=category,
-                            description=str(value),
+                            description=status_str,
                             metadata={
                                 "source": "task_status",
-                                "classifier_confidence": confidence,
                             },
                         )
                     )
