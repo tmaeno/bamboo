@@ -909,7 +909,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         nodes: list = []
         relationships: list[GraphRelationship] = []
 
-        task_id = (task_data or {}).get("taskID")
+        task_id = (task_data or {}).get("jediTaskID")
         task_status = (task_data or {}).get("status")
         if task_id:
             say(

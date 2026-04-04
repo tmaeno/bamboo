@@ -31,7 +31,7 @@ _MAX_LOG_CHARS = 1000
 
 # Task fields forwarded to the LLM as incident context for gap detection.
 _TASK_SUMMARY_KEYS = (
-    "taskID",
+    "jediTaskID",
     "status",
     "errorDialog",
     "retryID",

@@ -392,6 +392,12 @@ class CompositeMcpClient(McpClient):
             *(c.close() for c in self._clients), return_exceptions=True
         )
 
+    def task_data_tools(self) -> frozenset[str]:
+        result: set[str] = set()
+        for client in self._clients:
+            result |= client.task_data_tools()
+        return frozenset(result)
+
     def list_tools(self) -> list[McpTool]:
         seen: set[str] = set()
         tools: list[McpTool] = []

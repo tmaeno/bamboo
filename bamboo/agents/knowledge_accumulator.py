@@ -139,7 +139,7 @@ class KnowledgeAccumulator:
         """
         logger.info("KnowledgeAccumulator: starting knowledge extraction")
 
-        task_id = (task_data or {}).get("taskID")
+        task_id = (task_data or {}).get("jediTaskID")
         task_status = (task_data or {}).get("status")
         if task_id and task_status:
             graph_id = self._deterministic_id("graph", task_id, task_status)

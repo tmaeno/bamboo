@@ -174,7 +174,7 @@ class ReasoningNavigator:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
             root cause, resolution, explanation, email draft, and evidence.
         """
-        raw_task_id = task_data.get("taskID") or "unknown"
+        raw_task_id = task_data.get("jediTaskID") or "unknown"
         task_status = task_data.get("status")
         task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         logger.info("ReasoningNavigator: analysing task '%s'", task_id)
@@ -420,7 +420,7 @@ class ReasoningNavigator:
         """
         logger.info("ReasoningNavigator: generating resolution email")
 
-        raw_task_id = task_data.get("taskID") or "unknown"
+        raw_task_id = task_data.get("jediTaskID") or "unknown"
         task_status = task_data.get("status")
         composite_task_id = (
             f"{raw_task_id}:{task_status}" if task_status else raw_task_id

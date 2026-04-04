@@ -64,11 +64,12 @@ from bamboo.utils.panda_client import (
 
 logger = logging.getLogger(__name__)
 
+
 # Maximum number of errorDialog log URLs to fetch per call.
 _MAX_ERROR_DIALOG_LOGS = 5
 
 # Fields kept from parent task dicts in retry-chain results (keeps LLM context compact).
-_RETRY_CHAIN_FIELDS = ("taskID", "status", "errorDialog", "retryID", "transUses")
+_RETRY_CHAIN_FIELDS = ("jediTaskID", "status", "errorDialog", "retryID", "transUses")
 
 # PanDA WMS documentation GitHub repository.
 _PANDA_DOCS_RAW_BASE = "https://raw.githubusercontent.com/PanDAWMS/panda-docs/main"
@@ -102,17 +103,8 @@ class PandaMcpClient(McpClient):
                 ),
                 parameters_schema={
                     "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID",
-                        },
-                        "error_dialog": {
-                            "type": "string",
-                            "description": "Raw errorDialog field value from task_data",
-                        },
-                    },
-                    "required": ["task_id", "error_dialog"],
+                    "properties": {},
+                    "required": [],
                 },
             ),
             McpTool(
@@ -149,17 +141,13 @@ class PandaMcpClient(McpClient):
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID to start from",
-                        },
                         "max_depth": {
                             "type": "integer",
                             "default": 3,
                             "description": "Maximum number of ancestor levels to follow",
                         },
                     },
-                    "required": ["task_id"],
+                    "required": [],
                 },
             ),
             McpTool(
@@ -173,13 +161,8 @@ class PandaMcpClient(McpClient):
                 ),
                 parameters_schema={
                     "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID",
-                        },
-                    },
-                    "required": ["task_id"],
+                    "properties": {},
+                    "required": [],
                 },
             ),
             McpTool(
@@ -197,17 +180,13 @@ class PandaMcpClient(McpClient):
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID",
-                        },
                         "max_jobs": {
                             "type": "integer",
                             "default": 5,
                             "description": "Maximum number of job records to return",
                         },
                     },
-                    "required": ["task_id"],
+                    "required": [],
                 },
             ),
             McpTool(
@@ -223,13 +202,8 @@ class PandaMcpClient(McpClient):
                 ),
                 parameters_schema={
                     "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID",
-                        },
-                    },
-                    "required": ["task_id"],
+                    "properties": {},
+                    "required": [],
                 },
             ),
             McpTool(
@@ -244,13 +218,8 @@ class PandaMcpClient(McpClient):
                 ),
                 parameters_schema={
                     "type": "object",
-                    "properties": {
-                        "task_id": {
-                            "type": ["integer", "string"],
-                            "description": "PanDA jediTaskID",
-                        },
-                    },
-                    "required": ["task_id"],
+                    "properties": {},
+                    "required": [],
                 },
             ),
             McpTool(
@@ -350,6 +319,19 @@ class PandaMcpClient(McpClient):
     def list_tools(self) -> list[McpTool]:
         return list(self._tools)
 
+    def task_data_tools(self) -> frozenset[str]:
+        """Return names of tools whose handler accepts a ``task_data`` parameter.
+
+        Discovered dynamically from the dispatch table so newly added tools
+        are included automatically without updating any static list.
+        """
+        import inspect
+        return frozenset(
+            name
+            for name, handler in self._dispatch.items()
+            if "task_data" in inspect.signature(handler).parameters
+        )
+
     async def execute(self, tool_name: str, **kwargs: Any) -> Any:
         handler = self._dispatch.get(tool_name)
         if handler is None:
@@ -362,16 +344,17 @@ class PandaMcpClient(McpClient):
 
     async def _fetch_error_dialog_logs(
         self,
-        task_id: int | str,
-        error_dialog: str,
+        task_data: dict[str, Any],
     ) -> dict[str, str]:
-        """Download log files linked in *error_dialog* HTML.
+        """Download log files linked in the task's errorDialog HTML.
 
         Returns a dict mapping each URL to its text content.  URLs that
         return no content (network error, empty response) are excluded.
         Capped at :data:`_MAX_ERROR_DIALOG_LOGS` fetches.
         """
-        urls = extract_log_urls(error_dialog or "")[:_MAX_ERROR_DIALOG_LOGS]
+        task_id = task_data.get("jediTaskID")
+        error_dialog: str = task_data.get("errorDialog") or ""
+        urls = extract_log_urls(error_dialog)[:_MAX_ERROR_DIALOG_LOGS]
         if not urls:
             logger.debug(
                 "PandaMcpClient.fetch_error_dialog_logs: no log URLs in errorDialog "
@@ -425,15 +408,16 @@ class PandaMcpClient(McpClient):
 
     async def _get_retry_chain(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
         max_depth: int = 3,
     ) -> list[dict[str, Any]]:
-        """Follow retryID links upward from *task_id*, up to *max_depth* levels.
+        """Follow retryID links upward from the task, up to *max_depth* levels.
 
         Returns a list of compact task dicts (only the fields in
         :data:`_RETRY_CHAIN_FIELDS`), ordered from direct parent to oldest
         ancestor.  Stops early on fetch error or cycle detection.
         """
+        task_id = task_data.get("jediTaskID")
         chain: list[dict[str, Any]] = []
         seen: set[str] = {str(task_id)}
         current_id: int | str | None = task_id
@@ -481,7 +465,7 @@ class PandaMcpClient(McpClient):
 
     async def _get_task_jobs_summary(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
     ) -> dict[str, Any]:
         """Aggregate per-job status and error data for *task_id*.
 
@@ -499,8 +483,9 @@ class PandaMcpClient(McpClient):
         try:
             from collections import Counter
 
+            task_id = int(task_data["jediTaskID"])
             status, jobs = await asyncio.to_thread(
-                Client.get_job_descriptions, int(task_id)
+                Client.get_job_descriptions, task_id
             )
             if status != 0 or not isinstance(jobs, list):
                 return {"error": f"get_job_descriptions returned status={status}"}
@@ -534,14 +519,14 @@ class PandaMcpClient(McpClient):
         except Exception as exc:
             logger.warning(
                 "PandaMcpClient.get_task_jobs_summary: failed for task_id=%s: %s",
-                task_id,
+                task_data.get("jediTaskID", "unknown"),
                 exc,
             )
             return {"error": str(exc)}
 
     async def _get_failed_job_details(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
         max_jobs: int = 5,
     ) -> list[dict[str, Any]]:
         """Fetch details for representative failed jobs for *task_id*.
@@ -577,10 +562,12 @@ class PandaMcpClient(McpClient):
             return d
 
         try:
+            task_id_int = int(task_data["jediTaskID"])
+
             # Fetch scout dicts and unsuccessful jobs concurrently
             (scout_status, scout_raw), (fail_status, failed_raw) = await asyncio.gather(
-                asyncio.to_thread(Client.get_scout_job_descriptions, int(task_id)),
-                asyncio.to_thread(Client.get_job_descriptions, int(task_id), True),
+                asyncio.to_thread(Client.get_scout_job_descriptions, task_id_int),
+                asyncio.to_thread(Client.get_job_descriptions, task_id_int, True),
             )
 
             # Failed scout jobs
@@ -623,20 +610,20 @@ class PandaMcpClient(McpClient):
             logger.info(
                 "PandaMcpClient.get_failed_job_details: selected %d job(s) for task_id=%s",
                 len(selected),
-                task_id,
+                task_id_int,
             )
             return selected
         except Exception as exc:
             logger.warning(
                 "PandaMcpClient.get_failed_job_details: failed for task_id=%s: %s",
-                task_id,
+                task_data.get("jediTaskID", "unknown"),
                 exc,
             )
             return []
 
     async def _get_task_jedi_details(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
     ) -> dict[str, Any] | None:
         """Fetch extended task details for *task_id* via ``get_task_details_json``.
 
@@ -654,8 +641,9 @@ class PandaMcpClient(McpClient):
             return None
 
         try:
+            task_id_int = int(task_data["jediTaskID"])
             status, data = await asyncio.to_thread(
-                Client.get_task_details_json, int(task_id)
+                Client.get_task_details_json, task_id_int
             )
             if status != 0 or not isinstance(data, tuple) or not data[0]:
                 logger.warning(
@@ -681,7 +669,7 @@ class PandaMcpClient(McpClient):
 
     async def _get_task_input_datasets(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
     ) -> list[dict[str, Any]]:
         """Fetch input and pseudo-input dataset descriptions for *task_id*.
 
@@ -696,8 +684,9 @@ class PandaMcpClient(McpClient):
             return []
 
         try:
+            task_id_int = int(task_data["jediTaskID"])
             status, datasets = await asyncio.to_thread(
-                Client.get_files_in_datasets, int(task_id), "input,pseudo_input"
+                Client.get_files_in_datasets, task_id_int, "input,pseudo_input"
             )
             if status != 0 or not isinstance(datasets, list):
                 logger.warning(

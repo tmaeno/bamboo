@@ -117,6 +117,8 @@ class ExtraSourceExplorer:
             if self._planner is not None:
                 plan = await self._planner.plan(task_data, review_issues, tools, doc_hints=doc_hints)
 
+            task_data_tool_names = self._client.task_data_tools()
+
             if plan is not None and plan.steps:
                 all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
                 logger.info(
@@ -128,7 +130,12 @@ class ExtraSourceExplorer:
                 for i, step in enumerate(plan.steps, 1):
                     say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
                     coros = [
-                        self._client.execute(tc["tool"], **tc.get("args", {}))
+                        self._client.execute(
+                            tc["tool"],
+                            **({**tc.get("args", {}), "task_data": task_data}
+                               if tc["tool"] in task_data_tool_names
+                               else tc.get("args", {})),
+                        )
                         for tc in step.tool_calls
                     ]
                     results = await asyncio.gather(*coros, return_exceptions=True)
@@ -150,7 +157,12 @@ class ExtraSourceExplorer:
             say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
 
             coros = [
-                self._client.execute(tc["tool"], **tc.get("args", {}))
+                self._client.execute(
+                    tc["tool"],
+                    **({**tc.get("args", {}), "task_data": task_data}
+                       if tc["tool"] in task_data_tool_names
+                       else tc.get("args", {})),
+                )
                 for tc in tool_calls
             ]
             results = await asyncio.gather(*coros, return_exceptions=True)

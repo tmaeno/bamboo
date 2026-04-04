@@ -70,6 +70,18 @@ class McpClient(ABC):
         calls have completed.  No-op for in-process clients.
         """
 
+    def task_data_tools(self) -> frozenset[str]:
+        """Return names of tools that expect ``task_data`` to be injected.
+
+        The explorer calls this to determine which tool calls should have the
+        full ``task_data`` dict automatically added to their kwargs before
+        execution — so the LLM never has to specify a ``task_id`` argument.
+
+        Override in subclasses that have task-data-aware tools.  The default
+        returns an empty set (safe for clients with no such tools).
+        """
+        return frozenset()
+
     @abstractmethod
     def list_tools(self) -> list[McpTool]:
         """Return the full catalogue of tools this client exposes."""

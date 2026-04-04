@@ -71,7 +71,7 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
 
         # Build the composite identifier for downstream reference.
         task_data = state.get("task_data") or {}
-        raw_task_id = task_data.get("taskID")
+        raw_task_id = task_data.get("jediTaskID")
         task_status = task_data.get("status")
         if raw_task_id and task_status:
             graph_id = f"{raw_task_id}:{task_status}"
