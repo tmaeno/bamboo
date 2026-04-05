@@ -275,9 +275,10 @@ def interactive():
         console.print("5. [red]Cleanup databases[/red]")
         console.print("6. Preview log filter")
         console.print("7. Check MCP servers")
-        console.print("8. Exit")
+        console.print("8. Preview job nodes")
+        console.print("9. Exit")
 
-        choice = _ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7", "8"])
+        choice = _ask("Select an option", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"])
 
         if choice == "1":
             asyncio.run(populate_knowledge_interactive())
@@ -294,6 +295,8 @@ def interactive():
         elif choice == "7":
             asyncio.run(check_mcp_servers_interactive())
         elif choice == "8":
+            asyncio.run(preview_job_nodes_interactive())
+        elif choice == "9":
             console.print("[green]Goodbye![/green]")
             break
 
@@ -981,6 +984,109 @@ async def check_mcp_servers_interactive():
 
     finally:
         await client.close()
+
+
+async def preview_job_nodes_interactive():
+    """Fetch live job data for a task and preview the job-related graph nodes."""
+    from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+    from bamboo.utils.narrator import set_narrator
+    from bamboo.utils.panda_client import fetch_task_data
+
+    set_narrator(console, verbose=True)
+    console.print("\n[bold cyan]Preview Job Nodes[/bold cyan]")
+    console.print("Fetches live job data from PanDA and shows what Aggregated_Job_Feature")
+    console.print("and Job_Instance nodes would be created.\n")
+
+    try:
+        from pandaclient import Client  # noqa: PLC0415
+    except ImportError:
+        console.print("[red]panda-client-light is not installed — cannot fetch job data.[/red]")
+        return
+
+    task_id_str = _ask("Enter PanDA jediTaskID")
+    try:
+        task_id = int(task_id_str)
+    except ValueError:
+        console.print("[red]Invalid task ID — must be an integer.[/red]")
+        return
+
+    console.print(f"Fetching task data for {task_id}...")
+    try:
+        task_data = await fetch_task_data(task_id)
+    except Exception as e:
+        console.print(f"[red]Failed to fetch task data: {e}[/red]")
+        return
+
+    console.print("Fetching all jobs and scout jobs from PanDA...")
+    (all_status, all_jobs), (scout_status, scout_jobs) = await asyncio.gather(
+        asyncio.to_thread(Client.get_job_descriptions, task_id),
+        asyncio.to_thread(Client.get_scout_job_descriptions, task_id),
+    )
+
+    if all_status != 0 or not isinstance(all_jobs, list):
+        console.print(f"[yellow]get_job_descriptions returned status={all_status} — no jobs.[/yellow]")
+        all_jobs = []
+    if scout_status != 0 or not isinstance(scout_jobs, list):
+        scout_jobs = []
+
+    console.print(
+        f"Fetched [cyan]{len(all_jobs)}[/cyan] total job(s), "
+        f"[cyan]{len(scout_jobs)}[/cyan] scout job(s)."
+    )
+
+    if not all_jobs and not scout_jobs:
+        console.print("[yellow]No job data returned — cannot create job nodes.[/yellow]")
+        return
+
+    external_data = {}
+    if scout_jobs:
+        external_data["representative_jobs"] = scout_jobs
+
+    console.print("Running extractor (job data only — task_data skipped)...")
+    extractor = KnowledgeGraphExtractor()
+    try:
+        graph = await extractor.extract_from_sources(
+            jobs_data=all_jobs if all_jobs else None,
+            external_data=external_data if external_data else None,
+        )
+    except Exception as e:
+        console.print(f"[red]Extraction failed: {e}[/red]")
+        return
+
+    job_types = {"Aggregated_Job_Feature", "Job_Instance", "Job_Instance_Context"}
+    job_nodes = [n for n in graph.nodes if n.node_type.value in job_types]
+
+    if not job_nodes:
+        console.print("[yellow]No job-related nodes were created.[/yellow]")
+        console.print(f"Graph has {len(graph.nodes)} node(s) total: "
+                      + ", ".join(f"{t}×{sum(1 for n in graph.nodes if n.node_type.value == t)}"
+                                  for t in sorted({n.node_type.value for n in graph.nodes})))
+        return
+
+    from collections import defaultdict
+    by_type: dict = defaultdict(list)
+    for n in job_nodes:
+        by_type[n.node_type.value].append(n)
+
+    console.print(f"\n[bold]Job-related nodes ({len(job_nodes)} total):[/bold]")
+    for type_name in sorted(by_type):
+        console.print(f"\n[cyan][{type_name}][/cyan]")
+        for n in by_type[type_name]:
+            console.print(f"  • [white]{n.name}[/white]")
+            if n.description:
+                desc = n.description.replace("\n", " ")
+                if len(desc) > 120:
+                    desc = desc[:117] + "..."
+                console.print(f"    [dim]{desc}[/dim]")
+
+    job_node_names = {n.name for n in job_nodes}
+    job_rels = [r for r in graph.relationships
+                if r.source_id in job_node_names or r.target_id in job_node_names]
+    if job_rels:
+        console.print(f"\n[bold]Relationships involving job nodes ({len(job_rels)}):[/bold]")
+        for r in sorted(job_rels, key=lambda r: r.relation_type.value):
+            conf = f"  [{r.confidence:.2f}]" if r.confidence != 1.0 else ""
+            console.print(f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}")
 
 
 @cli.command("populate")

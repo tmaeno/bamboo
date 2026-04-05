@@ -1253,43 +1253,188 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         Returns:
             Tuple of ``(new_nodes, new_relationships)``.
         """
+        from collections import defaultdict
+
         from bamboo.agents.extractors.panda_job_data_aggregator import PandaJobDataAggregator
 
         aggregator = PandaJobDataAggregator()
-        agg = aggregator.aggregate(jobs_data)
+        total = len(jobs_data)
+        min_group_jobs = max(1, int(total * aggregator._min_fraction))
+
+        # Attributes that describe the label itself — emitted as global nodes,
+        # not scoped per label group.
+        _CROSS_LABEL_ATTRS: frozenset[str] = frozenset({"prodSourceLabel"})
+        # Attributes that compare across sites — not scoped per site group,
+        # but may carry a label suffix in multi-label mode.
+        _CROSS_SITE_ATTRS: frozenset[str] = frozenset({"computingSite", "site_failure_rate"})
+        _GLOBAL_ATTRS: frozenset[str] = _CROSS_LABEL_ATTRS | _CROSS_SITE_ATTRS
+
+        def _group_by(jobs: list[dict], key: str) -> dict[str, list[dict]]:
+            """Group jobs by a string key; keep only groups >= min_group_jobs."""
+            groups: defaultdict[str, list[dict]] = defaultdict(list)
+            for job in jobs:
+                val = str(job.get(key, "")).strip() or "unknown"
+                groups[val].append(job)
+            return {g: js for g, js in groups.items() if len(js) >= min_group_jobs}
+
+        def _make_node(
+            attribute: str,
+            value: str,
+            job_count: int,
+            group_total: int,
+            failed_jobs: int,
+            suffix: str,
+            scope_desc: str,
+        ) -> AggregatedJobFeatureNode:
+            name = f"{attribute}={value}{suffix}"
+            scope = f" ({scope_desc})" if scope_desc else ""
+            return AggregatedJobFeatureNode(
+                name=name,
+                attribute=attribute,
+                value=value,
+                job_count=job_count,
+                description=(
+                    f"Job-level aggregated pattern{scope}: {attribute} = {value} "
+                    f"(derived from {job_count} of {group_total} jobs)"
+                ),
+                metadata={
+                    "source": "job_aggregation",
+                    "group_jobs": group_total,
+                    "total_jobs": total,
+                    "failed_jobs": failed_jobs,
+                },
+            )
+
+        # Global aggregation — always run for error signals, context texts,
+        # and global cross-label/cross-site feature nodes.
+        global_agg = aggregator.aggregate(jobs_data)
 
         nodes: list = []
         relationships: list[GraphRelationship] = []
 
         # 1. AggregatedJobFeatureNodes
+        # Primary grouping: prodSourceLabel (outer), then computingSite (inner).
+        # Node name suffixes: #{label} for label scope, @{site} for site scope.
         job_feature_nodes: list[AggregatedJobFeatureNode] = []
-        for attribute, value, job_count in agg.feature_items:
-            node = AggregatedJobFeatureNode(
-                name=f"{attribute}={value}",
-                attribute=attribute,
-                value=value,
-                job_count=job_count,
-                description=(
-                    f"Job-level aggregated pattern: {attribute} = {value} "
-                    f"(derived from {job_count} of {agg.total_jobs} jobs)"
-                ),
-                metadata={
-                    "source": "job_aggregation",
-                    "total_jobs": agg.total_jobs,
-                    "failed_jobs": agg.failed_jobs,
-                },
-            )
-            job_feature_nodes.append(node)
-            nodes.append(node)
+
+        significant_labels = _group_by(jobs_data, "prodSourceLabel")
+        multi_label = len(significant_labels) > 1
+
+        if multi_label:
+            # Outer loop: one group per prodSourceLabel value.
+            for label, label_jobs in significant_labels.items():
+                label_agg = aggregator.aggregate(label_jobs)
+                significant_label_sites = _group_by(label_jobs, "computingSite")
+                multi_label_site = len(significant_label_sites) > 1
+
+                if multi_label_site:
+                    # Per-label, per-site nodes.
+                    for site, site_jobs in significant_label_sites.items():
+                        site_agg = aggregator.aggregate(site_jobs)
+                        for attribute, value, job_count in site_agg.feature_items:
+                            if attribute in _GLOBAL_ATTRS:
+                                continue
+                            n = _make_node(
+                                attribute, value, job_count,
+                                len(site_jobs), site_agg.failed_jobs,
+                                suffix=f"#{label}@{site}",
+                                scope_desc=f"{label} at {site}",
+                            )
+                            job_feature_nodes.append(n)
+                            nodes.append(n)
+                    # Label-scoped cross-site nodes (computingSite / site_failure_rate
+                    # for this label).
+                    for attribute, value, job_count in label_agg.feature_items:
+                        if attribute not in _CROSS_SITE_ATTRS:
+                            continue
+                        n = _make_node(
+                            attribute, value, job_count,
+                            len(label_jobs), label_agg.failed_jobs,
+                            suffix=f"#{label}",
+                            scope_desc=label,
+                        )
+                        job_feature_nodes.append(n)
+                        nodes.append(n)
+                else:
+                    # Single site within this label — label suffix only.
+                    for attribute, value, job_count in label_agg.feature_items:
+                        if attribute in _CROSS_LABEL_ATTRS:
+                            continue
+                        n = _make_node(
+                            attribute, value, job_count,
+                            len(label_jobs), label_agg.failed_jobs,
+                            suffix=f"#{label}",
+                            scope_desc=label,
+                        )
+                        job_feature_nodes.append(n)
+                        nodes.append(n)
+
+            # Global nodes: prodSourceLabel, computingSite, site_failure_rate.
+            for attribute, value, job_count in global_agg.feature_items:
+                if attribute not in _GLOBAL_ATTRS:
+                    continue
+                n = _make_node(
+                    attribute, value, job_count,
+                    total, global_agg.failed_jobs,
+                    suffix="",
+                    scope_desc="",
+                )
+                job_feature_nodes.append(n)
+                nodes.append(n)
+
+        else:
+            # Single prodSourceLabel — apply site-grouping only (existing behaviour).
+            significant_sites = _group_by(jobs_data, "computingSite")
+            multi_site = len(significant_sites) > 1
+
+            if multi_site:
+                for site, site_jobs in significant_sites.items():
+                    site_agg = aggregator.aggregate(site_jobs)
+                    for attribute, value, job_count in site_agg.feature_items:
+                        if attribute in _CROSS_SITE_ATTRS:
+                            continue
+                        n = _make_node(
+                            attribute, value, job_count,
+                            len(site_jobs), site_agg.failed_jobs,
+                            suffix=f"@{site}",
+                            scope_desc=f"at {site}",
+                        )
+                        job_feature_nodes.append(n)
+                        nodes.append(n)
+                # Global cross-site nodes.
+                for attribute, value, job_count in global_agg.feature_items:
+                    if attribute not in _CROSS_SITE_ATTRS:
+                        continue
+                    n = _make_node(
+                        attribute, value, job_count,
+                        total, global_agg.failed_jobs,
+                        suffix="",
+                        scope_desc="",
+                    )
+                    job_feature_nodes.append(n)
+                    nodes.append(n)
+            else:
+                # Single label, single site — no suffix.
+                for attribute, value, job_count in global_agg.feature_items:
+                    n = _make_node(
+                        attribute, value, job_count,
+                        total, global_agg.failed_jobs,
+                        suffix="",
+                        scope_desc="",
+                    )
+                    job_feature_nodes.append(n)
+                    nodes.append(n)
 
         # 2. SymptomNodes from error signals (dedup against existing symptoms)
+        # Always use global_agg for error signals — error codes don't meaningfully
+        # vary per site, and cross-site deduplication happens here.
         existing_symptom_names: set[str] = {
             n.name
             for n in existing_nodes
             if hasattr(n, "node_type") and "SYMPTOM" in str(n.node_type)
         }
         new_symptom_nodes: list[SymptomNode] = []
-        for signal in agg.error_signals:
+        for signal in global_agg.error_signals:
             category, confidence = await self._classify_error(signal)
             if category in existing_symptom_names:
                 continue
@@ -1311,7 +1456,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         #    etc.) so that semantically identical messages from different jobs
         #    collapse to a single node in the vector DB.
         seen_normalised: set[str] = set()
-        for raw_diag in agg.context_texts:
+        for raw_diag in global_agg.context_texts:
             try:
                 normalised = await _normalize_diag(raw_diag)
             except ValueError as exc:
@@ -1354,19 +1499,23 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     )
                 )
 
+        scope_info = (
+            f"{len(significant_labels)} job types" if multi_label else "1 job type"
+        )
         say(
-            f"Jobs analysis: {len(job_feature_nodes)} feature patterns, "
+            f"Jobs analysis ({scope_info}): {len(job_feature_nodes)} feature patterns, "
             f"{len(new_symptom_nodes)} new symptom(s), "
             f"{len(seen_normalised)} diagnostic context(s)."
         )
         logger.debug(
-            "PandaKnowledgeExtractor: jobs_data (%d jobs) → "
+            "PandaKnowledgeExtractor: jobs_data (%d jobs, %d prodSourceLabel group(s)) → "
             "%d AggregatedJobFeatureNodes, %d new SymptomNodes, "
             "%d TaskContextNodes, %d has_job_pattern edges",
-            agg.total_jobs,
+            total,
+            len(significant_labels),
             len(job_feature_nodes),
             len(new_symptom_nodes),
-            len(agg.context_texts),
+            len(global_agg.context_texts),
             len(relationships),
         )
         return nodes, relationships

@@ -332,8 +332,7 @@ class PandaJobDataAggregator:
             fraction = count / total
             if fraction < self._min_fraction:
                 continue
-            label = f"{dominant}({int(fraction * 100)}%)"
-            result.feature_items.append((key, label, count))
+            result.feature_items.append((key, dominant, count))
 
     def _aggregate_continuous(
         self,
@@ -388,9 +387,7 @@ class PandaJobDataAggregator:
             top_site, top_count = site_total.most_common(1)[0]
             fraction = top_count / total
             if fraction >= self._min_fraction:
-                result.feature_items.append(
-                    ("computingSite", f"{top_site}({int(fraction * 100)}%)", top_count)
-                )
+                result.feature_items.append(("computingSite", top_site, top_count))
 
         # Per-site failure rates
         for site, s_total in site_total.items():
