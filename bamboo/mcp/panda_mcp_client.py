@@ -83,6 +83,117 @@ _PANDA_DOCS_TREE_URL = (
 # Tuple layout: (BM25Okapi index, list of (path, paragraph_text) parallel to the corpus).
 _bm25_data: tuple | None = None
 
+# Parsed splitRule parameter table from docs/source/advanced/task_params.rst.
+# Maps parameter name (e.g. "useExhausted") to its one-line description.
+# None = not yet fetched; {} = fetch attempted but failed or table was empty.
+_task_params_table: dict[str, str] | None = None
+
+
+async def _fetch_task_params_table() -> dict[str, str]:
+    """Fetch and parse the splitRule parameter table from task_params.rst.
+
+    Returns a dict mapping parameter name → description sentence.
+    Result is cached process-wide in ``_task_params_table``.
+    Returns ``{}`` on any fetch or parse error (fail-open).
+    """
+    global _task_params_table
+    if _task_params_table is not None:
+        return _task_params_table
+
+    url = f"{_PANDA_DOCS_RAW_BASE}/docs/source/advanced/task_params.rst"
+    try:
+        import httpx  # noqa: PLC0415
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            rst_text = r.text
+    except Exception as exc:
+        logger.warning("_fetch_task_params_table: failed to fetch %s: %s", url, exc)
+        _task_params_table = {}
+        return _task_params_table
+
+    _task_params_table = _parse_task_params_table(rst_text)
+    logger.info(
+        "_fetch_task_params_table: parsed %d splitRule parameter(s)",
+        len(_task_params_table),
+    )
+    return _task_params_table
+
+
+def _parse_task_params_table(rst_text: str) -> dict[str, str]:
+    """Parse ``.. list-table::`` entries from task_params.rst.
+
+    Each entry has three columns: Parameter, Code, Description.
+    Returns ``{parameter_name: description}`` for all entries found.
+    """
+    result: dict[str, str] = {}
+    # State: 0=seeking entry start, 1=got param, 2=got code, 3=in description
+    state = 0
+    param = ""
+    desc_parts: list[str] = []
+
+    for line in rst_text.splitlines():
+        stripped = line.strip()
+
+        if state == 0:
+            # New entry starts with "* - <word>" (first column = parameter name)
+            if stripped.startswith("* - "):
+                candidate = stripped[4:].strip()
+                # Parameter names are camelCase identifiers (no spaces)
+                if candidate and " " not in candidate:
+                    param = candidate
+                    desc_parts = []
+                    state = 1
+        elif state == 1:
+            # Second column: code abbreviation — skip
+            if stripped.startswith("- "):
+                state = 2
+            elif not stripped:
+                state = 0  # blank line without column 2 → abort entry
+        elif state == 2:
+            # Third column: description starts here
+            if stripped.startswith("- "):
+                desc_parts = [stripped[2:].strip()]
+                state = 3
+            elif not stripped:
+                state = 0
+        elif state == 3:
+            if stripped.startswith("* - "):
+                # New entry — save previous and start fresh
+                if param and desc_parts:
+                    result[param] = " ".join(desc_parts)
+                candidate = stripped[4:].strip()
+                if candidate and " " not in candidate:
+                    param = candidate
+                    desc_parts = []
+                    state = 1
+                else:
+                    state = 0
+            elif stripped.startswith("- "):
+                # Unexpected new column in same entry — end description
+                if param and desc_parts:
+                    result[param] = " ".join(desc_parts)
+                param = ""
+                desc_parts = []
+                state = 0
+            elif not stripped:
+                # Blank line ends description
+                if param and desc_parts:
+                    result[param] = " ".join(desc_parts)
+                param = ""
+                desc_parts = []
+                state = 0
+            else:
+                # Continuation line of description
+                desc_parts.append(stripped)
+
+    # Flush last entry if file ends without trailing blank line
+    if state == 3 and param and desc_parts:
+        result[param] = " ".join(desc_parts)
+
+    return result
+
 
 class PandaMcpClient(McpClient):
     """MCP client backed by PanDA endpoints.

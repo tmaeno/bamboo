@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
+from bamboo.agents.knowledge_reviewer import _join_doc_hints
 from bamboo.llm import (
     CAUSE_IDENTIFICATION_PROMPT,
     EMAIL_GENERATION_PROMPT,
@@ -143,6 +144,7 @@ class ReasoningNavigator:
         task_logs: dict[str, str] = None,
         job_logs: dict[str, str] = None,
         jobs_data: list[dict[str, Any]] = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> AnalysisResult:
         """Analyse a problematic task and return a root-cause + resolution result.
 
@@ -179,6 +181,8 @@ class ReasoningNavigator:
         task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         logger.info("ReasoningNavigator: analysing task '%s'", task_id)
 
+        domain_hints = _join_doc_hints(doc_hints)
+
         extracted_graph = await self.extractor.extract_from_sources(
             email_text="",
             task_data=task_data,
@@ -192,9 +196,9 @@ class ReasoningNavigator:
         graph_results = await self._query_graph_database(extracted_clues)
         vector_results = await self._query_vector_database(extracted_clues, task_data)
         analysis = await self._identify_root_cause(
-            task_data, external_data, graph_results, vector_results
+            task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
         )
-        email_content = await self._generate_email(task_data, analysis)
+        email_content = await self._generate_email(task_data, analysis, domain_hints=domain_hints)
 
         return AnalysisResult(
             task_id=task_id,
@@ -355,6 +359,7 @@ class ReasoningNavigator:
         external_data: dict[str, Any],
         graph_results: list[dict[str, Any]],
         vector_results: list[dict[str, Any]],
+        domain_hints: str = "(none)",
     ) -> dict[str, Any]:
         """Call the LLM to synthesise a root-cause analysis.
 
@@ -373,6 +378,7 @@ class ReasoningNavigator:
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
             task_info=json.dumps(sanitize_for_llm(task_data), indent=2),
             external_info=json.dumps(sanitize_for_llm(external_data) or {}, indent=2),
+            domain_hints=domain_hints,
             graph_results=json.dumps(graph_results, indent=2),
             vector_results=json.dumps(
                 [
@@ -407,7 +413,7 @@ class ReasoningNavigator:
             }
 
     async def _generate_email(
-        self, task_data: dict[str, Any], analysis: dict[str, Any]
+        self, task_data: dict[str, Any], analysis: dict[str, Any], domain_hints: str = "(none)"
     ) -> str:
         """Draft a professional resolution email for the task submitter.
 
@@ -428,6 +434,7 @@ class ReasoningNavigator:
         prompt = EMAIL_GENERATION_PROMPT.format(
             task_id=composite_task_id,
             task_description=task_data.get("description", ""),
+            domain_hints=domain_hints,
             analysis=json.dumps(analysis, indent=2),
         )
         messages = [

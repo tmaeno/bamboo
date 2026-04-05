@@ -50,16 +50,21 @@ class ReviewResult:
     """Outcome of one review pass.
 
     Attributes:
-        approved:   ``True`` if the graph adequately describes the incident.
-        feedback:   Actionable instructions for the extractor (empty when approved).
-        confidence: Reviewer's confidence in its verdict (0.0–1.0).
-        issues:     List of identified gaps (empty when approved).
+        approved:               ``True`` if the graph adequately describes the incident.
+        feedback:               Actionable instructions for the extractor (empty when approved).
+        confidence:             Reviewer's confidence in its verdict (0.0–1.0).
+        issues:                 List of identified gaps (empty when approved).
+        relevant_feature_nodes: Feature node names (Task_Feature / Job_Feature) that the
+                                reviewer identified as directly causally relevant based on
+                                domain documentation.  Used by the accumulator to create
+                                explicit ``contribute_to`` edges rather than blanket ones.
     """
 
     approved: bool
     feedback: str = ""
     confidence: float = 1.0
     issues: list[str] = field(default_factory=list)
+    relevant_feature_nodes: list[str] = field(default_factory=list)
 
 
 class KnowledgeReviewer:
@@ -115,7 +120,7 @@ class KnowledgeReviewer:
 
         try:
             llm = get_extraction_llm()
-            say(f"Analysing graph for incident gaps ({len(graph.nodes)} nodes)...")
+            say(f"Analysing graph for incident gaps and node relevance ({len(graph.nodes)} nodes)...")
             with thinking("Working"):
                 response = await llm.ainvoke(
                     KNOWLEDGE_REVIEW_PROMPT.format(
@@ -139,6 +144,11 @@ class KnowledgeReviewer:
                         "reviewer gaps",
                         "\n".join(f"• {i}" for i in result.issues),
                     )
+            if result.relevant_feature_nodes:
+                show_block(
+                    "reviewer: causally relevant features",
+                    "\n".join(f"• {n}" for n in result.relevant_feature_nodes),
+                )
             return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
@@ -247,6 +257,7 @@ def _parse_review_response(response: str) -> ReviewResult:
             feedback=str(data.get("feedback", "")),
             confidence=float(data.get("confidence", 1.0)),
             issues=[str(i) for i in data.get("issues", [])],
+            relevant_feature_nodes=[str(n) for n in data.get("relevant_feature_nodes", [])],
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("KnowledgeReviewer: failed to parse review response: %s", exc)

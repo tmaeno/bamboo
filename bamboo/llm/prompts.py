@@ -163,6 +163,12 @@ Task Information:
 External Information:
 {external_info}
 
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+Use the domain documentation to interpret graph evidence correctly and to weight causes
+that align with the documented failure pattern for this task status/error more highly.
+
 Graph Database Results (possible causes and resolutions):
 {graph_results}
 
@@ -195,6 +201,12 @@ EMAIL_GENERATION_PROMPT = """You are a technical communication expert. Generate 
 
 Task ID: {task_id}
 Task Description: {task_description}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+Use the domain documentation to ensure the resolution steps and explanations align with
+documented PanDA system behaviour for this task status/error.
 
 Root Cause Analysis:
 {analysis}
@@ -654,12 +666,19 @@ When a gap in "issues" could be resolved by one of the above tools, append a not
 Do NOT invent tool names — only reference tools listed above.
 If no tools are listed, assess gaps exactly as before.
 
+CAUSALLY RELEVANT FEATURES: Based on the domain documentation, list the exact names of
+any Task_Feature or Job_Feature nodes in the graph that are directly implicated in the
+documented failure pattern for this task status/error (e.g. if docs say memory exhaustion
+is the cause, list "ramCount=4GB" if that node exists). Use empty list if none apply or
+if domain documentation is absent.
+
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
 {{
   "approved": true | false,
   "confidence": <float 0.0-1.0>,
   "issues": ["<concise gap description>"],
-  "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>"
+  "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>",
+  "relevant_feature_nodes": ["<exact node name as it appears in the graph>"]
 }}
 """
 

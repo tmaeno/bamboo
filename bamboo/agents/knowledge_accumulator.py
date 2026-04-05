@@ -169,6 +169,7 @@ class KnowledgeAccumulator:
         )
 
         review_feedback = ""
+        review_result = None
         for attempt in range(self._max_review_retries + 1):
             graph = await self.extractor.extract_from_sources(
                 email_text=email_text,
@@ -246,6 +247,12 @@ class KnowledgeAccumulator:
 
             review_feedback = review_result.feedback
 
+        # Create explicit contribute_to edges for feature nodes the reviewer
+        # identified as causally relevant based on domain documentation.
+        # These replace the former blanket Task_Feature→Cause edges.
+        if review_result is not None and review_result.relevant_feature_nodes:
+            self._add_reviewer_feature_edges(graph, review_result.relevant_feature_nodes)
+
         if dry_run:
             logger.info(
                 "KnowledgeAccumulator: dry-run mode — skipping all database writes"
@@ -291,7 +298,8 @@ class KnowledgeAccumulator:
         """Fetch PanDA documentation hints before the first extraction pass.
 
         Derives search queries from key ``task_data`` fields (status,
-        errorDialog) and calls ``search_panda_docs`` via PandaMcpClient.
+        errorDialog, splitRule sub-rule keys) and calls ``search_panda_docs``
+        via PandaMcpClient.
 
         Returns a ``doc_hints`` dict: keys are query strings, values are
         plain rendered text (``"[Title] snippet\\n\\n[Title2] snippet2"``).
@@ -347,6 +355,30 @@ class KnowledgeAccumulator:
                     query,
                     exc,
                 )
+
+        # Look up splitRule sub-rule descriptions directly from task_params.rst.
+        split_rule_str = task_data.get("splitRule", "") or ""
+        if split_rule_str:
+            from bamboo.mcp.panda_mcp_client import _fetch_task_params_table  # noqa: PLC0415
+
+            table = await _fetch_task_params_table()
+            if table:
+                found: dict[str, str] = {}
+                for sub_rule in split_rule_str.split(","):
+                    sub_rule = sub_rule.strip()
+                    if "=" in sub_rule:
+                        key = sub_rule.split("=", 1)[0].strip()
+                        if key and key not in found and key in table:
+                            found[key] = table[key]
+                if found:
+                    doc_hints["splitRule params"] = "\n".join(
+                        f"- {k}: {v}" for k, v in found.items()
+                    )
+                    say(
+                        f"Looked up {len(found)} splitRule description(s) "
+                        "from task_params.rst"
+                    )
+
         return doc_hints
 
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
@@ -382,10 +414,8 @@ class KnowledgeAccumulator:
         }
 
         pairs = [
-            ("Symptom", RelationType.INDICATE),
-            ("Task_Feature", RelationType.CONTRIBUTE_TO),
-            ("Job_Feature", RelationType.CONTRIBUTE_TO),
-            ("Component", RelationType.ORIGINATED_FROM),
+            ("Symptom",     RelationType.INDICATE),
+            ("Component",   RelationType.ORIGINATED_FROM),
             ("Environment", RelationType.ASSOCIATED_WITH),
         ]
 
@@ -413,6 +443,61 @@ class KnowledgeAccumulator:
             logger.info(
                 "KnowledgeAccumulator: reconciled %d cross-extractor link(s)",
                 len(new_rels),
+            )
+
+    def _add_reviewer_feature_edges(
+        self, graph: KnowledgeGraph, feature_names: list[str]
+    ) -> None:
+        """Create ``contribute_to`` edges for reviewer-identified causal feature nodes.
+
+        Unlike the blanket reconciliation step (which was removed), this only
+        creates edges for feature nodes that the reviewer explicitly identified
+        as causally implicated in the documented failure pattern.  Edges carry
+        ``confidence=0.9`` to distinguish them from directly extracted ones.
+
+        Args:
+            graph:         The current :class:`KnowledgeGraph`.
+            feature_names: Node names returned in ``ReviewResult.relevant_feature_nodes``.
+        """
+        from bamboo.models.graph_element import GraphRelationship, RelationType
+
+        feature_set = set(feature_names)
+        feature_nodes = [
+            n for n in graph.nodes
+            if n.name in feature_set and n.node_type.value in ("Task_Feature", "Job_Feature")
+        ]
+        cause_nodes = [n for n in graph.nodes if n.node_type.value == "Cause"]
+
+        if not feature_nodes or not cause_nodes:
+            return
+
+        existing = {
+            (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
+        }
+        new_rels = []
+        for feat in feature_nodes:
+            for cause in cause_nodes:
+                key = (feat.name, cause.name, RelationType.CONTRIBUTE_TO)
+                if key not in existing:
+                    new_rels.append(
+                        GraphRelationship(
+                            source_id=feat.name,
+                            target_id=cause.name,
+                            relation_type=RelationType.CONTRIBUTE_TO,
+                            confidence=0.9,
+                        )
+                    )
+                    existing.add(key)
+
+        graph.relationships.extend(new_rels)
+        if new_rels:
+            say(
+                f"Added {len(new_rels)} reviewer-identified feature→cause edge(s)."
+            )
+            logger.info(
+                "KnowledgeAccumulator: added %d reviewer feature edge(s) for: %s",
+                len(new_rels),
+                feature_names,
             )
 
     # Node types that must NOT be stored in the graph database (Neo4j).

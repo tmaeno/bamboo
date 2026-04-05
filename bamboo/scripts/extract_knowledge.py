@@ -182,33 +182,68 @@ async def _run_extraction(
             click.echo("\n--- Node details ---")
             from collections import defaultdict
 
+            # Build set of node names that appear in at least one relationship.
+            connected_names: set[str] = set()
+            for r in result.graph.relationships:
+                connected_names.add(r.source_id)
+                connected_names.add(r.target_id)
+
+            def _print_node(n) -> None:
+                click.echo(f"  • {n.name}")
+                if n.description:
+                    desc = n.description.replace("\n", " ")
+                    if len(desc) > 120:
+                        desc = desc[:117] + "..."
+                    click.echo(f"    {desc}")
+                extras = {}
+                if hasattr(n, "confidence") and n.confidence != 1.0:
+                    extras["confidence"] = f"{n.confidence:.2f}"
+                if hasattr(n, "steps") and n.steps:
+                    extras["steps"] = len(n.steps)
+                if hasattr(n, "attribute"):
+                    extras["attribute"] = n.attribute
+                if hasattr(n, "severity") and n.severity:
+                    extras["severity"] = n.severity
+                if extras:
+                    click.echo(
+                        "    " + "  ".join(f"{k}={v}" for k, v in extras.items())
+                    )
+
             nodes_by_type: dict = defaultdict(list)
             for n in result.graph.nodes:
                 nodes_by_type[n.node_type.value].append(n)
             for type_name in sorted(nodes_by_type):
+                nodes = nodes_by_type[type_name]
+                connected = [n for n in nodes if n.name in connected_names]
+                isolated = [n for n in nodes if n.name not in connected_names]
                 click.echo(f"\n[{type_name}]")
-                for n in nodes_by_type[type_name]:
-                    click.echo(f"  • {n.name}")
-                    if n.description:
-                        # wrap long descriptions at 80 chars
-                        desc = n.description.replace("\n", " ")
-                        if len(desc) > 120:
-                            desc = desc[:117] + "..."
-                        click.echo(f"    {desc}")
-                    # type-specific extra fields
-                    extras = {}
-                    if hasattr(n, "confidence") and n.confidence != 1.0:
-                        extras["confidence"] = f"{n.confidence:.2f}"
-                    if hasattr(n, "steps") and n.steps:
-                        extras["steps"] = len(n.steps)
-                    if hasattr(n, "attribute"):
-                        extras["attribute"] = n.attribute
-                    if hasattr(n, "severity") and n.severity:
-                        extras["severity"] = n.severity
-                    if extras:
-                        click.echo(
-                            "    " + "  ".join(f"{k}={v}" for k, v in extras.items())
-                        )
+                if connected:
+                    click.echo("  connected:")
+                    for n in connected:
+                        _print_node(n)
+                if isolated:
+                    click.echo(click.style("  isolated:", fg="bright_black"))
+                    for n in isolated:
+                        click.echo(click.style(f"  • {n.name}", fg="bright_black"))
+                        if n.description:
+                            desc = n.description.replace("\n", " ")
+                            if len(desc) > 120:
+                                desc = desc[:117] + "..."
+                            click.echo(click.style(f"    {desc}", fg="bright_black"))
+                        extras = {}
+                        if hasattr(n, "confidence") and n.confidence != 1.0:
+                            extras["confidence"] = f"{n.confidence:.2f}"
+                        if hasattr(n, "steps") and n.steps:
+                            extras["steps"] = len(n.steps)
+                        if hasattr(n, "attribute"):
+                            extras["attribute"] = n.attribute
+                        if hasattr(n, "severity") and n.severity:
+                            extras["severity"] = n.severity
+                        if extras:
+                            click.echo(click.style(
+                                "    " + "  ".join(f"{k}={v}" for k, v in extras.items()),
+                                fg="bright_black",
+                            ))
 
             click.echo("\n--- Relationships ---")
             for r in sorted(
