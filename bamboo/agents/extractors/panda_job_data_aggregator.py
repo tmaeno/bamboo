@@ -92,9 +92,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 JOB_DISCRETE_KEYS: frozenset[str] = frozenset(
     {
+        "extendedProdSourceLabel",
         "gshare",
         "processingType",
-        "prodSourceLabel",
         "resourceType",
         "workQueue",
     }
@@ -107,6 +107,7 @@ JOB_DISCRETE_KEYS: frozenset[str] = frozenset(
 JOB_CONTINUOUS_KEYS: frozenset[str] = frozenset(
     {
         "cpuConsumptionTime",
+        "jobDuration",
         "actualCoreCount",
         "maxRSS",
         "outputFileBytes",
@@ -120,6 +121,16 @@ _JOB_BUCKETS: dict[str, list[tuple[float, str]]] = {
     # CPU time: seconds
     "cpuConsumptionTime": [
         (3_600, "<1h"),
+        (21_600, "1-6h"),
+        (86_400, "6-24h"),
+        (float("inf"), ">24h"),
+    ],
+    # Job wall-clock duration: seconds (finer short-job slots to detect early termination)
+    "jobDuration": [
+        (300, "<5min"),
+        (900, "5-15min"),
+        (1_800, "15-30min"),
+        (3_600, "30min-1h"),
         (21_600, "1-6h"),
         (86_400, "6-24h"),
         (float("inf"), ">24h"),

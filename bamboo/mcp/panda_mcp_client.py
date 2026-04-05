@@ -26,10 +26,6 @@ Tool catalogue
     Prioritises scout jobs (via ``get_scout_job_descriptions``) and jobs with
     distinct error codes (via ``get_job_descriptions`` with unsuccessful_only).
 
-``get_task_jedi_details``
-    Fetches extended task info (scheduling parameters, split/merge rules,
-    resource allocation) via ``get_task_details_json``.
-
 ``get_task_input_datasets``
     Fetches input and pseudo-input dataset descriptions (file counts,
     availability) via ``get_files_in_datasets``.
@@ -301,23 +297,6 @@ class PandaMcpClient(McpClient):
                 },
             ),
             McpTool(
-                name="get_task_jedi_details",
-                description=(
-                    "Fetches extended JEDI-level task details including scheduling parameters, "
-                    "split/merge rules, resource allocation, and internal status transitions.  "
-                    "Use this when the reviewer notes that the failure cause is unclear despite "
-                    "a clean errorDialog — e.g. the task was brokered to unexpected sites, "
-                    "resource limits triggered internal retries, or nQueuedJobs/nRunningJobs "
-                    "suggest scheduling bottlenecks.  "
-                    "Do NOT call if the errorDialog already provides a specific pilot or payload error."
-                ),
-                parameters_schema={
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                },
-            ),
-            McpTool(
                 name="get_task_input_datasets",
                 description=(
                     "Fetches the input and pseudo-input dataset descriptions (including file "
@@ -421,7 +400,6 @@ class PandaMcpClient(McpClient):
             "get_retry_chain": self._get_retry_chain,
             "get_task_jobs_summary": self._get_task_jobs_summary,
             "get_failed_job_details": self._get_failed_job_details,
-            "get_task_jedi_details": self._get_task_jedi_details,
             "get_task_input_datasets": self._get_task_input_datasets,
             "search_panda_server_source": self._search_panda_server_source,
             "search_panda_docs": self._search_panda_docs,
@@ -731,52 +709,6 @@ class PandaMcpClient(McpClient):
                 exc,
             )
             return []
-
-    async def _get_task_jedi_details(
-        self,
-        task_data: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Fetch extended task details for *task_id* via ``get_task_details_json``.
-
-        Uses the ``task/get_detailed_info`` endpoint (``output_mode="extended"``)
-        which returns scheduling parameters, split/merge rules, resource
-        allocation, and internal status fields not present in the standard task
-        dict returned by ``get_task_details_json`` alone.
-
-        Returns the detail dict, or ``None`` on failure.
-        """
-        try:
-            from pandaclient import Client  # noqa: PLC0415
-        except ImportError:
-            logger.warning("PandaMcpClient.get_task_jedi_details: panda-client-light not installed")
-            return None
-
-        try:
-            task_id_int = int(task_data["jediTaskID"])
-            status, data = await asyncio.to_thread(
-                Client.get_task_details_json, task_id_int
-            )
-            if status != 0 or not isinstance(data, tuple) or not data[0]:
-                logger.warning(
-                    "PandaMcpClient.get_task_jedi_details: returned status=%s for task_id=%s",
-                    status,
-                    task_id,
-                )
-                return None
-            result: dict[str, Any] = data[1]
-            logger.info(
-                "PandaMcpClient.get_task_jedi_details: fetched %d field(s) for task_id=%s",
-                len(result),
-                task_id,
-            )
-            return result
-        except Exception as exc:
-            logger.warning(
-                "PandaMcpClient.get_task_jedi_details: failed for task_id=%s: %s",
-                task_id,
-                exc,
-            )
-            return None
 
     async def _get_task_input_datasets(
         self,

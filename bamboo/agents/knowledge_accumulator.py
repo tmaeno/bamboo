@@ -435,6 +435,25 @@ class KnowledgeAccumulator:
                         )
                         existing.add(key)
 
+        # Cause -[solved_by]-> Resolution: link every cause to every resolution as a
+        # fallback.  The email extractor creates these when it can match the LLM's
+        # relationship source/target names; this step covers cases where that matching
+        # fails (e.g. name capitalisation mismatch after canonicalisation).
+        resolutions = by_type.get("Resolution", [])
+        for cause in causes:
+            for res in resolutions:
+                key = (cause.name, res.name, RelationType.SOLVED_BY)
+                if key not in existing:
+                    new_rels.append(
+                        GraphRelationship(
+                            source_id=cause.name,
+                            target_id=res.name,
+                            relation_type=RelationType.SOLVED_BY,
+                            confidence=0.7,
+                        )
+                    )
+                    existing.add(key)
+
         graph.relationships.extend(new_rels)
         if new_rels:
             say(

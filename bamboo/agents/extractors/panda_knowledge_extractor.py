@@ -1263,7 +1263,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         # Attributes that describe the label itself — emitted as global nodes,
         # not scoped per label group.
-        _CROSS_LABEL_ATTRS: frozenset[str] = frozenset({"prodSourceLabel"})
+        _CROSS_LABEL_ATTRS: frozenset[str] = frozenset({"extendedProdSourceLabel"})
         # Attributes that compare across sites — not scoped per site group,
         # but may carry a label suffix in multi-label mode.
         _CROSS_SITE_ATTRS: frozenset[str] = frozenset({"computingSite", "site_failure_rate"})
@@ -1317,7 +1317,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         # Node name suffixes: #{label} for label scope, @{site} for site scope.
         job_feature_nodes: list[AggregatedJobFeatureNode] = []
 
-        significant_labels = _group_by(jobs_data, "prodSourceLabel")
+        significant_labels = _group_by(jobs_data, "extendedProdSourceLabel")
         multi_label = len(significant_labels) > 1
 
         if multi_label:
@@ -1879,6 +1879,14 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             src = rel_data.get("source_name")
             tgt = rel_data.get("target_name")
             if src not in raw_name_to_node or tgt not in raw_name_to_node:
+                logger.warning(
+                    "PandaKnowledgeExtractor: email relationship dropped — "
+                    "source_name=%r or target_name=%r not found in extracted nodes "
+                    "(known names: %s)",
+                    src,
+                    tgt,
+                    list(raw_name_to_node.keys()),
+                )
                 continue
             try:
                 rel_type = RelationType(rel_data["relation_type"])
