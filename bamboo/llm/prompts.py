@@ -669,18 +669,28 @@ When a gap in "issues" could be resolved by one of the above tools, append a not
 Do NOT invent tool names — only reference tools listed above.
 If no tools are listed, assess gaps exactly as before.
 
-FAILURE DIMENSION: Identify the resource dimension(s) that caused this failure.
-Scan the errorDialog and Symptom text for these keywords and map each match:
-  "cpu time" / "cpuTime" / "core" / "cpu efficiency"  → cpu
-  "memory" / "RAM" / "mem"                            → memory
-  "walltime" / "wall time" / "timeout"                → walltime
-  "disk" / "I/O" / "storage"                         → disk
-  site name / "brokerage" / "no candidate"            → site
-  "events" / "files" / "job size"                     → job_size
+FAILURE DIMENSION: Identify the resource dimension(s) that caused this failure
+by reading and understanding the errorDialog and Symptom text.
 
-Return ALL dimensions whose keywords appear.  If no keyword matches, return
-empty list and set needs_job_data=true.  Do not consult domain documentation
-for dimension inference — keyword match only.
+Allowed dimensions and their typical signals:
+  cpu       — CPU time, core count, cpu efficiency, cpu consumption, over_cpu_consumption,
+               payload running on wrong queue type
+  memory    — memory limit, RAM, RSS, OOM, out-of-memory
+  walltime  — walltime, wall time, timeout, job duration (jobDuration), elapsed time
+  disk      — disk space, I/O, storage, output size
+  site      — specific site name, brokerage failure, no candidate site
+  job_size  — events per job, files per job, input/output file count or size
+
+Rules:
+  • Semantic understanding of the errorDialog is allowed — you do not need an exact
+    keyword match.  For example, if the errorDialog formula contains "jobDuration",
+    recognise that as a walltime parameter.
+  • Only include a dimension if it is directly described or named in the errorDialog
+    or Symptom text.  Do NOT add dimensions based on general domain knowledge about
+    how resources interact (e.g. do not add "memory" for a CPU incident just because
+    memory can affect CPU efficiency).
+  • If you cannot identify any dimension from the text, return empty list and set
+    needs_job_data=true.
 
 JOB DATA FLAG: Set "needs_job_data" to true when ALL of the following hold:
   1. The graph has NO Aggregated_Job_Feature or Job_Instance nodes.

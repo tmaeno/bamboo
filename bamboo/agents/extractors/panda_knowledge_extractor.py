@@ -286,7 +286,7 @@ FEATURE_CONCEPT: dict[str, str] = {
     "nCores": "cpu",
     "maxCoreCount": "cpu",
     "maxCpuCount": "cpu",
-    "cpuTime": "cpu",
+    "cpuTime": ["cpu", "walltime"],  # CPU time is both a CPU metric and a time metric
     "nThread": "cpu",
     # Memory
     "ramCount": "memory",
@@ -365,8 +365,9 @@ JOB_FEATURE_CONCEPT: dict[str, str | list[str]] = {
     "actualCoreCount": "cpu",
     # Memory
     "maxRSS": "memory",
-    # Walltime
-    "jobDuration": "walltime",
+    # Walltime / also CPU: jobDuration appears in PanDA's cpu-consumption limit formula
+    # (cpuConsumptionTime > jobDuration * coreCount * safety)
+    "jobDuration": ["cpu", "walltime"],
     # Disk + job sizing (output volume is both a disk metric and a job-size indicator)
     "outputFileBytes": ["disk", "job_size"],
     # Job sizing
@@ -1626,28 +1627,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 )
             )
 
-        # 4. has_job_pattern edges: every Symptom (existing + new) → each AggregatedJobFeatureNode
-        all_symptom_nodes: list = [
-            n
-            for n in existing_nodes
-            if hasattr(n, "node_type") and "SYMPTOM" in str(n.node_type)
-        ] + new_symptom_nodes
-
-        for symptom in all_symptom_nodes:
-            for jf_node in job_feature_nodes:
-                concepts = _node_concepts(jf_node)
-                if not concepts or "context" in concepts:
-                    # Context/unclassified nodes are connected via associated_with
-                    # by _add_context_edges in the accumulator instead.
-                    continue
-                relationships.append(
-                    GraphRelationship(
-                        source_id=symptom.name,
-                        target_id=jf_node.name,
-                        relation_type=RelationType.HAS_JOB_PATTERN,
-                        confidence=1.0,
-                    )
-                )
+        # has_job_pattern edges are created post-review in the accumulator
+        # (_add_dimension_feature_edges) so only dimension-matched nodes are connected.
 
         scope_info = (
             f"{len(significant_labels)} job types" if multi_label else "1 job type"

@@ -611,6 +611,7 @@ class KnowledgeAccumulator:
         if not feature_nodes or not cause_nodes:
             return
 
+        symptom_nodes = [n for n in graph.nodes if n.node_type.value == "Symptom"]
         existing = {
             (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
         }
@@ -628,6 +629,21 @@ class KnowledgeAccumulator:
                         )
                     )
                     existing.add(key)
+            # Aggregated_Job_Feature nodes also get has_job_pattern → Symptom edges
+            # so they survive the isolated-node filter even when no Cause node exists.
+            if feat.node_type.value == "Aggregated_Job_Feature":
+                for symptom in symptom_nodes:
+                    key = (symptom.name, feat.name, RelationType.HAS_JOB_PATTERN)
+                    if key not in existing:
+                        new_rels.append(
+                            GraphRelationship(
+                                source_id=symptom.name,
+                                target_id=feat.name,
+                                relation_type=RelationType.HAS_JOB_PATTERN,
+                                confidence=0.9,
+                            )
+                        )
+                        existing.add(key)
 
         graph.relationships.extend(new_rels)
         if new_rels:
