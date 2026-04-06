@@ -271,6 +271,10 @@ class KnowledgeAccumulator:
         if _all_failure_dimensions:
             self._add_dimension_feature_edges(graph, _all_failure_dimensions)
 
+        # Auto-connect context nodes to Symptom nodes so they appear connected
+        # in the graph regardless of whether we are in dry-run mode or not.
+        self._add_context_edges(graph)
+
         if dry_run:
             logger.info(
                 "KnowledgeAccumulator: dry-run mode — skipping all database writes"
@@ -548,6 +552,37 @@ class KnowledgeAccumulator:
                 len(new_rels),
             )
 
+    def _add_context_edges(self, graph: KnowledgeGraph) -> None:
+        """Connect concept=context nodes to every Symptom with ``associated_with``.
+
+        Context nodes (prodSourceLabel, taskType, etc.) are never direct causes
+        but carry signals for cross-task pattern queries.  Without an edge they
+        are isolated and dropped by the graph-DB isolated-node filter.  This
+        method is called before the dry-run check so the edges are visible in
+        preview output too.
+        """
+        from bamboo.models.graph_element import GraphRelationship, RelationType
+
+        symptom_names = [n.name for n in graph.nodes if n.node_type.value == "Symptom"]
+        if not symptom_names:
+            return
+        existing = {(r.source_id, r.target_id, r.relation_type) for r in graph.relationships}
+        for node in graph.nodes:
+            if node.metadata.get("concept") != "context":
+                continue
+            for symptom_name in symptom_names:
+                key = (node.name, symptom_name, RelationType.ASSOCIATED_WITH)
+                if key not in existing:
+                    graph.relationships.append(
+                        GraphRelationship(
+                            source_id=node.name,
+                            target_id=symptom_name,
+                            relation_type=RelationType.ASSOCIATED_WITH,
+                            confidence=1.0,
+                        )
+                    )
+                    existing.add(key)
+
     def _add_dimension_feature_edges(
         self, graph: KnowledgeGraph, dimensions: set[str]
     ) -> None:
@@ -620,35 +655,6 @@ class KnowledgeAccumulator:
         Relationship source/target IDs are remapped to the actual stored IDs
         before insertion.
         """
-        # Auto-connect context nodes (concept="context") to every Symptom with
-        # an ``associated_with`` edge so they survive the isolated-node filter.
-        # These are background classification fields (prodSourceLabel, taskType,
-        # etc.) that are never direct causes but are important for cross-task
-        # pattern queries.
-        from bamboo.models.graph_element import GraphRelationship, RelationType
-
-        symptom_names = [
-            n.name for n in graph.nodes if n.node_type.value == "Symptom"
-        ]
-        existing_rels = {
-            (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
-        }
-        for node in graph.nodes:
-            if node.metadata.get("concept") != "context":
-                continue
-            for symptom_name in symptom_names:
-                key = (node.name, symptom_name, RelationType.ASSOCIATED_WITH)
-                if key not in existing_rels:
-                    graph.relationships.append(
-                        GraphRelationship(
-                            source_id=node.name,
-                            target_id=symptom_name,
-                            relation_type=RelationType.ASSOCIATED_WITH,
-                            confidence=1.0,
-                        )
-                    )
-                    existing_rels.add(key)
-
         # Collect endpoint names from all relationships so isolated nodes can be
         # identified and dropped.  Relationship source/target IDs are still node
         # names at this point (UUID remapping happens after node creation below).
