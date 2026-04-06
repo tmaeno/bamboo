@@ -1235,8 +1235,31 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
     type=click.Path(),
     help="Path to save analysis results",
 )
-def analyze_cmd(task_data, task_id, external_data, output):
-    """Analyze a problematic task and generate a resolution."""
+@click.option(
+    "--compare-task-id",
+    "compare_task_ids",
+    type=int,
+    multiple=True,
+    help=(
+        "Additional task ID(s) to compare against for cross-task pattern analysis. "
+        "Repeatable. When provided, displays the common subgraph instead of a "
+        "single-task analysis."
+    ),
+)
+@click.option(
+    "--min-occurrences",
+    type=click.IntRange(min=2),
+    default=2,
+    show_default=True,
+    help="Minimum number of tasks sharing an edge for pattern output.",
+)
+def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min_occurrences):
+    """Analyze a problematic task and generate a resolution.
+
+    With --compare-task-id, displays the common subgraph across all specified
+    tasks (edges shared by at least --min-occurrences tasks) instead of the
+    single-task analysis.
+    """
     from bamboo.scripts.analyze_task import main as _main
 
     ctx = click.get_current_context()
@@ -1246,6 +1269,8 @@ def analyze_cmd(task_data, task_id, external_data, output):
         task_id=task_id,
         external_data=external_data,
         output=output,
+        compare_task_ids=compare_task_ids,
+        min_occurrences=min_occurrences,
     )
 
 

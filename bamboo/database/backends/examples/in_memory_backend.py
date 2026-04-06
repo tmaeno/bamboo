@@ -183,6 +183,56 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
 
         return results[:limit]
 
+    async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
+        """Remove a graph_id's contribution (in-memory stub)."""
+        rels_affected = 0
+        to_delete = []
+        for rel_id, rel in self.relationships.items():
+            graph_ids = rel.properties.get("graph_ids", [])
+            if graph_id in graph_ids:
+                remaining = [gid for gid in graph_ids if gid != graph_id]
+                if not remaining:
+                    to_delete.append(rel_id)
+                else:
+                    rel.properties["graph_ids"] = remaining
+                rels_affected += 1
+        for rel_id in to_delete:
+            del self.relationships[rel_id]
+        # Remove isolated nodes
+        referenced = set()
+        for rel in self.relationships.values():
+            referenced.add(rel.source_id)
+            referenced.add(rel.target_id)
+        isolated = [nid for nid in self.nodes if nid not in referenced]
+        for nid in isolated:
+            del self.nodes[nid]
+        return {"rels_affected": rels_affected, "nodes_removed": len(isolated)}
+
+    async def find_common_pattern(
+        self,
+        graph_ids: list[str],
+        min_occurrences: int = 2,
+    ) -> list[dict]:
+        """Return edges shared across at least *min_occurrences* of the given graphs (in-memory stub)."""
+        results = []
+        for rel in self.relationships.values():
+            rel_graph_ids = rel.properties.get("graph_ids", [])
+            matched = [gid for gid in rel_graph_ids if gid in graph_ids]
+            if len(matched) >= min_occurrences:
+                src = self.nodes.get(rel.source_id)
+                tgt = self.nodes.get(rel.target_id)
+                if src and tgt:
+                    results.append({
+                        "src_name": src.name,
+                        "src_type": src.node_type.value,
+                        "tgt_name": tgt.name,
+                        "tgt_type": tgt.node_type.value,
+                        "rel_type": rel.relation_type.value,
+                        "confidence": rel.confidence,
+                        "occurrence_count": len(matched),
+                    })
+        return sorted(results, key=lambda x: x["occurrence_count"], reverse=True)
+
     async def clear_all(self) -> None:
         """Clear all nodes and relationships from memory."""
         self.nodes.clear()

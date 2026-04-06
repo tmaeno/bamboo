@@ -34,12 +34,36 @@ from bamboo.utils.logging import setup_logging
     help="Path to external data JSON file",
 )
 @click.option("--output", type=click.Path(), help="Path to save analysis results")
-def main(task_data, task_id, external_data, output):
+@click.option(
+    "--compare-task-id",
+    "compare_task_ids",
+    type=int,
+    multiple=True,
+    help=(
+        "Additional jediTaskID(s) to compare against. When one or more are given, "
+        "the common subgraph across all tasks (including --task-id) is displayed "
+        "instead of the single-task analysis. Repeatable: --compare-task-id 456 "
+        "--compare-task-id 789."
+    ),
+)
+@click.option(
+    "--min-occurrences",
+    type=click.IntRange(min=2),
+    default=2,
+    show_default=True,
+    help="Minimum number of tasks that must share an edge for it to appear in the pattern output.",
+)
+def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences):
     """Analyze a problematic task and generate a resolution.
 
     Task data can be supplied either as a local JSON file (--task-data) or
     fetched live from PanDA by jediTaskID (--task-id).  The two options are
     mutually exclusive and at least one must be provided.
+
+    When --compare-task-id is given, the command instead displays the common
+    subgraph across all specified tasks (edges shared by at least
+    --min-occurrences tasks).  This requires all tasks to have been previously
+    accumulated with ``bamboo populate``.
     """
     setup_logging()
 
@@ -55,6 +79,11 @@ def main(task_data, task_id, external_data, output):
     external_dict = None
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
+
+    if compare_task_ids:
+        all_task_ids = ([task_id] if task_id is not None else []) + list(compare_task_ids)
+        asyncio.run(_find_pattern(all_task_ids, min_occurrences))
+        return
 
     result = asyncio.run(_analyze_task(task_dict, task_id, external_dict))
 
@@ -92,6 +121,80 @@ def main(task_data, task_id, external_data, output):
         click.echo(f"Feedback recorded: {reason}")
     else:
         click.echo("Please edit the results manually.")
+
+
+async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
+    """Fetch graph_ids for the given task IDs and display the common subgraph."""
+    import uuid
+
+    from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+
+    graph_db = GraphDatabaseClient()
+    try:
+        await graph_db.connect()
+
+        graph_ids: list[str] = []
+        for tid in task_ids:
+            try:
+                task_dict = await fetch_task_data(tid)
+            except Exception as e:
+                click.echo(f"Warning: could not fetch task {tid}: {e}", err=True)
+                continue
+            status = (task_dict or {}).get("status", "")
+            if status:
+                gid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"graph:{tid}:{status}"))
+            else:
+                gid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"graph:{tid}"))
+            graph_ids.append(gid)
+            click.echo(f"  Task {tid} (status={status or 'unknown'}) → graph_id {gid}")
+
+        if len(graph_ids) < 2:
+            click.echo("Need at least 2 resolvable task IDs to compute a pattern.", err=True)
+            return
+
+        click.echo(
+            f"\nQuerying common subgraph across {len(graph_ids)} task(s) "
+            f"(min_occurrences={min_occurrences})..."
+        )
+        edges = await graph_db.find_common_pattern(graph_ids, min_occurrences)
+
+        click.echo("\n" + "=" * 70)
+        click.echo("COMMON PATTERN")
+        click.echo("=" * 70)
+        click.echo(f"\nEdges matching threshold: {len(edges)}")
+
+        if not edges:
+            click.echo("No common edges found at this threshold.")
+            return
+
+        from collections import Counter
+        node_types: Counter = Counter()
+        seen_nodes: set[str] = set()
+        for e in edges:
+            for name, ntype in ((e["src_name"], e["src_type"]), (e["tgt_name"], e["tgt_type"])):
+                if name not in seen_nodes:
+                    node_types[ntype] += 1
+                    seen_nodes.add(name)
+
+        click.echo(f"Distinct nodes: {len(seen_nodes)}")
+        click.echo("\nNode types:")
+        for ntype, count in sorted(node_types.items()):
+            click.echo(f"  {ntype:<30} {count}")
+
+        click.echo("\nEdges (sorted by occurrence count):")
+        for e in edges:
+            conf = f"  [{e['confidence']:.2f}]" if e["confidence"] != 1.0 else ""
+            click.echo(
+                f"  {e['src_name']}  -[{e['rel_type']}]->  {e['tgt_name']}"
+                f"  (shared by {e['occurrence_count']}/{len(graph_ids)} tasks){conf}"
+            )
+        click.echo("\n" + "=" * 70)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        await graph_db.close()
 
 
 async def _analyze_task(task_dict, task_id, external_dict):

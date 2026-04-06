@@ -280,6 +280,28 @@ class KnowledgeAccumulator:
                 "KnowledgeAccumulator: dry-run mode — skipping all database writes"
             )
         else:
+            # Pre-check: if a Summary vector already exists for this graph_id the
+            # task was previously processed.  Clean up its stale Neo4j contribution
+            # before re-storing so old relationships don't accumulate.
+            if self.vector_db is not None:
+                existing = await self.vector_db.get_summaries_by_graph_ids([graph_id])
+                if existing:
+                    say(
+                        f"Task previously stored (graph_id={graph_id}) — "
+                        "removing stale Neo4j data before re-processing..."
+                    )
+                    counts = await self.graph_db.remove_graph_id(graph_id)
+                    say(
+                        f"Cleanup: {counts['rels_affected']} relationship(s) "
+                        f"updated/removed, {counts['nodes_removed']} isolated "
+                        "node(s) removed."
+                    )
+                    logger.info(
+                        "KnowledgeAccumulator: re-processing cleanup for "
+                        "graph_id=%s: %s",
+                        graph_id,
+                        counts,
+                    )
             await self._store_graph(graph)
 
         summary = await self._generate_summary(graph)
@@ -599,16 +621,31 @@ class KnowledgeAccumulator:
         Relationship source/target IDs are remapped to the actual stored IDs
         before insertion.
         """
-        graph_nodes = [
+        # Collect endpoint names from all relationships so isolated nodes can be
+        # identified and dropped.  Relationship source/target IDs are still node
+        # names at this point (UUID remapping happens after node creation below).
+        endpoint_names: set[str] = set()
+        for rel in graph.relationships:
+            endpoint_names.add(rel.source_id)
+            endpoint_names.add(rel.target_id)
+
+        all_eligible = [
             n for n in graph.nodes
             if n.node_type.value not in self._GRAPH_DB_SKIP_TYPES
         ]
+        graph_nodes = [
+            n for n in all_eligible
+            if n.name in endpoint_names or (n.id and n.id in endpoint_names)
+        ]
+        n_vector_only = len(graph.nodes) - len(all_eligible)
+        n_isolated = len(all_eligible) - len(graph_nodes)
         logger.info(
             "KnowledgeAccumulator: storing %d/%d nodes in graph DB "
-            "(%d vector-only skipped)",
+            "(%d vector-only skipped, %d isolated skipped)",
             len(graph_nodes),
             len(graph.nodes),
-            len(graph.nodes) - len(graph_nodes),
+            n_vector_only,
+            n_isolated,
         )
 
         node_ids: dict[str, str] = {}
@@ -616,11 +653,15 @@ class KnowledgeAccumulator:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
             node_ids[node.id or node.name] = node_id
 
+        graph_id = graph.metadata.get("graph_id", "")
         for rel in graph.relationships:
             rel.source_id = node_ids.get(rel.source_id, rel.source_id)
             rel.target_id = node_ids.get(rel.target_id, rel.target_id)
             # Skip relationships whose endpoints were not stored (vector-only nodes)
             if rel.source_id in node_ids.values() and rel.target_id in node_ids.values():
+                # Stamp the graph_id so Neo4j can track per-edge provenance and
+                # compute frequency across tasks via find_common_pattern.
+                rel.properties["graph_id"] = graph_id
                 await self.graph_db.create_relationship(rel)
 
         logger.info("KnowledgeAccumulator: graph stored successfully")

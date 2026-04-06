@@ -117,6 +117,40 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def find_common_pattern(
+        self,
+        graph_ids: list[str],
+        min_occurrences: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Return edges shared across at least *min_occurrences* of the given graphs.
+
+        Args:
+            graph_ids:       List of graph IDs to intersect.
+            min_occurrences: Minimum number of graphs that must share an edge.
+
+        Returns:
+            List of edge dicts ordered by ``occurrence_count DESC``.
+        """
+        pass
+
+    @abstractmethod
+    async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
+        """Remove a graph_id's contribution from all relationships and clean up.
+
+        For each relationship whose ``graph_ids`` list contains *graph_id*:
+        - Remove *graph_id* from the list and recompute ``frequency``.
+        - Delete the relationship if ``graph_ids`` becomes empty.
+        Then delete any nodes that have become fully isolated as a result.
+
+        Args:
+            graph_id: The graph ID to remove (derived from task_id + status).
+
+        Returns:
+            Dict with keys ``rels_affected`` and ``nodes_removed``.
+        """
+        pass
+
+    @abstractmethod
     async def clear_all(self) -> None:
         """Delete every node and relationship in the database.
 

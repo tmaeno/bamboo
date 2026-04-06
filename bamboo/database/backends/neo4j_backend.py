@@ -139,34 +139,167 @@ class Neo4jBackend(GraphDatabaseBackend):
             return await self.create_node(node)
 
     async def create_relationship(self, relationship: GraphRelationship) -> bool:
-        """Create a directed relationship between two nodes.
+        """Merge a directed relationship between two nodes and track provenance.
+
+        Uses MERGE on ``(source)-[rel_type]->(target)`` so the same logical edge
+        is stored only once regardless of how many tasks share it.  Each call
+        records the relationship's ``graph_id`` (stored in
+        ``relationship.properties["graph_id"]``) in a deduplicated list on the
+        edge, and derives ``frequency`` from that list's length.  Re-processing
+        the same task (same ``graph_id``) is therefore idempotent.
 
         Nodes are looked up by their ``id`` property.  Returns ``False``
         (without raising) if either node cannot be found.
 
         Args:
-            relationship: Edge descriptor.
+            relationship: Edge descriptor.  ``relationship.properties["graph_id"]``
+                          should be set by the caller before invoking this method.
 
         Returns:
-            ``True`` if the relationship was created.
+            ``True`` if the relationship was merged/created successfully.
         """
+        graph_id = relationship.properties.pop("graph_id", "")
         async with self.driver.session(
             database=self.settings.neo4j_database
         ) as session:
-            properties = relationship.properties.copy()
-            properties["confidence"] = relationship.confidence
             result = await session.run(
                 f"""
                 MATCH (source {{id: $source_id}})
                 MATCH (target {{id: $target_id}})
-                CREATE (source)-[r:{relationship.relation_type.value} $properties]->(target)
+                MERGE (source)-[r:{relationship.relation_type.value}]->(target)
+                ON CREATE SET
+                    r.confidence = $confidence,
+                    r.graph_ids  = CASE WHEN $graph_id <> '' THEN [$graph_id] ELSE [] END,
+                    r.frequency  = CASE WHEN $graph_id <> '' THEN 1 ELSE 0 END
+                ON MATCH SET
+                    r.graph_ids  = CASE
+                        WHEN $graph_id = '' OR $graph_id IN r.graph_ids THEN r.graph_ids
+                        ELSE r.graph_ids + $graph_id
+                    END,
+                    r.frequency  = size(CASE
+                        WHEN $graph_id = '' OR $graph_id IN r.graph_ids THEN r.graph_ids
+                        ELSE r.graph_ids + $graph_id
+                    END),
+                    r.confidence = CASE
+                        WHEN $graph_id IN r.graph_ids THEN r.confidence
+                        ELSE (r.confidence * r.frequency + $confidence) /
+                             (r.frequency + 1)
+                    END
                 RETURN r
                 """,
                 source_id=relationship.source_id,
                 target_id=relationship.target_id,
-                properties=properties,
+                confidence=relationship.confidence,
+                graph_id=graph_id,
             )
             return await result.single() is not None
+
+    async def find_common_pattern(
+        self,
+        graph_ids: list[str],
+        min_occurrences: int = 2,
+    ) -> list[dict]:
+        """Return edges shared across at least *min_occurrences* of the given graphs.
+
+        Only edges whose ``graph_ids`` list contains at least *min_occurrences*
+        values from *graph_ids* are returned.  The endpoint nodes are included
+        inline.  Isolated common nodes (nodes that are common but have no
+        qualifying edges) are naturally excluded.
+
+        Args:
+            graph_ids:        List of graph IDs to intersect (derived from
+                              ``KnowledgeAccumulator._deterministic_id``).
+            min_occurrences:  Minimum number of graphs that must share an edge
+                              for it to appear in the result.
+
+        Returns:
+            List of dicts with keys ``src_name``, ``src_type``, ``tgt_name``,
+            ``tgt_type``, ``rel_type``, ``occurrence_count``, ``confidence``.
+            Ordered by ``occurrence_count DESC``.
+        """
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            result = await session.run(
+                """
+                MATCH (src)-[r]->(tgt)
+                WITH src, tgt, type(r) AS rel_type, r.confidence AS confidence,
+                     r.graph_ids AS all_graph_ids,
+                     [gid IN r.graph_ids WHERE gid IN $graph_ids] AS matched_ids
+                WHERE size(matched_ids) >= $min_occurrences
+                RETURN
+                    src.name AS src_name,
+                    labels(src)[0] AS src_type,
+                    tgt.name AS tgt_name,
+                    labels(tgt)[0] AS tgt_type,
+                    rel_type,
+                    confidence,
+                    size(matched_ids) AS occurrence_count
+                ORDER BY occurrence_count DESC
+                """,
+                graph_ids=graph_ids,
+                min_occurrences=min_occurrences,
+            )
+            return [dict(record) async for record in result]
+
+    async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
+        """Remove a graph_id's contribution from all relationships and clean up.
+
+        Step 1: for every relationship whose ``graph_ids`` list contains
+        *graph_id*, remove it from the list.  Delete the relationship entirely
+        if the list becomes empty (no other task shares it).
+
+        Step 2: delete any nodes that are now fully isolated (no remaining edges).
+
+        Returns:
+            Dict with ``rels_affected`` (updated or deleted) and ``nodes_removed``.
+        """
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            # Step 1: update / delete relationships in one pass.
+            rel_result = await session.run(
+                """
+                MATCH ()-[r]->()
+                WHERE $graph_id IN r.graph_ids
+                WITH r,
+                     [gid IN r.graph_ids WHERE gid <> $graph_id] AS remaining
+                CALL {
+                    WITH r, remaining
+                    FOREACH (_ IN CASE WHEN size(remaining) = 0 THEN [1] ELSE [] END |
+                        DELETE r
+                    )
+                    FOREACH (_ IN CASE WHEN size(remaining) > 0 THEN [1] ELSE [] END |
+                        SET r.graph_ids = remaining,
+                            r.frequency = size(remaining)
+                    )
+                }
+                RETURN count(r) AS rels_affected
+                """,
+                graph_id=graph_id,
+            )
+            rel_record = await rel_result.single()
+            rels_affected = rel_record["rels_affected"] if rel_record else 0
+
+            # Step 2: delete nodes with no remaining edges.
+            node_result = await session.run(
+                """
+                MATCH (n)
+                WHERE NOT (n)--()
+                DELETE n
+                RETURN count(n) AS nodes_removed
+                """
+            )
+            node_record = await node_result.single()
+            nodes_removed = node_record["nodes_removed"] if node_record else 0
+
+        logger.info(
+            "Neo4j: removed graph_id=%s — %d rel(s) updated/deleted, %d node(s) removed",
+            graph_id,
+            rels_affected,
+            nodes_removed,
+        )
+        return {"rels_affected": rels_affected, "nodes_removed": nodes_removed}
 
     async def clear_all(self) -> None:
         """Delete every node and relationship from the Neo4j database."""

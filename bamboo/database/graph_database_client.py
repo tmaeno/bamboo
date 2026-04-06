@@ -76,6 +76,18 @@ class GraphDatabaseClient:
             limit=limit,
         )
 
+    async def find_common_pattern(
+        self,
+        graph_ids: list[str],
+        min_occurrences: int = 2,
+    ) -> list[dict]:
+        """Return edges shared across at least *min_occurrences* of the given graphs."""
+        return await self._backend.find_common_pattern(graph_ids, min_occurrences)
+
+    async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
+        """Remove a graph_id's contribution from Neo4j and clean up isolated nodes."""
+        return await self._backend.remove_graph_id(graph_id)
+
     async def clear_all(self) -> None:
         """Delete every node and relationship in the graph database."""
         await self._backend.clear_all()
