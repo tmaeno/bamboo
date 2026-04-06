@@ -29,7 +29,7 @@ from bamboo.llm import (
     get_summary_llm,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
-from bamboo.utils.narrator import say, thinking
+from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -170,11 +170,12 @@ class KnowledgeAccumulator:
 
         review_feedback = ""
         review_result = None
-        # Accumulate relevant_feature_nodes across all review passes so that
-        # features identified in early passes are not lost when a later pass
+        # Accumulate failure_dimension across all review passes so that
+        # dimensions identified in early passes are not lost when a later pass
         # (e.g. the one that sees job data for the first time) produces a
-        # different — or shorter — list.
-        _all_relevant_feature_nodes: list[str] = []
+        # different list.  Python selects feature nodes by concept tag, so the
+        # LLM never needs to see or name individual feature nodes.
+        _all_failure_dimensions: set[str] = set()
         for attempt in range(self._max_review_retries + 1):
             graph = await self.extractor.extract_from_sources(
                 email_text=email_text,
@@ -197,13 +198,9 @@ class KnowledgeAccumulator:
                 graph, sources_summary, task_data=task_data,
                 available_tools=_available_tools, doc_hints=_doc_hints,
             )
-            # Accumulate relevant feature nodes from every review pass,
+            # Accumulate failure dimensions from every review pass,
             # including the final (approved) one — must happen before any break.
-            seen_feat = set(_all_relevant_feature_nodes)
-            for fn in review_result.relevant_feature_nodes:
-                if fn not in seen_feat:
-                    _all_relevant_feature_nodes.append(fn)
-                    seen_feat.add(fn)
+            _all_failure_dimensions.update(review_result.failure_dimension)
 
             if review_result.approved or attempt >= self._max_review_retries:
                 if not review_result.approved:
@@ -267,13 +264,12 @@ class KnowledgeAccumulator:
 
             review_feedback = review_result.feedback
 
-        # Create explicit contribute_to edges for feature nodes the reviewer
-        # identified as causally relevant based on domain documentation.
-        # Uses the union of all review passes so that features flagged in an
-        # early pass are not lost when a later pass (e.g. after job data is
-        # fetched) produces a different list.
-        if _all_relevant_feature_nodes:
-            self._add_reviewer_feature_edges(graph, _all_relevant_feature_nodes)
+        # Create explicit contribute_to edges for all Task_Feature nodes whose
+        # concept tag matches a failure dimension declared by the reviewer.
+        # Python selects by concept mechanically — the LLM only identifies the
+        # dimension string, never individual node names.
+        if _all_failure_dimensions:
+            self._add_dimension_feature_edges(graph, _all_failure_dimensions)
 
         if dry_run:
             logger.info(
@@ -552,26 +548,27 @@ class KnowledgeAccumulator:
                 len(new_rels),
             )
 
-    def _add_reviewer_feature_edges(
-        self, graph: KnowledgeGraph, feature_names: list[str]
+    def _add_dimension_feature_edges(
+        self, graph: KnowledgeGraph, dimensions: set[str]
     ) -> None:
-        """Create ``contribute_to`` edges for reviewer-identified causal feature nodes.
+        """Create ``contribute_to`` edges for all feature nodes matching failure dimensions.
 
-        Unlike the blanket reconciliation step (which was removed), this only
-        creates edges for feature nodes that the reviewer explicitly identified
-        as causally implicated in the documented failure pattern.  Edges carry
-        ``confidence=0.9`` to distinguish them from directly extracted ones.
+        The reviewer LLM declares which resource dimension(s) caused the failure
+        (e.g. ``{"cpu"}``).  Python then selects every Task_Feature / Job_Feature
+        node whose ``metadata["concept"]`` is in that set and connects it to all
+        Cause nodes.  This removes individual node selection from the LLM entirely,
+        eliminating the over-inclusion problem caused by indirect domain reasoning.
 
         Args:
-            graph:         The current :class:`KnowledgeGraph`.
-            feature_names: Node names returned in ``ReviewResult.relevant_feature_nodes``.
+            graph:      The current :class:`KnowledgeGraph`.
+            dimensions: Concept strings returned in ``ReviewResult.failure_dimension``.
         """
         from bamboo.models.graph_element import GraphRelationship, RelationType
 
-        feature_set = set(feature_names)
         feature_nodes = [
             n for n in graph.nodes
-            if n.name in feature_set and n.node_type.value in ("Task_Feature", "Job_Feature")
+            if n.node_type.value in ("Task_Feature", "Job_Feature")
+            and n.metadata.get("concept") in dimensions
         ]
         cause_nodes = [n for n in graph.nodes if n.node_type.value == "Cause"]
 
@@ -598,12 +595,14 @@ class KnowledgeAccumulator:
 
         graph.relationships.extend(new_rels)
         if new_rels:
-            say(
-                f"Added {len(new_rels)} reviewer-identified feature→cause edge(s)."
+            show_block(
+                f"dimension-matched features ({', '.join(sorted(dimensions))})",
+                "\n".join(f"• {n.node_type.value} '{n.name}'" for n in feature_nodes),
             )
             logger.info(
-                "KnowledgeAccumulator: added %d reviewer feature edge(s)",
-                len(new_rels)
+                "KnowledgeAccumulator: added %d dimension-matched feature edge(s) for %s",
+                len(new_rels),
+                sorted(dimensions),
             )
 
     # Node types that must NOT be stored in the graph database (Neo4j).
@@ -621,6 +620,35 @@ class KnowledgeAccumulator:
         Relationship source/target IDs are remapped to the actual stored IDs
         before insertion.
         """
+        # Auto-connect context nodes (concept="context") to every Symptom with
+        # an ``associated_with`` edge so they survive the isolated-node filter.
+        # These are background classification fields (prodSourceLabel, taskType,
+        # etc.) that are never direct causes but are important for cross-task
+        # pattern queries.
+        from bamboo.models.graph_element import GraphRelationship, RelationType
+
+        symptom_names = [
+            n.name for n in graph.nodes if n.node_type.value == "Symptom"
+        ]
+        existing_rels = {
+            (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
+        }
+        for node in graph.nodes:
+            if node.metadata.get("concept") != "context":
+                continue
+            for symptom_name in symptom_names:
+                key = (node.name, symptom_name, RelationType.ASSOCIATED_WITH)
+                if key not in existing_rels:
+                    graph.relationships.append(
+                        GraphRelationship(
+                            source_id=node.name,
+                            target_id=symptom_name,
+                            relation_type=RelationType.ASSOCIATED_WITH,
+                            confidence=1.0,
+                        )
+                    )
+                    existing_rels.add(key)
+
         # Collect endpoint names from all relationships so isolated nodes can be
         # identified and dropped.  Relationship source/target IDs are still node
         # names at this point (UUID remapping happens after node creation below).

@@ -70,6 +70,7 @@ class ReviewResult:
     issues: list[str] = field(default_factory=list)
     relevant_feature_nodes: list[str] = field(default_factory=list)
     needs_job_data: bool = False
+    failure_dimension: list[str] = field(default_factory=list)
 
 
 class KnowledgeReviewer:
@@ -149,10 +150,10 @@ class KnowledgeReviewer:
                         "reviewer gaps",
                         "\n".join(f"• {i}" for i in result.issues),
                     )
-            if result.relevant_feature_nodes:
+            if result.failure_dimension:
                 show_block(
-                    "reviewer: causally relevant features",
-                    "\n".join(f"• {n}" for n in result.relevant_feature_nodes),
+                    "reviewer: failure dimension(s)",
+                    ", ".join(result.failure_dimension),
                 )
             if result.needs_job_data:
                 say("reviewer: job-level data requested — will fetch all jobs for next attempt.")
@@ -224,20 +225,47 @@ def _build_task_summary(task_data: dict[str, Any]) -> str:
     return json.dumps(subset, indent=2, default=str)
 
 
+# Only Task_Feature nodes with these concept tags are shown to the reviewer.
+# Everything else (untagged nodes, unit fields, split/mechanism nodes, context
+# classification nodes) is hidden before it reaches the LLM — there is no value
+# in asking the LLM to filter them; we already know they are never causally relevant.
+_REVIEWER_FEATURE_CONCEPTS: frozenset[str] = frozenset(
+    {"cpu", "memory", "walltime", "disk", "site", "job_size"}
+)
+
+
 def _serialise_graph(graph: KnowledgeGraph) -> str:
-    """Produce a compact text representation of the graph for the reviewer."""
+    """Produce a compact text representation of the graph for the reviewer.
+
+    Task_Feature nodes whose concept tag is in ``_REVIEWER_EXCLUDE_CONCEPTS``
+    (unit measurement fields, job-split mechanism fields, context classification
+    fields) are excluded from both the node list and the relationship list —
+    they are never causally relevant and only add noise for the LLM.
+    """
     from collections import Counter
 
-    type_counts = Counter(n.node_type.value for n in graph.nodes)
+    excluded_names: set[str] = {
+        n.name
+        for n in graph.nodes
+        if n.node_type.value == "Task_Feature"
+        and n.metadata.get("concept") not in _REVIEWER_FEATURE_CONCEPTS
+    }
+
+    visible_nodes = [n for n in graph.nodes if n.name not in excluded_names]
+    type_counts = Counter(n.node_type.value for n in visible_nodes)
     lines = ["Node counts: " + ", ".join(f"{t}={c}" for t, c in sorted(type_counts.items()))]
     lines.append("")
     lines.append("Nodes:")
-    for n in graph.nodes:
+    for n in visible_nodes:
         desc_snippet = (n.description or "")[:120]
-        lines.append(f"  [{n.node_type.value}] {n.name!r}  — {desc_snippet}")
+        concept = n.metadata.get("concept", "")
+        concept_tag = f" [concept:{concept}]" if concept else ""
+        lines.append(f"  [{n.node_type.value}] {n.name!r}{concept_tag}  — {desc_snippet}")
     lines.append("")
     lines.append("Relationships:")
     for r in graph.relationships:
+        if r.source_id in excluded_names or r.target_id in excluded_names:
+            continue
         lines.append(f"  {r.source_id!r} --[{r.relation_type.value}]--> {r.target_id!r}")
     return "\n".join(lines)
 
@@ -266,6 +294,7 @@ def _parse_review_response(response: str) -> ReviewResult:
             issues=[str(i) for i in data.get("issues", [])],
             relevant_feature_nodes=[str(n) for n in data.get("relevant_feature_nodes", [])],
             needs_job_data=bool(data.get("needs_job_data", False)),
+            failure_dimension=[str(d) for d in data.get("failure_dimension", [])],
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("KnowledgeReviewer: failed to parse review response: %s", exc)

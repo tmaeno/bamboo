@@ -268,6 +268,93 @@ CONTINUOUS_TASK_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Semantic concept tag for each Task_Feature attribute.
+#
+# The tag is stored in node.metadata["concept"] so the reviewer can identify
+# causally relevant nodes by dimension (cpu/memory/walltime/disk/site/job_size)
+# without asking the LLM to reason about naming conventions.
+#
+# Keys NOT listed here have no concept tag and are treated as unclassified.
+# splitRule sub-keys that are job-split mechanism nodes are tagged "split"
+# (reviewer explicitly excludes them as mechanism nodes).
+# ---------------------------------------------------------------------------
+FEATURE_CONCEPT: dict[str, str] = {
+    # CPU / core-count
+    "coreCount": "cpu",
+    "nCore": "cpu",
+    "nCores": "cpu",
+    "maxCoreCount": "cpu",
+    "maxCpuCount": "cpu",
+    "cpuTime": "cpu",
+    "nThread": "cpu",
+    # Memory
+    "ramCount": "memory",
+    "baseRamCount": "memory",
+    "memory": "memory",
+    "maxMemory": "memory",
+    # Walltime
+    "walltime": "walltime",
+    "baseWalltime": "walltime",
+    "maxWalltime": "walltime",
+    # Disk / IO
+    "diskIO": "disk",
+    "ioIntensity": "disk",
+    "outDiskCount": "disk",
+    "workDiskCount": "disk",
+    "forceStaged": "disk",
+    # Site
+    "site": "site",
+    "nucleus": "site",
+    "avoidVP": "site",
+    # Job sizing (affects how many events/files per job)
+    "nFilesPerJob": "job_size",
+    "nEventsPerJob": "job_size",
+    "nGBPerJob": "job_size",
+    "nEvents": "job_size",
+    "nFiles": "job_size",
+    "nJobs": "job_size",
+    # Job-split mechanism nodes — reviewer excludes these as indirect causes
+    "useScout": "split",
+    "useRealNumEvents": "split",
+    "respectSplitRule": "split",
+    "allowInputLAN": "split",
+    "inputPreStaging": "split",
+    "pushStatusChanges": "split",
+    # Measurement unit fields — reviewer excludes these entirely
+    "walltimeUnit": "unit",
+    "cpuTimeUnit": "unit",
+    "ramUnit": "unit",
+    "outDiskUnit": "unit",
+    "workDiskUnit": "unit",
+    "diskIOUnit": "unit",
+    "ioIntensityUnit": "unit",
+}
+
+# ---------------------------------------------------------------------------
+# Task_Feature keys that represent important background context rather than
+# direct causal factors.  These nodes are auto-connected to every Symptom node
+# with an ``associated_with`` edge so they are always stored in the graph DB
+# and queryable for cross-task pattern analysis — even though the reviewer
+# never includes them in ``relevant_feature_nodes``.
+# ---------------------------------------------------------------------------
+CONTEXT_TASK_KEYS: frozenset[str] = frozenset(
+    {
+        "prodSourceLabel",
+        "taskType",
+        "processingType",
+        "vo",
+        "architecture",
+        "transUses",
+        "resource_type",
+        "gshare",
+        "requestType",
+        "campaign",
+        "goal",
+        "framework",
+    }
+)
+
 # Bucket definitions per key: sorted list of (upper_bound_exclusive, label).
 # The last entry's upper_bound should be math.inf.
 _BUCKETS: dict[str, list[tuple[float, str]]] = {
@@ -1026,13 +1113,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     sub_rule = sub_rule.strip()
                     if "=" in sub_rule:
                         attr, val = sub_rule.split("=", 1)
-                        namespaced_attr = f"splitRule:{attr.strip()}"
+                        attr_stripped = attr.strip()
+                        namespaced_attr = f"splitRule:{attr_stripped}"
                         nodes.append(
                             self._make_feature_node(
                                 attribute=namespaced_attr,
                                 value=val.strip(),
                                 description=f"splitRule sub-rule: {sub_rule}",
                                 source="task_data/splitRule",
+                                concept=FEATURE_CONCEPT.get(attr_stripped),
                             )
                         )
                     elif sub_rule:
@@ -1108,6 +1197,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                                     value=val,
                                     description=f"{key} arg: --{attr}",
                                     source=f"task_data/{key}",
+                                    concept=FEATURE_CONCEPT.get(attr_clean),
                                 )
                             )
             elif key in self._unstructured_keys:
@@ -1118,12 +1208,16 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     )
                 )
             elif key in self._discrete_keys:
+                concept = FEATURE_CONCEPT.get(key) or (
+                    "context" if key in CONTEXT_TASK_KEYS else None
+                )
                 nodes.append(
                     self._make_feature_node(
                         attribute=str(key),
                         value=str(value) if value is not None else "",
                         description=f"Task data field: {key}",
                         source="task_data",
+                        concept=concept,
                     )
                 )
             elif key in self._continuous_keys:
@@ -1148,6 +1242,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         description=f"Task data field: {key} (bucketed from {raw!r})",
                         source="task_data",
                         extra_metadata={"raw_value": raw},
+                        concept=FEATURE_CONCEPT.get(key),
                     )
                 )
             else:
@@ -1983,12 +2078,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         description: str,
         source: str,
         extra_metadata: Optional[dict[str, Any]] = None,
+        concept: Optional[str] = None,
     ) -> TaskFeatureNode:
         metadata: dict[str, Any] = {
             "attribute": attribute,
             "value": value,
             "source": source,
         }
+        if concept:
+            metadata["concept"] = concept
         if extra_metadata:
             metadata.update(extra_metadata)
         return TaskFeatureNode(

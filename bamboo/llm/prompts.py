@@ -652,8 +652,11 @@ Use the domain documentation to:
   conditions trigger it.
 - Check whether the graph reflects the documented causes for that status.
 - Flag as a gap if the graph is missing nodes that the documentation says should be present
-  for this status (e.g. exhausted → expect nodes about CPU efficiency, scout job conditions,
-  memory usage, multi-core resource abuse).
+  for this status.  IMPORTANT: domain docs may list multiple possible dimensions (CPU,
+  memory, disk …) for a status.  When the errorDialog or Symptom nodes identify a SPECIFIC
+  dimension (e.g. "CPU time limit exceeded"), restrict gap-flagging to ONLY that dimension.
+  Do NOT flag gaps for other dimensions the docs mention — those are alternative causes that
+  did NOT trigger this particular incident.
 
 SOURCE EXCERPTS (optional):
 {sources_summary}
@@ -666,27 +669,18 @@ When a gap in "issues" could be resolved by one of the above tools, append a not
 Do NOT invent tool names — only reference tools listed above.
 If no tools are listed, assess gaps exactly as before.
 
-CAUSALLY RELEVANT FEATURES: List the exact names of Task_Feature or Job_Feature nodes
-whose SPECIFIC VALUE is a direct cause or necessary precondition of the incident — not
-merely present in the graph.  Apply the following strict criteria:
-  • The feature's value (not just its key) must be the reason the failure occurred or
-    the condition that enabled it.  Example: "ramCount=2-8GB" is relevant if docs say
-    that memory limit caused the failure; it is NOT relevant just because the task has
-    a memory limit.
-  • Cross-reference with the specific failure signal: only include features that relate
-    to the SAME dimension identified by the errorDialog or Symptom nodes.  If errorDialog
-    mentions CPU consumption but not memory, do NOT list memory-configuration nodes —
-    even if the domain docs broadly associate "exhausted" with resource abuse.  The
-    errorDialog and Symptom nodes are the authoritative signal; domain docs only explain
-    the mechanism behind those specific signals.
-  • Standard task configuration fields that are present but not linked to the failure
-    should NOT be listed (e.g. logging flags, template instantiation settings,
-    input-staging options, event-counting modes are rarely direct causes).
-  • Prefer an EMPTY list if uncertain.  A false positive here creates a spurious graph
-    edge; a false negative is harmless.
-  • Only include nodes whose names appear verbatim in the graph summary above.
-  • Use empty list if domain documentation is absent or does not clearly link a
-    specific feature value to the failure.
+FAILURE DIMENSION: Identify the resource dimension(s) that caused this failure.
+Scan the errorDialog and Symptom text for these keywords and map each match:
+  "cpu time" / "cpuTime" / "core" / "cpu efficiency"  → cpu
+  "memory" / "RAM" / "mem"                            → memory
+  "walltime" / "wall time" / "timeout"                → walltime
+  "disk" / "I/O" / "storage"                         → disk
+  site name / "brokerage" / "no candidate"            → site
+  "events" / "files" / "job size"                     → job_size
+
+Return ALL dimensions whose keywords appear.  If no keyword matches, return
+empty list and set needs_job_data=true.  Do not consult domain documentation
+for dimension inference — keyword match only.
 
 JOB DATA FLAG: Set "needs_job_data" to true when ALL of the following hold:
   1. The graph has NO Aggregated_Job_Feature or Job_Instance nodes.
@@ -703,7 +697,7 @@ Respond with a JSON object only — no markdown, no explanation outside the JSON
   "confidence": <float 0.0-1.0>,
   "issues": ["<concise gap description>"],
   "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>",
-  "relevant_feature_nodes": ["<exact node name as it appears in the graph>"],
+  "failure_dimension": ["cpu" | "memory" | "walltime" | "disk" | "site" | "job_size"],
   "needs_job_data": true | false
 }}
 """
