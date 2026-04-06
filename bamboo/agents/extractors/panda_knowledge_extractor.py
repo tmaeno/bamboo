@@ -355,6 +355,46 @@ CONTEXT_TASK_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Semantic concept tag for each Aggregated_Job_Feature attribute.
+# Mirrors FEATURE_CONCEPT but for job-level keys.
+# ---------------------------------------------------------------------------
+JOB_FEATURE_CONCEPT: dict[str, str | list[str]] = {
+    # CPU
+    "cpuConsumptionTime": "cpu",
+    "actualCoreCount": "cpu",
+    # Memory
+    "maxRSS": "memory",
+    # Walltime
+    "jobDuration": "walltime",
+    # Disk + job sizing (output volume is both a disk metric and a job-size indicator)
+    "outputFileBytes": ["disk", "job_size"],
+    # Job sizing
+    "inputFileBytes": "job_size",
+    # Site
+    "computingSite": "site",
+    "siteFailureRate": "site",
+    # Context — background classification, not direct causes
+    "extendedProdSourceLabel": "context",
+    "gshare": "context",
+    "processingType": "context",
+    "resourceType": "context",
+    "workQueue": "context",
+}
+
+
+def _node_concepts(node) -> list[str]:
+    """Return all concept tags for a node as a normalised list.
+
+    Handles both the legacy single-string form (``metadata["concept"] = "cpu"``)
+    and the multi-concept list form (``metadata["concept"] = ["disk", "job_size"]``).
+    Returns an empty list when no concept is set.
+    """
+    val = node.metadata.get("concept")
+    if val is None:
+        return []
+    return val if isinstance(val, list) else [val]
+
 # Bucket definitions per key: sorted list of (upper_bound_exclusive, label).
 # The last entry's upper_bound should be math.inf.
 _BUCKETS: dict[str, list[tuple[float, str]]] = {
@@ -1389,6 +1429,15 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         ) -> AggregatedJobFeatureNode:
             name = f"{attribute}={value}{suffix}"
             scope = f" ({scope_desc})" if scope_desc else ""
+            _concept = JOB_FEATURE_CONCEPT.get(attribute)
+            _meta: dict = {
+                "source": "job_aggregation",
+                "group_jobs": group_total,
+                "total_jobs": total,
+                "failed_jobs": failed_jobs,
+            }
+            if _concept:
+                _meta["concept"] = _concept
             return AggregatedJobFeatureNode(
                 name=name,
                 attribute=attribute,
@@ -1398,12 +1447,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     f"Job-level aggregated pattern{scope}: {attribute} = {value} "
                     f"(derived from {job_count} of {group_total} jobs)"
                 ),
-                metadata={
-                    "source": "job_aggregation",
-                    "group_jobs": group_total,
-                    "total_jobs": total,
-                    "failed_jobs": failed_jobs,
-                },
+                metadata=_meta,
             )
 
         # Global aggregation — always run for error signals, context texts,
@@ -1591,6 +1635,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         for symptom in all_symptom_nodes:
             for jf_node in job_feature_nodes:
+                concepts = _node_concepts(jf_node)
+                if not concepts or "context" in concepts:
+                    # Context/unclassified nodes are connected via associated_with
+                    # by _add_context_edges in the accumulator instead.
+                    continue
                 relationships.append(
                     GraphRelationship(
                         source_id=symptom.name,

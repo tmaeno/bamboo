@@ -204,6 +204,10 @@ async def _run_extraction(
                     extras["attribute"] = n.attribute
                 if hasattr(n, "severity") and n.severity:
                     extras["severity"] = n.severity
+                from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
+                concepts = _node_concepts(n)
+                if concepts:
+                    extras["concept"] = ", ".join(concepts)
                 if extras:
                     click.echo(
                         "    " + "  ".join(f"{k}={v}" for k, v in extras.items())
@@ -239,6 +243,9 @@ async def _run_extraction(
                             extras["attribute"] = n.attribute
                         if hasattr(n, "severity") and n.severity:
                             extras["severity"] = n.severity
+                        concept = getattr(n, "metadata", {}).get("concept")
+                        if concept:
+                            extras["concept"] = concept
                         if extras:
                             click.echo(click.style(
                                 "    " + "  ".join(f"{k}={v}" for k, v in extras.items()),

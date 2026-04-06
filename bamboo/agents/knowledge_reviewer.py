@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
 from bamboo.llm import KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.narrator import say, show_block, thinking
@@ -154,13 +155,14 @@ class KnowledgeReviewer:
                 dim_set = set(result.failure_dimension)
                 matched_nodes = [
                     n for n in graph.nodes
-                    if n.node_type.value in ("Task_Feature", "Job_Feature")
-                    and n.metadata.get("concept") in dim_set
+                    if n.node_type.value in ("Task_Feature", "Job_Feature", "Aggregated_Job_Feature")
+                    and any(c in dim_set for c in _node_concepts(n))
                 ]
                 body = f"dimensions: {', '.join(result.failure_dimension)}"
                 if matched_nodes:
                     body += "\n" + "\n".join(
-                        f"• {n.node_type.value} '{n.name}'" for n in matched_nodes
+                        f"• {n.node_type.value} '{n.name}' [{', '.join(_node_concepts(n))}]"
+                        for n in matched_nodes
                     )
                 show_block("reviewer: failure dimension(s)", body)
             if result.needs_job_data:
@@ -256,7 +258,7 @@ def _serialise_graph(graph: KnowledgeGraph) -> str:
         n.name
         for n in graph.nodes
         if n.node_type.value == "Task_Feature"
-        and n.metadata.get("concept") not in _REVIEWER_FEATURE_CONCEPTS
+        and not any(c in _REVIEWER_FEATURE_CONCEPTS for c in _node_concepts(n))
     }
 
     visible_nodes = [n for n in graph.nodes if n.name not in excluded_names]
@@ -266,8 +268,8 @@ def _serialise_graph(graph: KnowledgeGraph) -> str:
     lines.append("Nodes:")
     for n in visible_nodes:
         desc_snippet = (n.description or "")[:120]
-        concept = n.metadata.get("concept", "")
-        concept_tag = f" [concept:{concept}]" if concept else ""
+        concepts = _node_concepts(n)
+        concept_tag = f" [concept:{','.join(concepts)}]" if concepts else ""
         lines.append(f"  [{n.node_type.value}] {n.name!r}{concept_tag}  — {desc_snippet}")
     lines.append("")
     lines.append("Relationships:")

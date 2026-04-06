@@ -21,6 +21,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
+from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (
@@ -568,7 +569,7 @@ class KnowledgeAccumulator:
             return
         existing = {(r.source_id, r.target_id, r.relation_type) for r in graph.relationships}
         for node in graph.nodes:
-            if node.metadata.get("concept") != "context":
+            if "context" not in _node_concepts(node):
                 continue
             for symptom_name in symptom_names:
                 key = (node.name, symptom_name, RelationType.ASSOCIATED_WITH)
@@ -602,8 +603,8 @@ class KnowledgeAccumulator:
 
         feature_nodes = [
             n for n in graph.nodes
-            if n.node_type.value in ("Task_Feature", "Job_Feature")
-            and n.metadata.get("concept") in dimensions
+            if n.node_type.value in ("Task_Feature", "Job_Feature", "Aggregated_Job_Feature")
+            and any(c in dimensions for c in _node_concepts(n))
         ]
         cause_nodes = [n for n in graph.nodes if n.node_type.value == "Cause"]
 
@@ -632,7 +633,10 @@ class KnowledgeAccumulator:
         if new_rels:
             show_block(
                 f"dimension-matched features ({', '.join(sorted(dimensions))})",
-                "\n".join(f"• {n.node_type.value} '{n.name}'" for n in feature_nodes),
+                "\n".join(
+                    f"• {n.node_type.value} '{n.name}' [{', '.join(_node_concepts(n))}]"
+                    for n in feature_nodes
+                ),
             )
             logger.info(
                 "KnowledgeAccumulator: added %d dimension-matched feature edge(s) for %s",
