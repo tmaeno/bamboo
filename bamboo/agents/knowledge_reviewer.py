@@ -151,10 +151,18 @@ class KnowledgeReviewer:
                         "\n".join(f"• {i}" for i in result.issues),
                     )
             if result.failure_dimension:
-                show_block(
-                    "reviewer: failure dimension(s)",
-                    ", ".join(result.failure_dimension),
-                )
+                dim_set = set(result.failure_dimension)
+                matched_nodes = [
+                    n for n in graph.nodes
+                    if n.node_type.value in ("Task_Feature", "Job_Feature")
+                    and n.metadata.get("concept") in dim_set
+                ]
+                body = f"dimensions: {', '.join(result.failure_dimension)}"
+                if matched_nodes:
+                    body += "\n" + "\n".join(
+                        f"• {n.node_type.value} '{n.name}'" for n in matched_nodes
+                    )
+                show_block("reviewer: failure dimension(s)", body)
             if result.needs_job_data:
                 say("reviewer: job-level data requested — will fetch all jobs for next attempt.")
             return result
