@@ -37,6 +37,7 @@ class KnowledgeGraphExtractor:
 
     def __init__(self, strategy: str = None):
         self.strategy = get_extraction_strategy(strategy)
+        self._desc_cache: dict[str, str] = {}
         logger.info("KnowledgeGraphExtractor: using strategy '%s'", self.strategy.name)
 
     async def extract_from_sources(
@@ -89,31 +90,32 @@ class KnowledgeGraphExtractor:
 
         # Deduplicate nodes by (type, name) — the LLM occasionally emits the
         # same logical node twice with identical or near-identical names.
-        seen: dict[tuple, str] = {}  # (type, name) -> canonical node.id
+        # `name_remap` only contains entries for actual duplicates so that
+        # relationship endpoints remain as human-readable names throughout
+        # (surviving nodes are NOT remapped to their UUID).
+        seen: dict[tuple, str] = {}  # (type, name) -> canonical node.name
         deduped_nodes = []
-        id_remap: dict[str, str] = {}  # old id/name -> canonical id
+        name_remap: dict[str, str] = {}  # duplicate name -> canonical name
 
         for node in graph.nodes:
             if not node.id:
                 node.id = str(uuid.uuid4())
             key = (node.node_type.value, node.name)
             if key in seen:
-                id_remap[node.id] = seen[key]
-                id_remap[node.name] = seen[key]
+                name_remap[node.name] = seen[key]
             else:
-                seen[key] = node.id
-                id_remap[node.name] = node.id
+                seen[key] = node.name
                 deduped_nodes.append(node)
 
         graph.nodes = deduped_nodes
 
-        # Remap relationship endpoints to surviving node IDs and drop
+        # Remap relationship endpoints for merged duplicates and drop
         # self-loops that deduplication may have introduced.
         deduped_rels = []
         seen_rels: set[tuple] = set()
         for rel in graph.relationships:
-            src = id_remap.get(rel.source_id, rel.source_id)
-            tgt = id_remap.get(rel.target_id, rel.target_id)
+            src = name_remap.get(rel.source_id, rel.source_id)
+            tgt = name_remap.get(rel.target_id, rel.target_id)
             rel_key = (src, tgt, rel.relation_type)
             if src == tgt or rel_key in seen_rels:
                 continue
@@ -126,6 +128,6 @@ class KnowledgeGraphExtractor:
 
         from bamboo.utils.canonicalize import canonicalize_descriptions  # noqa: PLC0415
 
-        await canonicalize_descriptions(graph.nodes)
+        await canonicalize_descriptions(graph.nodes, cache=self._desc_cache)
 
         return graph

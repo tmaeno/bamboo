@@ -58,6 +58,10 @@ class ReviewResult:
                                 reviewer identified as directly causally relevant based on
                                 domain documentation.  Used by the accumulator to create
                                 explicit ``contribute_to`` edges rather than blanket ones.
+        needs_job_data:         ``True`` when the graph has no job-level nodes but the task
+                                context implies job execution occurred and job metrics would
+                                materially explain the incident.  The accumulator fetches all
+                                jobs from PanDA and re-extracts on the next attempt.
     """
 
     approved: bool
@@ -65,6 +69,7 @@ class ReviewResult:
     confidence: float = 1.0
     issues: list[str] = field(default_factory=list)
     relevant_feature_nodes: list[str] = field(default_factory=list)
+    needs_job_data: bool = False
 
 
 class KnowledgeReviewer:
@@ -149,6 +154,8 @@ class KnowledgeReviewer:
                     "reviewer: causally relevant features",
                     "\n".join(f"• {n}" for n in result.relevant_feature_nodes),
                 )
+            if result.needs_job_data:
+                say("reviewer: job-level data requested — will fetch all jobs for next attempt.")
             return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
@@ -258,6 +265,7 @@ def _parse_review_response(response: str) -> ReviewResult:
             confidence=float(data.get("confidence", 1.0)),
             issues=[str(i) for i in data.get("issues", [])],
             relevant_feature_nodes=[str(n) for n in data.get("relevant_feature_nodes", [])],
+            needs_job_data=bool(data.get("needs_job_data", False)),
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("KnowledgeReviewer: failed to parse review response: %s", exc)

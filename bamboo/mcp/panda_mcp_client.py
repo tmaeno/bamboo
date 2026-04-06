@@ -23,8 +23,9 @@ Tool catalogue
 
 ``get_failed_job_details``
     Fetches details for a small sample of representative failed jobs.
-    Prioritises scout jobs (via ``get_scout_job_descriptions``) and jobs with
-    distinct error codes (via ``get_job_descriptions`` with unsuccessful_only).
+    Prioritises scout jobs (identified by ``processingType="scout"``) and jobs
+    with distinct error codes, all via ``get_job_descriptions`` with
+    ``unsuccessful_only=True``.
 
 ``get_task_input_datasets``
     Fetches input and pseudo-input dataset descriptions (file counts,
@@ -74,8 +75,17 @@ _PANDA_DOCS_TREE_URL = (
     "https://api.github.com/repos/PanDAWMS/panda-docs/git/trees/main?recursive=1"
 )
 
+_TASK_PARAMS_RST_PATH = "docs/source/advanced/task_params.rst"
+
+# RST files excluded from the BM25 full-text index because they are handled
+# by dedicated structured parsers (e.g. _fetch_task_params_table).
+_BM25_EXCLUDE: frozenset[str] = frozenset({
+    _TASK_PARAMS_RST_PATH,  # parsed by _fetch_task_params_table
+})
+
 # In-process BM25 index: None = not yet built.
-# Built on the first search_panda_docs call from all docs/source/**/*.rst files.
+# Built on the first search_panda_docs call from all docs/source/**/*.rst files
+# except those listed in _BM25_EXCLUDE.
 # Tuple layout: (BM25Okapi index, list of (path, paragraph_text) parallel to the corpus).
 _bm25_data: tuple | None = None
 
@@ -96,7 +106,7 @@ async def _fetch_task_params_table() -> dict[str, str]:
     if _task_params_table is not None:
         return _task_params_table
 
-    url = f"{_PANDA_DOCS_RAW_BASE}/docs/source/advanced/task_params.rst"
+    url = f"{_PANDA_DOCS_RAW_BASE}/{_TASK_PARAMS_RST_PATH}"
     try:
         import httpx  # noqa: PLC0415
 
@@ -620,10 +630,10 @@ class PandaMcpClient(McpClient):
     ) -> list[dict[str, Any]]:
         """Fetch details for representative failed jobs for *task_id*.
 
-        Fetches scout job dicts (via ``get_scout_job_descriptions``) and all
-        unsuccessful jobs (via ``get_job_descriptions`` with
-        ``unsuccessful_only=True``) concurrently.  Prioritises failed scouts,
-        then samples by distinct ``pilotErrorCode``.
+        Fetches all unsuccessful jobs (via ``get_job_descriptions`` with
+        ``unsuccessful_only=True``) then splits by ``processingType``:
+        failed scouts are prioritised first, then samples by distinct
+        ``pilotErrorCode`` from the remaining jobs.
 
         Returns a list of compact dicts with fields: ``jobID``, ``computingSite``,
         ``jobStatus``, ``pilotErrorCode``, ``pilotErrorDiag``, ``transExitCode``,
@@ -653,31 +663,21 @@ class PandaMcpClient(McpClient):
         try:
             task_id_int = int(task_data["jediTaskID"])
 
-            # Fetch scout dicts and unsuccessful jobs concurrently
-            (scout_status, scout_raw), (fail_status, failed_raw) = await asyncio.gather(
-                asyncio.to_thread(Client.get_scout_job_descriptions, task_id_int),
-                asyncio.to_thread(Client.get_job_descriptions, task_id_int, True),
+            # Fetch all unsuccessful jobs in one call; split by processingType.
+            fail_status, failed_raw = await asyncio.to_thread(
+                Client.get_job_descriptions, task_id_int, True
             )
 
-            # Failed scout jobs
             failed_scouts: list[dict[str, Any]] = []
-            if scout_status == 0 and isinstance(scout_raw, list):
-                failed_scouts = [
-                    _compact(j) for j in scout_raw
-                    if isinstance(j, dict)
-                    and j.get("jobStatus") in ("failed", "cancelled", "closed")
-                ]
-
-            # Failed non-scout jobs (unsuccessful_only=True already filters by status)
-            scout_ids = {j.get("PandaID") for j in failed_scouts}
             other_failed: list[dict[str, Any]] = []
             if fail_status == 0 and isinstance(failed_raw, list):
-                other_failed = [
-                    _compact(j) for j in failed_raw
-                    if isinstance(j, dict)
-                    and str(j.get("processingType", "")).lower() != "scout"
-                    and j.get("PandaID") not in scout_ids
-                ]
+                for j in failed_raw:
+                    if not isinstance(j, dict):
+                        continue
+                    if str(j.get("processingType", "")).lower() == "scout":
+                        failed_scouts.append(_compact(j))
+                    else:
+                        other_failed.append(_compact(j))
 
             # Scout-first, then distinct pilotErrorCode selection
             selected: list[dict[str, Any]] = list(failed_scouts[:max_jobs])
@@ -934,6 +934,7 @@ async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
         if item.get("type") == "blob"
         and item.get("path", "").startswith("docs/source/")
         and item["path"].endswith(".rst")
+        and item["path"] not in _BM25_EXCLUDE
     ]
     logger.info(
         "PandaMcpClient.search_panda_docs: discovered %d RST file(s)", len(rst_paths)

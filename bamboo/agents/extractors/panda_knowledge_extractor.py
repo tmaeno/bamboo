@@ -1081,14 +1081,20 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                                 )
                             )
                     else:
-                        namespaced_attr = f"{key}:{attr}"
+                        # PanDA CLI flags are sometimes already namespaced with the
+                        # parent key (e.g. --task_creation_arguments:memory under key
+                        # task_creation_arguments).  Strip the redundant prefix to
+                        # avoid double-namespacing like
+                        # "task_creation_arguments:task_creation_arguments:memory".
+                        attr_clean = attr[len(key) + 1:] if attr.startswith(f"{key}:") else attr
+                        namespaced_attr = f"{key}:{attr_clean}"
                         # Classify each flag into three buckets:
                         #   skip args    — pure GUIDs/identifiers, no signal → dropped entirely
                         #   context args — free-form prose, semantic meaning → TaskContextNode (vector DB)
                         #   everything else — repeatable config choices → TaskFeatureNode (graph DB)
-                        if attr in self._task_creation_skip_args:
+                        if attr_clean in self._task_creation_skip_args:
                             continue
-                        elif attr in self._task_creation_context_args:
+                        elif attr_clean in self._task_creation_context_args:
                             nodes.append(
                                 self._make_context_node(
                                     attribute=namespaced_attr,

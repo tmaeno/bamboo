@@ -1017,18 +1017,17 @@ async def preview_job_nodes_interactive():
         console.print(f"[red]Failed to fetch task data: {e}[/red]")
         return
 
-    console.print("Fetching all jobs and scout jobs from PanDA...")
-    (all_status, all_jobs), (scout_status, scout_jobs) = await asyncio.gather(
-        asyncio.to_thread(Client.get_job_descriptions, task_id),
-        asyncio.to_thread(Client.get_scout_job_descriptions, task_id),
-    )
+    console.print("Fetching all jobs from PanDA...")
+    all_status, all_jobs = await asyncio.to_thread(Client.get_job_descriptions, task_id)
 
     if all_status != 0 or not isinstance(all_jobs, list):
         console.print(f"[yellow]get_job_descriptions returned status={all_status} — no jobs.[/yellow]")
         all_jobs = []
-    if scout_status != 0 or not isinstance(scout_jobs, list):
-        scout_jobs = []
 
+    scout_jobs = [
+        j for j in all_jobs
+        if isinstance(j, dict) and str(j.get("processingType", "")).lower() == "scout"
+    ]
     console.print(
         f"Fetched [cyan]{len(all_jobs)}[/cyan] total job(s), "
         f"[cyan]{len(scout_jobs)}[/cyan] scout job(s)."

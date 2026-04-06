@@ -170,6 +170,11 @@ class KnowledgeAccumulator:
 
         review_feedback = ""
         review_result = None
+        # Accumulate relevant_feature_nodes across all review passes so that
+        # features identified in early passes are not lost when a later pass
+        # (e.g. the one that sees job data for the first time) produces a
+        # different — or shorter — list.
+        _all_relevant_feature_nodes: list[str] = []
         for attempt in range(self._max_review_retries + 1):
             graph = await self.extractor.extract_from_sources(
                 email_text=email_text,
@@ -192,6 +197,14 @@ class KnowledgeAccumulator:
                 graph, sources_summary, task_data=task_data,
                 available_tools=_available_tools, doc_hints=_doc_hints,
             )
+            # Accumulate relevant feature nodes from every review pass,
+            # including the final (approved) one — must happen before any break.
+            seen_feat = set(_all_relevant_feature_nodes)
+            for fn in review_result.relevant_feature_nodes:
+                if fn not in seen_feat:
+                    _all_relevant_feature_nodes.append(fn)
+                    seen_feat.add(fn)
+
             if review_result.approved or attempt >= self._max_review_retries:
                 if not review_result.approved:
                     logger.warning(
@@ -211,6 +224,13 @@ class KnowledgeAccumulator:
                 f"Review pass {attempt + 1}: {len(review_result.issues)} issue(s) found — "
                 "retrying extraction with reviewer feedback."
             )
+
+            # On first rejection: fetch job data if reviewer requested it and
+            # it hasn't been provided yet.  Jobs are fetched directly from PanDA
+            # so that successful-but-resource-abusive scouts are included (unlike
+            # get_failed_job_details which only returns unsuccessful jobs).
+            if attempt == 0 and review_result.needs_job_data and jobs_data is None:
+                jobs_data = await self._fetch_jobs_from_panda(task_data)
 
             # One-shot source exploration on the first rejection.
             if attempt == 0 and self._explorer is not None:
@@ -249,9 +269,11 @@ class KnowledgeAccumulator:
 
         # Create explicit contribute_to edges for feature nodes the reviewer
         # identified as causally relevant based on domain documentation.
-        # These replace the former blanket Task_Feature→Cause edges.
-        if review_result is not None and review_result.relevant_feature_nodes:
-            self._add_reviewer_feature_edges(graph, review_result.relevant_feature_nodes)
+        # Uses the union of all review passes so that features flagged in an
+        # early pass are not lost when a later pass (e.g. after job data is
+        # fetched) produces a different list.
+        if _all_relevant_feature_nodes:
+            self._add_reviewer_feature_edges(graph, _all_relevant_feature_nodes)
 
         if dry_run:
             logger.info(
@@ -380,6 +402,50 @@ class KnowledgeAccumulator:
                     )
 
         return doc_hints
+
+    async def _fetch_jobs_from_panda(
+        self, task_data: dict[str, Any] | None
+    ) -> list[dict[str, Any]] | None:
+        """Fetch all job descriptions for the task from PanDA.
+
+        Called when the reviewer sets ``needs_job_data=True`` and no
+        ``jobs_data`` was supplied by the caller.  Returns ``None`` on any
+        error so the caller can proceed without job data rather than crashing.
+        """
+        if not task_data:
+            return None
+        try:
+            import asyncio as _asyncio
+
+            from pandaclient import Client as _Client  # noqa: PLC0415
+        except ImportError:
+            logger.warning(
+                "KnowledgeAccumulator: pandaclient not installed — cannot fetch job data"
+            )
+            return None
+        try:
+            task_id_int = int(task_data["jediTaskID"])
+            status, raw_jobs = await _asyncio.to_thread(
+                _Client.get_job_descriptions, task_id_int
+            )
+            if status == 0 and isinstance(raw_jobs, list):
+                say(f"Fetched {len(raw_jobs):,} job(s) from PanDA for job aggregation.")
+                logger.info(
+                    "KnowledgeAccumulator: fetched %d job(s) for task_id=%s",
+                    len(raw_jobs),
+                    task_id_int,
+                )
+                return raw_jobs
+            logger.warning(
+                "KnowledgeAccumulator: get_job_descriptions returned status=%s — skipping",
+                status,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "KnowledgeAccumulator: failed to fetch job data: %s", exc
+            )
+            return None
 
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
         """Create schema-defined edges that span extractor boundaries.
@@ -514,9 +580,8 @@ class KnowledgeAccumulator:
                 f"Added {len(new_rels)} reviewer-identified feature→cause edge(s)."
             )
             logger.info(
-                "KnowledgeAccumulator: added %d reviewer feature edge(s) for: %s",
-                len(new_rels),
-                feature_names,
+                "KnowledgeAccumulator: added %d reviewer feature edge(s)",
+                len(new_rels)
             )
 
     # Node types that must NOT be stored in the graph database (Neo4j).
