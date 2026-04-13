@@ -10,8 +10,8 @@ Prompt constants
     Used by ``LLMExtractionStrategy``.
 
 ``EMAIL_EXTRACTION_PROMPT``
-    Extracts ``Cause``, ``Resolution``, and ``Task_Context`` nodes from an
-    email thread.  Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
+    Extracts ``Cause``, ``Resolution``, ``Task_Context``, and ``Procedure`` nodes
+    from an email thread.  Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
 
 ``LOG_EXTRACTION_PROMPT``
     Extracts ``Symptom``, ``Component``, and ``Task_Context`` nodes from raw
@@ -262,15 +262,27 @@ Node types to extract:
   e.g. observations, background, constraints, timeline notes.
   name = a short snake_case key summarising the topic (e.g. "observed_behavior", "timeline").
   description = the verbatim or lightly paraphrased prose from the email.
+- Procedure: An investigation action taken in response to a cause — describes how the
+  incident was investigated (e.g. "we looked at finished jobs with high CPU time",
+  "we checked the parent task for data corruption").
+  Extract a Procedure ONLY when the email explicitly describes what was investigated
+  and how, not just that an investigation took place.
+  name = "{strategy_type}:{cause_name}" — a stable merge key combining the strategy
+         and the canonical cause name (e.g. "investigate finished normal jobs with high
+         cpuConsumptionTime and wallTime:cpu consumption exceeded job limit").
+  strategy_type = concise natural-language description of the investigation
+                  (e.g. "investigate finished normal jobs with high cpuConsumptionTime
+                  and wallTime").  Must be specific enough to guide tool selection.
+  description = full prose from the email describing what was investigated and why.
+  parameters = structured filter and metric details as a dict, e.g.:
+               {{"filter": {{"status": "finished", "jobType": "normal"}},
+                "metrics": ["cpuConsumptionTime", "wallTime"]}}
+               Omit keys that are not mentioned in the email.
 
 Relationships to emit (between extracted nodes only):
 - Cause -[solved_by]-> Resolution
+- Cause -[investigated_by]-> Procedure  (link each Procedure to its Cause)
 - Task_Context -[contribute_to]-> Cause  (only when the context directly supports a cause)
-
-If representative job data is present in the email (e.g. site-specific failures, pilot error
-codes per site), you may also emit a Cause linked from a job pattern — but ONLY when the
-job-level diagnostic implies a cause more specific than any task-level cause already extracted.
-Do NOT duplicate the task-level cause on job-level patterns.
 
 Canonicalization:
 - If the same cause or resolution is mentioned multiple times, emit it only once.
@@ -283,18 +295,20 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
 {{
   "nodes": [
     {{
-      "node_type": "Cause|Resolution|Task_Context",
+      "node_type": "Cause|Resolution|Task_Context|Procedure",
       "name": "...",
       "description": "...",
       "metadata": {{}},
-      "steps": []
+      "steps": [],
+      "strategy_type": "",
+      "parameters": {{}}
     }}
   ],
   "relationships": [
     {{
       "source_name": "...",
       "target_name": "...",
-      "relation_type": "solved_by|contribute_to",
+      "relation_type": "solved_by|contribute_to|investigated_by",
       "confidence": 0.0
     }}
   ]
@@ -689,17 +703,24 @@ Rules:
     or Symptom text.  Do NOT add dimensions based on general domain knowledge about
     how resources interact (e.g. do not add "memory" for a CPU incident just because
     memory can affect CPU efficiency).
-  • If you cannot identify any dimension from the text, return empty list and set
-    needs_job_data=true.
+  • If you cannot identify any dimension from the text, return empty list.
 
-JOB DATA FLAG: Set "needs_job_data" to true when ALL of the following hold:
-  1. The graph has NO Aggregated_Job_Feature or Job_Instance nodes.
-  2. The task context (status, errorDialog, nJobsFailed) implies job execution occurred and
-     job-level metrics (CPU time, memory, site, duration) would materially explain the incident.
-  Examples that warrant true: status=exhausted with CPU/memory errorDialog, nJobsFailed > 0
-  with no job nodes present, errorDialog mentions scout jobs or pilot errors.
-  Examples that do NOT warrant true: status=broken (never ran jobs), aborted, input-data errors,
-  job nodes already present in graph.
+PROCEDURE CONSISTENCY CHECK:
+For each Procedure node in the graph, verify that its strategy_type is consistent
+with the linked Cause node.  Flag as a specificity gap if:
+- The strategy_type is too vague to be actionable (e.g. "investigate jobs" with no
+  further detail about what to look for or which job status/type).
+- The strategy_type contradicts the cause (e.g. cause is "cpu consumption exceeded
+  job limit" but procedure investigates memory metrics).
+Examples of consistent pairs:
+- Cause "cpu consumption exceeded job limit" → strategy "investigate finished normal
+  jobs with high cpuConsumptionTime and wallTime"
+- Cause "build step failure" → strategy "investigate failed build jobs for
+  transformation errors"
+- Cause "input data missing from parent task" → strategy "check parent task status
+  and output dataset availability"
+Do NOT flag Procedure nodes as missing — their absence is acceptable.  Only flag
+present Procedure nodes whose strategy_type is vague or inconsistent.
 
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
 {{
@@ -707,8 +728,7 @@ Respond with a JSON object only — no markdown, no explanation outside the JSON
   "confidence": <float 0.0-1.0>,
   "issues": ["<concise gap description>"],
   "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>",
-  "failure_dimension": ["cpu" | "memory" | "walltime" | "disk" | "site" | "job_size"],
-  "needs_job_data": true | false
+  "failure_dimension": ["cpu" | "memory" | "walltime" | "disk" | "site" | "job_size"]
 }}
 """
 

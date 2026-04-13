@@ -61,7 +61,6 @@ class GraphDatabaseClient:
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
-        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
@@ -70,11 +69,16 @@ class GraphDatabaseClient:
         return await self._backend.find_causes(
             symptoms=symptoms,
             task_features=task_features,
-            job_features=job_features,
             environment_factors=environment_factors,
             components=components,
             limit=limit,
         )
+
+    async def find_procedures_for_causes(
+        self, cause_names: list[str]
+    ) -> list[dict[str, Any]]:
+        """Return Procedure nodes linked to the given causes via investigated_by edges."""
+        return await self._backend.find_procedures_for_causes(cause_names)
 
     async def find_common_pattern(
         self,

@@ -7,15 +7,20 @@ new problematic task it:
    task's structured fields using the configured
    :class:`~bamboo.agents.extractors.base.ExtractionStrategy`.
 2. Queries the **graph database** for candidate causes ranked by how many
-   extracted clue types (symptoms, features, environment, components) point to
-   them.
+   extracted clue types (symptoms, task features, environment, components) point
+   to them.
 3. Queries the **vector database** using a two-step retrieval pattern:
    a. Searches unstructured node descriptions to find similar past cases
       (returns ``graph_id`` values).
    b. Fetches the narrative summaries for those graphs.
 4. Feeds all evidence to an LLM to identify the most likely root cause and
-   recommend a resolution.
-5. Drafts a professional email for the task submitter.
+   recommend a resolution  (Phase 1).
+5. Queries the **graph database** for :class:`~bamboo.models.graph_element.ProcedureNode`
+   entries linked to the identified causes  (Phase 2).  If found, the LLM selects
+   the appropriate MCP tool from the available tool catalogue and runs the
+   investigation.  If no procedure is found, the navigator notes that human input
+   is recommended.
+6. Drafts a professional email for the task submitter.
 """
 
 import json
@@ -85,21 +90,15 @@ class ReasoningNavigator:
         because they are only available via vector search — they are not
         stored in the graph database.
 
-        ``AggregatedJobFeatureNode`` values are kept separately from ``TaskFeatureNode``
-        so graph queries can score them independently: a cause corroborated by
-        both task-level and job-level features ranks higher.
-
         Args:
             graph: A :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`.
 
         Returns:
-            Dict with keys ``symptoms``, ``task_features``, ``job_features``,
-            ``task_contexts``, ``environment_factors``, ``components``,
-            ``context``.
+            Dict with keys ``symptoms``, ``task_features``, ``task_contexts``,
+            ``environment_factors``, ``components``, ``context``.
         """
         symptoms = []
         task_features = []
-        job_features = []
         task_contexts = []
         environment_factors = []
         components = []
@@ -111,15 +110,6 @@ class ReasoningNavigator:
             elif "TASK_CONTEXT" in node_type_str or "JOB_CONTEXT" in node_type_str:
                 if node.description:
                     task_contexts.append(node.description)
-            elif "JOB_INSTANCE" in node_type_str:
-                # Include job instance names and descriptions as job-level clues.
-                # The name encodes site+error pattern; description is the full
-                # diagnostic text — both are useful for graph + vector queries.
-                job_features.append(node.name)
-                if node.description:
-                    task_contexts.append(node.description)
-            elif "AGGREGATED_JOB_FEATURE" in node_type_str or "JOB_FEATURE" in node_type_str:
-                job_features.append(node.name)
             elif "TASK_FEATURE" in node_type_str or "FEATURE" in node_type_str:
                 task_features.append(node.name)
             elif "ENVIRONMENT" in node_type_str:
@@ -130,7 +120,6 @@ class ReasoningNavigator:
         return {
             "symptoms": symptoms,
             "task_features": task_features,
-            "job_features": job_features,
             "task_contexts": task_contexts,
             "environment_factors": environment_factors,
             "components": components,
@@ -198,6 +187,27 @@ class ReasoningNavigator:
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
         )
+
+        # --- Phase 2: procedure-driven investigation ---
+        identified_causes = [analysis["root_cause"]] if analysis.get("root_cause") else []
+        procedures = await self._query_procedures(identified_causes)
+
+        investigation_result: dict[str, Any] = {}
+        if procedures:
+            investigation_result = await self._run_investigation(
+                task_data, procedures, domain_hints
+            )
+        else:
+            investigation_result["investigation_note"] = (
+                "No investigation procedure found for the identified cause. "
+                "Manual investigation is recommended."
+            )
+            logger.info(
+                "ReasoningNavigator: no procedures found for cause '%s' — "
+                "manual investigation recommended",
+                analysis.get("root_cause", "unknown"),
+            )
+
         email_content = await self._generate_email(task_data, analysis, domain_hints=domain_hints)
 
         return AnalysisResult(
@@ -212,6 +222,8 @@ class ReasoningNavigator:
                 "extracted_clues": extracted_clues,
                 "graph_results_count": len(graph_results),
                 "vector_results_count": len(vector_results),
+                "procedures_found": len(procedures),
+                "investigation": investigation_result,
             },
         )
 
@@ -224,10 +236,6 @@ class ReasoningNavigator:
     ) -> list[dict[str, Any]]:
         """Query the graph DB for causes that match the extracted clues.
 
-        Both task-level features and job-level features are passed so that
-        causes corroborated by execution patterns rank alongside those
-        corroborated by task configuration.
-
         Args:
             extracted_clues: Output of :meth:`_extract_clues_from_graph`.
 
@@ -238,12 +246,35 @@ class ReasoningNavigator:
         results = await self.graph_db.find_causes(
             symptoms=extracted_clues.get("symptoms"),
             task_features=extracted_clues.get("task_features"),
-            job_features=extracted_clues.get("job_features"),
             environment_factors=extracted_clues.get("environment_factors"),
             components=extracted_clues.get("components"),
             limit=10,
         )
         logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
+        return results
+
+    async def _query_procedures(
+        self, cause_names: list[str]
+    ) -> list[dict[str, Any]]:
+        """Query the graph DB for investigation procedures linked to identified causes.
+
+        Args:
+            cause_names: Canonical cause names from Phase 1 analysis.
+
+        Returns:
+            List of procedure dicts from
+            :meth:`GraphDatabaseClient.find_procedures_for_causes`, ordered by
+            frequency descending.
+        """
+        if not cause_names:
+            return []
+        logger.info(
+            "ReasoningNavigator: querying procedures for %d cause(s)", len(cause_names)
+        )
+        results = await self.graph_db.find_procedures_for_causes(cause_names)
+        logger.info(
+            "ReasoningNavigator: found %d procedure(s) for identified causes", len(results)
+        )
         return results
 
     async def _query_vector_database(
@@ -281,14 +312,6 @@ class ReasoningNavigator:
                 (
                     "Task_Feature",
                     "Task features: " + ", ".join(extracted_clues["task_features"]),
-                )
-            )
-        if extracted_clues.get("job_features"):
-            section_queries.append(
-                (
-                    "Job_Feature",
-                    "Job execution patterns: "
-                    + ", ".join(extracted_clues["job_features"]),
                 )
             )
         for ctx in extracted_clues.get("task_contexts", []):
@@ -446,3 +469,53 @@ class ReasoningNavigator:
 
         response = await self.llm.ainvoke(messages)
         return response.content
+
+    async def _run_investigation(
+        self,
+        task_data: dict[str, Any],
+        procedures: list[dict[str, Any]],
+        domain_hints: str = "(none)",
+    ) -> dict[str, Any]:
+        """Phase 2: run a procedure-driven investigation for the current task.
+
+        The LLM is given the list of procedures (each with a ``strategy_type``
+        and accumulated ``parameters``) and the available MCP tools.  It selects
+        which tool to call and with what arguments, then synthesises the findings
+        into a structured result.
+
+        This method is a scaffold — full MCP tool invocation will be wired in
+        when the navigator gains access to an MCP client.  Currently it returns
+        the procedure list and strategy descriptions so callers can see what
+        investigation was recommended.
+
+        Args:
+            task_data:    Raw task fields for the current task.
+            procedures:   Procedure dicts from :meth:`_query_procedures`.
+            domain_hints: Domain documentation string.
+
+        Returns:
+            Dict with ``procedures`` (the raw procedure list) and
+            ``investigation_note`` describing the recommended next steps.
+        """
+        logger.info(
+            "ReasoningNavigator: Phase 2 — %d procedure(s) available, "
+            "MCP tool invocation not yet wired",
+            len(procedures),
+        )
+
+        strategies = [
+            f"[cause: {p['cause_name']}] {p['strategy_type']} "
+            f"(confirmed by {p['frequency']} incident(s))"
+            for p in procedures
+        ]
+        note = (
+            "Investigation procedure(s) found but MCP tool invocation is not yet "
+            "implemented. Recommended strategies:\n"
+            + "\n".join(f"  • {s}" for s in strategies)
+        )
+        logger.info("ReasoningNavigator: investigation note: %s", note)
+
+        return {
+            "procedures": procedures,
+            "investigation_note": note,
+        }

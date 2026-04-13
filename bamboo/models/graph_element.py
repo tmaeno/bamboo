@@ -5,29 +5,22 @@ The graph schema is::
     Symptom        -[indicate]->          Cause
     Environment    -[associated_with]->   Cause
     Task_Feature   -[contribute_to]->     Cause
-    Aggregated_Job_Feature -[contribute_to]-> Cause
     Component      -[originated_from]->   Cause
     Cause          -[solved_by]->         Resolution
-    Symptom        -[has_job_pattern]->   Aggregated_Job_Feature
-    Symptom        -[has_job_instance]->  Job_Instance
-    Job_Instance   -[indicate]->          Cause  (optional — only when more specific)
+    Cause          -[investigated_by]->   Procedure
 
 ``TaskContextNode`` and ``JobInstanceContextNode`` are special cases: they are only
 stored in the vector database (for semantic search) and are never persisted in
 the graph database.
 
-The ``has_job_pattern`` edge connects a task-level :class:`SymptomNode` to the
-aggregated :class:`AggregatedJobFeatureNode` values derived from the jobs that
-make up the failing task.  This allows graph queries of the form "what
-job-execution patterns are associated with this symptom?" without requiring
-per-job nodes.
+``ProcedureNode`` encodes how to investigate a given cause type.  It is extracted
+from email threads alongside causes and resolutions, and linked from the cause via
+an ``investigated_by`` edge.  The edge carries per-incident investigation parameters
+(job filter conditions, metrics) as a list appended on each re-encounter, so no
+information is lost when multiple incidents map to the same procedure node.
 
-The ``has_job_instance`` edge connects a :class:`SymptomNode` to one or more
-:class:`JobInstanceNode` values that capture specific site+error failure
-patterns from representative failed jobs.  Unlike
-:class:`AggregatedJobFeatureNode`, a ``JobInstanceNode`` encodes *which site*
-and *which error code* co-occurred, enabling cross-task merging when the same
-pattern recurs.
+The reasoning navigator queries ``Cause -[investigated_by]-> Procedure`` after
+Phase 1 to decide whether and how to run a Phase 2 investigation.
 """
 
 from enum import Enum
@@ -48,9 +41,10 @@ class NodeType(str, Enum):
     SYMPTOM = "Symptom"
     CAUSE = "Cause"
     RESOLUTION = "Resolution"
+    PROCEDURE = "Procedure"
     TASK_FEATURE = "Task_Feature"
-    AGGREGATED_JOB_FEATURE = "Aggregated_Job_Feature"
-    JOB_INSTANCE = "Job_Instance"
+    AGGREGATED_JOB_FEATURE = "Aggregated_Job_Feature"  # deprecated — kept for existing graph data
+    JOB_INSTANCE = "Job_Instance"                       # deprecated — kept for existing graph data
     TASK_CONTEXT = "Task_Context"
     JOB_INSTANCE_CONTEXT = "Job_Instance_Context"
     ENVIRONMENT = "Environment"
@@ -89,9 +83,10 @@ class RelationType(str, Enum):
     SOLVED_BY = "solved_by"
     CONTRIBUTE_TO = "contribute_to"
     ORIGINATED_FROM = "originated_from"
+    INVESTIGATED_BY = "investigated_by"
     ASSOCIATED_WITH = "associated_with"
-    HAS_JOB_PATTERN = "has_job_pattern"
-    HAS_JOB_INSTANCE = "has_job_instance"
+    HAS_JOB_PATTERN = "has_job_pattern"    # deprecated — kept for existing graph data
+    HAS_JOB_INSTANCE = "has_job_instance"  # deprecated — kept for existing graph data
     SIGNALS = "signals"
     LEADS_TO = "leads_to"
     HAS_COMPONENT = "has_component"
@@ -388,6 +383,43 @@ class ResolutionNode(BaseNode):
     steps: list[str] = Field(default_factory=list)
     success_rate: Optional[float] = Field(None, ge=0.0, le=1.0)
     estimated_duration: Optional[str] = None
+
+
+class ProcedureNode(BaseNode):
+    """An investigation procedure for a cause type, extracted from email threads.
+
+    Encodes *how to investigate* a given cause — which jobs to look at, which
+    metrics to examine, or what related tasks to inspect.  Extracted from email
+    threads alongside causes and resolutions, then linked from the cause via an
+    ``investigated_by`` edge.
+
+    Merge key: ``"{strategy_type}:{cause_name}"`` — one node per
+    strategy+cause combination.  Per-incident investigation parameters (job
+    filter conditions, metrics) are stored on the ``investigated_by`` edge as a
+    list appended on each re-encounter, so no information is lost when multiple
+    incidents map to the same node.
+
+    The reasoning navigator queries ``Cause -[investigated_by]-> Procedure``
+    after Phase 1 cause identification.  It feeds ``strategy_type`` to an LLM
+    that selects the appropriate MCP tool from the available tool catalogue.
+    If no procedure is found for a cause, the navigator requests human input.
+
+    Attributes:
+        strategy_type: Concise natural-language description of the investigation,
+                       e.g. ``"investigate finished normal jobs with high
+                       cpuConsumptionTime and wallTime"``.  The LLM uses this to
+                       select MCP tools at navigation time.
+    """
+
+    node_type: NodeType = NodeType.PROCEDURE
+    strategy_type: str = Field(
+        default="",
+        description=(
+            "Concise natural-language description of the investigation strategy, "
+            "e.g. 'investigate finished normal jobs with high cpuConsumptionTime "
+            "and wallTime'.  Used by the navigator LLM to select MCP tools."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

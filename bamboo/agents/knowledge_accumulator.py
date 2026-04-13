@@ -194,10 +194,8 @@ class KnowledgeAccumulator:
             if self._reviewer is None:
                 break
             say(f"Running knowledge reviewer (attempt {attempt + 1}/{self._max_review_retries + 1})...")
-            _available_tools = self._explorer._client.list_tools() if self._explorer else None
             review_result = await self._reviewer.review(
-                graph, sources_summary, task_data=task_data,
-                available_tools=_available_tools, doc_hints=_doc_hints,
+                graph, sources_summary, task_data=task_data, doc_hints=_doc_hints,
             )
             # Accumulate failure dimensions from every review pass,
             # including the final (approved) one — must happen before any break.
@@ -222,46 +220,6 @@ class KnowledgeAccumulator:
                 f"Review pass {attempt + 1}: {len(review_result.issues)} issue(s) found — "
                 "retrying extraction with reviewer feedback."
             )
-
-            # On first rejection: fetch job data if reviewer requested it and
-            # it hasn't been provided yet.  Jobs are fetched directly from PanDA
-            # so that successful-but-resource-abusive scouts are included (unlike
-            # get_failed_job_details which only returns unsuccessful jobs).
-            if attempt == 0 and review_result.needs_job_data and jobs_data is None:
-                jobs_data = await self._fetch_jobs_from_panda(task_data)
-
-            # One-shot source exploration on the first rejection.
-            if attempt == 0 and self._explorer is not None:
-                say("Launching source explorer to fetch additional data...")
-                exploration = await self._explorer.explore(
-                    task_data=task_data or {},
-                    review_issues=review_result.issues,
-                    doc_hints=_doc_hints,
-                )
-                if exploration.task_logs:
-                    _task_logs.update(exploration.task_logs)
-                    say(
-                        f"Explorer fetched {len(exploration.task_logs)} "
-                        "additional log source(s)."
-                    )
-                if exploration.external_data:
-                    _external_data.update(exploration.external_data)
-                    say(
-                        f"Explorer added {len(exploration.external_data)} "
-                        "external data entry(ies)."
-                    )
-                if exploration.task_logs or exploration.external_data:
-                    # Rebuild so reviewer sees the new sources on next pass.
-                    sources_summary = build_sources_summary(
-                        email_text=email_text,
-                        task_logs=_task_logs,
-                        job_logs=job_logs,
-                        doc_hints=_doc_hints,
-                    )
-                logger.info(
-                    "KnowledgeAccumulator: source explorer ran %d tool call(s)",
-                    len(exploration.tool_calls),
-                )
 
             review_feedback = review_result.feedback
 
@@ -603,7 +561,7 @@ class KnowledgeAccumulator:
 
         feature_nodes = [
             n for n in graph.nodes
-            if n.node_type.value in ("Task_Feature", "Job_Feature", "Aggregated_Job_Feature")
+            if n.node_type.value == "Task_Feature"
             and any(c in dimensions for c in _node_concepts(n))
         ]
         cause_nodes = [n for n in graph.nodes if n.node_type.value == "Cause"]
@@ -611,7 +569,6 @@ class KnowledgeAccumulator:
         if not feature_nodes or not cause_nodes:
             return
 
-        symptom_nodes = [n for n in graph.nodes if n.node_type.value == "Symptom"]
         existing = {
             (r.source_id, r.target_id, r.relation_type) for r in graph.relationships
         }
@@ -629,21 +586,6 @@ class KnowledgeAccumulator:
                         )
                     )
                     existing.add(key)
-            # Aggregated_Job_Feature nodes also get has_job_pattern → Symptom edges
-            # so they survive the isolated-node filter even when no Cause node exists.
-            if feat.node_type.value == "Aggregated_Job_Feature":
-                for symptom in symptom_nodes:
-                    key = (symptom.name, feat.name, RelationType.HAS_JOB_PATTERN)
-                    if key not in existing:
-                        new_rels.append(
-                            GraphRelationship(
-                                source_id=symptom.name,
-                                target_id=feat.name,
-                                relation_type=RelationType.HAS_JOB_PATTERN,
-                                confidence=0.9,
-                            )
-                        )
-                        existing.add(key)
 
         graph.relationships.extend(new_rels)
         if new_rels:
@@ -707,6 +649,13 @@ class KnowledgeAccumulator:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
             node_ids[node.id or node.name] = node_id
 
+        # Build a name→parameters lookup for procedure edge wiring below.
+        proc_params_by_name: dict[str, Any] = {
+            n.name: n.metadata.get("parameters")
+            for n in graph.nodes
+            if n.node_type.value == "Procedure" and n.metadata.get("parameters")
+        }
+
         graph_id = graph.metadata.get("graph_id", "")
         for rel in graph.relationships:
             rel.source_id = node_ids.get(rel.source_id, rel.source_id)
@@ -716,6 +665,17 @@ class KnowledgeAccumulator:
                 # Stamp the graph_id so Neo4j can track per-edge provenance and
                 # compute frequency across tasks via find_common_pattern.
                 rel.properties["graph_id"] = graph_id
+                # For investigated_by edges, carry the procedure's parameters on
+                # the edge so they accumulate as a list per incident in Neo4j.
+                if rel.relation_type.value == "investigated_by":
+                    params = rel.properties.pop("parameters", None)
+                    if params is None:
+                        for proc_name, proc_params in proc_params_by_name.items():
+                            if node_ids.get(proc_name) == rel.target_id:
+                                params = proc_params
+                                break
+                    if params is not None:
+                        rel.properties["parameters"] = params
                 await self.graph_db.create_relationship(rel)
 
         logger.info("KnowledgeAccumulator: graph stored successfully")

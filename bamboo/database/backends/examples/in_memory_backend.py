@@ -102,7 +102,6 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
-        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
@@ -112,8 +111,6 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         clue_groups = [
             (symptoms or [], "SYMPTOM", "indicate"),
             (task_features or [], "TASK_FEATURE", "contribute_to"),
-            (job_features or [], "AGGREGATED_JOB_FEATURE", "contribute_to"),
-            (job_features or [], "JOB_INSTANCE", "indicate"),
             (environment_factors or [], "ENVIRONMENT", "contribute_to"),
             (components or [], "COMPONENT", "originated_from"),
         ]
@@ -182,6 +179,31 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         )
 
         return results[:limit]
+
+    async def find_procedures_for_causes(
+        self, cause_names: list[str]
+    ) -> list[dict[str, Any]]:
+        """Return Procedure nodes linked to the given causes (in-memory stub)."""
+        results = []
+        for rel in self.relationships.values():
+            if "investigated_by" not in str(rel.relation_type):
+                continue
+            cause_node = self.nodes.get(rel.source_id)
+            proc_node = self.nodes.get(rel.target_id)
+            if not cause_node or not proc_node:
+                continue
+            if cause_node.name not in cause_names:
+                continue
+            results.append({
+                "cause_name": cause_node.name,
+                "procedure_name": proc_node.name,
+                "strategy_type": getattr(proc_node, "strategy_type", ""),
+                "description": proc_node.description,
+                "parameters": rel.properties.get("parameters", []),
+                "frequency": rel.properties.get("frequency", 1),
+            })
+        results.sort(key=lambda x: x["frequency"], reverse=True)
+        return results
 
     async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
         """Remove a graph_id's contribution (in-memory stub)."""

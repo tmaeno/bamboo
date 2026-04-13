@@ -159,6 +159,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             ``True`` if the relationship was merged/created successfully.
         """
         graph_id = relationship.properties.pop("graph_id", "")
+        parameters = relationship.properties.pop("parameters", None)
         async with self.driver.session(
             database=self.settings.neo4j_database
         ) as session:
@@ -168,22 +169,28 @@ class Neo4jBackend(GraphDatabaseBackend):
                 MATCH (target {{id: $target_id}})
                 MERGE (source)-[r:{relationship.relation_type.value}]->(target)
                 ON CREATE SET
-                    r.confidence = $confidence,
-                    r.graph_ids  = CASE WHEN $graph_id <> '' THEN [$graph_id] ELSE [] END,
-                    r.frequency  = CASE WHEN $graph_id <> '' THEN 1 ELSE 0 END
+                    r.confidence  = $confidence,
+                    r.graph_ids   = CASE WHEN $graph_id <> '' THEN [$graph_id] ELSE [] END,
+                    r.frequency   = CASE WHEN $graph_id <> '' THEN 1 ELSE 0 END,
+                    r.parameters  = CASE WHEN $parameters IS NOT NULL THEN [$parameters] ELSE [] END
                 ON MATCH SET
-                    r.graph_ids  = CASE
+                    r.graph_ids   = CASE
                         WHEN $graph_id = '' OR $graph_id IN r.graph_ids THEN r.graph_ids
                         ELSE r.graph_ids + $graph_id
                     END,
-                    r.frequency  = size(CASE
+                    r.frequency   = size(CASE
                         WHEN $graph_id = '' OR $graph_id IN r.graph_ids THEN r.graph_ids
                         ELSE r.graph_ids + $graph_id
                     END),
-                    r.confidence = CASE
+                    r.confidence  = CASE
                         WHEN $graph_id IN r.graph_ids THEN r.confidence
                         ELSE (r.confidence * r.frequency + $confidence) /
                              (r.frequency + 1)
+                    END,
+                    r.parameters  = CASE
+                        WHEN $parameters IS NULL OR $graph_id IN coalesce(r.graph_ids, [])
+                            THEN coalesce(r.parameters, [])
+                        ELSE coalesce(r.parameters, []) + [$parameters]
                     END
                 RETURN r
                 """,
@@ -191,6 +198,7 @@ class Neo4jBackend(GraphDatabaseBackend):
                 target_id=relationship.target_id,
                 confidence=relationship.confidence,
                 graph_id=graph_id,
+                parameters=parameters,
             )
             return await result.single() is not None
 
@@ -311,7 +319,6 @@ class Neo4jBackend(GraphDatabaseBackend):
         self,
         symptoms: list[str] = None,
         task_features: list[str] = None,
-        job_features: list[str] = None,
         environment_factors: list[str] = None,
         components: list[str] = None,
         limit: int = 10,
@@ -320,8 +327,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
         Each clue type that links to a cause contributes +1 to its match_score,
         so causes corroborated by multiple clue types rank above those matched
-        by only one.  Job features (aggregated execution patterns) are scored
-        independently from task features so the signal is additive.
+        by only one.
         """
         async with self.driver.session(
             database=self.settings.neo4j_database
@@ -337,38 +343,27 @@ class Neo4jBackend(GraphDatabaseBackend):
             WHERE f.name IN $task_features
             WITH symptom_causes, collect(DISTINCT c2) AS feature_causes
 
-            // --- Job-feature clues (aggregated patterns + specific instances) ---
-            OPTIONAL MATCH (jf:Aggregated_Job_Feature)-[:contribute_to]->(c3a:Cause)
-            WHERE jf.name IN $job_features
-            OPTIONAL MATCH (ji:Job_Instance)-[:indicate]->(c3b:Cause)
-            WHERE ji.name IN $job_features
-            WITH symptom_causes, feature_causes,
-                 collect(DISTINCT c3a) + collect(DISTINCT c3b) AS job_feature_causes
-
             // --- Environment clues ---
-            OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c4:Cause)
+            OPTIONAL MATCH (env:Environment)-[:contribute_to]->(c3:Cause)
             WHERE env.name IN $environment_factors
-            WITH symptom_causes, feature_causes, job_feature_causes,
-                 collect(DISTINCT c4) AS env_causes
+            WITH symptom_causes, feature_causes,
+                 collect(DISTINCT c3) AS env_causes
 
             // --- Component clues ---
-            OPTIONAL MATCH (comp:Component)-[:originated_from]->(c5:Cause)
+            OPTIONAL MATCH (comp:Component)-[:originated_from]->(c4:Cause)
             WHERE comp.name IN $components
-            WITH symptom_causes, feature_causes, job_feature_causes, env_causes,
-                 collect(DISTINCT c5) AS comp_causes
+            WITH symptom_causes, feature_causes, env_causes,
+                 collect(DISTINCT c4) AS comp_causes
 
             // --- Union all matched causes and score by clue-type breadth ---
-            WITH symptom_causes + feature_causes + job_feature_causes
-                 + env_causes + comp_causes AS all_causes,
-                 symptom_causes, feature_causes, job_feature_causes,
-                 env_causes, comp_causes
+            WITH symptom_causes + feature_causes + env_causes + comp_causes AS all_causes,
+                 symptom_causes, feature_causes, env_causes, comp_causes
             UNWIND all_causes AS c
             WITH DISTINCT c,
-                 (CASE WHEN c IN symptom_causes       THEN 1 ELSE 0 END +
-                  CASE WHEN c IN feature_causes       THEN 1 ELSE 0 END +
-                  CASE WHEN c IN job_feature_causes   THEN 1 ELSE 0 END +
-                  CASE WHEN c IN env_causes           THEN 1 ELSE 0 END +
-                  CASE WHEN c IN comp_causes          THEN 1 ELSE 0 END) AS match_score
+                 (CASE WHEN c IN symptom_causes  THEN 1 ELSE 0 END +
+                  CASE WHEN c IN feature_causes  THEN 1 ELSE 0 END +
+                  CASE WHEN c IN env_causes      THEN 1 ELSE 0 END +
+                  CASE WHEN c IN comp_causes     THEN 1 ELSE 0 END) AS match_score
 
             OPTIONAL MATCH (c)-[:solved_by]->(r:Resolution)
             RETURN c.id          AS cause_id,
@@ -386,7 +381,6 @@ class Neo4jBackend(GraphDatabaseBackend):
                 query,
                 symptoms=symptoms or [],
                 task_features=task_features or [],
-                job_features=job_features or [],
                 environment_factors=environment_factors or [],
                 components=components or [],
                 limit=limit,
@@ -404,6 +398,44 @@ class Neo4jBackend(GraphDatabaseBackend):
                 }
                 for record in records
             ]
+
+    async def find_procedures_for_causes(
+        self, cause_names: list[str]
+    ) -> list[dict[str, Any]]:
+        """Return Procedure nodes linked to the given causes via investigated_by edges.
+
+        Each result includes the procedure's strategy_type, the accumulated
+        parameter sets from all contributing incidents, and the edge frequency
+        (how many incidents confirmed this procedure for this cause).
+
+        Results are ordered by frequency descending so the most-evidenced
+        procedures appear first.
+
+        Args:
+            cause_names: Canonical cause names to look up.
+
+        Returns:
+            List of dicts with keys ``cause_name``, ``procedure_name``,
+            ``strategy_type``, ``parameters``, ``frequency``.
+        """
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            result = await session.run(
+                """
+                MATCH (c:Cause)-[r:investigated_by]->(p:Procedure)
+                WHERE c.name IN $cause_names
+                RETURN c.name             AS cause_name,
+                       p.name             AS procedure_name,
+                       p.strategy_type    AS strategy_type,
+                       p.description      AS description,
+                       coalesce(r.parameters, []) AS parameters,
+                       coalesce(r.frequency, 1)   AS frequency
+                ORDER BY frequency DESC
+                """,
+                cause_names=cause_names,
+            )
+            return [dict(record) async for record in result]
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

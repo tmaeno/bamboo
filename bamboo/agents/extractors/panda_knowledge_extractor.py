@@ -1325,22 +1325,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 nodes.extend(log_nodes)
                 relationships.extend(log_rels)
 
-        # Aggregated job data → AggregatedJobFeatureNodes + SymptomNodes + TaskContextNodes
-        if jobs_data:
-            say(f"Aggregating data from {len(jobs_data):,} jobs...")
-            job_nodes, job_rels = await self._extract_from_jobs(jobs_data, nodes)
-            nodes.extend(job_nodes)
-            relationships.extend(job_rels)
-
-        # Representative failed jobs → JobInstanceNodes + JobInstanceContextNodes
-        representative_jobs = (external_data or {}).get("representative_jobs")
-        if representative_jobs and isinstance(representative_jobs, list):
-            say(f"Extracting job instance patterns from {len(representative_jobs)} representative job(s)...")
-            inst_nodes, inst_rels = self._extract_from_representative_jobs(
-                representative_jobs, nodes
-            )
-            nodes.extend(inst_nodes)
-            relationships.extend(inst_rels)
+        # NOTE: Job-level extraction (_extract_from_jobs, _extract_from_representative_jobs)
+        # is intentionally skipped here.  Job nodes (AggregatedJobFeature, JobInstance) have
+        # been removed from the task-level graph in favour of Procedure nodes that encode
+        # investigation strategies.  The job extraction methods are preserved for potential
+        # use in a dedicated job-investigation pipeline.
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         say(

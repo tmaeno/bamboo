@@ -51,26 +51,19 @@ class ReviewResult:
     """Outcome of one review pass.
 
     Attributes:
-        approved:               ``True`` if the graph adequately describes the incident.
-        feedback:               Actionable instructions for the extractor (empty when approved).
-        confidence:             Reviewer's confidence in its verdict (0.0–1.0).
-        issues:                 List of identified gaps (empty when approved).
-        relevant_feature_nodes: Feature node names (Task_Feature / Job_Feature) that the
-                                reviewer identified as directly causally relevant based on
-                                domain documentation.  Used by the accumulator to create
-                                explicit ``contribute_to`` edges rather than blanket ones.
-        needs_job_data:         ``True`` when the graph has no job-level nodes but the task
-                                context implies job execution occurred and job metrics would
-                                materially explain the incident.  The accumulator fetches all
-                                jobs from PanDA and re-extracts on the next attempt.
+        approved:         ``True`` if the graph adequately describes the incident.
+        feedback:         Actionable instructions for the extractor (empty when approved).
+        confidence:       Reviewer's confidence in its verdict (0.0–1.0).
+        issues:           List of identified gaps (empty when approved).
+        failure_dimension: Resource dimension(s) that caused the failure, e.g. ``["cpu"]``.
+                           Used by the accumulator to wire ``contribute_to`` edges from
+                           dimension-matched Task_Feature nodes to Cause nodes.
     """
 
     approved: bool
     feedback: str = ""
     confidence: float = 1.0
     issues: list[str] = field(default_factory=list)
-    relevant_feature_nodes: list[str] = field(default_factory=list)
-    needs_job_data: bool = False
     failure_dimension: list[str] = field(default_factory=list)
 
 
@@ -165,8 +158,6 @@ class KnowledgeReviewer:
                         for n in matched_nodes
                     )
                 show_block("reviewer: failure dimension(s)", body)
-            if result.needs_job_data:
-                say("reviewer: job-level data requested — will fetch all jobs for next attempt.")
             return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
@@ -302,8 +293,6 @@ def _parse_review_response(response: str) -> ReviewResult:
             feedback=str(data.get("feedback", "")),
             confidence=float(data.get("confidence", 1.0)),
             issues=[str(i) for i in data.get("issues", [])],
-            relevant_feature_nodes=[str(n) for n in data.get("relevant_feature_nodes", [])],
-            needs_job_data=bool(data.get("needs_job_data", False)),
             failure_dimension=[str(d) for d in data.get("failure_dimension", [])],
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
