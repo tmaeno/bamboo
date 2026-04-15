@@ -70,8 +70,6 @@ indexing.
 | `task_data` | `dict` | Structured PanDA task fields |
 | `external_data` | `dict` | Supplementary key→value metadata |
 | `task_logs` | `dict[str, str]` | Task-level logs keyed by source name (e.g. `"jedi"`) |
-| `job_logs` | `dict[str, str]` | Job-level logs keyed by source name (e.g. `"pilot"`) |
-| `jobs_data` | `list[dict]` | Raw job attribute dicts for aggregation |
 | `dry_run` | `bool` | Skip all DB writes; useful for `bamboo extract` previews |
 
 **Output:** `ExtractedKnowledge` — graph, narrative summary, vector key insights, metadata.
@@ -118,10 +116,8 @@ several LLM sub-calls to produce a complete `KnowledgeGraph`.
 | `task_data.status` | `SymptomNode` (when `broken` / `failed`) |
 | `task_data` free-form fields (taskName, …) | `TaskContextNode` (vector DB only) |
 | `external_data` key→value pairs | `TaskFeatureNode` |
-| `external_data.representative_jobs` | `JobInstanceNode` + `JobInstanceContextNode` |
-| `email_text` | `CauseNode`, `ResolutionNode`, `TaskContextNode` (LLM) |
-| `task_logs` / `job_logs` | `SymptomNode`, `ComponentNode`, `TaskContextNode` (LLM) |
-| `jobs_data` | `AggregatedJobFeatureNode`, `SymptomNode`, `TaskContextNode` (via aggregator) |
+| `email_text` | `CauseNode`, `ResolutionNode`, `ProcedureNode`, `TaskContextNode` (LLM) |
+| `task_logs` | `SymptomNode`, `ComponentNode`, `TaskContextNode` (LLM) |
 
 The `errorDialog` field is also scanned for embedded HTML log links; each linked file is
 downloaded and processed as a task-level log.
@@ -129,32 +125,6 @@ downloaded and processed as a task-level log.
 **Canonicalisation:** error categories, cause names, and resolution names are normalised via
 a vector-DB + LLM round-trip so the same concept always maps to the same node name across
 incidents.
-
----
-
-### `PandaJobDataAggregator`
-
-**File:** `bamboo/agents/extractors/panda_job_data_aggregator.py`
-
-A pure-Python (no LLM, no DB) transformation step that converts a list of raw PanDA job
-attribute dicts into stable, reusable graph patterns.
-
-**Aggregation logic:**
-
-- **Dominant discrete values** — site, transformation, queue, etc. become
-  `AggregatedJobFeatureNode` entries with the dominant value and its fraction,
-  e.g. `"computingSite=AGLT2(73%)"`.
-- **Per-site failure rates** — e.g. `"site_failure_rate=AGLT2:high(>50%)"`.
-- **Continuous values** — CPU time, actual memory bucketed into range labels.
-- **Error signals** — collected from three channels:
-  - *Pilot* (`pilotErrorCode` / `pilotErrorDiag`) — prefixed `"pilot:<code>"`
-  - *Payload* (`transExitCode`) — prefixed `"payload:<code>"`
-  - *DDM* (`ddmErrorCode` / `ddmErrorDiag`) — prefixed `"ddm:<code>"`
-- **Representative diag texts** — top-N distinct diagnostic strings forwarded as
-  `TaskContextNode` content for vector DB similarity search.
-
-The aggregator is stateless; the caller (`PandaKnowledgeExtractor`) instantiates graph nodes
-from its output.
 
 ---
 
@@ -172,7 +142,7 @@ should be present but is missing — rather than cross-checking against source t
 |---|---|
 | Structural | `SymptomNode` with no `CauseNode` explaining it |
 | Specificity | Node named `"error"` with no error code or detail |
-| Contextual | `nJobsFailed > 0` in task context but no `AggregatedJobFeatureNode` or `JobInstanceNode` |
+| Contextual | `SymptomNode` present but no `CauseNode` reachable via graph traversal |
 
 **Grounding rule:** the LLM may only flag a gap if it is implied by (a) the graph structure
 itself or (b) the available task context fields.  Speculation beyond the provided data is
@@ -180,7 +150,7 @@ prohibited.
 
 **MCP tool awareness:** the reviewer receives the full MCP tool catalogue at review time.
 When a gap could be resolved by a specific tool, the reviewer annotates the issue string
-accordingly — e.g. `"nJobsFailed=47 but no JOB_INSTANCE nodes → resolvable with get_failed_job_details"`.
+accordingly — e.g. `"SymptomNode present but no Cause found → resolvable with get_task_logs"`.
 This makes the explorer's downstream tool-selection more reliable without changing the
 `ReviewResult` schema.  The reviewer only sees tools that are statically registered (PanDA
 tools are always available; external server tools appear after the first `connect()`).
@@ -273,7 +243,7 @@ Built-in client that exposes PanDA data tools.  No external connection needed.
 | `get_parent_task` | `retryID` present but root cause unclear | `external_data` | Parent task dict |
 | `get_retry_chain` | Failure spans multiple retry attempts | `external_data` | List of ancestor task summaries |
 | `get_task_jobs_summary` | Job-level failure distribution missing | `external_data` | Status counts + top error diags |
-| `get_failed_job_details` | `JobInstanceNode` gaps: scout failures, site-specific errors | `external_data` | List of compact job dicts |
+| `get_failed_job_details` | Scout failures, site-specific errors needing job-level detail | `external_data` | List of compact job dicts |
 | `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
 | `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
 | `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |

@@ -46,8 +46,6 @@ class KnowledgeGraphExtractor:
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        job_logs: dict[str, str] = None,
-        jobs_data: list[dict[str, Any]] = None,
         review_feedback: str = "",
         doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
@@ -64,13 +62,6 @@ class KnowledgeGraphExtractor:
             task_logs:       *Task-level* log output keyed by source name
                              (e.g. ``{"jedi": "...", "harvester": "..."}``).
                              Extracted nodes are tagged ``log_level="task"``.
-            job_logs:        *Job-level* log output keyed by a stable source name
-                             (e.g. ``{"pilot": "...", "payload": "..."}``, NOT
-                             a raw PanDA job ID).
-                             Extracted nodes are tagged ``log_level="job"``.
-            jobs_data:       List of raw job attribute dicts used for aggregated
-                             :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
-                             extraction.
             review_feedback: Corrective feedback from a previous reviewer pass;
                              forwarded to the strategy's LLM prompts on retries.
 
@@ -82,8 +73,6 @@ class KnowledgeGraphExtractor:
             task_data=task_data,
             external_data=external_data,
             task_logs=task_logs,
-            job_logs=job_logs,
-            jobs_data=jobs_data,
             review_feedback=review_feedback,
             doc_hints=doc_hints,
         )

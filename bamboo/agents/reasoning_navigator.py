@@ -131,8 +131,6 @@ class ReasoningNavigator:
         task_data: dict[str, Any],
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        job_logs: dict[str, str] = None,
-        jobs_data: list[dict[str, Any]] = None,
         doc_hints: dict[str, str] | None = None,
     ) -> AnalysisResult:
         """Analyse a problematic task and return a root-cause + resolution result.
@@ -153,14 +151,6 @@ class ReasoningNavigator:
             task_logs:     *Task-level* log output keyed by source name
                            (e.g. ``{"jedi": "...", "harvester": "..."}``).
                            Extracted nodes are tagged ``log_level="task"``.
-            job_logs:      *Job-level* log output keyed by a stable source name
-                           (e.g. ``{"pilot": "...", "payload": "..."}``, NOT a
-                           raw PanDA job ID).
-                           Extracted nodes are tagged ``log_level="job"``.
-            jobs_data:     List of raw job attribute dicts for aggregated
-                           :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
-                           extraction.
-
         Returns:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
             root cause, resolution, explanation, email draft, and evidence.
@@ -177,8 +167,6 @@ class ReasoningNavigator:
             task_data=task_data,
             external_data=external_data,
             task_logs=task_logs,
-            job_logs=job_logs,
-            jobs_data=jobs_data,
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 

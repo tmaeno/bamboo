@@ -78,10 +78,6 @@ class Neo4jBackend(GraphDatabaseBackend):
                 "CREATE INDEX IF NOT EXISTS FOR (n:Symptom) ON (n.name)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Resolution) ON (n.success_rate)",
                 "CREATE INDEX IF NOT EXISTS FOR (n:Task_Feature) ON (n.name)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Aggregated_Job_Feature) ON (n.name)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Aggregated_Job_Feature) ON (n.attribute)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Instance) ON (n.name)",
-                "CREATE INDEX IF NOT EXISTS FOR (n:Job_Instance) ON (n.site)",
             ]:
                 await session.run(query)
 

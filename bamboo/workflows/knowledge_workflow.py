@@ -19,11 +19,6 @@ class KnowledgeState(TypedDict):
         external_data:  External environmental metadata.
         task_logs:      *Task-level* log output keyed by source name
                         (e.g. ``{"jedi": "...", "harvester": "..."}``).
-        job_logs:       *Job-level* log output keyed by a stable source name
-                        (e.g. ``{"pilot": "...", "payload": "..."}``).
-        jobs_data:      List of raw job attribute dicts for aggregated
-                        :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
-                        extraction.
         extracted_graph: Serialised :class:`~bamboo.models.knowledge_entity.KnowledgeGraph`
                         (set after extraction).
         summary:        LLM-generated narrative summary (set after extraction).
@@ -37,8 +32,6 @@ class KnowledgeState(TypedDict):
     task_data: Optional[dict[str, Any]]
     external_data: Optional[dict[str, Any]]
     task_logs: Optional[dict[str, str]]
-    job_logs: Optional[dict[str, str]]
-    jobs_data: Optional[list[dict[str, Any]]]
     extracted_graph: Optional[dict[str, Any]]
     summary: Optional[str]
     status: str
@@ -62,8 +55,6 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
             task_data=state["task_data"],
             external_data=state["external_data"],
             task_logs=state.get("task_logs"),
-            job_logs=state.get("job_logs"),
-            jobs_data=state.get("jobs_data"),
         )
 
         await graph_db.close()

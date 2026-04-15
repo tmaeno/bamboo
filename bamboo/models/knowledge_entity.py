@@ -11,13 +11,10 @@ from pydantic import BaseModel, Field
 
 from .graph_element import (
     AnomalyNode,
-    AggregatedJobFeatureNode,
     CauseNode,
     ComponentNode,
     EnvironmentNode,
     IssueNode,
-    JobInstanceContextNode,
-    JobInstanceNode,
     MetricNode,
     OptimizationNode,
     PatternNode,
@@ -35,9 +32,6 @@ NodeUnion = Union[
     SymptomNode,
     EnvironmentNode,
     TaskFeatureNode,
-    AggregatedJobFeatureNode,
-    JobInstanceNode,
-    JobInstanceContextNode,
     TaskContextNode,
     ComponentNode,
     CauseNode,

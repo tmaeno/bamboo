@@ -148,7 +148,7 @@ class KnowledgeReviewer:
                 dim_set = set(result.failure_dimension)
                 matched_nodes = [
                     n for n in graph.nodes
-                    if n.node_type.value in ("Task_Feature", "Job_Feature", "Aggregated_Job_Feature")
+                    if n.node_type.value == "Task_Feature"
                     and any(c in dim_set for c in _node_concepts(n))
                 ]
                 body = f"dimensions: {', '.join(result.failure_dimension)}"
@@ -172,7 +172,6 @@ class KnowledgeReviewer:
 def build_sources_summary(
     email_text: str = "",
     task_logs: dict[str, str] | None = None,
-    job_logs: dict[str, str] | None = None,
     doc_hints: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build truncated source excerpts for use as optional reviewer context.
@@ -180,7 +179,6 @@ def build_sources_summary(
     Args:
         email_text: Raw email thread.
         task_logs:  Task-level logs keyed by source name.
-        job_logs:   Job-level logs keyed by source name.
         doc_hints:  PanDA documentation hints keyed by query string (already
                     rendered as plain text — not JSON).
 
@@ -193,9 +191,6 @@ def build_sources_summary(
     for name, text in (task_logs or {}).items():
         if text and text.strip():
             sources[f"task_log:{name}"] = text[:_MAX_LOG_CHARS]
-    for name, text in (job_logs or {}).items():
-        if text and text.strip():
-            sources[f"job_log:{name}"] = text[:_MAX_LOG_CHARS]
     for query, text in (doc_hints or {}).items():
         if text and text.strip():
             sources[f"panda_docs:{query[:40]}"] = text[:_MAX_LOG_CHARS * 3]

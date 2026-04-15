@@ -27,9 +27,9 @@ Design
   same VectorDB + LLM pattern as error categories, so the same concept always
   maps to the same canonical name regardless of how it is worded.
 
-* ``logs``           – raw log output from one or more sources, keyed by
-  source name (e.g. ``{"pilot": "...", "payload": "..."}``).  Each source
-  is passed to the LLM separately to extract :class:`SymptomNode`,
+* ``task_logs``      – raw log output from task-level sources (JEDI, Harvester,
+  etc.), keyed by source name (e.g. ``{"jedi": "...", "harvester": "..."}``)
+  Each source is passed to the LLM separately to extract :class:`SymptomNode`,
   :class:`ComponentNode`, and :class:`TaskContextNode` nodes.  Cause and
   Resolution are intentionally excluded — logs record *what* happened, not
   *why* or *how to fix it*; those come from the email thread and graph
@@ -66,16 +66,12 @@ from bamboo.llm import (
 )
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
-    JOB_DIAG_NORMALIZE_PROMPT,
     TASK_ERROR_CATEGORY_LABEL_PROMPT,
 )
 from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     GraphRelationship,
-    AggregatedJobFeatureNode,
-    JobInstanceContextNode,
-    JobInstanceNode,
     RelationType,
     ResolutionNode,
     SymptomNode,
@@ -354,34 +350,6 @@ CONTEXT_TASK_KEYS: frozenset[str] = frozenset(
         "framework",
     }
 )
-
-# ---------------------------------------------------------------------------
-# Semantic concept tag for each Aggregated_Job_Feature attribute.
-# Mirrors FEATURE_CONCEPT but for job-level keys.
-# ---------------------------------------------------------------------------
-JOB_FEATURE_CONCEPT: dict[str, str | list[str]] = {
-    # CPU
-    "cpuConsumptionTime": "cpu",
-    "actualCoreCount": "cpu",
-    # Memory
-    "maxRSS": "memory",
-    # Walltime / also CPU: jobDuration appears in PanDA's cpu-consumption limit formula
-    # (cpuConsumptionTime > jobDuration * coreCount * safety)
-    "jobDuration": ["cpu", "walltime"],
-    # Disk + job sizing (output volume is both a disk metric and a job-size indicator)
-    "outputFileBytes": ["disk", "job_size"],
-    # Job sizing
-    "inputFileBytes": "job_size",
-    # Site
-    "computingSite": "site",
-    "siteFailureRate": "site",
-    # Context — background classification, not direct causes
-    "extendedProdSourceLabel": "context",
-    "gshare": "context",
-    "processingType": "context",
-    "resourceType": "context",
-    "workQueue": "context",
-}
 
 
 def _node_concepts(node) -> list[str]:
@@ -767,35 +735,6 @@ async def _generate_category_label(error_message: str) -> str:
     return label
 
 
-async def _normalize_diag(diag_text: str) -> str:
-    """LLM: strip job-specific tokens from a raw error diagnostic string.
-
-    Converts incident-specific messages such as::
-
-        "File user.abc.input.AOD_1234.pool.root missing at AGLT2_DATADISK"
-
-    into a reusable canonical description::
-
-        "Input file missing at storage endpoint"
-
-    so that semantically identical diagnostics from different jobs produce the
-    same embedding and collapse to a single ``TaskContextNode`` in the vector DB.
-
-    Raises:
-        ValueError: If the LLM returns an empty string.
-    """
-    preview = diag_text[:60].replace("\n", " ")
-    say(f"Normalizing diagnostic: \"{preview}{'...' if len(diag_text) > 60 else ''}\"")
-    llm = get_extraction_llm()
-    with thinking("Working"):
-        response = await llm.ainvoke(
-            JOB_DIAG_NORMALIZE_PROMPT.format(diag_text=diag_text)
-        )
-    normalised = response.content.strip()
-    if not normalised:
-        raise ValueError(f"LLM returned an empty normalised diag for: {diag_text!r}")
-    return normalised
-
 
 def _make_cause_resolution_label_fn(node_type: str):
     """Return an async label function for Cause or Resolution nodes."""
@@ -1029,8 +968,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_data: Optional[dict[str, Any]] = None,
         external_data: Optional[dict[str, Any]] = None,
         task_logs: Optional[dict[str, str]] = None,
-        job_logs: Optional[dict[str, str]] = None,
-        jobs_data: Optional[list[dict[str, Any]]] = None,
         review_feedback: str = "",
         doc_hints: Optional[dict[str, str]] = None,
     ) -> KnowledgeGraph:
@@ -1119,7 +1056,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                                 log_url,
                             )
                             log_nodes, log_rels = await self._extract_from_log(
-                                source_name, log_content, log_level="task"
+                                source_name, log_content
                             )
                             nodes.extend(log_nodes)
                             relationships.extend(log_rels)
@@ -1308,28 +1245,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
             )
             log_nodes, log_rels = await self._extract_from_log(
-                source_name, source_log, log_level="task", review_feedback=review_feedback
+                source_name, source_log, review_feedback=review_feedback
             )
             nodes.extend(log_nodes)
             relationships.extend(log_rels)
-
-        # Job-level logs (execution workers: pilot, Athena/payload, …)
-        for source_name, source_log in (job_logs or {}).items():
-            if source_log and source_log.strip():
-                say(
-                    f"Processing job log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
-                )
-                log_nodes, log_rels = await self._extract_from_log(
-                    source_name, source_log, log_level="job", review_feedback=review_feedback
-                )
-                nodes.extend(log_nodes)
-                relationships.extend(log_rels)
-
-        # NOTE: Job-level extraction (_extract_from_jobs, _extract_from_representative_jobs)
-        # is intentionally skipped here.  Job nodes (AggregatedJobFeature, JobInstance) have
-        # been removed from the task-level graph in favour of Procedure nodes that encode
-        # investigation strategies.  The job extraction methods are preserved for potential
-        # use in a dedicated job-investigation pipeline.
 
         graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
         say(
@@ -1341,413 +1260,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             len(relationships),
         )
         return graph
-
-    # ------------------------------------------------------------------
-    # Job data extraction
-    # ------------------------------------------------------------------
-
-    async def _extract_from_jobs(
-        self,
-        jobs_data: list[dict[str, Any]],
-        existing_nodes: list,
-    ) -> tuple[list, list[GraphRelationship]]:
-        """Aggregate job records into AggregatedJobFeatureNodes plus related graph elements.
-
-        Uses :class:`~bamboo.agents.extractors.panda_job_data_aggregator.PandaJobDataAggregator`
-        to derive stable, reusable patterns from the raw job list, then:
-
-        1. Creates a :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode` for
-           each aggregated ``(attribute, value)`` pair.
-        2. Classifies each error signal through the error classifier to produce
-           additional :class:`~bamboo.models.graph_element.SymptomNode` values
-           (deduplicated against already-extracted task-level SymptomNodes).
-           Error signals are prefixed with their source channel
-           (``"pilot:<code>"`` or ``"payload:<code>"``).
-        3. Normalises each representative diagnostic string with the LLM
-           (via :func:`_normalize_diag`) to strip job-specific tokens (file
-           names, dataset scopes, replica URLs, etc.), then creates a
-           :class:`~bamboo.models.graph_element.TaskContextNode` per unique
-           normalised string (vector DB only).  Identical problems from
-           different jobs collapse to a single node.
-        4. Emits ``has_job_pattern`` edges from every task-level
-           :class:`~bamboo.models.graph_element.SymptomNode` in
-           *existing_nodes* to each new :class:`AggregatedJobFeatureNode`, so the graph
-           can answer "what job-execution patterns are associated with this
-           symptom?".
-
-        Args:
-            jobs_data:      List of raw job attribute dicts.
-            existing_nodes: Nodes already extracted earlier in this call
-                            (used to find existing SymptomNodes for the
-                            ``has_job_pattern`` edges).
-
-        Returns:
-            Tuple of ``(new_nodes, new_relationships)``.
-        """
-        from collections import defaultdict
-
-        from bamboo.agents.extractors.panda_job_data_aggregator import PandaJobDataAggregator
-
-        aggregator = PandaJobDataAggregator()
-        total = len(jobs_data)
-        min_group_jobs = max(1, int(total * aggregator._min_fraction))
-
-        # Attributes that describe the label itself — emitted as global nodes,
-        # not scoped per label group.
-        _CROSS_LABEL_ATTRS: frozenset[str] = frozenset({"extendedProdSourceLabel"})
-        # Attributes that compare across sites — not scoped per site group,
-        # but may carry a label suffix in multi-label mode.
-        _CROSS_SITE_ATTRS: frozenset[str] = frozenset({"computingSite", "site_failure_rate"})
-        _GLOBAL_ATTRS: frozenset[str] = _CROSS_LABEL_ATTRS | _CROSS_SITE_ATTRS
-
-        def _group_by(jobs: list[dict], key: str) -> dict[str, list[dict]]:
-            """Group jobs by a string key; keep only groups >= min_group_jobs."""
-            groups: defaultdict[str, list[dict]] = defaultdict(list)
-            for job in jobs:
-                val = str(job.get(key, "")).strip() or "unknown"
-                groups[val].append(job)
-            return {g: js for g, js in groups.items() if len(js) >= min_group_jobs}
-
-        def _make_node(
-            attribute: str,
-            value: str,
-            job_count: int,
-            group_total: int,
-            failed_jobs: int,
-            suffix: str,
-            scope_desc: str,
-        ) -> AggregatedJobFeatureNode:
-            name = f"{attribute}={value}{suffix}"
-            scope = f" ({scope_desc})" if scope_desc else ""
-            _concept = JOB_FEATURE_CONCEPT.get(attribute)
-            _meta: dict = {
-                "source": "job_aggregation",
-                "group_jobs": group_total,
-                "total_jobs": total,
-                "failed_jobs": failed_jobs,
-            }
-            if _concept:
-                _meta["concept"] = _concept
-            return AggregatedJobFeatureNode(
-                name=name,
-                attribute=attribute,
-                value=value,
-                job_count=job_count,
-                description=(
-                    f"Job-level aggregated pattern{scope}: {attribute} = {value} "
-                    f"(derived from {job_count} of {group_total} jobs)"
-                ),
-                metadata=_meta,
-            )
-
-        # Global aggregation — always run for error signals, context texts,
-        # and global cross-label/cross-site feature nodes.
-        global_agg = aggregator.aggregate(jobs_data)
-
-        nodes: list = []
-        relationships: list[GraphRelationship] = []
-
-        # 1. AggregatedJobFeatureNodes
-        # Primary grouping: prodSourceLabel (outer), then computingSite (inner).
-        # Node name suffixes: #{label} for label scope, @{site} for site scope.
-        job_feature_nodes: list[AggregatedJobFeatureNode] = []
-
-        significant_labels = _group_by(jobs_data, "extendedProdSourceLabel")
-        multi_label = len(significant_labels) > 1
-
-        if multi_label:
-            # Outer loop: one group per prodSourceLabel value.
-            for label, label_jobs in significant_labels.items():
-                label_agg = aggregator.aggregate(label_jobs)
-                significant_label_sites = _group_by(label_jobs, "computingSite")
-                multi_label_site = len(significant_label_sites) > 1
-
-                if multi_label_site:
-                    # Per-label, per-site nodes.
-                    for site, site_jobs in significant_label_sites.items():
-                        site_agg = aggregator.aggregate(site_jobs)
-                        for attribute, value, job_count in site_agg.feature_items:
-                            if attribute in _GLOBAL_ATTRS:
-                                continue
-                            n = _make_node(
-                                attribute, value, job_count,
-                                len(site_jobs), site_agg.failed_jobs,
-                                suffix=f"#{label}@{site}",
-                                scope_desc=f"{label} at {site}",
-                            )
-                            job_feature_nodes.append(n)
-                            nodes.append(n)
-                    # Label-scoped cross-site nodes (computingSite / site_failure_rate
-                    # for this label).
-                    for attribute, value, job_count in label_agg.feature_items:
-                        if attribute not in _CROSS_SITE_ATTRS:
-                            continue
-                        n = _make_node(
-                            attribute, value, job_count,
-                            len(label_jobs), label_agg.failed_jobs,
-                            suffix=f"#{label}",
-                            scope_desc=label,
-                        )
-                        job_feature_nodes.append(n)
-                        nodes.append(n)
-                else:
-                    # Single site within this label — label suffix only.
-                    for attribute, value, job_count in label_agg.feature_items:
-                        if attribute in _CROSS_LABEL_ATTRS:
-                            continue
-                        n = _make_node(
-                            attribute, value, job_count,
-                            len(label_jobs), label_agg.failed_jobs,
-                            suffix=f"#{label}",
-                            scope_desc=label,
-                        )
-                        job_feature_nodes.append(n)
-                        nodes.append(n)
-
-            # Global nodes: prodSourceLabel, computingSite, site_failure_rate.
-            for attribute, value, job_count in global_agg.feature_items:
-                if attribute not in _GLOBAL_ATTRS:
-                    continue
-                n = _make_node(
-                    attribute, value, job_count,
-                    total, global_agg.failed_jobs,
-                    suffix="",
-                    scope_desc="",
-                )
-                job_feature_nodes.append(n)
-                nodes.append(n)
-
-        else:
-            # Single prodSourceLabel — apply site-grouping only (existing behaviour).
-            significant_sites = _group_by(jobs_data, "computingSite")
-            multi_site = len(significant_sites) > 1
-
-            if multi_site:
-                for site, site_jobs in significant_sites.items():
-                    site_agg = aggregator.aggregate(site_jobs)
-                    for attribute, value, job_count in site_agg.feature_items:
-                        if attribute in _CROSS_SITE_ATTRS:
-                            continue
-                        n = _make_node(
-                            attribute, value, job_count,
-                            len(site_jobs), site_agg.failed_jobs,
-                            suffix=f"@{site}",
-                            scope_desc=f"at {site}",
-                        )
-                        job_feature_nodes.append(n)
-                        nodes.append(n)
-                # Global cross-site nodes.
-                for attribute, value, job_count in global_agg.feature_items:
-                    if attribute not in _CROSS_SITE_ATTRS:
-                        continue
-                    n = _make_node(
-                        attribute, value, job_count,
-                        total, global_agg.failed_jobs,
-                        suffix="",
-                        scope_desc="",
-                    )
-                    job_feature_nodes.append(n)
-                    nodes.append(n)
-            else:
-                # Single label, single site — no suffix.
-                for attribute, value, job_count in global_agg.feature_items:
-                    n = _make_node(
-                        attribute, value, job_count,
-                        total, global_agg.failed_jobs,
-                        suffix="",
-                        scope_desc="",
-                    )
-                    job_feature_nodes.append(n)
-                    nodes.append(n)
-
-        # 2. SymptomNodes from error signals (dedup against existing symptoms)
-        # Always use global_agg for error signals — error codes don't meaningfully
-        # vary per site, and cross-site deduplication happens here.
-        existing_symptom_names: set[str] = {
-            n.name
-            for n in existing_nodes
-            if hasattr(n, "node_type") and "SYMPTOM" in str(n.node_type)
-        }
-        new_symptom_nodes: list[SymptomNode] = []
-        for signal in global_agg.error_signals:
-            category, confidence = await self._classify_error(signal)
-            if category in existing_symptom_names:
-                continue
-            existing_symptom_names.add(category)
-            symptom = SymptomNode(
-                name=category,
-                description=signal,
-                metadata={
-                    "source": "job_error_signal",
-                    "classifier_confidence": confidence,
-                    "raw_signal": signal,
-                },
-            )
-            new_symptom_nodes.append(symptom)
-            nodes.append(symptom)
-
-        # 3. TaskContextNodes — normalise each raw diag with the LLM first to
-        #    strip job-specific tokens (file names, dataset scopes, replica URLs,
-        #    etc.) so that semantically identical messages from different jobs
-        #    collapse to a single node in the vector DB.
-        seen_normalised: set[str] = set()
-        for raw_diag in global_agg.context_texts:
-            try:
-                normalised = await _normalize_diag(raw_diag)
-            except ValueError as exc:
-                logger.warning(
-                    "PandaKnowledgeExtractor: diag normalisation failed (%s) — skipped: %r",
-                    exc,
-                    raw_diag,
-                )
-                continue
-            if normalised in seen_normalised:
-                continue
-            seen_normalised.add(normalised)
-            nodes.append(
-                TaskContextNode(
-                    name="job_error_diag",
-                    description=normalised,
-                    metadata={
-                        "source": "job_aggregation",
-                        "log_level": "job",
-                        "raw_diag": raw_diag,
-                    },
-                )
-            )
-
-        # has_job_pattern edges are created post-review in the accumulator
-        # (_add_dimension_feature_edges) so only dimension-matched nodes are connected.
-
-        scope_info = (
-            f"{len(significant_labels)} job types" if multi_label else "1 job type"
-        )
-        say(
-            f"Jobs analysis ({scope_info}): {len(job_feature_nodes)} feature patterns, "
-            f"{len(new_symptom_nodes)} new symptom(s), "
-            f"{len(seen_normalised)} diagnostic context(s)."
-        )
-        logger.debug(
-            "PandaKnowledgeExtractor: jobs_data (%d jobs, %d prodSourceLabel group(s)) → "
-            "%d AggregatedJobFeatureNodes, %d new SymptomNodes, "
-            "%d TaskContextNodes, %d has_job_pattern edges",
-            total,
-            len(significant_labels),
-            len(job_feature_nodes),
-            len(new_symptom_nodes),
-            len(global_agg.context_texts),
-            len(relationships),
-        )
-        return nodes, relationships
-
-    # ------------------------------------------------------------------
-    # Representative job extraction
-    # ------------------------------------------------------------------
-
-    def _extract_from_representative_jobs(
-        self,
-        jobs: list[dict[str, Any]],
-        existing_nodes: list,
-    ) -> tuple[list, list[GraphRelationship]]:
-        """Create canonical JobInstanceNode + JobInstanceContextNode from representative failed jobs.
-
-        Each unique ``(site, channel, error_code)`` combination produces exactly
-        one :class:`~bamboo.models.graph_element.JobInstanceNode` (deduplicated
-        within this call).  Because names are canonical and incident-agnostic,
-        Neo4j upserts on ``name`` will merge the same pattern across tasks.
-
-        A paired :class:`~bamboo.models.graph_element.JobInstanceContextNode` (vector-DB
-        only) is also emitted for each pattern, carrying the full diagnostic text
-        for semantic similarity search.
-
-        A ``has_job_instance`` edge is created from the most relevant existing
-        :class:`~bamboo.models.graph_element.SymptomNode` to each new
-        ``JobInstanceNode``.  If no Symptom exists in the current graph the
-        edges are omitted rather than creating orphan relationships.
-
-        Args:
-            jobs:           List of compact job dicts from the explorer's
-                            ``get_failed_job_details`` tool.
-            existing_nodes: Nodes already in the graph (searched for Symptoms).
-
-        Returns:
-            Tuple of ``(new_nodes, new_relationships)``.
-        """
-        symptom_nodes = [
-            n for n in existing_nodes
-            if "SYMPTOM" in str(n.node_type)
-        ]
-
-        nodes: list = []
-        relationships: list[GraphRelationship] = []
-        seen: dict[str, JobInstanceNode] = {}  # canonical name → node
-
-        for job in jobs:
-            site = str(job.get("computingSite") or "unknown")
-            pilot_code = job.get("pilotErrorCode")
-            trans_code = job.get("transExitCode")
-
-            # Determine error channel and code
-            if pilot_code and int(pilot_code) != 0:
-                channel = "pilot"
-                code = str(pilot_code)
-            elif trans_code and int(trans_code) != 0:
-                channel = "payload"
-                code = str(trans_code)
-            else:
-                channel = "unknown"
-                code = "unknown"
-
-            canonical_name = f"job_failure:{site}:{channel}:{code}"
-            if canonical_name in seen:
-                continue  # already produced this pattern
-
-            diag_text = (
-                job.get("pilotErrorDiag")
-                or (str(trans_code) if trans_code else None)
-                or ""
-            )
-
-            inst_node = JobInstanceNode(
-                name=canonical_name,
-                description=diag_text or None,
-                site=site,
-                error_code=code,
-                error_channel=channel,
-                exit_code=int(trans_code) if trans_code else None,
-                metadata={"source": "get_failed_job_details"},
-            )
-            seen[canonical_name] = inst_node
-            nodes.append(inst_node)
-
-            # JobInstanceContextNode — vector DB only, carries full diagnostic text
-            if diag_text:
-                ctx_node = JobInstanceContextNode(
-                    name=f"job_instance_context:{site}:{channel}:{code}",
-                    description=diag_text,
-                    metadata={"source": "get_failed_job_details"},
-                )
-                nodes.append(ctx_node)
-
-            # has_job_instance edges from all Symptom nodes
-            for symptom in symptom_nodes:
-                relationships.append(
-                    GraphRelationship(
-                        source_id=symptom.name,
-                        target_id=canonical_name,
-                        relation_type=RelationType.HAS_JOB_INSTANCE,
-                    )
-                )
-
-        logger.debug(
-            "PandaKnowledgeExtractor: representative_jobs → "
-            "%d JobInstanceNode(s), %d JobInstanceContextNode(s), %d has_job_instance edges",
-            sum(1 for n in nodes if isinstance(n, JobInstanceNode)),
-            sum(1 for n in nodes if isinstance(n, JobInstanceContextNode)),
-            len(relationships),
-        )
-        return nodes, relationships
-
     # ------------------------------------------------------------------
     # Log extraction
     # ------------------------------------------------------------------
@@ -1756,22 +1268,16 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         self,
         source_name: str,
         log_text: str,
-        log_level: str = "task",
         review_feedback: str = "",
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Symptom/Component/Task_Context from one log source.
 
         Args:
             source_name: Identifies the log origin (e.g. ``"jedi"``,
-                         ``"pilot"``, ``"payload"``).  Stored in every node's
-                         metadata so the graph can distinguish which component
-                         produced which symptom.
+                         ``"harvester"``).  Stored in every node's metadata so
+                         the graph can distinguish which component produced which
+                         symptom.
             log_text:    Raw log content for this source.
-            log_level:   ``"task"`` for orchestration-layer logs (JEDI,
-                         Harvester, etc.) or ``"job"`` for execution-layer logs
-                         (pilot, Athena/payload, etc.).  Stored in every
-                         extracted node's metadata so callers can filter by
-                         provenance level.
 
         Cause and Resolution are intentionally excluded — logs record *what*
         happened, not *why* or how to fix it.  Symptom names are canonicalised
@@ -1828,12 +1334,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             raw_name = node_data["name"]
             node_type_str = node_data.get("node_type", "")
 
-            # Tag every node with both the log source and the log level so
-            # downstream queries can filter by origin (e.g. "symptoms from
-            # job-level pilot logs only").
+            # Tag every node with the log source so downstream queries can
+            # filter by origin (e.g. "symptoms from jedi logs").
             node_data = dict(node_data)
             node_data.setdefault("metadata", {})["log_source"] = source_name
-            node_data["metadata"]["log_level"] = log_level
 
             # Canonicalize Symptom names through the error classifier so they
             # merge with SymptomNodes produced from errorDialog.

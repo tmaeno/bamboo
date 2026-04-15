@@ -42,21 +42,13 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        job_logs: dict[str, str] = None,
-        jobs_data: list[dict[str, Any]] = None,
         review_feedback: str = "",
         doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
-        """Extract using LLM-based approach.
-
-        ``job_logs`` and ``jobs_data`` are merged into the combined input text
-        alongside ``task_logs`` so the LLM sees the full picture.  More structured
-        job-level processing (aggregation, bucketing) requires the Panda
-        strategy; this strategy treats all inputs as unstructured prose.
-        """
+        """Extract using LLM-based approach."""
         # Combine all input sources
         input_data = self._prepare_input(
-            email_text, task_data, external_data, task_logs, job_logs, jobs_data,
+            email_text, task_data, external_data, task_logs,
             doc_hints=doc_hints,
         )
 
@@ -104,18 +96,9 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         task_data: dict[str, Any],
         external_data: dict[str, Any],
         task_logs: dict[str, str] = None,
-        job_logs: dict[str, str] = None,
-        jobs_data: list[dict[str, Any]] = None,
         doc_hints: dict[str, str] = None,
     ) -> str:
-        """Prepare combined input for the LLM.
-
-        All sources are concatenated as labelled sections.  Task-level and
-        job-level logs are labelled differently so the LLM can distinguish
-        their provenance.  When ``jobs_data`` is provided a brief summary
-        (total count, failed count) is included rather than the full list to
-        avoid context-window bloat.
-        """
+        """Prepare combined input for the LLM."""
         sections = []
 
         if email_text:
@@ -136,20 +119,6 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
         for source_name, source_log in (task_logs or {}).items():
             if source_log and source_log.strip():
                 sections.append(f"TASK-LEVEL LOG ({source_name}):\n{source_log}")
-
-        for source_name, source_log in (job_logs or {}).items():
-            if source_log and source_log.strip():
-                sections.append(f"JOB-LEVEL LOG ({source_name}):\n{source_log}")
-
-        if jobs_data:
-            total = len(jobs_data)
-            failed = sum(
-                1 for j in jobs_data if str(j.get("jobStatus", "")) != "finished"
-            )
-            sections.append(
-                f"JOB SUMMARY: {total} jobs total, {failed} failed "
-                f"({int(failed / total * 100)}% failure rate)."
-            )
 
         return "\n\n".join(sections)
 

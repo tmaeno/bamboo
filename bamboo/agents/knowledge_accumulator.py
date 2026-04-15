@@ -97,8 +97,6 @@ class KnowledgeAccumulator:
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        job_logs: dict[str, str] = None,
-        jobs_data: list[dict[str, Any]] = None,
         dry_run: bool = False,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
@@ -121,13 +119,6 @@ class KnowledgeAccumulator:
             task_logs:     *Task-level* log output keyed by source name
                            (e.g. ``{"jedi": "...", "harvester": "..."}``).
                            Extracted nodes are tagged ``log_level="task"``.
-            job_logs:      *Job-level* log output keyed by a stable source name
-                           (e.g. ``{"pilot": "...", "payload": "..."}``, NOT a
-                           raw PanDA job ID).
-                           Extracted nodes are tagged ``log_level="job"``.
-            jobs_data:     List of raw job attribute dicts used for aggregated
-                           :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
-                           extraction.
             dry_run:       When ``True``, extraction and summarisation are
                            performed normally but **no data is written** to
                            either the graph database or the vector database.
@@ -165,7 +156,6 @@ class KnowledgeAccumulator:
         sources_summary = build_sources_summary(
             email_text=email_text,
             task_logs=_task_logs,
-            job_logs=job_logs,
             doc_hints=_doc_hints,
         )
 
@@ -183,8 +173,6 @@ class KnowledgeAccumulator:
                 task_data=task_data,
                 external_data=_external_data,
                 task_logs=_task_logs,
-                job_logs=job_logs,
-                jobs_data=jobs_data,
                 review_feedback=review_feedback,
                 doc_hints=_doc_hints,
             )
@@ -286,9 +274,6 @@ class KnowledgeAccumulator:
                 "has_task_data": bool(task_data),
                 "has_external_data": bool(external_data),
                 "has_task_logs": bool(task_logs),
-                "has_job_logs": bool(job_logs),
-                "has_jobs_data": bool(jobs_data),
-                "jobs_count": len(jobs_data) if jobs_data else 0,
                 "explorer_ran": self._explorer is not None and self._reviewer is not None,
                 "explorer_logs_added": len(_task_logs) - len(task_logs or {}),
                 "explorer_external_added": len(_external_data) - len(external_data or {}),
@@ -384,50 +369,6 @@ class KnowledgeAccumulator:
 
         return doc_hints
 
-    async def _fetch_jobs_from_panda(
-        self, task_data: dict[str, Any] | None
-    ) -> list[dict[str, Any]] | None:
-        """Fetch all job descriptions for the task from PanDA.
-
-        Called when the reviewer sets ``needs_job_data=True`` and no
-        ``jobs_data`` was supplied by the caller.  Returns ``None`` on any
-        error so the caller can proceed without job data rather than crashing.
-        """
-        if not task_data:
-            return None
-        try:
-            import asyncio as _asyncio
-
-            from pandaclient import Client as _Client  # noqa: PLC0415
-        except ImportError:
-            logger.warning(
-                "KnowledgeAccumulator: pandaclient not installed — cannot fetch job data"
-            )
-            return None
-        try:
-            task_id_int = int(task_data["jediTaskID"])
-            status, raw_jobs = await _asyncio.to_thread(
-                _Client.get_job_descriptions, task_id_int
-            )
-            if status == 0 and isinstance(raw_jobs, list):
-                say(f"Fetched {len(raw_jobs):,} job(s) from PanDA for job aggregation.")
-                logger.info(
-                    "KnowledgeAccumulator: fetched %d job(s) for task_id=%s",
-                    len(raw_jobs),
-                    task_id_int,
-                )
-                return raw_jobs
-            logger.warning(
-                "KnowledgeAccumulator: get_job_descriptions returned status=%s — skipping",
-                status,
-            )
-            return None
-        except Exception as exc:
-            logger.warning(
-                "KnowledgeAccumulator: failed to fetch job data: %s", exc
-            )
-            return None
-
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
         """Create schema-defined edges that span extractor boundaries.
 
@@ -438,7 +379,6 @@ class KnowledgeAccumulator:
 
             Symptom      -[indicate]->        Cause
             Task_Feature -[contribute_to]->   Cause
-            Job_Feature  -[contribute_to]->   Cause
             Component    -[originated_from]-> Cause
             Environment  -[associated_with]-> Cause
 
@@ -548,8 +488,8 @@ class KnowledgeAccumulator:
         """Create ``contribute_to`` edges for all feature nodes matching failure dimensions.
 
         The reviewer LLM declares which resource dimension(s) caused the failure
-        (e.g. ``{"cpu"}``).  Python then selects every Task_Feature / Job_Feature
-        node whose ``metadata["concept"]`` is in that set and connects it to all
+        (e.g. ``{"cpu"}``).  Python then selects every Task_Feature node whose
+        ``metadata["concept"]`` is in that set and connects it to all
         Cause nodes.  This removes individual node selection from the LLM entirely,
         eliminating the over-inclusion problem caused by indirect domain reasoning.
 
@@ -604,7 +544,7 @@ class KnowledgeAccumulator:
 
     # Node types that must NOT be stored in the graph database (Neo4j).
     # These types hold unstructured prose indexed only in the vector database.
-    _GRAPH_DB_SKIP_TYPES = {"Task_Context", "Job_Instance_Context"}
+    _GRAPH_DB_SKIP_TYPES = {"Task_Context"}
 
     async def _store_graph(self, graph: KnowledgeGraph):
         """Persist graph nodes and relationships to Graph database.
@@ -727,24 +667,16 @@ class KnowledgeAccumulator:
 
         Indexed node types:
         - ``Task_Context``: free-form prose fields (steps, user reports, etc.)
-        - ``Job_Context``: full diagnostic text from representative failed jobs.
         - ``Symptom``: description holds the raw error message text, which is
           worth semantic search even though the node's canonical name is the
           clean error category.
-        - ``Aggregated_Job_Feature``: description holds aggregated job pattern
-          details useful for semantic similarity search.
-        - ``Job_Instance``: description holds per-job diagnostic text for
-          cross-incident similarity search.
 
         Cause and Resolution nodes are intentionally excluded: their canonical
         names are already precisely indexed in the graph database.
         """
         _INDEXABLE = {
             "Task_Context",
-            "Job_Instance_Context",
             "Symptom",
-            "Aggregated_Job_Feature",
-            "Job_Instance",
         }
         insights = []
         for node in graph.nodes:

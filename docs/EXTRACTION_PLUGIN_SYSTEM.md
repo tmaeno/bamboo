@@ -54,8 +54,6 @@ graph = await extractor.extract_from_sources(
     task_data=task_dict,
     external_data=external_data,
     task_logs={"jedi": "...", "harvester": "..."},   # task-level orchestration logs
-    job_logs={"pilot": "...", "payload": "..."},      # job-level execution logs
-    jobs_data=[{"PandaID": 123, "jobStatus": "failed", ...}],  # raw job records
 )
 ```
 
@@ -101,8 +99,6 @@ class MySystemExtractionStrategy(ExtractionStrategy):
         task_data: dict = None,
         external_data: dict = None,
         task_logs: dict[str, str] = None,   # task-level orchestration logs
-        job_logs: dict[str, str] = None,    # job-level execution logs
-        jobs_data: list[dict] = None,       # raw job records for aggregation
     ):
         # Extract using MySystem-specific logic
         # Return KnowledgeGraph

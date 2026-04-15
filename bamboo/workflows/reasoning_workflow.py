@@ -17,11 +17,6 @@ class ReasoningState(TypedDict):
         external_data:      Optional supplementary metadata.
         task_logs:          *Task-level* log output keyed by source name
                             (e.g. ``{"jedi": "...", "harvester": "..."}``).
-        job_logs:           *Job-level* log output keyed by a stable source name
-                            (e.g. ``{"pilot": "...", "payload": "..."}``).
-        jobs_data:          List of raw job attribute dicts for aggregated
-                            :class:`~bamboo.models.graph_element.AggregatedJobFeatureNode`
-                            extraction.
         extracted_features: Clue dict produced by
                             :meth:`~bamboo.agents.reasoning_navigator.ReasoningNavigator._extract_clues_from_graph`.
         graph_results:      Candidate causes from the graph DB.
@@ -36,8 +31,6 @@ class ReasoningState(TypedDict):
     task_data: dict[str, Any]
     external_data: Optional[dict[str, Any]]
     task_logs: Optional[dict[str, str]]
-    job_logs: Optional[dict[str, str]]
-    jobs_data: Optional[list[dict[str, Any]]]
     extracted_features: Optional[dict[str, Any]]
     graph_results: Optional[list[dict[str, Any]]]
     vector_results: Optional[list[dict[str, Any]]]
@@ -63,8 +56,6 @@ async def analyze_task_node(state: ReasoningState) -> ReasoningState:
             task_data=state["task_data"],
             external_data=state["external_data"],
             task_logs=state.get("task_logs"),
-            job_logs=state.get("job_logs"),
-            jobs_data=state.get("jobs_data"),
         )
 
         await graph_db.close()

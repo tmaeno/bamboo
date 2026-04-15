@@ -34,33 +34,6 @@ class TestJobDataSensitiveFields:
         assert "atlas_prod" not in str(list(result.values()))
         assert "42" not in str([result["prodUserName"], result["prodUserID"]])
 
-    def test_aggregator_strips_sensitive_fields(self):
-        """PandaJobDataAggregator must pseudonymise sensitive fields before aggregation."""
-        from bamboo.agents.extractors.panda_job_data_aggregator import PandaJobDataAggregator
-
-        jobs = [
-            {
-                "jobID": i,
-                "prodUserName": "atlas_prod",
-                "prodUserID": "42",
-                "jobStatus": "failed",
-                "computingSite": "CERN",
-                "processingType": "simul",
-            }
-            for i in range(5)
-        ]
-        agg = PandaJobDataAggregator()
-        result = agg.aggregate(jobs)
-
-        # Sensitive values must not appear anywhere in the aggregated output
-        all_text = (
-            str(result.feature_items)
-            + str(result.error_signals)
-            + str(result.context_texts)
-        )
-        assert "atlas_prod" not in all_text
-        assert "prodUserName" not in all_text or "atlas_prod" not in all_text
-
 
 class TestPseudonymise:
     def test_stable(self):
