@@ -30,12 +30,17 @@ class McpTool:
                            accepted by the concrete ``execute`` implementation.
         metadata:          Optional extra fields (e.g. cost hints, rate
                            limits) — not shown to the LLM by default.
+        requires_interaction: When ``True``, the tool is only offered to the
+                           LLM when running in an interactive terminal
+                           (``sys.stdout.isatty()``).  Set this for tools
+                           that prompt the human operator for input.
     """
 
     name: str
     description: str
     parameters_schema: dict[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
+    requires_interaction: bool = field(default=False)
 
 
 class McpClient(ABC):

@@ -98,6 +98,7 @@ class KnowledgeAccumulator:
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
         dry_run: bool = False,
+        require_procedures: bool = False,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
@@ -124,6 +125,11 @@ class KnowledgeAccumulator:
                            either the graph database or the vector database.
                            Useful for previewing what would be stored before
                            committing.
+            require_procedures: When ``True``, the graph is not written to
+                           any database if it contains no Procedure nodes.
+                           :attr:`ExtractedKnowledge.stored` is set to
+                           ``False`` in that case; the caller should exit
+                           with a non-zero status code.
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -140,7 +146,7 @@ class KnowledgeAccumulator:
         else:
             graph_id = str(uuid.uuid4())
 
-        from bamboo.agents.knowledge_reviewer import build_sources_summary
+        from bamboo.agents.knowledge_reviewer import build_sources_summary, summarise_email_investigations
 
         # Local mutable copies — may be augmented by the explorer on first rejection.
         # Original caller dicts are never mutated.
@@ -153,63 +159,88 @@ class KnowledgeAccumulator:
         if self._explorer is not None:
             _doc_hints = await self._prefetch_panda_docs(task_data or {})
 
+        email_investigation = ""
+        if email_text and email_text.strip():
+            email_investigation = await summarise_email_investigations(email_text)
+
         sources_summary = build_sources_summary(
             email_text=email_text,
             task_logs=_task_logs,
             doc_hints=_doc_hints,
+            email_investigation=email_investigation,
         )
 
-        review_feedback = ""
         review_result = None
-        # Accumulate failure_dimension across all review passes so that
-        # dimensions identified in early passes are not lost when a later pass
-        # (e.g. the one that sees job data for the first time) produces a
-        # different list.  Python selects feature nodes by concept tag, so the
-        # LLM never needs to see or name individual feature nodes.
+        # Accumulate failure_dimension across both extraction passes so that
+        # dimensions identified in the first pass are not lost if the second
+        # pass produces a different list.
         _all_failure_dimensions: set[str] = set()
-        for attempt in range(self._max_review_retries + 1):
-            graph = await self.extractor.extract_from_sources(
+
+        # Expose available tools to the reviewer so it can annotate issues with
+        # "→ resolvable with <tool_name>".
+        _available_tools = self._explorer.available_tools() if self._explorer else []
+
+        async def _extract_and_review(pass_label: str):
+            """Run one extraction + review cycle. Returns (graph, review_result)."""
+            _graph = await self.extractor.extract_from_sources(
                 email_text=email_text,
                 task_data=task_data,
                 external_data=_external_data,
                 task_logs=_task_logs,
-                review_feedback=review_feedback,
                 doc_hints=_doc_hints,
             )
-            graph.metadata["graph_id"] = graph_id
-            self._reconcile_cross_extractor_links(graph)
-
+            _graph.metadata["graph_id"] = graph_id
+            self._reconcile_cross_extractor_links(_graph)
             if self._reviewer is None:
-                break
-            say(f"Running knowledge reviewer (attempt {attempt + 1}/{self._max_review_retries + 1})...")
-            review_result = await self._reviewer.review(
-                graph, sources_summary, task_data=task_data, doc_hints=_doc_hints,
+                return _graph, None
+            say(f"Running knowledge reviewer ({pass_label})...")
+            _result = await self._reviewer.review(
+                _graph, sources_summary,
+                task_data=task_data,
+                doc_hints=_doc_hints,
+                available_tools=_available_tools,
             )
-            # Accumulate failure dimensions from every review pass,
-            # including the final (approved) one — must happen before any break.
-            _all_failure_dimensions.update(review_result.failure_dimension)
+            _all_failure_dimensions.update(_result.failure_dimension)
+            return _graph, _result
 
-            if review_result.approved or attempt >= self._max_review_retries:
-                if not review_result.approved:
-                    logger.warning(
-                        "KnowledgeAccumulator: reviewer not satisfied after %d attempt(s) — "
-                        "storing best result (confidence=%.2f)",
-                        attempt + 1,
-                        review_result.confidence,
-                    )
-                break
+        # Pass 1: extract from current sources → review.
+        graph, review_result = await _extract_and_review("pass 1")
+
+        if review_result is not None and not review_result.approved and self._explorer:
+            # On rejection: ask the explorer to fetch real additional data based
+            # on the reviewer's issues.  Never re-extract from the same sources
+            # with a feedback prompt — that risks the LLM fabricating information.
             logger.info(
-                "KnowledgeAccumulator: review pass %d/%d found %d issue(s) — retrying extraction",
-                attempt + 1,
-                self._max_review_retries,
+                "KnowledgeAccumulator: pass 1 rejected (%d issue(s)) — "
+                "invoking explorer for additional data",
                 len(review_result.issues),
             )
             say(
-                f"Review pass {attempt + 1}: {len(review_result.issues)} issue(s) found — "
-                "retrying extraction with reviewer feedback."
+                f"Pass 1: {len(review_result.issues)} gap(s) found — "
+                "fetching additional data sources..."
             )
+            exploration = await self._explorer.explore(
+                task_data or {}, review_result.issues, doc_hints=_doc_hints,
+            )
+            if exploration.task_logs or exploration.external_data:
+                _task_logs.update(exploration.task_logs)
+                _external_data.update(exploration.external_data)
+                # Rebuild sources_summary to include newly fetched data.
+                sources_summary = build_sources_summary(
+                    email_text=email_text,
+                    task_logs=_task_logs,
+                    doc_hints=_doc_hints,
+                    email_investigation=email_investigation,
+                )
 
-            review_feedback = review_result.feedback
+            # Pass 2: re-extract from enriched sources → final review.
+            graph, review_result = await _extract_and_review("pass 2")
+            if review_result is not None and not review_result.approved:
+                logger.warning(
+                    "KnowledgeAccumulator: reviewer not satisfied after explorer pass — "
+                    "storing best result (confidence=%.2f)",
+                    review_result.confidence,
+                )
 
         # Create explicit contribute_to edges for all Task_Feature nodes whose
         # concept tag matches a failure dimension declared by the reviewer.
@@ -221,6 +252,36 @@ class KnowledgeAccumulator:
         # Auto-connect context nodes to Symptom nodes so they appear connected
         # in the graph regardless of whether we are in dry-run mode or not.
         self._add_context_edges(graph)
+
+        _has_procedures = any(n.node_type.value == "Procedure" for n in graph.nodes)
+        if require_procedures and not _has_procedures:
+            say(
+                "No Procedure nodes found — graph not stored (--require-procedures). "
+                "Provide an email thread with investigation steps, or run interactively."
+            )
+            logger.warning(
+                "KnowledgeAccumulator: require_procedures=True but no Procedure nodes — "
+                "skipping storage for graph_id=%s",
+                graph_id,
+            )
+            summary = await self._generate_summary(graph)
+            key_insights = await self._extract_key_insights(graph)
+            return ExtractedKnowledge(
+                graph=graph,
+                summary=summary,
+                key_insights=key_insights,
+                source_references=[],
+                extraction_metadata={
+                    "has_email": bool(email_text),
+                    "has_task_data": bool(task_data),
+                    "has_external_data": bool(external_data),
+                    "has_task_logs": bool(task_logs),
+                    "explorer_ran": self._explorer is not None and self._reviewer is not None,
+                    "explorer_logs_added": len(_task_logs) - len(task_logs or {}),
+                    "explorer_external_added": len(_external_data) - len(external_data or {}),
+                },
+                stored=False,
+            )
 
         if dry_run:
             logger.info(

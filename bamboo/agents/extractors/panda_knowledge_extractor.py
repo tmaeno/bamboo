@@ -72,6 +72,7 @@ from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     GraphRelationship,
+    ProcedureNode,
     RelationType,
     ResolutionNode,
     SymptomNode,
@@ -869,6 +870,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         error_classifier: Optional[ErrorCategoryClassifier] = None,
         cause_store: Optional[CanonicalNodeStore] = None,
         resolution_store: Optional[CanonicalNodeStore] = None,
+        procedure_store: Optional[CanonicalNodeStore] = None,
     ) -> None:
         """
         Args:
@@ -893,6 +895,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             error_classifier:            Custom ErrorCategoryClassifier (for testing).
             cause_store:                 Custom CanonicalNodeStore for Cause nodes (for testing).
             resolution_store:            Custom CanonicalNodeStore for Resolution nodes (for testing).
+            procedure_store:             Custom CanonicalNodeStore for Procedure nodes (for testing).
         """
         self._unstructured_keys: frozenset[str] = (
             unstructured_keys
@@ -938,6 +941,13 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 label_fn=_make_cause_resolution_label_fn("Resolution"),
             )
         )
+        self._procedure_store: CanonicalNodeStore = (
+            procedure_store
+            or CanonicalNodeStore(
+                node_type="Procedure",
+                label_fn=_make_cause_resolution_label_fn("Procedure"),
+            )
+        )
 
     # ------------------------------------------------------------------
     # ExtractionStrategy interface
@@ -968,7 +978,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_data: Optional[dict[str, Any]] = None,
         external_data: Optional[dict[str, Any]] = None,
         task_logs: Optional[dict[str, str]] = None,
-        review_feedback: str = "",
         doc_hints: Optional[dict[str, str]] = None,
     ) -> KnowledgeGraph:
         nodes: list = []
@@ -1229,24 +1238,27 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         if email_text and email_text.strip():
             say(
-                f"Processing email thread ({len(email_text):,} chars). Extracting causes and resolutions..."
+                f"Processing email thread ({len(email_text):,} chars). Extracting causes, resolutions, and procedures..."
             )
-            email_nodes, email_rels = await self._extract_from_email(
-                email_text, review_feedback=review_feedback
-            )
+            email_nodes, email_rels = await self._extract_from_email(email_text, doc_hints=doc_hints)
             nodes.extend(email_nodes)
             relationships.extend(email_rels)
 
         # Task-level logs (orchestration services: JEDI, Harvester, …)
+        # Human-input entries (human_input:*) are routed through _extract_from_email
+        # so the email prompt — which extracts Procedure nodes — is used instead of
+        # the log prompt (which only extracts Symptom/Component/Task_Context).
         for source_name, source_log in (task_logs or {}).items():
             if not source_log or not source_log.strip():
                 continue
-            say(
-                f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
-            )
-            log_nodes, log_rels = await self._extract_from_log(
-                source_name, source_log, review_feedback=review_feedback
-            )
+            if source_name.startswith("human_input:"):
+                say(f"Processing human-provided input '{source_name}'...")
+                log_nodes, log_rels = await self._extract_from_email(source_log, doc_hints=doc_hints)
+            else:
+                say(
+                    f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
+                )
+                log_nodes, log_rels = await self._extract_from_log(source_name, source_log)
             nodes.extend(log_nodes)
             relationships.extend(log_rels)
 
@@ -1268,7 +1280,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         self,
         source_name: str,
         log_text: str,
-        review_feedback: str = "",
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Symptom/Component/Task_Context from one log source.
 
@@ -1316,15 +1327,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             if "brokerage" in source_name
             else LOG_EXTRACTION_PROMPT
         )
-        feedback_section = (
-            f"\n\nREVIEWER NOTES FROM PREVIOUS ATTEMPT:\n{review_feedback}\n"
-            "Please address these issues in your extraction."
-            if review_feedback
-            else ""
-        )
         llm = get_extraction_llm()
         with thinking(f"Working"):
-            response = await llm.ainvoke(base_prompt.format(log_text=filtered_log) + feedback_section)
+            response = await llm.ainvoke(base_prompt.format(log_text=filtered_log))
         raw = self._parse_log_response(response.content)
 
         nodes = []
@@ -1450,7 +1455,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     # ------------------------------------------------------------------
 
     async def _extract_from_email(
-        self, email_text: str, review_feedback: str = ""
+        self, email_text: str, doc_hints: dict[str, str] | None = None
     ) -> tuple[list, list[GraphRelationship]]:
         """LLM extracts Cause/Resolution/Task_Context from email.
 
@@ -1460,23 +1465,19 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         two different emails produces the same node name and is merged correctly
         by ``get_or_create_canonical_node`` in the graph database.
         """
-        say("Extracting causes and resolutions from email thread...")
-        feedback_section = (
-            f"\n\nREVIEWER NOTES FROM PREVIOUS ATTEMPT:\n{review_feedback}\n"
-            "Please address these issues in your extraction."
-            if review_feedback
-            else ""
-        )
+        say("Extracting causes, resolutions, and procedures from email thread...")
+        hints_text = "\n\n".join(v for v in (doc_hints or {}).values() if v) or "(none)"
         llm = get_extraction_llm()
         with thinking("Working"):
             response = await llm.ainvoke(
-                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text) + feedback_section
+                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text, doc_hints=hints_text)
             )
         raw = self._parse_email_response(response.content)
 
         _store_for_type = {
             "Cause": self._cause_store,
             "Resolution": self._resolution_store,
+            "Procedure": self._procedure_store,
         }
 
         nodes = []
@@ -1583,6 +1584,11 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             )
         if node_type == NodeType.TASK_CONTEXT:
             return TaskContextNode(**base)
+        if node_type == NodeType.PROCEDURE:
+            return ProcedureNode(
+                **base,
+                strategy_type=node_data.get("strategy_type", ""),
+            )
 
         logger.warning(
             "PandaKnowledgeExtractor: node_type '%s' is not permitted in email extraction — skipped",

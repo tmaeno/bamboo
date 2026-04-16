@@ -35,7 +35,9 @@ def build_mcp_client(settings: object) -> McpClient:
     )
     from bamboo.mcp.server_config import load_server_configs  # noqa: PLC0415
 
-    clients: list[McpClient] = [PandaMcpClient()]
+    from bamboo.mcp.interactive_mcp_client import InteractiveMcpClient  # noqa: PLC0415
+
+    clients: list[McpClient] = [PandaMcpClient(), InteractiveMcpClient()]
 
     config_path: str = getattr(settings, "mcp_servers_config", "") or ""
     if config_path:
@@ -75,12 +77,13 @@ def build_mcp_client(settings: object) -> McpClient:
                     cfg.url,
                 )
 
-    if len(clients) == 1:
-        return clients[0]
+    if len(clients) == 2 and not config_path:
+        # No external servers — return the bare composite (PanDA + interactive).
+        pass
 
     logger.info(
-        "build_mcp_client: composite client with %d server(s): PandaMcpClient + %s",
+        "build_mcp_client: composite client with %d client(s): %s",
         len(clients),
-        [c._name for c in clients[1:]],  # type: ignore[attr-defined]
+        [c.name for c in clients],
     )
     return CompositeMcpClient(clients)

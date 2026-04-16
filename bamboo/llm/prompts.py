@@ -267,7 +267,7 @@ Node types to extract:
   "we checked the parent task for data corruption").
   Extract a Procedure ONLY when the email explicitly describes what was investigated
   and how, not just that an investigation took place.
-  name = "{strategy_type}:{cause_name}" — a stable merge key combining the strategy
+  name = "{{strategy_type}}:{{cause_name}}" — a stable merge key combining the strategy
          and the canonical cause name (e.g. "investigate finished normal jobs with high
          cpuConsumptionTime and wallTime:cpu consumption exceeded job limit").
   strategy_type = concise natural-language description of the investigation
@@ -287,6 +287,10 @@ Relationships to emit (between extracted nodes only):
 Canonicalization:
 - If the same cause or resolution is mentioned multiple times, emit it only once.
 - Keep names concise and general (no incident-specific IDs, paths, or dataset names).
+
+Domain knowledge (PanDA system — for context and filling in MISSING details only;
+do NOT replace or override terminology that is already present in the source text):
+{doc_hints}
 
 Email thread:
 {email_text}
@@ -314,6 +318,19 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
   ]
 }}
 """
+
+EMAIL_INVESTIGATION_SUMMARY_PROMPT = """You are reading an incident email thread.
+Identify any investigation steps that were explicitly described — what was examined,
+checked, or queried, and what was found or concluded.
+
+List each step briefly (one line each).  Only report steps that are explicitly stated
+in the email — do NOT infer or speculate.  If no investigation steps are described,
+respond with exactly: none
+
+Email thread:
+{email_text}
+
+Investigation steps:"""
 
 CAUSE_RESOLUTION_CANONICALIZE_PROMPT = """You are a knowledge-graph canonicalization expert.
 
@@ -618,29 +635,28 @@ Do NOT speculate about information not suggested by the graph or task context.
 
 Evaluate for:
 - STRUCTURAL GAPS: missing nodes that the graph implies should exist
-    * SYMPTOM with no CAUSE or explanatory TASK_FEATURE/AGGREGATED_JOB_FEATURE/JOB_INSTANCE node
+    * SYMPTOM with no CAUSE or explanatory TASK_FEATURE node
     * CAUSE with no SYMPTOM (orphaned cause)
     * Completed/finished task (status=finished/done) with no RESOLUTION node
+  NOTE: contribute_to edges between Task_Feature and Cause nodes are wired
+  automatically by the system after review — do NOT flag their absence as a gap.
+  If the relevant Task_Feature nodes already exist in the graph, the structural
+  requirement is met regardless of whether explicit edges are present.
+  Use SEMANTIC understanding when checking Task_Feature coverage: e.g. a node
+  with attribute=coreCount and value=1 represents a single-core queue constraint
+  and is equivalent to a node named "queueType=single_core".
 - SPECIFICITY GAPS: node names or descriptions too vague to be useful
     * e.g. a Symptom named "error" or "failure" with no error code or further detail
 - CONTEXTUAL GAPS: task context that implies data exists but is not in the graph
-    * nJobsFailed > 0 but no AGGREGATED_JOB_FEATURE or JOB_INSTANCE nodes describing
-      job-level failure patterns
     * retryID present but no cause node referencing the parent task
-    * errorDialog text mentions job-level events (e.g. "scout jobs failed", "jobs exceeded
-      walltime") but neither AGGREGATED_JOB_FEATURE nor JOB_INSTANCE nodes capture what
-      those jobs did or which sites failed
-
-Minimum requirement (always reject if not met):
-- At least one SYMPTOM node must exist.
+    * errorDialog text implies a specific root cause but no CAUSE node captures it
 
 Gap-driven rejection — reject if any of the following is true:
-- A STRUCTURAL GAP was found (e.g. SYMPTOM with no explanatory node at all).
+- A STRUCTURAL GAP was found (e.g. SYMPTOM with no explanatory node at all, or no CAUSE node).
 - A SPECIFICITY GAP was found that makes a node meaningless (e.g. Symptom named "error"
   with no further detail).
 - A CONTEXTUAL GAP was found that represents a significant missing dimension of the incident
-  (e.g. task context shows job failures but graph has no AGGREGATED_JOB_FEATURE or
-  JOB_INSTANCE nodes).
+  (e.g. errorDialog implies a clear root cause but the graph has no CAUSE node for it).
 
 Approve if: minimum requirement is met AND no significant gaps were found.
 A missing RESOLUTION alone is acceptable — the task may be unresolved.
@@ -719,8 +735,9 @@ Examples of consistent pairs:
   transformation errors"
 - Cause "input data missing from parent task" → strategy "check parent task status
   and output dataset availability"
-Do NOT flag Procedure nodes as missing — their absence is acceptable.  Only flag
-present Procedure nodes whose strategy_type is vague or inconsistent.
+PROCEDURE CONSISTENCY CHECK (for Procedure nodes that are present):
+Verify that each Procedure node's strategy_type is consistent with its linked Cause node.
+Flag as a specificity gap if the strategy_type is too vague or contradicts the cause.
 
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
 {{

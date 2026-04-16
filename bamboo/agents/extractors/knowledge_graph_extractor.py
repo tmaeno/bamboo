@@ -46,7 +46,6 @@ class KnowledgeGraphExtractor:
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        review_feedback: str = "",
         doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph and assign stable node IDs.
@@ -56,14 +55,12 @@ class KnowledgeGraphExtractor:
         so strategies do not need to manage IDs themselves).
 
         Args:
-            email_text:      Email thread or communication text.
-            task_data:       Structured task/issue data as a flat dict.
-            external_data:   External metadata as a flat dict.
-            task_logs:       *Task-level* log output keyed by source name
-                             (e.g. ``{"jedi": "...", "harvester": "..."}``).
-                             Extracted nodes are tagged ``log_level="task"``.
-            review_feedback: Corrective feedback from a previous reviewer pass;
-                             forwarded to the strategy's LLM prompts on retries.
+            email_text:    Email thread or communication text.
+            task_data:     Structured task/issue data as a flat dict.
+            external_data: External metadata as a flat dict.
+            task_logs:     *Task-level* log output keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``).
+                           Extracted nodes are tagged ``log_level="task"``.
 
         Returns:
             :class:`KnowledgeGraph` with all nodes carrying stable UUIDs.
@@ -73,7 +70,6 @@ class KnowledgeGraphExtractor:
             task_data=task_data,
             external_data=external_data,
             task_logs=task_logs,
-            review_feedback=review_feedback,
             doc_hints=doc_hints,
         )
 
@@ -117,6 +113,12 @@ class KnowledgeGraphExtractor:
 
         from bamboo.utils.canonicalize import canonicalize_descriptions  # noqa: PLC0415
 
-        await canonicalize_descriptions(graph.nodes, cache=self._desc_cache)
+        # Only canonicalize nodes with free-form prose descriptions.
+        # Task_Feature (attribute=value), Symptom (already canonicalized via
+        # ErrorCategoryClassifier), Component, and Environment nodes have
+        # short structured names — no prose to strip.
+        _DESC_CANONICALIZE_TYPES = frozenset({"Cause", "Resolution", "Procedure", "Task_Context"})
+        prose_nodes = [n for n in graph.nodes if n.node_type.value in _DESC_CANONICALIZE_TYPES]
+        await canonicalize_descriptions(prose_nodes, cache=self._desc_cache)
 
         return graph

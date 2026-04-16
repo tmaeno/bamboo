@@ -20,7 +20,7 @@ from typing import Any
 
 from bamboo.agents.knowledge_reviewer import _build_task_summary
 from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
-from bamboo.mcp.base import McpClient, McpTool
+from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in type hints)
 from bamboo.utils.narrator import say, thinking
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,22 @@ class ExtraSourceExplorer:
             self._llm = get_extraction_llm()  # temperature=0, deterministic JSON
         return self._llm
 
+    def _filtered_tools(self) -> list[McpTool]:
+        """Return tools from the client, excluding interactive tools when not on a tty."""
+        import sys
+        tools = self._client.list_tools()
+        if not sys.stdout.isatty():
+            tools = [t for t in tools if not t.requires_interaction]
+        return tools
+
+    def available_tools(self) -> list[McpTool]:
+        """Return the filtered tool list for passing to the reviewer.
+
+        The reviewer uses this to annotate issues with
+        ``"→ resolvable with <tool_name>"``.
+        """
+        return self._filtered_tools()
+
     async def explore(
         self,
         task_data: dict[str, Any],
@@ -104,50 +120,89 @@ class ExtraSourceExplorer:
 
         await self._client.connect()
         try:
-            tools = self._client.list_tools()
-            tool_calls = await self._select_tools(task_data, review_issues, tools)
+            tools = self._filtered_tools()
+            task_data_tool_names = self._client.task_data_tools()
 
+            # ── Hard-route: "No investigation procedure captured" → request_human_input ──
+            # Deterministic code routing — the LLM planner consistently mis-routes this
+            # gap to data-fetching tools.  Handle it in Python before the planner runs.
+            _PROCEDURE_MARKER = "no investigation procedure captured"
+            procedure_issues = [i for i in review_issues if _PROCEDURE_MARKER in i.lower()]
+            other_issues = [i for i in review_issues if _PROCEDURE_MARKER not in i.lower()]
+            human_input_tool = next((t for t in tools if t.name == "request_human_input"), None)
+
+            out = ExplorationResult()
+
+            if procedure_issues and human_input_tool:
+                say("Requesting human input for missing investigation procedure...")
+                _prompt = (
+                    "Please describe the investigation steps that were actually performed "
+                    "to diagnose this task failure — what was checked, what commands were "
+                    "run, and what confirmed the root cause."
+                )
+                tc = {"tool": "request_human_input", "args": {"prompt": _prompt}}
+                out.tool_calls.append(tc)
+                try:
+                    result = await self._client.execute("request_human_input", prompt=_prompt)
+                    say("  request_human_input: done.")
+                except Exception as exc:
+                    say(f"  request_human_input: failed — {exc}")
+                    result = exc
+                self._merge_tool_result("request_human_input", result, out)
+            elif procedure_issues:
+                logger.info(
+                    "ExtraSourceExplorer: procedure gap found but request_human_input "
+                    "not available — skipping"
+                )
+                say("  Procedure gap: request_human_input not available.")
+
+            if not other_issues:
+                return out
+
+            # ── Primary path: planner ────
+            if self._planner is not None:
+                plan = await self._planner.plan(task_data, other_issues, tools, doc_hints=doc_hints)
+                if plan is not None:
+                    if not plan.steps:
+                        logger.info(
+                            "ExtraSourceExplorer: planner found no steps — nothing to explore"
+                        )
+                        say("Explorer: planner found no actionable steps.")
+                        return out
+                    all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
+                    logger.info(
+                        "ExtraSourceExplorer: executing plan — %d step(s), %d tool call(s)",
+                        len(plan.steps),
+                        len(all_tool_calls),
+                    )
+                    out.tool_calls.extend(all_tool_calls)
+                    for i, step in enumerate(plan.steps, 1):
+                        say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
+                        coros = [
+                            self._client.execute(
+                                tc["tool"],
+                                **({**tc.get("args", {}), "task_data": task_data}
+                                   if tc["tool"] in task_data_tool_names
+                                   else tc.get("args", {})),
+                            )
+                            for tc in step.tool_calls
+                        ]
+                        results = await asyncio.gather(*coros, return_exceptions=True)
+                        for tc, result in zip(step.tool_calls, results):
+                            if isinstance(result, BaseException):
+                                say(f"    {tc['tool']}: failed — {result}")
+                            else:
+                                say(f"    {tc['tool']}: done.")
+                            self._merge_tool_result(tc["tool"], result, out)
+                    return out
+
+            # ── Fallback: single-wave concurrent path (no planner / plan=None) ─
+            tool_calls = await self._select_tools(task_data, other_issues, tools)
             if not tool_calls:
                 logger.info("ExtraSourceExplorer: LLM selected no tools — nothing to explore")
                 say("Explorer selected no additional tools.")
-                return ExplorationResult()
-
-            # ── Plan-based path (planner configured and succeeded) ──────────
-            plan = None
-            if self._planner is not None:
-                plan = await self._planner.plan(task_data, review_issues, tools, doc_hints=doc_hints)
-
-            task_data_tool_names = self._client.task_data_tools()
-
-            if plan is not None and plan.steps:
-                all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
-                logger.info(
-                    "ExtraSourceExplorer: executing plan — %d step(s), %d tool call(s)",
-                    len(plan.steps),
-                    len(all_tool_calls),
-                )
-                out = ExplorationResult(tool_calls=all_tool_calls)
-                for i, step in enumerate(plan.steps, 1):
-                    say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
-                    coros = [
-                        self._client.execute(
-                            tc["tool"],
-                            **({**tc.get("args", {}), "task_data": task_data}
-                               if tc["tool"] in task_data_tool_names
-                               else tc.get("args", {})),
-                        )
-                        for tc in step.tool_calls
-                    ]
-                    results = await asyncio.gather(*coros, return_exceptions=True)
-                    for tc, result in zip(step.tool_calls, results):
-                        if isinstance(result, BaseException):
-                            say(f"    {tc['tool']}: failed — {result}")
-                        else:
-                            say(f"    {tc['tool']}: done.")
-                        self._merge_tool_result(tc["tool"], result, out)
                 return out
 
-            # ── Fallback: single-wave concurrent path (no planner / plan failed) ─
             tool_names = [tc["tool"] for tc in tool_calls]
             logger.info(
                 "ExtraSourceExplorer: executing %d tool call(s): %s",
@@ -167,7 +222,7 @@ class ExtraSourceExplorer:
             ]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
-            out = ExplorationResult(tool_calls=tool_calls)
+            out.tool_calls.extend(tool_calls)
             for tc, result in zip(tool_calls, results):
                 if isinstance(result, BaseException):
                     say(f"  {tc['tool']}: failed — {result}")
@@ -248,6 +303,9 @@ class ExtraSourceExplorer:
         elif tool_name == "search_panda_docs":
             if isinstance(result, list) and result:
                 out.task_logs["panda_docs:search"] = json.dumps(result, indent=2)
+        elif tool_name == "request_human_input":
+            if result and isinstance(result, str):
+                out.task_logs["human_input:procedures"] = result
         else:
             # Unknown tool — likely from an external MCP server.
             # Store raw result in external_data so the LLM extractor receives

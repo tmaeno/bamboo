@@ -6,8 +6,9 @@ adequately describes the incident — identifying structural, specificity, and
 contextual gaps rather than cross-checking against source text.
 
 Gaps are grounded in either the graph itself (structural implications) or the
-available task context (e.g. nJobsFailed > 0 but no JOB_FEATURE nodes).  The
-LLM is instructed not to speculate beyond what the graph and context imply.
+available task context (e.g. errorDialog implies a root cause but no CAUSE node
+exists).  The LLM is instructed not to speculate beyond what the graph and
+context imply.
 
 Failure modes are handled defensively: any LLM or parse error causes the
 reviewer to return ``approved=True`` (fail-open), so a reviewer malfunction
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
-from bamboo.llm import KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
+from bamboo.llm import EMAIL_INVESTIGATION_SUMMARY_PROMPT, KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.narrator import say, show_block, thinking
 
@@ -71,8 +72,8 @@ class KnowledgeReviewer:
     """LLM-based incident gap analyzer for extracted knowledge graphs.
 
     Call :meth:`review` after extraction and before storing to Neo4j/Qdrant.
-    If the result is not approved, pass ``result.feedback`` back to the
-    extractor as ``review_feedback`` and retry.
+    If the result is not approved, the accumulator invokes the explorer to
+    fetch additional data sources and re-extracts from the enriched sources.
     """
 
     async def review(
@@ -107,6 +108,18 @@ class KnowledgeReviewer:
         if not graph.nodes:
             say("Graph is empty — skipping review.")
             return ReviewResult(approved=True, confidence=1.0)
+
+        hard_issues = _check_hard_requirements(graph, available_tools)
+        if hard_issues:
+            say(
+                f"Hard structural requirements not met "
+                f"({len(hard_issues)} issue(s)) — skipping LLM review."
+            )
+            show_block(
+                "reviewer gaps",
+                "\n".join(f"• {i}" for i in hard_issues),
+            )
+            return ReviewResult(approved=False, confidence=1.0, issues=hard_issues)
 
         graph_summary = _serialise_graph(graph)
         task_summary = _build_task_summary(task_data or {})
@@ -145,19 +158,7 @@ class KnowledgeReviewer:
                         "\n".join(f"• {i}" for i in result.issues),
                     )
             if result.failure_dimension:
-                dim_set = set(result.failure_dimension)
-                matched_nodes = [
-                    n for n in graph.nodes
-                    if n.node_type.value == "Task_Feature"
-                    and any(c in dim_set for c in _node_concepts(n))
-                ]
-                body = f"dimensions: {', '.join(result.failure_dimension)}"
-                if matched_nodes:
-                    body += "\n" + "\n".join(
-                        f"• {n.node_type.value} '{n.name}' [{', '.join(_node_concepts(n))}]"
-                        for n in matched_nodes
-                    )
-                show_block("reviewer: failure dimension(s)", body)
+                say(f"Failure dimension(s): {', '.join(result.failure_dimension)}")
             return result
         except Exception:
             logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
@@ -169,24 +170,67 @@ class KnowledgeReviewer:
 # ---------------------------------------------------------------------------
 
 
+def _check_hard_requirements(
+    graph: KnowledgeGraph,
+    available_tools: list | None = None,
+) -> list[str]:
+    """Return issue strings for any hard structural requirements not met.
+
+    Checks are purely mechanical — no LLM needed.  If any issues are returned
+    :meth:`KnowledgeReviewer.review` short-circuits and skips the LLM call.
+
+    Checked requirements:
+    - At least one Symptom node
+    - At least one Cause node
+    - At least one Procedure node
+    """
+    issues: list[str] = []
+    node_types = {n.node_type.value for n in graph.nodes}
+    if "Symptom" not in node_types:
+        issues.append("No Symptom node found")
+    if "Cause" not in node_types:
+        issues.append("No Cause node found")
+    if "Procedure" not in node_types:
+        issue = "No investigation procedure captured"
+        if available_tools and any(
+            getattr(t, "name", "") == "request_human_input" for t in available_tools
+        ):
+            issue += " → resolvable with request_human_input"
+        issues.append(issue)
+    return issues
+
+
 def build_sources_summary(
     email_text: str = "",
     task_logs: dict[str, str] | None = None,
     doc_hints: dict[str, str] | None = None,
+    email_investigation: str = "",
 ) -> dict[str, str]:
-    """Build truncated source excerpts for use as optional reviewer context.
+    """Build source excerpts for use as optional reviewer context.
+
+    When ``email_investigation`` is provided (a pre-computed LLM summary of
+    investigation steps in the email), it is stored under the key
+    ``"email_investigation"`` and the raw email text is omitted — the summary
+    gives the reviewer a focused, length-independent signal for the Procedure
+    gap check.  When ``email_investigation`` is empty, the raw email text is
+    included truncated to :data:`_MAX_EMAIL_CHARS` as a fallback.
 
     Args:
-        email_text: Raw email thread.
-        task_logs:  Task-level logs keyed by source name.
-        doc_hints:  PanDA documentation hints keyed by query string (already
-                    rendered as plain text — not JSON).
+        email_text:          Raw email thread (used as fallback when
+                             ``email_investigation`` is not provided).
+        task_logs:           Task-level logs keyed by source name.
+        doc_hints:           PanDA documentation hints keyed by query string
+                             (already rendered as plain text — not JSON).
+        email_investigation: Pre-computed investigation-steps summary from
+                             :func:`summarise_email_investigations`.
 
     Returns:
-        Dict mapping source label → truncated text.
+        Dict mapping source label → text.
     """
     sources: dict[str, str] = {}
-    if email_text and email_text.strip():
+    if email_investigation and email_investigation.strip():
+        sources["email_investigation"] = email_investigation.strip()
+    elif email_text and email_text.strip():
         sources["email"] = email_text[:_MAX_EMAIL_CHARS]
     for name, text in (task_logs or {}).items():
         if text and text.strip():
@@ -195,6 +239,33 @@ def build_sources_summary(
         if text and text.strip():
             sources[f"panda_docs:{query[:40]}"] = text[:_MAX_LOG_CHARS * 3]
     return sources
+
+
+async def summarise_email_investigations(email_text: str) -> str:
+    """Summarise investigation steps described in an email thread.
+
+    Calls the LLM with :data:`~bamboo.llm.EMAIL_INVESTIGATION_SUMMARY_PROMPT`
+    to extract a compact, length-independent description of any investigation
+    actions explicitly mentioned in the email.  The result is passed to
+    :func:`build_sources_summary` as ``email_investigation`` so the reviewer
+    can check for missing Procedure nodes regardless of email length.
+
+    Returns ``""`` on any error (fail-open: caller falls back to the raw
+    truncated email).
+    """
+    try:
+        llm = get_extraction_llm()
+        response = await llm.ainvoke(
+            EMAIL_INVESTIGATION_SUMMARY_PROMPT.format(email_text=email_text)
+        )
+        return response.content.strip()
+    except Exception:
+        logger.warning(
+            "summarise_email_investigations: LLM call failed — "
+            "falling back to raw truncated email for reviewer context",
+            exc_info=True,
+        )
+        return ""
 
 
 def _join_doc_hints(doc_hints: dict[str, str] | None) -> str:

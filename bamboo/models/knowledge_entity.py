@@ -18,6 +18,7 @@ from .graph_element import (
     MetricNode,
     OptimizationNode,
     PatternNode,
+    ProcedureNode,
     ResolutionNode,
     SystemNode,
     SymptomNode,
@@ -35,6 +36,7 @@ NodeUnion = Union[
     TaskContextNode,
     ComponentNode,
     CauseNode,
+    ProcedureNode,
     ResolutionNode,
     MetricNode,
     AnomalyNode,
@@ -88,6 +90,13 @@ class ExtractedKnowledge(BaseModel):
     )
     source_references: list[str] = Field(default_factory=list)
     extraction_metadata: dict[str, Any] = Field(default_factory=dict)
+    stored: bool = Field(
+        default=True,
+        description=(
+            "False when require_procedures=True and no Procedure nodes were found — "
+            "the graph was not written to any database."
+        ),
+    )
 
 
 class SemanticEntry(BaseModel):

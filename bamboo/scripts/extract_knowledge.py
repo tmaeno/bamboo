@@ -77,7 +77,16 @@ from bamboo.utils.logging import setup_logging
         "extraction→review→explorer chain with --max-retries 1."
     ),
 )
-def main(email_thread, task_data, task_id, external_data, output, verbose, max_retries):
+@click.option(
+    "--require-procedures",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reject graphs that contain no Procedure nodes. "
+        "Exits with code 1 if no investigation procedure was captured."
+    ),
+)
+def main(email_thread, task_data, task_id, external_data, output, verbose, max_retries, require_procedures):
     """Extract knowledge graph and preview it without writing to any database.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -105,13 +114,14 @@ def main(email_thread, task_data, task_id, external_data, output, verbose, max_r
         _run_extraction(
             email_text, task_dict, task_id, external_dict, output,
             verbose=verbose, max_retries=max_retries,
+            require_procedures=require_procedures,
         )
     )
 
 
 async def _run_extraction(
     email_text, task_dict, task_id, external_dict, output=None, verbose=False,
-    max_retries=None,
+    max_retries=None, require_procedures=False,
 ):
     """Run extraction in dry-run mode and print the result."""
     from rich.console import Console
@@ -156,6 +166,7 @@ async def _run_extraction(
             task_data=task_dict,
             external_data=external_dict,
             dry_run=True,
+            require_procedures=require_procedures,
         )
 
         # --- Summary ---
@@ -265,6 +276,13 @@ async def _run_extraction(
         click.echo(f"\nSummary:\n{result.summary}")
         click.echo("\n" + "=" * 70)
         click.echo("Nothing was written to Neo4j or Qdrant.")
+
+        if require_procedures and not result.stored:
+            click.echo(
+                "\n⚠  No Procedure nodes — graph not stored (--require-procedures).",
+                err=True,
+            )
+            sys.exit(1)
 
         # --- Optional JSON output ---
         if output:

@@ -40,7 +40,16 @@ from bamboo.utils.logging import setup_logging
     type=click.Path(exists=True),
     help="Path to external data JSON file",
 )
-def main(email_thread, task_data, task_id, external_data):
+@click.option(
+    "--require-procedures",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reject graphs that contain no Procedure nodes. "
+        "Exits with code 1 if no investigation procedure was captured."
+    ),
+)
+def main(email_thread, task_data, task_id, external_data, require_procedures):
     """Populate knowledge base from various sources.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -64,10 +73,10 @@ def main(email_thread, task_data, task_id, external_data):
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    asyncio.run(_extract_knowledge(email_text, task_dict, task_id, external_dict))
+    asyncio.run(_extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures))
 
 
-async def _extract_knowledge(email_text, task_dict, task_id, external_dict):
+async def _extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures=False):
     """Extract and store knowledge."""
     from rich.console import Console
 
@@ -84,6 +93,17 @@ async def _extract_knowledge(email_text, task_dict, task_id, external_dict):
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
+    from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.exploration_planner import ExplorationPlanner
+    from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
+    from bamboo.config import get_settings
+    from bamboo.mcp.factory import build_mcp_client
+
+    settings = get_settings()
+    reviewer = KnowledgeReviewer()
+    _mcp = build_mcp_client(settings)
+    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+
     neo4j = GraphDatabaseClient()
     qdrant = VectorDatabaseClient()
 
@@ -91,14 +111,22 @@ async def _extract_knowledge(email_text, task_dict, task_id, external_dict):
         await neo4j.connect()
         await qdrant.connect()
 
-        agent = KnowledgeAccumulator(neo4j, qdrant)
+        agent = KnowledgeAccumulator(neo4j, qdrant, reviewer=reviewer, explorer=explorer)
 
         click.echo("Extracting knowledge...")
         result = await agent.process_knowledge(
             email_text=email_text,
             task_data=task_dict,
             external_data=external_dict,
+            require_procedures=require_procedures,
         )
+
+        if require_procedures and not result.stored:
+            click.echo(
+                "\n⚠  No Procedure nodes — graph not stored (--require-procedures).",
+                err=True,
+            )
+            sys.exit(1)
 
         click.echo("\n✓ Knowledge extracted successfully!")
         click.echo("\nSummary:")

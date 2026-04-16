@@ -1009,7 +1009,16 @@ async def check_mcp_servers_interactive():
     type=click.Path(exists=True),
     help="Path to external data JSON file",
 )
-def populate_cmd(email_thread, task_data, task_id, external_data):
+@click.option(
+    "--require-procedures",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reject graphs that contain no Procedure nodes. "
+        "Exits with code 1 if no investigation procedure was captured."
+    ),
+)
+def populate_cmd(email_thread, task_data, task_id, external_data, require_procedures):
     """Populate knowledge base from various sources."""
     from bamboo.scripts.populate_knowledge import main as _main
 
@@ -1020,6 +1029,7 @@ def populate_cmd(email_thread, task_data, task_id, external_data):
         task_data=task_data,
         task_id=task_id,
         external_data=external_data,
+        require_procedures=require_procedures,
     )
 
 
@@ -1073,7 +1083,16 @@ def populate_cmd(email_thread, task_data, task_id, external_data):
         "extraction→review→explorer chain."
     ),
 )
-def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose, max_retries):
+@click.option(
+    "--require-procedures",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reject graphs that contain no Procedure nodes. "
+        "Exits with code 1 if no investigation procedure was captured."
+    ),
+)
+def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose, max_retries, require_procedures):
     """Extract knowledge graph and preview it without writing to any database.
 
     Runs the full extraction pipeline (LLM calls, error classification, graph
@@ -1101,6 +1120,7 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
         output=output,
         verbose=verbose,
         max_retries=max_retries,
+        require_procedures=require_procedures,
     )
 
 

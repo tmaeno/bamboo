@@ -32,7 +32,6 @@ class ExtractionStrategy(ABC):
         task_data: dict[str, Any] = None,
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
-        review_feedback: str = "",
         doc_hints: dict[str, str] = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
@@ -41,19 +40,15 @@ class ExtractionStrategy(ABC):
         supply any combination of sources.
 
         Args:
-            email_text:      Email thread or communication text.  May be empty.
-            task_data:       Structured task/issue data as a flat dict.  May be
-                             ``None``.
-            external_data:   External metadata (metrics, JIRA fields, etc.) as a
-                             flat dict.  May be ``None``.
-            task_logs:       Task-level log output from orchestration services
-                             (e.g. JEDI, Harvester), keyed by source name
-                             (e.g. ``{"jedi": "...", "harvester": "..."}``)
-                             May be ``None``.
-            review_feedback: Corrective feedback from a previous
-                             :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`
-                             pass.  Non-empty only on retry attempts; injected
-                             into LLM prompts to guide re-extraction.
+            email_text:    Email thread or communication text.  May be empty.
+            task_data:     Structured task/issue data as a flat dict.  May be
+                           ``None``.
+            external_data: External metadata (metrics, JIRA fields, etc.) as a
+                           flat dict.  May be ``None``.
+            task_logs:     Task-level log output from orchestration services
+                           (e.g. JEDI, Harvester), keyed by source name
+                           (e.g. ``{"jedi": "...", "harvester": "..."}``)
+                           May be ``None``.
 
         Returns:
             :class:`KnowledgeGraph` containing the extracted nodes and
