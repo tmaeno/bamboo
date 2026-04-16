@@ -9,6 +9,7 @@ Connection is established via :meth:`Neo4jBackend.connect` (called by
 All methods require an open driver; call :meth:`Neo4jBackend.close` when done.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -98,6 +99,11 @@ class Neo4jBackend(GraphDatabaseBackend):
             properties = node.model_dump(exclude={"node_type"})
             if not properties.get("id"):
                 properties["id"] = str(uuid.uuid4())
+            # Neo4j only accepts primitives/arrays as property values.
+            # JSON-serialize any dict fields (e.g. metadata, properties).
+            for key, val in properties.items():
+                if isinstance(val, dict):
+                    properties[key] = json.dumps(val, default=str)
             result = await session.run(
                 f"CREATE (n:{node.node_type.value} $properties) RETURN n.id AS id",
                 properties=properties,
@@ -190,11 +196,13 @@ class Neo4jBackend(GraphDatabaseBackend):
                     END
                 RETURN r
                 """,
-                source_id=relationship.source_id,
-                target_id=relationship.target_id,
-                confidence=relationship.confidence,
-                graph_id=graph_id,
-                parameters=parameters,
+                {
+                    "source_id": relationship.source_id,
+                    "target_id": relationship.target_id,
+                    "confidence": relationship.confidence,
+                    "graph_id": graph_id,
+                    "parameters": parameters,
+                },
             )
             return await result.single() is not None
 
@@ -268,8 +276,7 @@ class Neo4jBackend(GraphDatabaseBackend):
                 WHERE $graph_id IN r.graph_ids
                 WITH r,
                      [gid IN r.graph_ids WHERE gid <> $graph_id] AS remaining
-                CALL {
-                    WITH r, remaining
+                CALL (r, remaining) {
                     FOREACH (_ IN CASE WHEN size(remaining) = 0 THEN [1] ELSE [] END |
                         DELETE r
                     )

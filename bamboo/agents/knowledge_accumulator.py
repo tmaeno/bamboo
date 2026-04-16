@@ -648,7 +648,7 @@ class KnowledgeAccumulator:
         node_ids: dict[str, str] = {}
         for node in graph_nodes:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
-            node_ids[node.id or node.name] = node_id
+            node_ids[node.name] = node_id
 
         # Build a name→parameters lookup for procedure edge wiring below.
         proc_params_by_name: dict[str, Any] = {

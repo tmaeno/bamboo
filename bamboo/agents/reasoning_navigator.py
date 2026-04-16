@@ -41,6 +41,7 @@ from bamboo.llm import (
 )
 from bamboo.models.knowledge_entity import AnalysisResult
 from bamboo.utils.sanitize import sanitize_for_llm
+from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +55,21 @@ class ReasoningNavigator:
     Args:
         graph_db:  Connected :class:`GraphDatabaseClient`.
         vector_db: Connected :class:`VectorDatabaseClient`.
+        explorer:  Optional :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
+                   When provided, Phase 2 (procedure-driven investigation) delegates
+                   MCP tool selection and execution to the explorer rather than
+                   remaining a no-op stub.
     """
 
     def __init__(
         self,
         graph_db: GraphDatabaseClient,
         vector_db: VectorDatabaseClient,
+        explorer=None,
     ):
         self.graph_db = graph_db
         self.vector_db = vector_db
+        self._explorer = explorer
         self._llm = None
         self._embeddings = None
         self.extractor = KnowledgeGraphExtractor()
@@ -175,6 +182,13 @@ class ReasoningNavigator:
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
         )
+        show_block(
+            "root cause analysis",
+            f"cause:      {analysis.get('root_cause')}\n"
+            f"confidence: {analysis.get('confidence')}\n"
+            f"resolution: {analysis.get('resolution')}\n"
+            f"reasoning:  {analysis.get('reasoning')}",
+        )
 
         # --- Phase 2: procedure-driven investigation ---
         identified_causes = [analysis["root_cause"]] if analysis.get("root_cause") else []
@@ -195,6 +209,25 @@ class ReasoningNavigator:
                 "manual investigation recommended",
                 analysis.get("root_cause", "unknown"),
             )
+
+        # --- Merge investigation results and run second analysis pass ---
+        inv_external = investigation_result.get("external_data") or {}
+        inv_logs = investigation_result.get("task_logs") or {}
+        if inv_external or inv_logs:
+            merged_external = {**(external_data or {}), **inv_external}
+            logger.info("ReasoningNavigator: re-running root cause analysis with investigation data")
+            analysis = await self._identify_root_cause(
+                task_data, merged_external, graph_results, vector_results, domain_hints=domain_hints
+            )
+            show_block(
+                "root cause analysis (updated)",
+                f"cause:      {analysis.get('root_cause')}\n"
+                f"confidence: {analysis.get('confidence')}\n"
+                f"resolution: {analysis.get('resolution')}\n"
+                f"reasoning:  {analysis.get('reasoning')}",
+            )
+            # Attach raw investigation data so the email LLM sees job IDs and metrics directly
+            analysis["investigation_data"] = inv_external
 
         email_content = await self._generate_email(task_data, analysis, domain_hints=domain_hints)
 
@@ -387,10 +420,10 @@ class ReasoningNavigator:
         logger.info("ReasoningNavigator: identifying root cause with LLM")
 
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
-            task_info=json.dumps(sanitize_for_llm(task_data), indent=2),
-            external_info=json.dumps(sanitize_for_llm(external_data) or {}, indent=2),
+            task_info=json.dumps(sanitize_for_llm(task_data), indent=2, default=str),
+            external_info=json.dumps(sanitize_for_llm(external_data) or {}, indent=2, default=str),
             domain_hints=domain_hints,
-            graph_results=json.dumps(graph_results, indent=2),
+            graph_results=json.dumps(graph_results, indent=2, default=str),
             vector_results=json.dumps(
                 [
                     {
@@ -401,6 +434,7 @@ class ReasoningNavigator:
                     for r in vector_results
                 ],
                 indent=2,
+                default=str,
             ),
         )
 
@@ -410,10 +444,16 @@ class ReasoningNavigator:
             ),
             HumanMessage(content=prompt),
         ]
-        response = await self.llm.ainvoke(messages)
+        with thinking("Working"):
+            response = await self.llm.ainvoke(messages)
 
+        text = response.content.strip()
+        if "```json" in text:
+            text = text[text.find("```json") + 7 : text.rfind("```")].strip()
+        elif "```" in text:
+            text = text[text.find("```") + 3 : text.rfind("```")].strip()
         try:
-            return json.loads(response.content)
+            return json.loads(text)
         except json.JSONDecodeError as exc:
             logger.error("ReasoningNavigator: failed to parse LLM response: %s", exc)
             return {
@@ -446,7 +486,7 @@ class ReasoningNavigator:
             task_id=composite_task_id,
             task_description=task_data.get("description", ""),
             domain_hints=domain_hints,
-            analysis=json.dumps(analysis, indent=2),
+            analysis=json.dumps(analysis, indent=2, default=str),
         )
         messages = [
             SystemMessage(
@@ -455,7 +495,8 @@ class ReasoningNavigator:
             HumanMessage(content=prompt),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        with thinking("Working"):
+            response = await self.llm.ainvoke(messages)
         return response.content
 
     async def _run_investigation(
@@ -486,24 +527,49 @@ class ReasoningNavigator:
             ``investigation_note`` describing the recommended next steps.
         """
         logger.info(
-            "ReasoningNavigator: Phase 2 — %d procedure(s) available, "
-            "MCP tool invocation not yet wired",
+            "ReasoningNavigator: Phase 2 — %d procedure(s) available",
             len(procedures),
         )
 
-        strategies = [
-            f"[cause: {p['cause_name']}] {p['strategy_type']} "
-            f"(confirmed by {p['frequency']} incident(s))"
-            for p in procedures
-        ]
+        # Stub fallback when no explorer is wired.
+        if self._explorer is None:
+            strategies = [
+                f"[cause: {p['cause_name']}] {p['strategy_type']} "
+                f"(confirmed by {p['frequency']} incident(s))"
+                for p in procedures
+            ]
+            note = (
+                "Investigation procedure(s) found but no MCP explorer configured. "
+                "Recommended strategies:\n"
+                + "\n".join(f"  • {s}" for s in strategies)
+            )
+            logger.info("ReasoningNavigator: investigation note: %s", note)
+            return {"procedures": procedures, "investigation_note": note}
+
+        # Delegate to ExtraSourceExplorer — reuses its LLM tool selection,
+        # asyncio.gather execution, and _merge_tool_result routing.
+        issues = []
+        for p in procedures:
+            params_str = json.dumps(p.get("parameters") or [], default=str)
+            issues.append(
+                f"Investigate '{p['cause_name']}': {p['strategy_type']}. "
+                f"Historical parameters: {params_str}"
+            )
+
+        say(f"Phase 2: running investigation via MCP ({len(issues)} procedure(s))...")
+        exploration = await self._explorer.explore(task_data, issues, skip_gap_analysis=True)
+
         note = (
-            "Investigation procedure(s) found but MCP tool invocation is not yet "
-            "implemented. Recommended strategies:\n"
-            + "\n".join(f"  • {s}" for s in strategies)
+            f"Investigation ran {len(exploration.tool_calls)} tool call(s)."
+            if exploration.tool_calls
+            else "Explorer selected no tools for the investigation procedure."
         )
-        logger.info("ReasoningNavigator: investigation note: %s", note)
+        logger.info("ReasoningNavigator: %s", note)
 
         return {
             "procedures": procedures,
+            "tool_calls": exploration.tool_calls,
+            "external_data": exploration.external_data,
+            "task_logs": {k: v[:2000] for k, v in exploration.task_logs.items()},
             "investigation_note": note,
         }

@@ -72,6 +72,7 @@ from bamboo.models.graph_element import (
     CauseNode,
     ComponentNode,
     GraphRelationship,
+    NodeType,
     ProcedureNode,
     RelationType,
     ResolutionNode,
@@ -1272,6 +1273,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             len(relationships),
         )
         return graph
+
     # ------------------------------------------------------------------
     # Log extraction
     # ------------------------------------------------------------------
@@ -1408,8 +1410,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
     @staticmethod
     def _create_log_node(node_data: dict[str, Any]):
-        from bamboo.models.graph_element import NodeType
-
         try:
             node_type = NodeType(node_data.get("node_type", ""))
         except ValueError:
@@ -1557,8 +1557,6 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
     @staticmethod
     def _create_email_node(node_data: dict[str, Any]):
-        from bamboo.models.graph_element import NodeType
-
         try:
             node_type = NodeType(node_data.get("node_type", ""))
         except ValueError:

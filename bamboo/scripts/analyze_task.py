@@ -53,7 +53,8 @@ from bamboo.utils.logging import setup_logging
     show_default=True,
     help="Minimum number of tasks that must share an edge for it to appear in the pattern output.",
 )
-def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences):
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose):
     """Analyze a problematic task and generate a resolution.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -85,7 +86,7 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         asyncio.run(_find_pattern(all_task_ids, min_occurrences))
         return
 
-    result = asyncio.run(_analyze_task(task_dict, task_id, external_dict))
+    result = asyncio.run(_analyze_task(task_dict, task_id, external_dict, verbose))
 
     # Display results
     click.echo("\n" + "=" * 80)
@@ -197,13 +198,13 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
         await graph_db.close()
 
 
-async def _analyze_task(task_dict, task_id, external_dict):
+async def _analyze_task(task_dict, task_id, external_dict, verbose=False):
     """Run the async reasoning pipeline and return results."""
     from rich.console import Console
 
     from bamboo.utils.narrator import set_narrator, thinking
 
-    set_narrator(Console())
+    set_narrator(Console(), verbose=verbose)
 
     if task_id is not None:
         from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
@@ -214,6 +215,11 @@ async def _analyze_task(task_dict, task_id, external_dict):
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
+    from bamboo.agents.exploration_planner import ExplorationPlanner
+    from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.config import get_settings
+    from bamboo.mcp.factory import build_mcp_client
+
     graph_db = GraphDatabaseClient()
     vector_db = VectorDatabaseClient()
 
@@ -221,7 +227,10 @@ async def _analyze_task(task_dict, task_id, external_dict):
         await graph_db.connect()
         await vector_db.connect()
 
-        agent = ReasoningNavigator(graph_db, vector_db)
+        settings = get_settings()
+        _mcp = build_mcp_client(settings)
+        explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+        agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
 
         click.echo("Analyzing task...")
         return await agent.analyze_task(

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from bamboo.llm import (
     EXPLORATION_GAP_ANALYSIS_PROMPT,
     EXPLORATION_PLAN_PROMPT,
+    PROCEDURE_EXECUTION_PROMPT,
     get_extraction_llm,
 )
 from bamboo.mcp.base import McpClient, McpTool
@@ -111,6 +112,7 @@ class ExplorationPlanner:
         review_issues: list[str],
         tools: list[McpTool],
         doc_hints: dict[str, str] | None = None,
+        skip_gap_analysis: bool = False,
     ) -> ExplorationPlan | None:
         """Run both planning phases and return a structured plan.
 
@@ -118,20 +120,28 @@ class ExplorationPlanner:
         existing single-LLM-call tool-selection path.
 
         Args:
-            task_data:     Structured task fields from PanDA.
-            review_issues: Issue strings from the previous
-                           :class:`~bamboo.agents.KnowledgeReviewer` result.
-            tools:         Available MCP tools (already listed by the caller).
-            task_logs:     Current task_logs dict (may contain panda_docs: entries).
+            task_data:          Structured task fields from PanDA.
+            review_issues:      Issue strings from the previous
+                                :class:`~bamboo.agents.KnowledgeReviewer` result.
+            tools:              Available MCP tools (already listed by the caller).
+            skip_gap_analysis:  When ``True``, skip phase 1 and treat
+                                *review_issues* directly as gaps fed into
+                                phase 2.  Use this when the caller already has
+                                concrete investigation instructions (e.g.
+                                procedure strings from the navigator) and gap
+                                analysis would only re-frame them incorrectly.
         """
         if not review_issues or not tools:
             return None
         try:
-            gaps = await self._analyse_gaps(task_data, review_issues, tools, doc_hints)
+            if skip_gap_analysis:
+                gaps = list(review_issues)
+            else:
+                gaps = await self._analyse_gaps(task_data, review_issues, tools, doc_hints)
             if not gaps:
                 say("Planner found no actionable gaps — falling back to direct tool selection.")
                 return None
-            steps = await self._build_plan(gaps, task_data, tools, doc_hints)
+            steps = await self._build_plan(gaps, task_data, tools, doc_hints, skip_gap_analysis=skip_gap_analysis)
             plan = ExplorationPlan(gaps=gaps, steps=steps)
             say(
                 f"Exploration plan: {len(plan.steps)} step(s), "
@@ -198,10 +208,14 @@ class ExplorationPlanner:
         task_data: dict[str, Any],
         tools: list[McpTool],
         doc_hints: dict[str, str] | None = None,
+        skip_gap_analysis: bool = False,
     ) -> list[PlanStep]:
         """LLM call 2: map gaps to ordered PlanSteps.
 
         Returns ``[]`` on parse error (triggers fallback in :meth:`plan`).
+        Uses :data:`PROCEDURE_EXECUTION_PROMPT` when *skip_gap_analysis* is
+        ``True`` so the LLM follows procedure instructions verbatim instead of
+        applying generic diagnostic reasoning.
         """
         from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
         from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
@@ -210,7 +224,8 @@ class ExplorationPlanner:
         tools_description = _build_tools_description(tools)
         gaps_text = "\n".join(f"- {g}" for g in gaps)
 
-        prompt = EXPLORATION_PLAN_PROMPT.format(
+        template = PROCEDURE_EXECUTION_PROMPT if skip_gap_analysis else EXPLORATION_PLAN_PROMPT
+        prompt = template.format(
             gaps=gaps_text,
             task_summary=task_summary,
             tools_description=tools_description,
@@ -221,7 +236,16 @@ class ExplorationPlanner:
         with thinking("Planning"):
             response = await self.llm.ainvoke(prompt)
 
-        return _parse_plan_steps(response.content)
+        show_block("planner: raw plan response", response.content)
+        steps = _parse_plan_steps(response.content)
+        if steps:
+            from rich.markup import escape  # noqa: PLC0415
+            lines = []
+            for i, s in enumerate(steps, 1):
+                tools = ", ".join(tc["tool"] for tc in s.tool_calls)
+                lines.append(f"step {i}: {escape(tools)} — {s.reason}")
+            show_block("planner: exploration plan", "\n".join(lines))
+        return steps
 
 
 # ---------------------------------------------------------------------------

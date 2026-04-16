@@ -1018,7 +1018,8 @@ async def check_mcp_servers_interactive():
         "Exits with code 1 if no investigation procedure was captured."
     ),
 )
-def populate_cmd(email_thread, task_data, task_id, external_data, require_procedures):
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def populate_cmd(email_thread, task_data, task_id, external_data, require_procedures, verbose):
     """Populate knowledge base from various sources."""
     from bamboo.scripts.populate_knowledge import main as _main
 
@@ -1030,6 +1031,7 @@ def populate_cmd(email_thread, task_data, task_id, external_data, require_proced
         task_id=task_id,
         external_data=external_data,
         require_procedures=require_procedures,
+        verbose=verbose,
     )
 
 
@@ -1168,7 +1170,8 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
     show_default=True,
     help="Minimum number of tasks sharing an edge for pattern output.",
 )
-def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min_occurrences):
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose):
     """Analyze a problematic task and generate a resolution.
 
     With --compare-task-id, displays the common subgraph across all specified
@@ -1186,6 +1189,7 @@ def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min
         output=output,
         compare_task_ids=compare_task_ids,
         min_occurrences=min_occurrences,
+        verbose=verbose,
     )
 
 

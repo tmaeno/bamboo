@@ -49,7 +49,8 @@ from bamboo.utils.logging import setup_logging
         "Exits with code 1 if no investigation procedure was captured."
     ),
 )
-def main(email_thread, task_data, task_id, external_data, require_procedures):
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def main(email_thread, task_data, task_id, external_data, require_procedures, verbose):
     """Populate knowledge base from various sources.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -73,16 +74,16 @@ def main(email_thread, task_data, task_id, external_data, require_procedures):
     if external_data:
         external_dict = json.loads(Path(external_data).read_text())
 
-    asyncio.run(_extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures))
+    asyncio.run(_extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures, verbose))
 
 
-async def _extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures=False):
+async def _extract_knowledge(email_text, task_dict, task_id, external_dict, require_procedures=False, verbose=False):
     """Extract and store knowledge."""
     from rich.console import Console
 
     from bamboo.utils.narrator import set_narrator, thinking
 
-    set_narrator(Console())
+    set_narrator(Console(), verbose=verbose)
 
     if task_id is not None:
         from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415

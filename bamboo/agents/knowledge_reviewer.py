@@ -99,7 +99,7 @@ class KnowledgeReviewer:
             available_tools:  List of :class:`~bamboo.mcp.McpTool` descriptors that
                               the explorer can invoke to fill gaps.  When provided,
                               the reviewer annotates each issue with the tool that
-                              could resolve it (e.g. ``"→ resolvable with get_failed_job_details"``).
+                              could resolve it (e.g. ``"→ resolvable with get_scout_job_details"``).
 
         Returns:
             :class:`ReviewResult` with the verdict and corrective feedback.

@@ -98,6 +98,7 @@ class ExtraSourceExplorer:
         task_data: dict[str, Any],
         review_issues: list[str],
         doc_hints: dict[str, str] | None = None,
+        skip_gap_analysis: bool = False,
     ) -> ExplorationResult:
         """Single select-and-fetch pass.
 
@@ -161,14 +162,11 @@ class ExtraSourceExplorer:
 
             # ── Primary path: planner ────
             if self._planner is not None:
-                plan = await self._planner.plan(task_data, other_issues, tools, doc_hints=doc_hints)
-                if plan is not None:
-                    if not plan.steps:
-                        logger.info(
-                            "ExtraSourceExplorer: planner found no steps — nothing to explore"
-                        )
-                        say("Explorer: planner found no actionable steps.")
-                        return out
+                plan = await self._planner.plan(
+                    task_data, other_issues, tools,
+                    doc_hints=doc_hints, skip_gap_analysis=skip_gap_analysis,
+                )
+                if plan is not None and plan.steps:
                     all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
                     logger.info(
                         "ExtraSourceExplorer: executing plan — %d step(s), %d tool call(s)",
@@ -195,6 +193,11 @@ class ExtraSourceExplorer:
                                 say(f"    {tc['tool']}: done.")
                             self._merge_tool_result(tc["tool"], result, out)
                     return out
+                if plan is not None and not plan.steps:
+                    logger.info(
+                        "ExtraSourceExplorer: planner found no steps — falling back to _select_tools"
+                    )
+                    say("Explorer: planner found no steps — falling back to direct tool selection.")
 
             # ── Fallback: single-wave concurrent path (no planner / plan=None) ─
             tool_calls = await self._select_tools(task_data, other_issues, tools)
@@ -291,7 +294,7 @@ class ExtraSourceExplorer:
         elif tool_name == "get_task_jobs_summary":
             if isinstance(result, dict):
                 out.external_data["jobs_summary"] = result
-        elif tool_name == "get_failed_job_details":
+        elif tool_name == "get_scout_job_details":
             if isinstance(result, list):
                 out.external_data["representative_jobs"] = result
         elif tool_name == "get_task_input_datasets":

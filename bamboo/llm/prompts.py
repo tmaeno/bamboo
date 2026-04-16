@@ -179,9 +179,14 @@ Based on this information:
 1. Identify the most likely root cause
 2. Assess your confidence level (0-1)
 3. Recommend the best resolution
-4. Explain your reasoning
+4. Explain your reasoning — when external_info contains job-level data, cite
+   specific job IDs and metric values to support the identified cause
 
-Respond with a JSON object:
+IMPORTANT: If a matching cause appears in the Graph Database Results, set "root_cause"
+to the exact "cause_name" string from that result — character for character. Do not
+paraphrase or reformulate it. This exact match is required for procedure lookup.
+
+Respond with a valid JSON object — no markdown fences, no explanation:
 {{
   "root_cause": "...",
   "confidence": 0.0-1.0,
@@ -215,8 +220,10 @@ The email should:
 1. Start with a brief acknowledgment of the issue
 2. Explain the root cause in clear, non-technical language when possible
 3. Provide step-by-step resolution instructions
-4. Offer to help if they have questions
-5. Be professional but friendly
+4. When the analysis contains investigation data with specific job IDs or measured
+   values, reference them to illustrate the problem concretely
+5. Offer to help if they have questions
+6. Be professional but friendly
 
 Generate the email content:
 """
@@ -825,6 +832,47 @@ Output a JSON array of steps only — no markdown, no explanation outside the JS
 [
   {{
     "reason": "<why this step is needed and which gap it addresses>",
+    "tool_calls": [
+      {{
+        "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
+        "args": {{ }}
+      }}
+    ]
+  }}
+]
+"""
+
+PROCEDURE_EXECUTION_PROMPT = """You are a diagnostic data-collection agent for a PanDA computing task.
+
+You have been given an investigation procedure to execute.  Your only job is to
+select the tool(s) whose output directly serves the procedure.
+
+PROCEDURE:
+{gaps}
+
+TASK CONTEXT (key fields only):
+{task_summary}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+AVAILABLE TOOLS:
+{tools_description}
+
+Selection rules:
+- Read each procedure instruction and find the tool whose description matches what
+  the instruction asks to collect.  Match on keywords: "scout jobs" → scout job tool,
+  "cpuConsumptionTime / wallTime / jobDuration" → tool that returns those fields,
+  "error logs" → log-fetching tool, etc.
+- Always prefer the most specific match.  A tool that explicitly mentions the same
+  metric or job type as the procedure is the right choice.
+- Do NOT add steps for data not mentioned in the procedure.
+- If genuinely no tool matches, output an empty array.
+
+Output a JSON array of steps only — no markdown, no explanation outside the JSON:
+[
+  {{
+    "reason": "<quote the procedure instruction this step executes>",
     "tool_calls": [
       {{
         "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
