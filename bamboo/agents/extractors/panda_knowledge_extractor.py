@@ -606,6 +606,7 @@ class CanonicalNodeStore:
         vector_client=None,
         embeddings_client=None,
         match_threshold: float = 0.82,
+        validate_fn=None,
     ) -> None:
         self._node_type = node_type
         self._section = f"canonical_node::{node_type}"
@@ -613,6 +614,7 @@ class CanonicalNodeStore:
         self._vector_client = vector_client
         self._embeddings = embeddings_client or get_embeddings()
         self.match_threshold = match_threshold
+        self._validate_fn = validate_fn
 
     async def _get_client(self):
         if self._vector_client is None:
@@ -668,6 +670,19 @@ class CanonicalNodeStore:
         if results:
             label = results[0]["metadata"].get("label", candidate)
             score = float(results[0]["score"])
+            # Optional consistency check: reject the match if the validate_fn
+            # says the raw text does not actually fit the matched category.
+            if self._validate_fn is not None and not await self._validate_fn(raw_text, label):
+                logger.info(
+                    "CanonicalNodeStore[%s]: match '%s' (score=%.3f) rejected by validate_fn "
+                    "— storing candidate '%s' as new entry",
+                    self._node_type,
+                    label,
+                    score,
+                    candidate,
+                )
+                await self._store(candidate, auto_generated=True)
+                return candidate, 0.0, True
             logger.debug(
                 "CanonicalNodeStore[%s]: matched '%s' (score=%.3f)",
                 self._node_type,
@@ -763,6 +778,34 @@ def _make_cause_resolution_label_fn(node_type: str):
     return _fn
 
 
+async def _validate_error_category_match(error_message: str, category: str) -> bool:
+    """LLM sanity-check: does *error_message* actually fit *category*?
+
+    Returns True (accept match) or False (reject — store a new category instead).
+    Defaults to True on any LLM failure so classification is never blocked.
+    """
+    from bamboo.llm import ERROR_CATEGORY_MATCH_PROMPT, get_extraction_llm  # noqa: PLC0415
+
+    try:
+        llm = get_extraction_llm()
+        prompt = ERROR_CATEGORY_MATCH_PROMPT.format(
+            category=category,
+            error_message=error_message[:500],
+        )
+        with thinking("Validating category match"):
+            response = await llm.ainvoke(prompt)
+        answer = response.content.strip().lower()
+        match = answer.startswith("yes")
+        if not match:
+            say(f'Category "{category}" rejected for this error — creating new category')
+        return match
+    except Exception as exc:
+        logger.warning(
+            "_validate_error_category_match: LLM check failed (%s) — accepting match", exc
+        )
+        return True
+
+
 # ---------------------------------------------------------------------------
 # ErrorCategoryStore  — specialization of CanonicalNodeStore
 # ---------------------------------------------------------------------------
@@ -789,6 +832,7 @@ class ErrorCategoryStore(CanonicalNodeStore):
             vector_client=vector_client,
             embeddings_client=embeddings_client,
             match_threshold=new_category_threshold,
+            validate_fn=_validate_error_category_match,
         )
 
     # Keep old threshold attribute name for any callers that used it directly.
@@ -1031,15 +1075,20 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                         f"Found errorDialog: \"{preview}{'...' if len(str_value) > 80 else ''}\""
                     )
                     say("Classifying error category...")
-                    category, confidence = await self._classify_error(str_value)
+                    plain_value = re.sub(r"<[^>]+>", " ", str_value)
+                    plain_value = " ".join(plain_value.split())
+                    reason_match = re.search(r"\breason=(\w+)", plain_value)
+                    classify_input = reason_match.group(1) if reason_match else plain_value
+                    category, confidence = await self._classify_error(classify_input)
                     say(f"Classified as: {category} (confidence: {confidence:.2f})")
                     nodes.append(
                         SymptomNode(
                             name=category,
-                            description=str_value,
+                            description=plain_value,
                             metadata={
                                 "source": "error_classifier",
                                 "classifier_confidence": confidence,
+                                "raw_description": str_value,
                             },
                         )
                     )
@@ -1348,8 +1397,13 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
             # Canonicalize Symptom names through the error classifier so they
             # merge with SymptomNodes produced from errorDialog.
+            # Use the description (actual log message) rather than the
+            # LLM-generated node name — the name may be a pre-categorized label
+            # (e.g. "BrokerageNoCandidates") while the description contains the
+            # raw log line that carries the real signal for classification.
             if node_type_str == "Symptom":
-                canonical, confidence = await self._classify_error(raw_name)
+                classify_input = node_data.get("description") or raw_name
+                canonical, confidence = await self._classify_error(classify_input)
                 node_data["name"] = canonical
                 node_data["metadata"]["classifier_confidence"] = confidence
 

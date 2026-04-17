@@ -292,3 +292,19 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             logger.debug(
                 f"Updated success rate for {resolution_id}: {node.success_rate}"
             )
+
+    async def get_node_description(self, node_type: str, name: str) -> str | None:
+        """Return the description of an existing node, or None if not found."""
+        for node in self.nodes.values():
+            if node.node_type.value == node_type and node.name == name:
+                return getattr(node, "description", None)
+        return None
+
+    async def update_node_description(
+        self, node_type: str, name: str, description: str
+    ) -> None:
+        """Set the description field on an existing node."""
+        for node in self.nodes.values():
+            if node.node_type.value == node_type and node.name == name:
+                node.description = description
+                return

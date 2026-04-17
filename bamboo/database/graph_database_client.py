@@ -105,3 +105,13 @@ class GraphDatabaseClient:
         return await self._backend.update_resolution_success_rate(
             resolution_id, success
         )
+
+    async def get_node_description(self, node_type: str, name: str) -> str | None:
+        """Return the description of an existing node, or None if not found."""
+        return await self._backend.get_node_description(node_type, name)
+
+    async def update_node_description(
+        self, node_type: str, name: str, description: str
+    ) -> None:
+        """Set the description field on an existing node."""
+        await self._backend.update_node_description(node_type, name, description)

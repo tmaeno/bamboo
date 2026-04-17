@@ -461,7 +461,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             MATCH (r:Resolution {id: $resolution_id})
             SET r.total_attempts = COALESCE(r.total_attempts, 0) + 1,
                 r.successful_attempts = COALESCE(r.successful_attempts, 0) + $success_increment,
-                r.success_rate = toFloat(COALESCE(r.successful_attempts, 0) + $success_increment) / 
+                r.success_rate = toFloat(COALESCE(r.successful_attempts, 0) + $success_increment) /
                                  toFloat(COALESCE(r.total_attempts, 0) + 1)
             RETURN r.success_rate as success_rate
             """
@@ -469,4 +469,29 @@ class Neo4jBackend(GraphDatabaseBackend):
                 query,
                 resolution_id=resolution_id,
                 success_increment=1 if success else 0,
+            )
+
+    async def get_node_description(self, node_type: str, name: str) -> str | None:
+        """Return the description of an existing node, or None if not found."""
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            result = await session.run(
+                f"MATCH (n:{node_type} {{name: $name}}) RETURN n.description AS desc",
+                name=name,
+            )
+            record = await result.single()
+            return record["desc"] if record else None
+
+    async def update_node_description(
+        self, node_type: str, name: str, description: str
+    ) -> None:
+        """Set the description field on an existing node."""
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            await session.run(
+                f"MATCH (n:{node_type} {{name: $name}}) SET n.description = $desc",
+                name=name,
+                desc=description,
             )

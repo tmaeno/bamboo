@@ -65,6 +65,11 @@ Prompt constants
     consistency against the original sources.  Returns a structured JSON
     verdict with issues and corrective feedback.
     Used by :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`.
+
+``DOC_SEARCH_KEYWORDS_PROMPT``
+    Extracts 2-5 focused search terms from a task's errorDialog and operator
+    email so that ``search_panda_docs`` retrieves the most relevant sections.
+    Used by :class:`~bamboo.agents.knowledge_accumulator.KnowledgeAccumulator`.
 """
 
 EXTRACTION_PROMPT = """You are a knowledge extraction expert. Your task is to extract structured knowledge from the provided information and construct a knowledge graph.
@@ -139,6 +144,9 @@ SUMMARIZATION_PROMPT = """You are a technical documentation expert. Create a com
 
 Knowledge Graph:
 {graph_data}
+
+PARAMETER DOCUMENTATION (authoritative definitions — use these verbatim when describing task parameters):
+{doc_hints}
 
 Create a entry that:
 1. Highlights the main errors and their causes
@@ -412,6 +420,16 @@ Raw error message:
 {error_message}
 
 Category label:"""
+
+ERROR_CATEGORY_MATCH_PROMPT = """You are an error classification expert.
+
+Does the following error message fit the error category "{category}"?
+
+Error message:
+{error_message}
+
+Answer with exactly "yes" or "no". No explanation."""
+
 
 LOG_EXTRACTION_PROMPT = """You are a log analysis expert reading raw operational log output from a distributed computing job.
 
@@ -911,3 +929,38 @@ Keep:
 Return ONLY the normalised string — no JSON, no explanation, no punctuation
 beyond what is part of the message itself.  Maximum 120 characters.
 """
+
+PROCEDURE_DESC_MERGE_PROMPT = """Merge the two descriptions of the same investigation procedure into the best single description. Keep all distinct information from both; prefer the more specific and complete phrasing. Return ONLY the merged description string, no explanation.
+
+Procedure name: {name}
+
+Description A:
+{desc_a}
+
+Description B:
+{desc_b}
+
+Merged description:"""
+
+DOC_SEARCH_KEYWORDS_PROMPT = """You are helping to query PanDA system documentation.
+
+Given the following error information from a PanDA task, extract 2-5 short,
+focused search terms that would best retrieve the relevant PanDA documentation
+sections. Return ONLY a JSON array of strings, no explanation.
+
+Rules:
+- Only use terms that appear in the provided text — do not invent terms.
+- Prefer PanDA system identifiers exactly as written — ALL_CAPS constants
+  and snake_case reason tokens are the most precise search terms.
+- Each term must be at least 4 characters.
+- Omit generic single words (job, task, log, error, failed, timeout) unless
+  combined with a more specific qualifier.
+
+Error dialog:
+{error_dialog}
+
+Email / operator notes (may be empty):
+{email_text}
+
+JSON array:"""
+

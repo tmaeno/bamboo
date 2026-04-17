@@ -178,6 +178,33 @@ class ReasoningNavigator:
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
         graph_results = await self._query_graph_database(extracted_clues)
+        if not graph_results and extracted_clues.get("symptoms"):
+            show_block(
+                "root cause analysis",
+                "cause:      unknown\n"
+                "confidence: 0.0\n"
+                "resolution: Manual investigation required\n"
+                "reasoning:  No matching causes found in the knowledge base for the "
+                f"observed symptoms: {extracted_clues['symptoms']}",
+            )
+            return AnalysisResult(
+                task_id=task_id,
+                root_cause="unknown",
+                confidence=0.0,
+                resolution="Manual investigation required",
+                explanation=(
+                    "No matching causes found in the knowledge base for the "
+                    f"observed symptoms: {extracted_clues['symptoms']}"
+                ),
+                email_content="",
+                metadata={
+                    "extracted_clues": extracted_clues,
+                    "graph_results_count": 0,
+                    "vector_results_count": 0,
+                    "procedures_found": 0,
+                    "investigation": {},
+                },
+            )
         vector_results = await self._query_vector_database(extracted_clues, task_data)
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
@@ -264,8 +291,18 @@ class ReasoningNavigator:
             List of cause dicts from :meth:`GraphDatabaseClient.find_causes`.
         """
         logger.info("ReasoningNavigator: querying graph database")
+        symptoms = extracted_clues.get("symptoms") or []
+        for symptom in symptoms:
+            single = await self.graph_db.find_causes(symptoms=[symptom], limit=1)
+            if not single:
+                logger.info(
+                    "ReasoningNavigator: symptom '%s' has no known causes in graph "
+                    "— returning no results to avoid spurious match",
+                    symptom,
+                )
+                return []
         results = await self.graph_db.find_causes(
-            symptoms=extracted_clues.get("symptoms"),
+            symptoms=symptoms or None,
             task_features=extracted_clues.get("task_features"),
             environment_factors=extracted_clues.get("environment_factors"),
             components=extracted_clues.get("components"),

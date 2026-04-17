@@ -67,13 +67,15 @@ _MAX_ERROR_DIALOG_LOGS = 5
 _RETRY_CHAIN_FIELDS = ("jediTaskID", "status", "errorDialog", "retryID", "transUses")
 
 # PanDA WMS documentation GitHub repository.
-_PANDA_DOCS_RAW_BASE = "https://raw.githubusercontent.com/PanDAWMS/panda-docs/main"
-_PANDA_DOCS_WEB_BASE = "https://github.com/PanDAWMS/panda-docs/blob/main"
+_PANDA_DOCS_ORG = "tmaeno"
+_PANDA_DOCS_RAW_BASE = f"https://raw.githubusercontent.com/{_PANDA_DOCS_ORG}/panda-docs/main"
+_PANDA_DOCS_WEB_BASE = f"https://github.com/{_PANDA_DOCS_ORG}/panda-docs/blob/main"
 _PANDA_DOCS_TREE_URL = (
-    "https://api.github.com/repos/PanDAWMS/panda-docs/git/trees/main?recursive=1"
+    f"https://api.github.com/repos/{_PANDA_DOCS_ORG}/panda-docs/git/trees/main?recursive=1"
 )
 
 _TASK_PARAMS_RST_PATH = "docs/source/advanced/task_params.rst"
+_BROKERAGE_RST_PATH = "docs/source/advanced/brokerage.rst"
 
 # RST files excluded from the BM25 full-text index because they are handled
 # by dedicated structured parsers (e.g. _fetch_task_params_table).
@@ -397,6 +399,18 @@ class PandaMcpClient(McpClient):
                     "required": ["query"],
                 },
             ),
+            McpTool(
+                name="fetch_brokerage_context",
+                description=(
+                    "Fetches the full unfiltered brokerage log from the task's "
+                    "errorDialog link together with the PanDA brokerage "
+                    "documentation page. Use this when investigating "
+                    "'no suitable sites', placement throttling, or "
+                    "'BrokerageNoCandidates' symptoms to get complete "
+                    "site-selection details that the trimmed first-pass log omits."
+                ),
+                parameters_schema={"type": "object", "properties": {}, "required": []},
+            ),
         ]
         self._dispatch = {
             "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
@@ -407,6 +421,7 @@ class PandaMcpClient(McpClient):
             "get_task_input_datasets": self._get_task_input_datasets,
             "search_panda_server_source": self._search_panda_server_source,
             "search_panda_docs": self._search_panda_docs,
+            "fetch_brokerage_context": self._fetch_brokerage_context,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -886,6 +901,52 @@ class PandaMcpClient(McpClient):
         )
         return results
 
+    async def _fetch_brokerage_context(
+        self,
+        task_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the full unfiltered brokerage log(s) and the brokerage RST page.
+
+        Unlike ``fetch_error_dialog_logs``, no log filter is applied so the
+        complete site-selection funnel is visible to the LLM.
+        """
+        error_dialog: str = (task_data or {}).get("errorDialog") or ""
+        urls = extract_log_urls(error_dialog)[:_MAX_ERROR_DIALOG_LOGS]
+
+        contents = await asyncio.gather(
+            *[async_fetch_log_content(url) for url in urls],
+            return_exceptions=True,
+        )
+        logs: dict[str, str] = {
+            url: c
+            for url, c in zip(urls, contents)
+            if c and not isinstance(c, BaseException)
+        }
+        logger.info(
+            "PandaMcpClient.fetch_brokerage_context: fetched %d/%d log(s)",
+            len(logs),
+            len(urls),
+        )
+        brokerage_doc, doc_path = await self._fetch_brokerage_doc()
+        return {"logs": logs, "brokerage_doc": brokerage_doc, "doc_path": doc_path}
+
+    async def _fetch_brokerage_doc(self) -> tuple[str, str]:
+        """Fetch the full PanDA brokerage RST documentation page."""
+        import httpx  # noqa: PLC0415
+        url = f"{_PANDA_DOCS_RAW_BASE}/{_BROKERAGE_RST_PATH}"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url)
+                content = resp.text if resp.status_code == 200 else ""
+                if content:
+                    logger.info(
+                        "PandaMcpClient: fetched brokerage doc (%d chars)", len(content)
+                    )
+                return content, _BROKERAGE_RST_PATH
+        except Exception as exc:
+            logger.warning("PandaMcpClient: failed to fetch brokerage doc: %s", exc)
+            return "", _BROKERAGE_RST_PATH
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers for search_panda_docs
@@ -970,7 +1031,7 @@ async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
     for path, content in raw_files.items():
         for raw_para in re.split(r"\n{2,}", content):
             cleaned = _clean(raw_para)
-            if len(cleaned) > 40:
+            if cleaned:
                 paragraphs.append((path, cleaned))
 
     corpus = [re.findall(r"[a-z0-9]+", text.lower()) for _, text in paragraphs]

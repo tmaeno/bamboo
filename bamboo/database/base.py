@@ -194,6 +194,29 @@ class GraphDatabaseBackend(ABC):
         """
         pass
 
+    @abstractmethod
+    async def get_node_description(self, node_type: str, name: str) -> str | None:
+        """Return the description of an existing node, or None if not found.
+
+        Args:
+            node_type: The node type label (e.g. ``"Procedure"``).
+            name:      The canonical node name.
+        """
+        pass
+
+    @abstractmethod
+    async def update_node_description(
+        self, node_type: str, name: str, description: str
+    ) -> None:
+        """Set the description field on an existing node.
+
+        Args:
+            node_type:   The node type label (e.g. ``"Procedure"``).
+            name:        The canonical node name.
+            description: The new description string.
+        """
+        pass
+
 
 class VectorDatabaseBackend(ABC):
     """Interface for vector database implementations."""

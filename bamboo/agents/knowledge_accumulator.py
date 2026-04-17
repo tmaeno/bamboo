@@ -25,8 +25,10 @@ from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (
+    PROCEDURE_DESC_MERGE_PROMPT,
     SUMMARIZATION_PROMPT,
     get_embeddings,
+    get_llm,
     get_summary_llm,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
@@ -157,7 +159,7 @@ class KnowledgeAccumulator:
         # Stored separately from task_logs — docs are domain hints, not execution logs.
         _doc_hints: dict[str, str] = {}
         if self._explorer is not None:
-            _doc_hints = await self._prefetch_panda_docs(task_data or {})
+            _doc_hints = await self._prefetch_panda_docs(task_data or {}, email_text=email_text or "")
 
         email_investigation = ""
         if email_text and email_text.strip():
@@ -264,7 +266,7 @@ class KnowledgeAccumulator:
                 "skipping storage for graph_id=%s",
                 graph_id,
             )
-            summary = await self._generate_summary(graph)
+            summary = await self._generate_summary(graph, doc_hints=_doc_hints)
             key_insights = await self._extract_key_insights(graph)
             return ExtractedKnowledge(
                 graph=graph,
@@ -312,7 +314,7 @@ class KnowledgeAccumulator:
                     )
             await self._store_graph(graph)
 
-        summary = await self._generate_summary(graph)
+        summary = await self._generate_summary(graph, doc_hints=_doc_hints)
         key_insights = await self._extract_key_insights(graph)
 
         if not dry_run:
@@ -342,13 +344,18 @@ class KnowledgeAccumulator:
         )
 
     async def _prefetch_panda_docs(
-        self, task_data: dict[str, Any]
+        self, task_data: dict[str, Any], email_text: str = ""
     ) -> dict[str, str]:
         """Fetch PanDA documentation hints before the first extraction pass.
 
         Derives search queries from key ``task_data`` fields (status,
-        errorDialog, splitRule sub-rule keys) and calls ``search_panda_docs``
-        via PandaMcpClient.
+        errorDialog, splitRule sub-rule keys) and an optional ``email_text``,
+        then calls ``search_panda_docs`` via PandaMcpClient.
+
+        For ``errorDialog`` and ``email_text`` an LLM call extracts 2-5
+        focused search terms so that the most relevant documentation section
+        is retrieved rather than a generic one.  Falls back to the raw
+        120-char errorDialog string if the LLM call fails.
 
         Returns a ``doc_hints`` dict: keys are query strings, values are
         plain rendered text (``"[Title] snippet\\n\\n[Title2] snippet2"``).
@@ -356,20 +363,54 @@ class KnowledgeAccumulator:
         """
         import re
 
-        queries: list[str] = []
+        error_dialog = task_data.get("errorDialog", "") or ""
+        plain_error = ""
+        if error_dialog:
+            plain_error = re.sub(r"<[^>]+>", " ", error_dialog)
+            plain_error = " ".join(plain_error.split())
+
+        # Build a single focused query from LLM-extracted keywords.
+        # Falls back to the raw 120-char errorDialog string if the LLM call
+        # fails or there is nothing to extract.
+        doc_query = ""
+        if plain_error or email_text:
+            try:
+                from bamboo.llm import DOC_SEARCH_KEYWORDS_PROMPT, get_extraction_llm  # noqa: PLC0415
+                from langchain_core.messages import HumanMessage  # noqa: PLC0415
+
+                llm = get_extraction_llm()
+                prompt = DOC_SEARCH_KEYWORDS_PROMPT.format(
+                    error_dialog=plain_error[:500].rsplit(None, 1)[0] if plain_error else "(none)",
+                    email_text=email_text[:500].rsplit(None, 1)[0] if email_text else "(none)",
+                )
+                with thinking("Extracting doc search keywords"):
+                    response = await llm.ainvoke([HumanMessage(content=prompt)])
+                raw = response.content.strip()
+                if raw.startswith("```"):
+                    raw = "\n".join(
+                        line for line in raw.splitlines() if not line.startswith("```")
+                    ).strip()
+                keywords: list[str] = json.loads(raw)
+                clean = [k for k in keywords if k and isinstance(k, str)]
+                if clean:
+                    doc_query = " ".join(clean)
+                    say(f"Doc search keywords: {clean}")
+            except Exception as exc:
+                logger.warning(
+                    "KnowledgeAccumulator._prefetch_panda_docs: "
+                    "keyword extraction failed (%s) — falling back to raw errorDialog",
+                    exc,
+                )
+
+            if not doc_query and plain_error:
+                doc_query = plain_error[:120]
 
         status = task_data.get("status", "")
+        queries: list[str] = []
         if status:
             queries.append(f"task status {status}")
-
-        error_dialog = task_data.get("errorDialog", "") or ""
-        if error_dialog:
-            # Strip HTML tags and condense whitespace, then take the first
-            # ~120 chars as a search phrase (avoids sending a wall of text).
-            plain = re.sub(r"<[^>]+>", " ", error_dialog)
-            plain = " ".join(plain.split())[:120]
-            if plain:
-                queries.append(plain)
+        if doc_query:
+            queries.append(doc_query)
 
         if not queries:
             return {}
@@ -607,6 +648,21 @@ class KnowledgeAccumulator:
     # These types hold unstructured prose indexed only in the vector database.
     _GRAPH_DB_SKIP_TYPES = {"Task_Context"}
 
+    async def _merge_procedure_description(
+        self, name: str, existing: str, new: str
+    ) -> str:
+        """Ask the LLM to merge two Procedure descriptions into one."""
+        prompt = PROCEDURE_DESC_MERGE_PROMPT.format(
+            name=name, desc_a=existing, desc_b=new
+        )
+        llm = get_llm()
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        merged = response.content.strip()
+        logger.info(
+            "KnowledgeAccumulator: merged description for procedure '%s'", name
+        )
+        return merged
+
     async def _store_graph(self, graph: KnowledgeGraph):
         """Persist graph nodes and relationships to Graph database.
 
@@ -645,6 +701,22 @@ class KnowledgeAccumulator:
             n_isolated,
         )
 
+        # For Procedure nodes: LLM-merge descriptions when a same-named node exists.
+        for node in graph_nodes:
+            if node.node_type.value != "Procedure" or not node.description:
+                continue
+            existing_desc = await self.graph_db.get_node_description(
+                "Procedure", node.name
+            )
+            if existing_desc is not None and existing_desc.strip() != node.description.strip():
+                merged = await self._merge_procedure_description(
+                    node.name, existing_desc, node.description
+                )
+                await self.graph_db.update_node_description(
+                    "Procedure", node.name, merged
+                )
+                node.description = merged
+
         node_ids: dict[str, str] = {}
         for node in graph_nodes:
             node_id = await self.graph_db.get_or_create_canonical_node(node, node.name)
@@ -681,7 +753,9 @@ class KnowledgeAccumulator:
 
         logger.info("KnowledgeAccumulator: graph stored successfully")
 
-    async def _generate_summary(self, graph: KnowledgeGraph) -> str:
+    async def _generate_summary(
+        self, graph: KnowledgeGraph, doc_hints: dict[str, str] | None = None
+    ) -> str:
         """Ask the LLM to produce a narrative summary of the knowledge graph.
 
         The summary is stored in Qdrant so that users can retrieve full
@@ -709,8 +783,13 @@ class KnowledgeAccumulator:
             ],
         }
 
+        hints_text = (
+            "\n".join(f"{k}:\n{v}" for k, v in (doc_hints or {}).items())
+            or "(none)"
+        )
         prompt = SUMMARIZATION_PROMPT.format(
-            graph_data=json.dumps(graph_data, indent=2)
+            graph_data=json.dumps(graph_data, indent=2),
+            doc_hints=hints_text,
         )
         messages = [
             SystemMessage(content="You are an expert at creating technical summaries."),
@@ -742,11 +821,15 @@ class KnowledgeAccumulator:
         insights = []
         for node in graph.nodes:
             if node.description and node.node_type.value in _INDEXABLE:
+                # For Symptom nodes the raw error message is preserved in
+                # metadata["raw_description"] (before description canonicalization).
+                # Use it for richer semantic search; fall back to description.
+                content = node.metadata.get("raw_description") or node.description
                 insights.append(
                     {
                         "node_id": node.id,
                         "section": node.node_type.value,
-                        "content": node.description,
+                        "content": content,
                     }
                 )
         return insights

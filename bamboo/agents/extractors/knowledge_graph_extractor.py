@@ -113,11 +113,13 @@ class KnowledgeGraphExtractor:
 
         from bamboo.utils.canonicalize import canonicalize_descriptions  # noqa: PLC0415
 
-        # Only canonicalize nodes with free-form prose descriptions.
-        # Task_Feature (attribute=value), Symptom (already canonicalized via
-        # ErrorCategoryClassifier), Component, and Environment nodes have
-        # short structured names — no prose to strip.
-        _DESC_CANONICALIZE_TYPES = frozenset({"Cause", "Resolution", "Procedure", "Task_Context"})
+        # Canonicalize free-form prose descriptions.
+        # Task_Feature (attribute=value) and Environment nodes have short
+        # structured names with no prose to strip.  Component names are
+        # structured system labels.  Symptom *names* are already canonical via
+        # ErrorCategoryClassifier; their *descriptions* (raw error messages /
+        # LLM summaries from logs) still need incident-specific tokens stripped.
+        _DESC_CANONICALIZE_TYPES = frozenset({"Cause", "Resolution", "Procedure", "Task_Context", "Symptom"})
         prose_nodes = [n for n in graph.nodes if n.node_type.value in _DESC_CANONICALIZE_TYPES]
         await canonicalize_descriptions(prose_nodes, cache=self._desc_cache)
 
