@@ -42,8 +42,13 @@ class ReasoningState(TypedDict):
 
 
 async def analyze_task_node(state: ReasoningState) -> ReasoningState:
-    """Analyse a problematic task and determine its root cause."""
+    """Analyse a problematic task, compose a prescription, and draft the email."""
     try:
+        from bamboo.agents.email_drafter import EmailDrafter
+        from bamboo.agents.prescription_composer import PrescriptionComposer
+        from bamboo.config import get_settings
+        from bamboo.mcp.factory import build_mcp_client
+
         graph_db = GraphDatabaseClient()
         vector_db = VectorDatabaseClient()
 
@@ -61,6 +66,14 @@ async def analyze_task_node(state: ReasoningState) -> ReasoningState:
         await graph_db.close()
         await vector_db.close()
 
+        _mcp = build_mcp_client(get_settings())
+        prescription = await PrescriptionComposer(_mcp).compose(
+            state["task_data"], result
+        )
+        email_content = await EmailDrafter().draft(
+            state["task_data"], result, prescription
+        )
+
         return {
             **state,
             "analysis": {
@@ -68,8 +81,9 @@ async def analyze_task_node(state: ReasoningState) -> ReasoningState:
                 "confidence": result.confidence,
                 "resolution": result.resolution,
                 "explanation": result.explanation,
+                "prescription": prescription,
             },
-            "email_content": result.email_content,
+            "email_content": email_content,
             "status": "analyzed",
         }
     except Exception as e:

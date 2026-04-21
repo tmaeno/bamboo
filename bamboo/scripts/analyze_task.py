@@ -86,7 +86,9 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         asyncio.run(_find_pattern(all_task_ids, min_occurrences))
         return
 
-    result = asyncio.run(_analyze_task(task_dict, task_id, external_dict, verbose))
+    result, prescription, email_content = asyncio.run(
+        _analyze_task(task_dict, task_id, external_dict, verbose)
+    )
 
     # Display results
     click.echo("\n" + "=" * 80)
@@ -97,14 +99,27 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
     click.echo(f"Confidence: {result.confidence:.2%}")
     click.echo(f"\nResolution: {result.resolution}")
     click.echo(f"\nExplanation:\n{result.explanation}")
+
+    if prescription and prescription.get("hints"):
+        click.echo("\n" + "-" * 80)
+        click.echo("PRESCRIPTION")
+        click.echo("-" * 80)
+        for hint in prescription["hints"]:
+            click.echo(f"  • {hint}")
+        if prescription.get("command_template"):
+            click.echo(f"\n  Suggested options: {prescription['command_template']}")
+        if prescription.get("notes"):
+            click.echo(f"\n  Notes: {prescription['notes']}")
+
     click.echo("\n" + "-" * 80)
     click.echo("EMAIL DRAFT")
     click.echo("-" * 80)
-    click.echo(result.email_content)
+    click.echo(email_content)
     click.echo("=" * 80)
 
     if output:
         output_path = Path(output)
+        result.email_content = email_content
         output_path.write_text(result.model_dump_json(indent=2))
         click.echo(f"\n✓ Results saved to {output}")
 
@@ -215,8 +230,10 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False):
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
+    from bamboo.agents.email_drafter import EmailDrafter
     from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.prescription_composer import PrescriptionComposer
     from bamboo.config import get_settings
     from bamboo.mcp.factory import build_mcp_client
 
@@ -233,10 +250,18 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False):
         agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
 
         click.echo("Analyzing task...")
-        return await agent.analyze_task(
+        result = await agent.analyze_task(
             task_data=task_dict,
             external_data=external_dict,
         )
+
+        click.echo("Composing prescription...")
+        prescription = await PrescriptionComposer(_mcp).compose(task_dict, result)
+
+        click.echo("Drafting email...")
+        email_content = await EmailDrafter().draft(task_dict, result, prescription)
+
+        return result, prescription, email_content
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)

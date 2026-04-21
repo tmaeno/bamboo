@@ -266,7 +266,7 @@ class KnowledgeAccumulator:
                 "skipping storage for graph_id=%s",
                 graph_id,
             )
-            summary = await self._generate_summary(graph, doc_hints=_doc_hints)
+            summary = await self._generate_summary(graph, doc_hints=_doc_hints, email_text=email_text)
             key_insights = await self._extract_key_insights(graph)
             return ExtractedKnowledge(
                 graph=graph,
@@ -314,7 +314,7 @@ class KnowledgeAccumulator:
                     )
             await self._store_graph(graph)
 
-        summary = await self._generate_summary(graph, doc_hints=_doc_hints)
+        summary = await self._generate_summary(graph, doc_hints=_doc_hints, email_text=email_text)
         key_insights = await self._extract_key_insights(graph)
 
         if not dry_run:
@@ -754,7 +754,10 @@ class KnowledgeAccumulator:
         logger.info("KnowledgeAccumulator: graph stored successfully")
 
     async def _generate_summary(
-        self, graph: KnowledgeGraph, doc_hints: dict[str, str] | None = None
+        self,
+        graph: KnowledgeGraph,
+        doc_hints: dict[str, str] | None = None,
+        email_text: str = "",
     ) -> str:
         """Ask the LLM to produce a narrative summary of the knowledge graph.
 
@@ -790,6 +793,7 @@ class KnowledgeAccumulator:
         prompt = SUMMARIZATION_PROMPT.format(
             graph_data=json.dumps(graph_data, indent=2),
             doc_hints=hints_text,
+            email_text=email_text or "(none)",
         )
         messages = [
             SystemMessage(content="You are an expert at creating technical summaries."),

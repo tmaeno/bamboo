@@ -143,7 +143,7 @@ class AnalysisResult(BaseModel):
         resolution:          Recommended resolution.
         explanation:         Full LLM reasoning narrative.
         supporting_evidence: Evidence items from graph and vector results.
-        email_content:       Draft email generated for the task submitter.
+        email_content:       Draft email (populated by EmailDrafter, not navigator).
         metadata:            Additional context (clue counts, etc.).
     """
 
@@ -153,5 +153,5 @@ class AnalysisResult(BaseModel):
     resolution: str
     explanation: str
     supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
-    email_content: str
+    email_content: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)

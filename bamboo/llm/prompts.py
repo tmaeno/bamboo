@@ -48,6 +48,20 @@ Prompt constants
     Drafts a professional resolution email for a task submitter.
     Used by :class:`~bamboo.agents.reasoning_navigator.ReasoningNavigator`.
 
+``PRESCRIPTION_CLASSIFY_PROMPT``
+    Classifies a resolution into an action type (resubmit, contact_admin, etc.) and
+    decides whether CLI documentation is needed.
+    Used by :class:`~bamboo.agents.prescription_composer.PrescriptionComposer`.
+
+``PRESCRIPTION_COMPOSE_PROMPT``
+    Composes concrete action steps (prescription) given the analysis and any fetched
+    resources (e.g. CLI docs).
+    Used by :class:`~bamboo.agents.prescription_composer.PrescriptionComposer`.
+
+``PRESCRIPTION_EMAIL_PROMPT``
+    Drafts a resolution email combining root-cause analysis and prescription hints.
+    Used by :class:`~bamboo.agents.email_drafter.EmailDrafter`.
+
 ``JOB_DIAG_NORMALIZE_PROMPT``
     Strips job-specific tokens (file names, dataset scopes, job IDs, replica
     URLs, etc.) from a raw error diagnostic string, returning a reusable
@@ -140,24 +154,29 @@ Output your response as a valid JSON with the following structure:
 """
 
 
-SUMMARIZATION_PROMPT = """You are a technical documentation expert. Create a comprehensive yet concise entry of the following knowledge graph.
+SUMMARIZATION_PROMPT = """You are a technical documentation expert. Create a concise summary of the following knowledge graph and email thread.
 
 Knowledge Graph:
 {graph_data}
 
-PARAMETER DOCUMENTATION (authoritative definitions — use these verbatim when describing task parameters):
+Email Thread (if available):
+{email_text}
+
+TERMINOLOGY REFERENCE (use only to interpret technical terms already present in the graph or email — do NOT introduce new causes, resolutions, procedures, or commands from this section):
 {doc_hints}
 
-Create a entry that:
-1. Highlights the main errors and their causes
-2. Describes the key contributing factors (environment, features, components)
-3. Outlines the recommended resolutions
-4. Captures important patterns and insights
+STRICT RULE: Only use information explicitly present in either the Knowledge Graph or the Email Thread above.
+Do NOT invent, infer, or supplement with domain knowledge — not extra causes, not example commands, not additional context.
 
-The entry should be:
+Create a summary that:
+1. Highlights the causes and their descriptions, exactly as they appear in the graph
+2. Describes the key contributing factors (environment, features, components) from the graph
+3. Outlines the resolutions from the graph
+4. Describes any investigation procedures from the graph or email thread (steps taken, findings, communications with admins)
+
+The summary should be:
 - Clear and technical
-- Searchable (include key terms)
-- Contextual (provide enough background)
+- Faithful to the graph and email — no hallucinated content
 - Actionable (highlight what matters for troubleshooting)
 
 Summary:
@@ -283,11 +302,9 @@ Node types to extract:
   Extract a Procedure ONLY when the email explicitly describes what was investigated
   and how, not just that an investigation took place.
   name = "{{strategy_type}}:{{cause_name}}" — a stable merge key combining the strategy
-         and the canonical cause name (e.g. "investigate finished normal jobs with high
-         cpuConsumptionTime and wallTime:cpu consumption exceeded job limit").
-  strategy_type = concise natural-language description of the investigation
-                  (e.g. "investigate finished normal jobs with high cpuConsumptionTime
-                  and wallTime").  Must be specific enough to guide tool selection.
+         and the canonical cause name.
+  strategy_type = concise natural-language description of the investigation.
+                  Must be specific enough to guide tool selection.
   description = full prose from the email describing what was investigated and why.
   parameters = structured filter and metric details as a dict, e.g.:
                {{"filter": {{"status": "finished", "jobType": "normal"}},
@@ -963,4 +980,92 @@ Email / operator notes (may be empty):
 {email_text}
 
 JSON array:"""
+
+PRESCRIPTION_CLASSIFY_PROMPT = """You are a PanDA task failure analyst.
+
+TASK FAILURE ANALYSIS:
+Root cause: {root_cause}
+Resolution from knowledge graph: {resolution}
+Investigation findings: {investigation}
+
+Classify the resolution into one of these action types:
+- resubmit: The user should resubmit the task with different CLI options or parameters
+- contact_admin: The user should contact a site or system administrator
+- fix_code: The user should fix their analysis script or code
+- wait: The user should wait for an external condition to be resolved
+- other: Any other action type
+
+Also specify whether you need CLI documentation (only for "resubmit" type), and which
+submission command applies ("prun" or "pathena") based on the components below.
+
+Components identified: {components}
+
+Respond as JSON only:
+{{
+  "action_type": "resubmit|contact_admin|fix_code|wait|other",
+  "needs_cli_docs": true|false,
+  "component": "prun|pathena|null"
+}}"""
+
+PRESCRIPTION_COMPOSE_PROMPT = """You are a PanDA task failure analyst providing actionable remediation steps.
+
+TASK SUMMARY:
+{task_summary}
+
+ROOT CAUSE: {root_cause}
+
+RESOLUTION FROM KNOWLEDGE GRAPH:
+{resolution}
+
+INVESTIGATION FINDINGS (job-level metrics from this task):
+{investigation}
+
+ACTION TYPE: {action_type}
+
+{cli_docs_section}
+
+Based on the above, provide concrete, actionable steps for the operator.
+
+For "resubmit": Give 2-3 specific CLI option changes with exact flag names, recommended
+values, and one-sentence justification referencing measured metrics where available.
+For "contact_admin": Specify who to contact and what to report.
+For "fix_code": Describe what to look for and change in the analysis code.
+For "wait": Describe what to wait for and how to check if it is resolved.
+For "other": Provide clear free-text action steps.
+
+Respond as JSON only:
+{{
+  "action_type": "{action_type}",
+  "hints": ["concrete step 1", "concrete step 2"],
+  "command_template": "--flag=value --flag2=value2",
+  "notes": "any caveats or missing information"
+}}
+
+Note: "command_template" is only required for action_type "resubmit"; omit for others."""
+
+PRESCRIPTION_EMAIL_PROMPT = """You are a technical communication expert writing to a physicist about their failed PanDA task.
+
+Task ID: {task_id}
+Task description: {task_description}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+ROOT CAUSE ANALYSIS:
+{analysis}
+
+PRESCRIPTION (recommended action):
+{prescription}
+
+Write a clear, professional email that:
+1. Briefly acknowledges the issue
+2. Explains the root cause in accessible language
+3. Provides the specific action steps from the prescription above
+4. For "resubmit" prescriptions: include the suggested command options concretely
+5. For "contact_admin" prescriptions: include the contact details
+6. References specific measured values from the investigation where available
+7. Offers further help if needed
+8. Is professional but friendly
+
+Generate the email content:"""
 

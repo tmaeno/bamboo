@@ -419,9 +419,13 @@ async def populate_knowledge_interactive():
 
 async def analyze_task_interactive():
     """Interactive task analysis."""
+    from bamboo.agents.email_drafter import EmailDrafter
+    from bamboo.agents.prescription_composer import PrescriptionComposer
     from bamboo.agents.reasoning_navigator import ReasoningNavigator
+    from bamboo.config import get_settings
     from bamboo.database.graph_database_client import GraphDatabaseClient
     from bamboo.database.vector_database_client import VectorDatabaseClient
+    from bamboo.mcp.factory import build_mcp_client
 
     console.print("\n[bold cyan]Analyze Problematic Task[/bold cyan]")
 
@@ -469,6 +473,7 @@ async def analyze_task_interactive():
         await graph_db.connect()
         await vector_db.connect()
 
+        _mcp = build_mcp_client(get_settings())
         agent = ReasoningNavigator(graph_db, vector_db)
 
         with console.status("[bold green]Analyzing task..."):
@@ -476,6 +481,12 @@ async def analyze_task_interactive():
                 task_data=task_dict,
                 external_data=external_dict,
             )
+
+        with console.status("[bold green]Composing prescription..."):
+            prescription = await PrescriptionComposer(_mcp).compose(task_dict, result)
+
+        with console.status("[bold green]Drafting email..."):
+            email_content = await EmailDrafter().draft(task_dict, result, prescription)
 
         console.print("\n" + "=" * 80)
         console.print(
@@ -491,9 +502,19 @@ async def analyze_task_interactive():
 
         console.print(f"\n[bold]Explanation:[/bold]\n{result.explanation}")
 
+        if prescription and prescription.get("hints"):
+            console.print("\n" + "-" * 80)
+            console.print("[bold]Prescription:[/bold]")
+            for hint in prescription["hints"]:
+                console.print(f"  • {hint}")
+            if prescription.get("command_template"):
+                console.print(f"\n  Suggested options: {prescription['command_template']}")
+            if prescription.get("notes"):
+                console.print(f"\n  Notes: {prescription['notes']}")
+
         console.print("\n" + "-" * 80)
         console.print(
-            Panel(result.email_content, title="Email Draft", border_style="blue")
+            Panel(email_content, title="Email Draft", border_style="blue")
         )
 
         if _confirm("\nDo you approve this analysis?"):

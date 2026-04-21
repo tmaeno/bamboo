@@ -411,6 +411,26 @@ class PandaMcpClient(McpClient):
                 ),
                 parameters_schema={"type": "object", "properties": {}, "required": []},
             ),
+            McpTool(
+                name="fetch_cli_options",
+                description=(
+                    "Returns the --help output for the prun or pathena command. "
+                    "Pass component='prun' or component='pathena' based on the "
+                    "Component node in the task graph. Use when the resolution "
+                    "involves resubmitting a task with different CLI options."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "component": {
+                            "type": "string",
+                            "enum": ["prun", "pathena"],
+                            "description": "Which submission command to fetch help for",
+                        }
+                    },
+                    "required": ["component"],
+                },
+            ),
         ]
         self._dispatch = {
             "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
@@ -422,6 +442,7 @@ class PandaMcpClient(McpClient):
             "search_panda_server_source": self._search_panda_server_source,
             "search_panda_docs": self._search_panda_docs,
             "fetch_brokerage_context": self._fetch_brokerage_context,
+            "fetch_cli_options": self._fetch_cli_options,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -637,16 +658,18 @@ class PandaMcpClient(McpClient):
         task_data: dict[str, Any],
         max_jobs: int = 5,
     ) -> list[dict[str, Any]]:
-        """Fetch details for representative failed jobs for *task_id*.
+        """Fetch details for representative scout and failed jobs for *task_id*.
 
-        Fetches all unsuccessful jobs (via ``get_job_descriptions`` with
-        ``unsuccessful_only=True``) then splits by ``processingType``:
-        failed scouts are prioritised first, then samples by distinct
-        ``pilotErrorCode`` from the remaining jobs.
+        Fetches all jobs (via ``get_job_descriptions``) then splits by
+        ``extendedProdSourceLabel``: jobs whose label ends with ``scout`` are
+        prioritised first (regardless of status), then samples by distinct
+        ``pilotErrorCode`` from the remaining failed/cancelled/closed jobs.
 
         Returns a list of compact dicts with fields: ``jobID``, ``computingSite``,
         ``jobStatus``, ``pilotErrorCode``, ``pilotErrorDiag``, ``transExitCode``,
-        ``processingType``.  Returns an empty list on any error.
+        ``processingType``, ``cpuConsumptionTime``, ``wallTime``, ``jobDuration``,
+        ``extendedProdSourceLabel``, ``maxPSS`` (maximum proportional set size, kB),
+        ``actualCoreCount``, ``memory_leak``.  Returns an empty list on any error.
         """
         try:
             from pandaclient import Client  # noqa: PLC0415
@@ -666,6 +689,9 @@ class PandaMcpClient(McpClient):
             "wallTime",
             "jobDuration",
             "extendedProdSourceLabel",
+            "maxPSS",
+            "actualCoreCount",
+            "memory_leak",
         )
 
         def _compact(j: dict[str, Any]) -> dict[str, Any]:
@@ -929,6 +955,32 @@ class PandaMcpClient(McpClient):
         )
         brokerage_doc, doc_path = await self._fetch_brokerage_doc()
         return {"logs": logs, "brokerage_doc": brokerage_doc, "doc_path": doc_path}
+
+    async def _fetch_cli_options(self, component: str) -> dict[str, Any]:
+        """Return the --help output for prun or pathena."""
+        import io  # noqa: PLC0415
+        from contextlib import redirect_stdout  # noqa: PLC0415
+
+        buf = io.StringIO()
+        try:
+            if component == "prun":
+                from pandaclient import PrunScript  # noqa: PLC0415
+                try:
+                    with redirect_stdout(buf):
+                        PrunScript.main(ext_args=["--help"])
+                except SystemExit:
+                    pass
+            elif component == "pathena":
+                # PathenaScript defines optP at module level; use print_help directly.
+                from pandaclient import PathenaScript  # noqa: PLC0415
+                PathenaScript.optP.print_help(buf)
+            else:
+                return {"error": f"Unknown component: {component}"}
+        except ImportError as exc:
+            return {"error": f"pandaclient not available: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)}
+        return {component: buf.getvalue()}
 
     async def _fetch_brokerage_doc(self) -> tuple[str, str]:
         """Fetch the full PanDA brokerage RST documentation page."""

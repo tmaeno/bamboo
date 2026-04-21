@@ -1,4 +1,4 @@
-"""Reasoning agent: diagnoses incidents and generates resolution emails.
+"""Reasoning agent: diagnoses incidents and produces root-cause analysis.
 
 :class:`ReasoningNavigator` is the second half of the Bamboo pipeline.  Given a
 new problematic task it:
@@ -20,7 +20,11 @@ new problematic task it:
    the appropriate MCP tool from the available tool catalogue and runs the
    investigation.  If no procedure is found, the navigator notes that human input
    is recommended.
-6. Drafts a professional email for the task submitter.
+
+Email drafting is handled downstream by
+:class:`~bamboo.agents.email_drafter.EmailDrafter`, which combines the navigator's
+analysis with the prescription from
+:class:`~bamboo.agents.prescription_composer.PrescriptionComposer`.
 """
 
 import json
@@ -35,7 +39,6 @@ from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.agents.knowledge_reviewer import _join_doc_hints
 from bamboo.llm import (
     CAUSE_IDENTIFICATION_PROMPT,
-    EMAIL_GENERATION_PROMPT,
     get_embeddings,
     get_llm,
 )
@@ -47,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReasoningNavigator:
-    """Diagnoses a problematic task and drafts a resolution email.
+    """Diagnoses a problematic task and returns a root-cause analysis.
 
     The agent is stateless between calls: every :meth:`analyze_task`
     invocation is independent.
@@ -143,12 +146,13 @@ class ReasoningNavigator:
         """Analyse a problematic task and return a root-cause + resolution result.
 
         Pipeline:
-            1. Extract knowledge graph from structured task fields, logs, job
-               logs, and aggregated job data.
-            2. Query graph DB for candidate causes (task features + job features).
+            1. Extract knowledge graph from structured task fields, logs, and
+               aggregated job data.
+            2. Query graph DB for candidate causes.
             3. Query vector DB for similar past cases (two-step retrieval).
-            4. Ask LLM to identify the root cause.
-            5. Ask LLM to draft a resolution email.
+            4. Ask LLM to identify the root cause (Phase 1).
+            5. Query graph DB for investigation procedures; run them via MCP
+               explorer (Phase 2).
 
         Args:
             task_data:     Structured task fields (must include ``taskID``; ``status``
@@ -160,7 +164,9 @@ class ReasoningNavigator:
                            Extracted nodes are tagged ``log_level="task"``.
         Returns:
             :class:`~bamboo.models.knowledge_entity.AnalysisResult` with the
-            root cause, resolution, explanation, email draft, and evidence.
+            root cause, resolution, explanation, and investigation evidence.
+            Email drafting is handled downstream by
+            :class:`~bamboo.agents.email_drafter.EmailDrafter`.
         """
         raw_task_id = task_data.get("jediTaskID") or "unknown"
         task_status = task_data.get("status")
@@ -196,7 +202,6 @@ class ReasoningNavigator:
                     "No matching causes found in the knowledge base for the "
                     f"observed symptoms: {extracted_clues['symptoms']}"
                 ),
-                email_content="",
                 metadata={
                     "extracted_clues": extracted_clues,
                     "graph_results_count": 0,
@@ -256,8 +261,6 @@ class ReasoningNavigator:
             # Attach raw investigation data so the email LLM sees job IDs and metrics directly
             analysis["investigation_data"] = inv_external
 
-        email_content = await self._generate_email(task_data, analysis, domain_hints=domain_hints)
-
         return AnalysisResult(
             task_id=task_id,
             root_cause=analysis["root_cause"],
@@ -265,13 +268,14 @@ class ReasoningNavigator:
             resolution=analysis["resolution"],
             explanation=analysis["reasoning"],
             supporting_evidence=analysis.get("supporting_evidence", []),
-            email_content=email_content,
             metadata={
                 "extracted_clues": extracted_clues,
                 "graph_results_count": len(graph_results),
                 "vector_results_count": len(vector_results),
                 "procedures_found": len(procedures),
                 "investigation": investigation_result,
+                "investigation_data": analysis.get("investigation_data", {}),
+                "components": extracted_clues.get("components", []),
             },
         )
 
@@ -499,42 +503,6 @@ class ReasoningNavigator:
                 "resolution": "Manual investigation required",
                 "reasoning": "LLM response could not be parsed.",
             }
-
-    async def _generate_email(
-        self, task_data: dict[str, Any], analysis: dict[str, Any], domain_hints: str = "(none)"
-    ) -> str:
-        """Draft a professional resolution email for the task submitter.
-
-        Args:
-            task_data: Raw task fields (``taskID`` and ``description`` used).
-            analysis:  Root-cause analysis dict from :meth:`_identify_root_cause`.
-
-        Returns:
-            Email body as a plain-text string.
-        """
-        logger.info("ReasoningNavigator: generating resolution email")
-
-        raw_task_id = task_data.get("jediTaskID") or "unknown"
-        task_status = task_data.get("status")
-        composite_task_id = (
-            f"{raw_task_id}:{task_status}" if task_status else raw_task_id
-        )
-        prompt = EMAIL_GENERATION_PROMPT.format(
-            task_id=composite_task_id,
-            task_description=task_data.get("description", ""),
-            domain_hints=domain_hints,
-            analysis=json.dumps(analysis, indent=2, default=str),
-        )
-        messages = [
-            SystemMessage(
-                content="You are an expert at technical communication and customer support."
-            ),
-            HumanMessage(content=prompt),
-        ]
-
-        with thinking("Working"):
-            response = await self.llm.ainvoke(messages)
-        return response.content
 
     async def _run_investigation(
         self,
