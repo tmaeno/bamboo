@@ -1288,6 +1288,33 @@ def seed_drafts_cmd(csv_path, output_dir, approved_dir, similarity_threshold, co
     )
 
 
+@cli.command("review-drafts")
+@click.option(
+    "--drafts",
+    "drafts_dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory containing draft JSON files to review.",
+)
+def review_drafts_cmd(drafts_dir):
+    """Interactively review and approve draft email notifications.
+
+    Opens a terminal UI showing each draft side-by-side with editable
+    email-body fields.  Use Ctrl+D to approve, Ctrl+S to save without
+    approving, and Ctrl+Q to quit.
+
+    Examples:
+
+    \b
+      bamboo review-drafts
+      bamboo review-drafts --drafts my_drafts/
+    """
+    from bamboo.scripts.review_drafts import main as _main
+
+    _main(drafts_dir=drafts_dir)
+
+
 @cli.command("batch-populate")
 @click.option(
     "--drafts",

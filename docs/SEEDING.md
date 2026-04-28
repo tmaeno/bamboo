@@ -15,8 +15,9 @@ burden by:
 1. **`bamboo seed-drafts`** — reading a CSV of problematic PanDA tasks,
    checking what is already known, and generating LLM-assisted JSON draft files
    for tasks that need human attention.
-2. **Human review** — an operator opens each draft, verifies or edits the
-   structured content, and sets `"reviewed": true`.
+2. **`bamboo review-drafts`** — an interactive terminal UI for reading, editing,
+   and approving each draft.  Alternatively, draft JSON files can be edited
+   directly and `"reviewed"` set to `true` by hand.
 3. **`bamboo batch-populate`** — reading every approved draft and calling the
    standard `process_knowledge` pipeline to store graphs and vectors.
 
@@ -30,8 +31,8 @@ bamboo seed-drafts
      ├─── Approved-matched ────────────────────► drafts/ (pre-filled, quick check)
      └─── New ─────────────────────────────────► drafts/ (LLM draft, full review)
                                                          │
-                                               Human review
-                                                 (set reviewed: true)
+                                          bamboo review-drafts
+                                          (or edit JSON by hand)
                                                          │
                                                          ▼
                                               bamboo batch-populate
@@ -178,19 +179,49 @@ human action.
 
 ---
 
-## Step 2 — Human review
+## Step 2 — Review drafts: `bamboo review-drafts`
 
-Open each file in `drafts/` and:
+```bash
+bamboo review-drafts --drafts drafts/
+```
 
-1. Read `review_hint` to understand what kind of review is needed.
-2. **New drafts** (`matched_from: null`): read all four `email_body` fields
-   carefully.  The LLM draft is a starting point — verify or rewrite as needed.
-3. **Pre-filled drafts** (`matched_from` set): check the `review_hint` for
-   task feature differences.  If the listed differences do not affect the root
-   cause, a quick read is sufficient.
-4. Set `"reviewed": true` when satisfied.
+Opens an interactive terminal UI with:
 
-Only drafts with `"reviewed": true` are processed by `batch-populate`.
+- **Left panel** — list of all drafts in the directory.  Each entry is prefixed
+  with `○` (pending) or `✓` (approved).
+- **Right panel** — task metadata (read-only) and four editable fields:
+  `Background`, `Cause`, `Resolution`, and `Procedure` (one step per line).
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate the draft list (auto-saves current draft) |
+| `Ctrl+D` | Approve current draft and jump to the next pending one |
+| `Ctrl+S` | Save edits without approving |
+| `Ctrl+Q` | Quit (saves current draft first) |
+
+### Review guidelines
+
+1. Read the `Hint` line at the top of the detail panel.
+2. **New drafts** (`Matched: —`): read all four fields carefully.  The LLM
+   draft is a starting point — verify or rewrite as needed.
+3. **Pre-filled drafts** (`Matched: task_XXXX.json`): the hint lists task
+   feature differences (taskType, site, coreCount, …).  If those differences
+   do not affect the root cause, a quick read is sufficient.
+4. Press `Ctrl+D` when satisfied.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--drafts` | `drafts/` | Directory containing draft JSON files |
+
+### Manual alternative
+
+If you prefer to skip the TUI, edit the JSON files directly and set
+`"reviewed": true` in each file you want to approve.  Only drafts with
+`"reviewed": true` are processed by `batch-populate`.
 
 ---
 
