@@ -1214,6 +1214,147 @@ def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min
     )
 
 
+@cli.command("seed-drafts")
+@click.option(
+    "--csv",
+    "csv_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="CSV file with jediTaskID and status columns.",
+)
+@click.option(
+    "--output",
+    "output_dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory to write draft JSON files.",
+)
+@click.option(
+    "--approved",
+    "approved_dir",
+    default="approved_email_drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory containing the approved email draft library.",
+)
+@click.option(
+    "--similarity-threshold",
+    default=0.85,
+    show_default=True,
+    type=float,
+    help="Cosine similarity threshold for DB coverage and approved-draft matching.",
+)
+@click.option(
+    "--concurrency",
+    default=5,
+    show_default=True,
+    type=int,
+    help="Maximum concurrent PanDA fetch requests.",
+)
+@click.option(
+    "--skip-existing",
+    is_flag=True,
+    default=False,
+    help="Skip draft files that already exist in the output directory.",
+)
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def seed_drafts_cmd(csv_path, output_dir, approved_dir, similarity_threshold, concurrency, skip_existing, verbose):
+    """Generate seeding drafts for bamboo commissioning.
+
+    Reads a CSV of problematic PanDA tasks and classifies each into one of four
+    tiers: skipped (status changed), DB-covered, approved-matched (pre-filled
+    from library), or new (LLM-generated draft).
+
+    Examples:
+
+    \b
+      bamboo seed-drafts --csv tasks.csv
+      bamboo seed-drafts --csv tasks.csv --output my_drafts/ --approved approved/
+      bamboo seed-drafts --csv tasks.csv --similarity-threshold 0.90
+    """
+    from bamboo.scripts.seed_drafts import main as _main
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        _main,
+        csv_path=csv_path,
+        output_dir=output_dir,
+        approved_dir=approved_dir,
+        similarity_threshold=similarity_threshold,
+        concurrency=concurrency,
+        skip_existing=skip_existing,
+        verbose=verbose,
+    )
+
+
+@cli.command("batch-populate")
+@click.option(
+    "--drafts",
+    "drafts_dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory containing reviewed draft JSON files.",
+)
+@click.option(
+    "--save-to",
+    default="approved_email_drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory to archive reviewed drafts to (approved email library).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview what would be populated without writing to any database.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+@click.option(
+    "--concurrency",
+    default=3,
+    show_default=True,
+    type=int,
+    help="Maximum concurrent process_knowledge calls.",
+)
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
+def batch_populate_cmd(drafts_dir, save_to, dry_run, yes, concurrency, verbose):
+    """Batch-populate knowledge databases from reviewed draft files.
+
+    Reads all ``reviewed: true`` JSON files in the drafts directory and calls
+    the populate logic for each pending task_id.  Successfully populated tasks
+    are removed from the draft's ``task_ids`` list.  Newly reviewed drafts are
+    archived to the approved email library for future use.
+
+    Examples:
+
+    \b
+      bamboo batch-populate
+      bamboo batch-populate --drafts my_drafts/ --save-to approved/
+      bamboo batch-populate --dry-run
+      bamboo batch-populate --yes --concurrency 5
+    """
+    from bamboo.scripts.batch_populate import main as _main
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        _main,
+        drafts_dir=drafts_dir,
+        save_to=save_to,
+        dry_run=dry_run,
+        yes=yes,
+        concurrency=concurrency,
+        verbose=verbose,
+    )
+
+
 @cli.command("verify")
 def verify_cmd():
     """Verify that the Bamboo package is correctly installed."""
