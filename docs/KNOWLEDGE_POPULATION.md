@@ -1,15 +1,43 @@
-# Seeding the Knowledge Databases
+# Knowledge Population
 
-This document covers the **commissioning workflow** for pre-populating bamboo's
-Neo4j (graph) and Qdrant (vector) databases before the system goes live —
-and how to keep them growing incrementally over time.
+Bamboo supports two population paths — choose based on your operational context:
+
+- **Individual** (`bamboo populate`) — ingest a single task immediately.  Suitable
+  for ad-hoc incident analysis and for production incidents handled one at a time.
+- **Batch** (`seed-drafts → review-drafts → batch-populate`) — pre-populate the
+  databases from a large CSV of known problematic tasks before the system goes live,
+  or catch up after a database reset.
 
 ---
 
-## Overview
+## Individual path: `bamboo populate`
+
+```bash
+bamboo populate --task-id <jediTaskID>
+```
+
+Fetches the task from PanDA, runs the full Knowledge Accumulation pipeline
+(extraction → review → optional MCP enrichment), and stores the results directly
+in the graph and vector databases.  Use this for:
+
+- Production incidents: analyze a failing task and immediately add its cause/resolution
+  to the knowledge base.
+- Spot-checks: verify a single known task is correctly represented before a batch run.
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--task-id` | (required) | PanDA jediTaskID |
+| `--source` | `panda` | Extraction source (`panda`, `file`, `llm`) |
+| `-v` / `--verbose` | off | Enable DEBUG logging |
+
+---
+
+## Batch workflow
 
 `Cause`, `Resolution`, and `Procedure` knowledge graph nodes come exclusively
-from human-reviewed email drafts.  The seeding workflow reduces the authoring
+from human-reviewed email drafts.  The batch workflow reduces the authoring
 burden by:
 
 1. **`bamboo seed-drafts`** — reading a CSV of problematic PanDA tasks,
@@ -37,7 +65,7 @@ bamboo seed-drafts
                                                          ▼
                                               bamboo batch-populate
                                                          │
-                                                         ├──► Neo4j + Qdrant
+                                                         ├──► graph + vector databases
                                                          └──► approved_email_drafts/
 ```
 
@@ -278,7 +306,7 @@ As more knowledge accumulates, the proportion of "new" tasks decreases.
 
 ## Database reset recovery
 
-If Neo4j and Qdrant are wiped:
+If the graph and vector databases are reset:
 
 1. Run `bamboo seed-drafts` on the original (or a new) CSV.
 2. The DB coverage check finds nothing.
@@ -296,8 +324,3 @@ can have different root causes depending on task configuration (site, taskType,
 prodSourceLabel, coreCount, splitRule).  The `review_hint` in pre-filled drafts
 shows these differences explicitly so the reviewer can catch mismatches.
 
-**Complementary production path** — once bamboo has sufficient knowledge,
-`bamboo analyze --task-id <id>` → `EmailDrafter.draft()` → human validates →
-`bamboo populate` provides a richer draft source (uses the full causal graph
-including TaskFeature context).  The two paths coexist: seeding for batch
-commissioning, analyze → populate for individual new incidents.

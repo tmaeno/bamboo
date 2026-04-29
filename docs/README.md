@@ -20,6 +20,11 @@ Pluggable knowledge extraction strategies (`panda`, `llm`, `rule_based`, …), h
 ### 🐼 [PanDA Integration](PANDA_INTEGRATION.md)
 Fetch task and job data live from PanDA — no local JSON file required.
 
+### 🗄️ [Knowledge Population](KNOWLEDGE_POPULATION.md)
+Two paths for populating the graph and vector databases: individual (`bamboo populate`)
+for live incidents, and batch (`seed-drafts → review-drafts → batch-populate`) for
+bulk commissioning.
+
 ### 🤖 [Agent Reference](AGENTS.md)
 All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ExtraSourceExplorer`, `ReasoningNavigator`, and their components.
 
@@ -37,6 +42,7 @@ Development setup, code style, extension points (agents, node types, relationshi
 ### PanDA operators
 1. [Quick Start Guide](QUICKSTART.md) — environment setup
 2. [PanDA Integration](PANDA_INTEGRATION.md) — fetch tasks directly from PanDA
+3. [Knowledge Population](KNOWLEDGE_POPULATION.md) — populate databases from live tasks or CSV batches
 
 ### Developers
 1. [Quick Start Guide](QUICKSTART.md) — environment setup
