@@ -213,6 +213,12 @@ IMPORTANT: If a matching cause appears in the Graph Database Results, set "root_
 to the exact "cause_name" string from that result — character for character. Do not
 paraphrase or reformulate it. This exact match is required for procedure lookup.
 
+If graph_results and vector_results are both empty or weakly matched and external_info
+contains investigation data, treat that investigation data as the primary evidence source.
+In that case, be explicit in "reasoning" that this is a first-principles analysis with no
+confirmed historical precedent, and label the resolution as a hypothesis rather than a
+confirmed procedure.
+
 Respond with a valid JSON object — no markdown fences, no explanation:
 {{
   "root_cause": "...",
@@ -916,6 +922,77 @@ Output a JSON array of steps only — no markdown, no explanation outside the JS
     ]
   }}
 ]
+"""
+
+INVESTIGATION_PLAN_PROMPT = """You are a diagnostic investigation planner for a PanDA computing task with no confirmed historical precedent.
+
+The initial root-cause analysis yielded low confidence.  Your job is to design a targeted
+investigation plan that either confirms a candidate hypothesis or uncovers a novel cause —
+and to flag any investigation directions that no available tool can address.
+
+TASK CONTEXT (key fields only):
+{task_summary}
+
+EXTRACTED CLUES (symptoms, features, environment, components observed in this task):
+{extracted_clues}
+
+CANDIDATE CAUSES from graph database (partial matches — treat as hypotheses to confirm or refute):
+{candidate_causes}
+
+SYMPTOMS WITH NO GRAPH DB MATCH (novel leads — no historical precedent found):
+{unmatched_symptoms}
+
+SIMILAR PAST CASES from vector database (narrative context — do not re-fetch this data):
+{similar_cases}
+
+INITIAL ANALYSIS (LLM synthesis before investigation):
+{initial_reasoning}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+AVAILABLE TOOLS:
+{tools_description}
+
+Your task: design an ordered execution plan of tool-call groups (steps) that targets
+the hypotheses and novel leads above.
+
+Investigation strategy:
+- For each CANDIDATE CAUSE: design steps that fetch evidence to confirm or refute it.
+- For each UNMATCHED SYMPTOM: design steps to understand what could produce it.
+- Build on the INITIAL ANALYSIS reasoning — do not contradict it without evidence.
+- Use DOMAIN DOCUMENTATION to interpret what metrics and logs are relevant.
+
+Step design rules:
+- Tools within one step run CONCURRENTLY — only group tools that are fully INDEPENDENT.
+- If tool B needs tool A's result first, put B in a LATER step.
+- Only select a tool if the task context fields its args require are non-empty.
+- If no tool helps a hypothesis, omit the step — record it in capability_gaps instead.
+- If no tool helps anything, output steps as an empty array.
+
+Capability gaps: for each hypothesis or novel lead that NO available tool can investigate,
+record it so the tool ecosystem can be improved.
+
+Output a single JSON object only — no markdown, no explanation outside the JSON:
+{{
+  "steps": [
+    {{
+      "reason": "<which hypothesis or symptom this step targets and what it fetches>",
+      "tool_calls": [
+        {{
+          "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
+          "args": {{ }}
+        }}
+      ]
+    }}
+  ],
+  "capability_gaps": [
+    {{
+      "investigation": "<what we would check to confirm/refute this hypothesis or symptom>",
+      "suggested_tool_capability": "<what a future tool would need to do to enable this investigation>"
+    }}
+  ]
+}}
 """
 
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.

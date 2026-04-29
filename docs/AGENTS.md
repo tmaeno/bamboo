@@ -30,12 +30,19 @@ includes an optional quality-gate loop.
 │                                     └─ StdioMcpClient  (stdio) │
 └────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────┐
-│  Reasoning Navigation                                       │
-│                                                             │
-│  task data ──► ReasoningNavigator                           │
-│                    └─ KnowledgeGraphExtractor  (read-only)  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  Reasoning Navigation                                                │
+│                                                                      │
+│  task data ──► ReasoningNavigator                                    │
+│                    ├─ KnowledgeGraphExtractor  (read-only)           │
+│                    │                                                 │
+│                    ├─ Exploratory investigation  (low-confidence)    │
+│                    │      └─ ExplorationPlanner.plan_investigation() │
+│                    │             └─ ExtraSourceExplorer              │
+│                    │                                                 │
+│                    └─ Procedure-driven investigation  (Phase 2)      │
+│                           └─ ExtraSourceExplorer                     │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 The **review–explore loop** inside `KnowledgeAccumulator` always runs:
@@ -184,11 +191,22 @@ Map each resolvable gap to one or more MCP tool calls, grouped into sequential
 steps run in order so a later step can rely on earlier steps having populated the
 extraction context.
 
-**Output:** `ExplorationPlan` — `gaps` (list of gap strings), `steps` (list of `PlanStep`).
+**Output:** `ExplorationPlan` — `gaps` (list of gap strings), `steps` (list of `PlanStep`),
+`capability_gaps` (list of investigation directions no available tool can address).
 Each `PlanStep` has a `reason` (human-readable) and `tool_calls` (list of tool + args dicts).
+`capability_gaps` is only populated by `plan_investigation()` (see below).
 
 **Fail-open:** any error in either phase causes `plan()` to return `None`, signalling the
 explorer to fall back to its single-LLM-call `_select_tools` path.
+
+**Exploratory investigation** (`plan_investigation()`):  
+A separate entry point used exclusively by `ReasoningNavigator` when initial root-cause
+confidence is below the threshold.  Unlike `plan()`, it does not require reviewer issues.
+It takes partial graph DB results (candidate causes to confirm/refute) and unmatched symptoms
+(novel leads with no historical precedent) as context, and produces an `ExplorationPlan` via a
+**single LLM call** (`INVESTIGATION_PLAN_PROMPT`).  The output `ExplorationPlan.capability_gaps`
+lists investigation directions that no available tool can address — these are surfaced in the
+final `AnalysisResult` to guide future tool development.  Fail-open: returns `None` on any error.
 
 ---
 
@@ -219,6 +237,12 @@ Any individual tool failure is logged and skipped — the pipeline never stalls.
 
 Results from unrecognised tools (e.g. from external MCP servers) are stored in
 `external_data` under `"tool:<name>"` and forwarded to the LLM extractor as additional context.
+
+**Pre-built plan path:**  
+`explore()` also accepts an optional `plan` keyword argument.  When a pre-built
+`ExplorationPlan` is provided (e.g. from `ExplorationPlanner.plan_investigation()`), all
+planning phases are skipped and the plan steps are executed directly.  Used by
+`ReasoningNavigator._run_exploratory_investigation()`.
 
 **Output:** `ExplorationResult` — `task_logs`, `external_data`, `tool_calls` (all calls across all steps, for observability).
 
@@ -379,17 +403,29 @@ pipeline, then drafts a resolution email for the task submitter.
 
 1. **Extract clues** — run `KnowledgeGraphExtractor` on the task's structured fields to
    identify symptoms, task features, job features, environment factors, and components.
-2. **Graph DB query** — find candidate causes ranked by how many clue types point to them
-   (symptoms, task features, job features, environment, components).
+2. **Graph DB query** — find candidate causes ranked by how many clue types point to them.
+   Symptoms with no known causes are collected as *novel leads* (returned alongside results).
 3. **Vector DB retrieval** — two-step:
    a. Search node descriptions for similar past incidents (returns `graph_id` values).
    b. Fetch narrative summaries for those graphs.
-4. **LLM diagnosis** — synthesise graph evidence + semantic evidence into a root-cause
-   statement with confidence score.
-5. **Email draft** — generate a professional resolution email for the task submitter.
+4. **Initial LLM diagnosis** — synthesise graph evidence + semantic evidence into a root-cause
+   statement with confidence score.  Always runs, even when graph or vector results are empty.
+5. **Exploratory investigation** *(if `confidence < EXPLORATORY_INVESTIGATION_THRESHOLD`,
+   default 0.5)* — `ExplorationPlanner.plan_investigation()` generates a targeted plan from
+   partial DB evidence and novel leads; `ExtraSourceExplorer` executes it via MCP tools.
+   Root-cause is re-synthesised with the gathered evidence.  Investigation directions that no
+   available tool can address are collected as `capability_gaps`.
+6. **Procedure-driven investigation** *(Phase 2, if a known cause was identified)* — query
+   graph DB for `ProcedureNode` entries linked to the cause; run via `ExtraSourceExplorer`.
+7. **Email draft** — generate a professional resolution email for the task submitter.
 
 **Output:** `AnalysisResult` — `root_cause`, `confidence`, `resolution`, `explanation`,
-`supporting_evidence`, `email_content`.
+`supporting_evidence`, `capability_gaps`, `email_content`.
+
+`capability_gaps` is a list of investigation directions that no available MCP tool could
+address during exploratory investigation.  Each entry has `"investigation"` (what would be
+checked) and `"suggested_tool_capability"` (what a future tool would need to do).  Empty when
+confidence was high enough to skip exploratory investigation or no explorer is configured.
 
 ---
 
@@ -424,7 +460,9 @@ continues with what it has rather than aborting.
 | Component | On failure |
 |---|---|
 | `KnowledgeReviewer` LLM call | Returns `approved=True`, logs exception |
-| `ExplorationPlanner` either LLM call | Returns `None` → explorer falls back to `_select_tools` |
+| `ExplorationPlanner.plan()` either LLM call | Returns `None` → explorer falls back to `_select_tools` |
+| `ExplorationPlanner.plan_investigation()` LLM call | Returns `None` → exploratory investigation skipped |
+| `ReasoningNavigator._run_exploratory_investigation()` (no planner) | Returns `(None, [])`, skips exploratory investigation silently |
 | `ExtraSourceExplorer` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |

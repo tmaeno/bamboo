@@ -377,6 +377,43 @@ def check_database_connections() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Completion scripts
+# ---------------------------------------------------------------------------
+
+
+def check_completion_scripts() -> bool:
+    """Regenerate zsh/bash completion scripts from the Click CLI if out of date."""
+    print("Shell completion scripts")
+    try:
+        from click.shell_completion import BashComplete, ZshComplete
+        from bamboo.cli import cli
+        import bamboo.data.completions
+
+        pkg_dir = Path(bamboo.data.completions.__file__).parent
+        updated = []
+
+        for ShellClass, filename in [
+            (ZshComplete, "_bamboo"),
+            (BashComplete, "_bamboo.bash"),
+        ]:
+            expected = ShellClass(cli, {}, "bamboo", "_BAMBOO_COMPLETE").source()
+            target = pkg_dir / filename
+            current = target.read_text(encoding="utf-8") if target.exists() else ""
+            if current == expected:
+                _ok(f"{filename} is up to date")
+            else:
+                target.write_text(expected, encoding="utf-8")
+                _ok(f"{filename} regenerated")
+                updated.append(filename)
+
+        if updated:
+            print(f"    → Commit the updated file(s): {', '.join(updated)}")
+        return True
+    except Exception as exc:
+        return _fail(f"could not generate completion scripts: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -390,6 +427,7 @@ def main() -> int:
         check_python_version,
         check_package_importable,
         check_submodule_imports,
+        check_completion_scripts,
         check_cli_entry_points,
         check_key_dependencies,
         check_api_keys,

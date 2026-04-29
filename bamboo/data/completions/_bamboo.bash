@@ -1,29 +1,28 @@
-_bamboo_complete() {
-  local cur prev commands
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
-  commands="interactive populate extract analyze fetch-task verify"
+_bamboo_completion() {
+    local IFS=$'\n'
+    local response
 
-  if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    response=$(env COMP_WORDS="${COMP_WORDS[*]}" COMP_CWORD=$COMP_CWORD _BAMBOO_COMPLETE=bash_complete $1)
+
+    for completion in $response; do
+        IFS=',' read type value <<< "$completion"
+
+        if [[ $type == 'dir' ]]; then
+            COMPREPLY=()
+            compopt -o dirnames
+        elif [[ $type == 'file' ]]; then
+            COMPREPLY=()
+            compopt -o default
+        elif [[ $type == 'plain' ]]; then
+            COMPREPLY+=($value)
+        fi
+    done
+
     return 0
-  fi
-
-  case "$prev" in
-    populate|extract)
-      COMPREPLY=( $(compgen -W "--email-thread --task-data --task-id --external-data --output --help" -- "$cur") )
-      ;;
-    analyze)
-      COMPREPLY=( $(compgen -W "--task-data --task-id --external-data --output --help" -- "$cur") )
-      ;;
-    fetch-task)
-      COMPREPLY=( $(compgen -W "--output --verbose --help" -- "$cur") )
-      ;;
-    --email-thread|--task-data|--external-data|--output|-o)
-      COMPREPLY=( $(compgen -f -- "$cur") )
-      ;;
-  esac
 }
 
-complete -F _bamboo_complete bamboo
+_bamboo_completion_setup() {
+    complete -o nosort -F _bamboo_completion bamboo
+}
 
+_bamboo_completion_setup;

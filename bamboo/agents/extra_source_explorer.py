@@ -77,6 +77,11 @@ class ExtraSourceExplorer:
             self._llm = get_extraction_llm()  # temperature=0, deterministic JSON
         return self._llm
 
+    @property
+    def planner(self):
+        """The configured :class:`~bamboo.agents.exploration_planner.ExplorationPlanner`, or ``None``."""
+        return self._planner
+
     def _filtered_tools(self) -> list[McpTool]:
         """Return tools from the client, excluding interactive tools when not on a tty."""
         import sys
@@ -99,6 +104,7 @@ class ExtraSourceExplorer:
         review_issues: list[str],
         doc_hints: dict[str, str] | None = None,
         skip_gap_analysis: bool = False,
+        plan=None,
     ) -> ExplorationResult:
         """Single select-and-fetch pass.
 
@@ -115,14 +121,48 @@ class ExtraSourceExplorer:
             task_data:     Structured task fields from PanDA.
             review_issues: Issue strings from the previous
                            :class:`~bamboo.agents.knowledge_reviewer.ReviewResult`.
+            plan:          Optional pre-built :class:`~bamboo.agents.exploration_planner.ExplorationPlan`.
+                           When provided, skips all planning phases and executes the
+                           plan steps directly.  ``review_issues`` is ignored.
         """
-        if not review_issues or not task_data:
+        if (not review_issues and plan is None) or not task_data:
             return ExplorationResult()
 
         await self._client.connect()
         try:
             tools = self._filtered_tools()
             task_data_tool_names = self._client.task_data_tools()
+
+            # ── Pre-built plan: skip all planning, execute steps directly ──────────────
+            if plan is not None:
+                out = ExplorationResult()
+                if plan.steps:
+                    all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
+                    logger.info(
+                        "ExtraSourceExplorer: executing pre-built plan — %d step(s), %d tool call(s)",
+                        len(plan.steps),
+                        len(all_tool_calls),
+                    )
+                    out.tool_calls.extend(all_tool_calls)
+                    for i, step in enumerate(plan.steps, 1):
+                        say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
+                        coros = [
+                            self._client.execute(
+                                tc["tool"],
+                                **({**tc.get("args", {}), "task_data": task_data}
+                                   if tc["tool"] in task_data_tool_names
+                                   else tc.get("args", {})),
+                            )
+                            for tc in step.tool_calls
+                        ]
+                        results = await asyncio.gather(*coros, return_exceptions=True)
+                        for tc, result in zip(step.tool_calls, results):
+                            if isinstance(result, BaseException):
+                                say(f"    {tc['tool']}: failed — {result}")
+                            else:
+                                say(f"    {tc['tool']}: done.")
+                            self._merge_tool_result(tc["tool"], result, out)
+                return out
 
             # ── Hard-route: "No investigation procedure captured" → request_human_input ──
             # Deterministic code routing — the LLM planner consistently mis-routes this

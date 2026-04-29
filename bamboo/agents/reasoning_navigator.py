@@ -48,6 +48,8 @@ from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
 
+EXPLORATORY_INVESTIGATION_THRESHOLD = 0.5
+
 
 class ReasoningNavigator:
     """Diagnoses a problematic task and returns a root-cause analysis.
@@ -59,9 +61,9 @@ class ReasoningNavigator:
         graph_db:  Connected :class:`GraphDatabaseClient`.
         vector_db: Connected :class:`VectorDatabaseClient`.
         explorer:  Optional :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
-                   When provided, Phase 2 (procedure-driven investigation) delegates
-                   MCP tool selection and execution to the explorer rather than
-                   remaining a no-op stub.
+                   When provided with a configured planner, enables exploratory investigation
+                   of low-confidence incidents (Phase 0) in addition to Phase 2
+                   procedure-driven investigation.
     """
 
     def __init__(
@@ -183,33 +185,7 @@ class ReasoningNavigator:
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
-        graph_results = await self._query_graph_database(extracted_clues)
-        if not graph_results and extracted_clues.get("symptoms"):
-            show_block(
-                "root cause analysis",
-                "cause:      unknown\n"
-                "confidence: 0.0\n"
-                "resolution: Manual investigation required\n"
-                "reasoning:  No matching causes found in the knowledge base for the "
-                f"observed symptoms: {extracted_clues['symptoms']}",
-            )
-            return AnalysisResult(
-                task_id=task_id,
-                root_cause="unknown",
-                confidence=0.0,
-                resolution="Manual investigation required",
-                explanation=(
-                    "No matching causes found in the knowledge base for the "
-                    f"observed symptoms: {extracted_clues['symptoms']}"
-                ),
-                metadata={
-                    "extracted_clues": extracted_clues,
-                    "graph_results_count": 0,
-                    "vector_results_count": 0,
-                    "procedures_found": 0,
-                    "investigation": {},
-                },
-            )
+        graph_results, unmatched_symptoms = await self._query_graph_database(extracted_clues)
         vector_results = await self._query_vector_database(extracted_clues, task_data)
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
@@ -221,6 +197,41 @@ class ReasoningNavigator:
             f"resolution: {analysis.get('resolution')}\n"
             f"reasoning:  {analysis.get('reasoning')}",
         )
+
+        # --- Exploratory investigation when confidence is too low ---
+        capability_gaps: list[dict] = []
+        if analysis.get("confidence", 0.0) < EXPLORATORY_INVESTIGATION_THRESHOLD:
+            say(
+                f"Confidence {analysis.get('confidence', 0.0):.2f} below threshold "
+                f"{EXPLORATORY_INVESTIGATION_THRESHOLD} — starting exploratory investigation..."
+            )
+            exploration_result, capability_gaps = await self._run_exploratory_investigation(
+                extracted_clues=extracted_clues,
+                task_data=task_data,
+                partial_graph_results=graph_results,
+                partial_vector_results=vector_results,
+                unmatched_symptoms=unmatched_symptoms,
+                initial_result=analysis,
+                domain_hints=domain_hints,
+            )
+            if exploration_result is not None and (
+                exploration_result.external_data or exploration_result.task_logs
+            ):
+                merged_external = {**(external_data or {}), **exploration_result.external_data}
+                logger.info(
+                    "ReasoningNavigator: re-running root cause analysis with exploratory data"
+                )
+                analysis = await self._identify_root_cause(
+                    task_data, merged_external, graph_results, vector_results,
+                    domain_hints=domain_hints,
+                )
+                show_block(
+                    "root cause analysis (after exploration)",
+                    f"cause:      {analysis.get('root_cause')}\n"
+                    f"confidence: {analysis.get('confidence')}\n"
+                    f"resolution: {analysis.get('resolution')}\n"
+                    f"reasoning:  {analysis.get('reasoning')}",
+                )
 
         # --- Phase 2: procedure-driven investigation ---
         identified_causes = [analysis["root_cause"]] if analysis.get("root_cause") else []
@@ -268,6 +279,7 @@ class ReasoningNavigator:
             resolution=analysis["resolution"],
             explanation=analysis["reasoning"],
             supporting_evidence=analysis.get("supporting_evidence", []),
+            capability_gaps=capability_gaps,
             metadata={
                 "extracted_clues": extracted_clues,
                 "graph_results_count": len(graph_results),
@@ -285,26 +297,38 @@ class ReasoningNavigator:
 
     async def _query_graph_database(
         self, extracted_clues: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[str]]:
         """Query the graph DB for causes that match the extracted clues.
+
+        Checks each symptom individually first.  Any symptom with no known
+        causes is collected in ``unmatched_symptoms`` and the overall query
+        returns empty results (to avoid spurious partial matches).
 
         Args:
             extracted_clues: Output of :meth:`_extract_clues_from_graph`.
 
         Returns:
-            List of cause dicts from :meth:`GraphDatabaseClient.find_causes`.
+            A ``(results, unmatched_symptoms)`` tuple.  ``results`` is the
+            list of cause dicts from :meth:`GraphDatabaseClient.find_causes`.
+            ``unmatched_symptoms`` lists symptoms that had zero graph DB matches
+            and are forwarded to the exploratory planner as novel leads.
         """
         logger.info("ReasoningNavigator: querying graph database")
         symptoms = extracted_clues.get("symptoms") or []
+        unmatched_symptoms: list[str] = []
         for symptom in symptoms:
             single = await self.graph_db.find_causes(symptoms=[symptom], limit=1)
             if not single:
                 logger.info(
                     "ReasoningNavigator: symptom '%s' has no known causes in graph "
-                    "— returning no results to avoid spurious match",
+                    "— recording as novel lead",
                     symptom,
                 )
-                return []
+                unmatched_symptoms.append(symptom)
+
+        if unmatched_symptoms:
+            return [], unmatched_symptoms
+
         results = await self.graph_db.find_causes(
             symptoms=symptoms or None,
             task_features=extracted_clues.get("task_features"),
@@ -313,7 +337,7 @@ class ReasoningNavigator:
             limit=10,
         )
         logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
-        return results
+        return results, []
 
     async def _query_procedures(
         self, cause_names: list[str]
@@ -503,6 +527,89 @@ class ReasoningNavigator:
                 "resolution": "Manual investigation required",
                 "reasoning": "LLM response could not be parsed.",
             }
+
+    async def _run_exploratory_investigation(
+        self,
+        extracted_clues: dict[str, Any],
+        task_data: dict[str, Any],
+        partial_graph_results: list[dict[str, Any]],
+        partial_vector_results: list[dict[str, Any]],
+        unmatched_symptoms: list[str],
+        initial_result: dict[str, Any],
+        domain_hints: str = "(none)",
+    ) -> tuple[Any, list[dict]]:
+        """Plan and execute an exploratory investigation for a low-confidence incident.
+
+        Called when the initial root-cause synthesis confidence falls below
+        :data:`EXPLORATORY_INVESTIGATION_THRESHOLD`.  Uses the planner to generate
+        a targeted plan from partial DB evidence and novel symptom leads, then
+        executes it via the explorer.
+
+        Args:
+            extracted_clues:       Clue dict from :meth:`_extract_clues_from_graph`.
+            task_data:             Structured task fields.
+            partial_graph_results: Candidate causes from the graph DB (may be empty).
+            partial_vector_results: Similar past cases from the vector DB (may be empty).
+            unmatched_symptoms:    Symptoms with no graph DB precedent.
+            initial_result:        Dict from the initial :meth:`_identify_root_cause` call.
+            domain_hints:          Domain documentation string.
+
+        Returns:
+            ``(exploration_result, capability_gaps)`` — the MCP tool results and the
+            list of investigation directions that no available tool could address.
+            Returns ``(None, [])`` when no explorer or planner is configured.
+        """
+        if self._explorer is None or self._explorer.planner is None:
+            logger.info(
+                "ReasoningNavigator: exploratory investigation skipped — "
+                "no explorer or planner configured"
+            )
+            return None, []
+
+        tools = self._explorer.available_tools()
+        if not tools:
+            logger.info("ReasoningNavigator: exploratory investigation skipped — no tools available")
+            return None, []
+
+        doc_hints_dict = None  # domain_hints already formatted; planner accepts dict or None
+        plan = await self._explorer.planner.plan_investigation(
+            task_data=task_data,
+            extracted_clues=extracted_clues,
+            partial_graph_results=partial_graph_results,
+            partial_vector_results=partial_vector_results,
+            unmatched_symptoms=unmatched_symptoms,
+            initial_result=initial_result,
+            tools=tools,
+            doc_hints=doc_hints_dict,
+        )
+
+        if plan is None:
+            return None, []
+
+        capability_gaps = plan.capability_gaps
+
+        if not plan.steps:
+            logger.info(
+                "ReasoningNavigator: exploratory plan has no executable steps "
+                "(%d capability gap(s) identified)",
+                len(capability_gaps),
+            )
+            return None, capability_gaps
+
+        say(
+            f"Exploratory investigation: executing {len(plan.steps)} step(s) "
+            f"({plan.total_tool_calls} tool call(s))..."
+        )
+        exploration_result = await self._explorer.explore(task_data, [], plan=plan)
+
+        note = (
+            f"Exploratory investigation ran {len(exploration_result.tool_calls)} tool call(s)."
+            if exploration_result.tool_calls
+            else "Exploratory investigation: explorer selected no tools."
+        )
+        logger.info("ReasoningNavigator: %s", note)
+
+        return exploration_result, capability_gaps
 
     async def _run_investigation(
         self,

@@ -155,3 +155,11 @@ class AnalysisResult(BaseModel):
     supporting_evidence: list[dict[str, Any]] = Field(default_factory=list)
     email_content: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    capability_gaps: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Investigation directions identified during exploratory analysis that no "
+            "available MCP tool could address.  Each entry has 'investigation' and "
+            "'suggested_tool_capability' keys."
+        ),
+    )

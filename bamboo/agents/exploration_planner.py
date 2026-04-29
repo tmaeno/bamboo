@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from bamboo.llm import (
     EXPLORATION_GAP_ANALYSIS_PROMPT,
     EXPLORATION_PLAN_PROMPT,
+    INVESTIGATION_PLAN_PROMPT,
     PROCEDURE_EXECUTION_PROMPT,
     get_extraction_llm,
 )
@@ -68,14 +69,19 @@ class ExplorationPlan:
     """An ordered list of :class:`PlanStep` objects produced by :class:`ExplorationPlanner`.
 
     Attributes:
-        gaps:  Structured gap descriptions from the gap-analysis phase,
-               preserved for logging and observability.
-        steps: Ordered execution groups.  Steps run sequentially; tool calls
-               within each step run concurrently.
+        gaps:             Structured gap descriptions from the gap-analysis phase,
+                          preserved for logging and observability.
+        steps:            Ordered execution groups.  Steps run sequentially; tool calls
+                          within each step run concurrently.
+        capability_gaps:  Investigation directions that no available tool can address.
+                          Each entry has keys ``"investigation"`` (what would be checked)
+                          and ``"suggested_tool_capability"`` (what a future tool would need
+                          to do).  Populated only by :meth:`ExplorationPlanner.plan_investigation`.
     """
 
     gaps: list[str] = field(default_factory=list)
     steps: list[PlanStep] = field(default_factory=list)
+    capability_gaps: list[dict] = field(default_factory=list)
 
     @property
     def total_tool_calls(self) -> int:
@@ -152,6 +158,94 @@ class ExplorationPlanner:
             logger.warning(
                 "ExplorationPlanner: planning failed (%s) — falling back to _select_tools",
                 exc,
+            )
+            return None
+
+    async def plan_investigation(
+        self,
+        task_data: dict[str, Any],
+        extracted_clues: dict[str, Any],
+        partial_graph_results: list[dict[str, Any]],
+        partial_vector_results: list[dict[str, Any]],
+        unmatched_symptoms: list[str],
+        initial_result: dict[str, Any],
+        tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
+    ) -> ExplorationPlan | None:
+        """Single-LLM-call planner for exploratory investigation of unknown incidents.
+
+        Unlike :meth:`plan`, this method does not require reviewer issues — it
+        derives investigation directions from partial DB evidence and extracted
+        clues.  It returns an :class:`ExplorationPlan` whose ``capability_gaps``
+        field lists investigation steps that no available tool can address.
+
+        Returns ``None`` on any failure (fail-open).
+
+        Args:
+            task_data:             Structured task fields from PanDA.
+            extracted_clues:       Output of ``_extract_clues_from_graph``.
+            partial_graph_results: Candidate causes from the graph DB (may be empty).
+            partial_vector_results: Similar past cases from the vector DB (may be empty).
+            unmatched_symptoms:    Symptoms with zero graph DB matches.
+            initial_result:        Dict from the initial :meth:`_identify_root_cause` call.
+            tools:                 Available MCP tools.
+            doc_hints:             Domain documentation.
+        """
+        if not tools:
+            return None
+        try:
+            from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
+            from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
+
+            truncated_vector = [
+                {"score": r.get("score", 0.0), "entry": r.get("entry"), "content": str(r.get("content", ""))[:300]}
+                for r in partial_vector_results[:3]
+            ]
+            prompt = INVESTIGATION_PLAN_PROMPT.format(
+                task_summary=_build_task_summary(task_data),
+                extracted_clues=json.dumps(
+                    {k: v for k, v in extracted_clues.items() if k != "context"},
+                    indent=2,
+                    default=str,
+                ),
+                candidate_causes=json.dumps(partial_graph_results, indent=2, default=str),
+                unmatched_symptoms=json.dumps(unmatched_symptoms, default=str),
+                similar_cases=json.dumps(truncated_vector, indent=2, default=str),
+                initial_reasoning=json.dumps(
+                    {k: initial_result.get(k) for k in ("root_cause", "confidence", "reasoning")},
+                    indent=2,
+                    default=str,
+                ),
+                domain_hints=_join_doc_hints(doc_hints),
+                tools_description=_build_tools_description(tools),
+            )
+
+            say("Planning exploratory investigation...")
+            with thinking("Planning"):
+                response = await self.llm.ainvoke(prompt)
+
+            show_block("planner: exploratory investigation raw response", response.content)
+            steps, capability_gaps = _parse_investigation_plan(response.content)
+
+            plan = ExplorationPlan(gaps=[], steps=steps, capability_gaps=capability_gaps)
+            say(
+                f"Exploratory investigation plan: {len(plan.steps)} step(s), "
+                f"{plan.total_tool_calls} tool call(s), "
+                f"{len(capability_gaps)} capability gap(s)."
+            )
+            if capability_gaps:
+                show_block(
+                    "planner: capability gaps",
+                    "\n".join(
+                        f"• {g.get('investigation', '')} "
+                        f"[needs: {g.get('suggested_tool_capability', '')}]"
+                        for g in capability_gaps
+                    ),
+                )
+            return plan
+        except Exception as exc:
+            logger.warning(
+                "ExplorationPlanner.plan_investigation: failed (%s) — returning None", exc
             )
             return None
 
@@ -306,3 +400,27 @@ def _strip_fences(text: str) -> str:
     elif "```" in text:
         text = text[text.find("```") + 3: text.rfind("```")].strip()
     return text
+
+
+def _parse_investigation_plan(response: str) -> tuple[list[PlanStep], list[dict]]:
+    """Parse the INVESTIGATION_PLAN_PROMPT response.
+
+    Expects a JSON object with ``"steps"`` and ``"capability_gaps"`` arrays.
+    Returns ``(steps, capability_gaps)``; either list may be empty on parse error.
+    """
+    text = _strip_fences(response)
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            logger.warning("ExplorationPlanner: investigation plan response is not a dict — ignored")
+            return [], []
+        steps = _parse_plan_steps(json.dumps(data.get("steps", [])))
+        raw_gaps = data.get("capability_gaps", [])
+        capability_gaps = [
+            g for g in raw_gaps
+            if isinstance(g, dict) and g.get("investigation")
+        ]
+        return steps, capability_gaps
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("ExplorationPlanner: failed to parse investigation plan response: %s", exc)
+        return [], []

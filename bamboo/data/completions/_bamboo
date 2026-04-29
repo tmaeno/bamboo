@@ -1,66 +1,40 @@
 #compdef bamboo
 
-_bamboo() {
-  local state
+_bamboo_completion() {
+    local -a completions
+    local -a completions_with_descriptions
+    local -a response
+    (( ! $+commands[bamboo] )) && return 1
 
-  _arguments \
-    '1: :->command' \
-    '*: :->args'
+    response=("${(@f)$(env COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) _BAMBOO_COMPLETE=zsh_complete bamboo)}")
 
-  case $state in
-    command)
-      local commands
-      commands=(
-        'interactive:Start interactive mode'
-        'populate:Populate knowledge base from various sources'
-        'extract:Extract knowledge graph and preview without writing to databases'
-        'analyze:Analyze a problematic task and generate a resolution'
-        'fetch-task:Fetch task details from PanDA'
-        'verify:Verify that the Bamboo package is correctly installed'
-      )
-      _describe 'bamboo command' commands
-      ;;
-    args)
-      case $words[2] in
-        populate)
-          _arguments \
-            '--email-thread[Path to email thread text file]:file:_files' \
-            '--task-data[Path to task data JSON file]:file:_files' \
-            '--task-id[PanDA jediTaskID]:task id' \
-            '--external-data[Path to external data JSON file]:file:_files' \
-            '--help[Show help]'
-          ;;
-        extract)
-          _arguments \
-            '--email-thread[Path to email thread text file]:file:_files' \
-            '--task-data[Path to task data JSON file]:file:_files' \
-            '--task-id[PanDA jediTaskID]:task id' \
-            '--external-data[Path to external data JSON file]:file:_files' \
-            '(-o --output)'{-o,--output}'[Save extracted graph as JSON]:file:_files' \
-            '--help[Show help]'
-          ;;
-        analyze)
-          _arguments \
-            '--task-data[Path to task data JSON file]:file:_files' \
-            '--task-id[PanDA jediTaskID]:task id' \
-            '--external-data[Path to external data JSON file]:file:_files' \
-            '--output[Path to save analysis results]:file:_files' \
-            '--help[Show help]'
-          ;;
-        fetch-task)
-          _arguments \
-            '1:task id' \
-            '(-o --output)'{-o,--output}'[Save task data as JSON]:file:_files' \
-            '(-v --verbose)'{-v,--verbose}'[Print verbose communication logs]' \
-            '--help[Show help]'
-          ;;
-        interactive|verify)
-          _arguments '--help[Show help]'
-          ;;
-      esac
-      ;;
-  esac
+    for type key descr in ${response}; do
+        if [[ "$type" == "plain" ]]; then
+            if [[ "$descr" == "_" ]]; then
+                completions+=("$key")
+            else
+                completions_with_descriptions+=("$key":"$descr")
+            fi
+        elif [[ "$type" == "dir" ]]; then
+            _path_files -/
+        elif [[ "$type" == "file" ]]; then
+            _path_files -f
+        fi
+    done
+
+    if [ -n "$completions_with_descriptions" ]; then
+        _describe -V unsorted completions_with_descriptions -U
+    fi
+
+    if [ -n "$completions" ]; then
+        compadd -U -V unsorted -a completions
+    fi
 }
 
-_bamboo "$@"
-
+if [[ $zsh_eval_context[-1] == loadautofunc ]]; then
+    # autoload from fpath, call function directly
+    _bamboo_completion "$@"
+else
+    # eval/source/. command, register function for later
+    compdef _bamboo_completion bamboo
+fi
