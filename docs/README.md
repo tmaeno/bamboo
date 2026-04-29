@@ -12,7 +12,7 @@ Step-by-step guide to install Bamboo, configure databases and API keys, and run 
 - Running agents and the MCP server, troubleshooting
 
 ### 🔌 [Database Plugin System](database-plugins/INDEX.md)
-Graph database (Neo4j) and vector database (Qdrant) plugin architecture, backend configuration, and how to add new backends.
+Graph database and vector database plugin architecture, backend configuration, and how to add new backends.
 
 ### 🧩 [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md)
 Pluggable knowledge extraction strategies (`panda`, `llm`, `rule_based`, …), how to select one, and how to register a custom extractor.
