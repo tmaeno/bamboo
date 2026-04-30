@@ -1039,9 +1039,47 @@ async def check_mcp_servers_interactive():
         "Exits with code 1 if no investigation procedure was captured."
     ),
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Extract and preview without writing to any database (no DB connections made).",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Save the extracted graph as JSON to this file path.",
+)
+@click.option(
+    "--max-retries",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum reviewer-rejection retries (0 = no retry after first review). "
+        "Defaults to 2. Use --max-retries 1 to debug a single "
+        "extraction→review→explorer chain."
+    ),
+)
+@click.option(
+    "--debug-report",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Save a JSON trace of every intermediate pipeline step to this file. "
+        "Useful for investigating unexpected extraction or storage behaviour."
+    ),
+)
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
-def populate_cmd(email_thread, task_data, task_id, external_data, require_procedures, verbose):
-    """Populate knowledge base from various sources."""
+def populate_cmd(
+    email_thread, task_data, task_id, external_data, require_procedures,
+    dry_run, output, max_retries, debug_report, verbose,
+):
+    """Populate knowledge base from various sources.
+
+    Use --dry-run to preview extraction without writing to any database.
+    """
     from bamboo.scripts.populate_knowledge import main as _main
 
     ctx = click.get_current_context()
@@ -1052,6 +1090,10 @@ def populate_cmd(email_thread, task_data, task_id, external_data, require_proced
         task_id=task_id,
         external_data=external_data,
         require_procedures=require_procedures,
+        dry_run=dry_run,
+        output=output,
+        max_retries=max_retries,
+        debug_report=debug_report,
         verbose=verbose,
     )
 
@@ -1116,22 +1158,22 @@ def populate_cmd(email_thread, task_data, task_id, external_data, require_proced
     ),
 )
 def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose, max_retries, require_procedures):
-    """Extract knowledge graph and preview it without writing to any database.
+    """Deprecated: use ``bamboo populate --dry-run`` instead.
 
-    Runs the full extraction pipeline (LLM calls, error classification, graph
-    construction) and prints a summary of what *would* be stored by
-    ``bamboo populate``.  Nothing is written to Neo4j or Qdrant.
-
-    Examples:
+    Extract knowledge graph and preview it without writing to any database.
+    This command is kept for backwards compatibility and delegates to
+    ``bamboo populate --dry-run``.
 
     \b
-      bamboo extract --task-id 12345
-      bamboo extract --task-data task.json --email-thread email.txt
-      bamboo extract --task-data task.json --output graph_preview.json
-      bamboo extract --task-id 12345 --verbose
-      bamboo extract --task-id 12345 -v --max-retries 1
+      bamboo populate --task-id 12345 --dry-run
+      bamboo populate --task-id 12345 --dry-run --output graph_preview.json
+      bamboo populate --task-id 12345 --dry-run -v --max-retries 1
     """
-    from bamboo.scripts.extract_knowledge import main as _main
+    click.echo(
+        "Note: 'bamboo extract' is deprecated — use 'bamboo populate --dry-run' instead.",
+        err=True,
+    )
+    from bamboo.scripts.populate_knowledge import main as _main
 
     ctx = click.get_current_context()
     ctx.invoke(
@@ -1140,10 +1182,12 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
         task_data=task_data,
         task_id=task_id,
         external_data=external_data,
-        output=output,
-        verbose=verbose,
-        max_retries=max_retries,
         require_procedures=require_procedures,
+        dry_run=True,
+        output=output,
+        max_retries=max_retries,
+        debug_report=None,
+        verbose=verbose,
     )
 
 
@@ -1192,7 +1236,23 @@ def extract_cmd(email_thread, task_data, task_id, external_data, output, verbose
     help="Minimum number of tasks sharing an edge for pattern output.",
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
-def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose):
+@click.option(
+    "--debug-report",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Save a JSON trace of every intermediate analysis step to this file. "
+        "Useful for investigating why an incident was or was not flagged as new."
+    ),
+)
+@click.option(
+    "--drafts-dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory to write seed draft JSON for novel incidents.",
+)
+def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir):
     """Analyze a problematic task and generate a resolution.
 
     With --compare-task-id, displays the common subgraph across all specified
@@ -1211,6 +1271,8 @@ def analyze_cmd(task_data, task_id, external_data, output, compare_task_ids, min
         compare_task_ids=compare_task_ids,
         min_occurrences=min_occurrences,
         verbose=verbose,
+        debug_report=debug_report,
+        drafts_dir=drafts_dir,
     )
 
 

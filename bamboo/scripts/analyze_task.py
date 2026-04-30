@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -10,7 +11,44 @@ import click
 from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
+from bamboo.models.knowledge_entity import AnalysisResult
 from bamboo.utils.logging import setup_logging
+
+
+async def _write_novel_draft(
+    task_dict: dict,
+    result: AnalysisResult,
+    prescription: dict | None,
+    drafts_dir: str = "drafts",
+) -> Path:
+    """Write a seed draft JSON for a novel (unmatched) incident."""
+    output = Path(drafts_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    task_id = (task_dict or {}).get("jediTaskID", result.task_id)
+    email_body = {
+        "background": result.explanation,
+        "cause": result.root_cause,
+        "resolution": result.resolution,
+        "procedure": (prescription or {}).get("hints", []),
+    }
+    review_hint = (
+        f"Novel incident — unmatched symptoms: {', '.join(result.unmatched_symptoms)}. "
+        "Verify root cause and resolution are correct before approving."
+    )
+    draft = {
+        "reviewed": False,
+        "review_hint": review_hint,
+        "matched_from": None,
+        "task_ids": [int(task_id)] if str(task_id).isdigit() else [],
+        "task_data": task_dict or {},
+        "errorDialog_canonical": (task_dict or {}).get("errorDialog", ""),
+        "email_body": email_body,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    out_file = output / f"task_{task_id}.json"
+    out_file.write_text(json.dumps(draft, indent=2, default=str))
+    return out_file
 
 
 @click.command()
@@ -54,7 +92,23 @@ from bamboo.utils.logging import setup_logging
     help="Minimum number of tasks that must share an edge for it to appear in the pattern output.",
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
-def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose):
+@click.option(
+    "--debug-report",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Save a JSON trace of every intermediate analysis step to this file. "
+        "Useful for investigating why an incident was or was not flagged as new."
+    ),
+)
+@click.option(
+    "--drafts-dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory to write seed draft JSON for novel incidents.",
+)
+def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir):
     """Analyze a problematic task and generate a resolution.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -86,8 +140,8 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         asyncio.run(_find_pattern(all_task_ids, min_occurrences))
         return
 
-    result, prescription, email_content = asyncio.run(
-        _analyze_task(task_dict, task_id, external_dict, verbose)
+    result, prescription, email_content, draft_path = asyncio.run(
+        _analyze_task(task_dict, task_id, external_dict, verbose, debug_report=debug_report, drafts_dir=drafts_dir)
     )
 
     # Display results
@@ -111,32 +165,39 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         if prescription.get("notes"):
             click.echo(f"\n  Notes: {prescription['notes']}")
 
-    click.echo("\n" + "-" * 80)
-    click.echo("EMAIL DRAFT")
-    click.echo("-" * 80)
-    click.echo(email_content)
-    click.echo("=" * 80)
+    if draft_path is not None:
+        click.echo("\n" + "-" * 80)
+        click.echo(f"✓ Novel incident: seed draft written to {draft_path}")
+        click.echo("  Run `bamboo review-drafts` to review and approve before adding to KB.")
+        click.echo("=" * 80)
+    else:
+        click.echo("\n" + "-" * 80)
+        click.echo("EMAIL DRAFT")
+        click.echo("-" * 80)
+        click.echo(email_content)
+        click.echo("=" * 80)
+
+        click.echo("\n")
+        feedback = click.prompt(
+            "Do you approve this analysis? (yes/no/edit)",
+            type=click.Choice(["yes", "no", "edit"]),
+            default="yes",
+        )
+
+        if feedback == "yes":
+            click.echo("✓ Analysis approved!")
+        elif feedback == "no":
+            reason = click.prompt("Please provide feedback for improvement")
+            click.echo(f"Feedback recorded: {reason}")
+        else:
+            click.echo("Please edit the results manually.")
 
     if output:
         output_path = Path(output)
-        result.email_content = email_content
+        if email_content:
+            result.email_content = email_content
         output_path.write_text(result.model_dump_json(indent=2))
         click.echo(f"\n✓ Results saved to {output}")
-
-    click.echo("\n")
-    feedback = click.prompt(
-        "Do you approve this analysis? (yes/no/edit)",
-        type=click.Choice(["yes", "no", "edit"]),
-        default="yes",
-    )
-
-    if feedback == "yes":
-        click.echo("✓ Analysis approved!")
-    elif feedback == "no":
-        reason = click.prompt("Please provide feedback for improvement")
-        click.echo(f"Feedback recorded: {reason}")
-    else:
-        click.echo("Please edit the results manually.")
 
 
 async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
@@ -213,8 +274,10 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
         await graph_db.close()
 
 
-async def _analyze_task(task_dict, task_id, external_dict, verbose=False):
+async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_report=None, drafts_dir="drafts"):
     """Run the async reasoning pipeline and return results."""
+    import uuid
+
     from rich.console import Console
 
     from bamboo.utils.narrator import set_narrator, thinking
@@ -249,19 +312,54 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False):
         explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
         agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
 
+        debug_trace: dict | None = {} if debug_report else None
+
         click.echo("Analyzing task...")
         result = await agent.analyze_task(
             task_data=task_dict,
             external_data=external_dict,
+            debug_trace=debug_trace,
         )
+
+        if debug_report and debug_trace is not None:
+            from bamboo.agents.extractors.panda_knowledge_extractor import (  # noqa: PLC0415
+                CLI_ARGUMENT_KEYS,
+                DISCRETE_TASK_KEYS,
+                SPLIT_RULE_KEYS,
+                UNSTRUCTURED_TASK_KEYS,
+            )
+            _relevant_keys = (
+                DISCRETE_TASK_KEYS | UNSTRUCTURED_TASK_KEYS | SPLIT_RULE_KEYS
+                | CLI_ARGUMENT_KEYS | {"jediTaskID", "status", "errorDialog", "taskName"}
+            )
+            task_status = (task_dict or {}).get("status", "")
+            raw_id = (task_dict or {}).get("jediTaskID")
+            gid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"graph:{raw_id}:{task_status}" if task_status else f"graph:{raw_id}",
+                )
+            )
+            debug_trace["task_data"] = {
+                k: v for k, v in (task_dict or {}).items() if k in _relevant_keys
+            }
+            debug_trace["graph_id"] = gid
+            Path(debug_report).write_text(
+                json.dumps(debug_trace, indent=2, default=str)
+            )
+            click.echo(f"\n✓ Debug report saved to {debug_report}")
 
         click.echo("Composing prescription...")
         prescription = await PrescriptionComposer(_mcp).compose(task_dict, result)
 
-        click.echo("Drafting email...")
-        email_content = await EmailDrafter().draft(task_dict, result, prescription)
-
-        return result, prescription, email_content
+        if result.unmatched_symptoms:
+            click.echo("Novel incident — writing seed draft instead of email...")
+            draft_path = await _write_novel_draft(task_dict, result, prescription, drafts_dir)
+            return result, prescription, None, draft_path
+        else:
+            click.echo("Drafting email...")
+            email_content = await EmailDrafter().draft(task_dict, result, prescription)
+            return result, prescription, email_content, None
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)

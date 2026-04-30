@@ -144,6 +144,7 @@ class ReasoningNavigator:
         external_data: dict[str, Any] = None,
         task_logs: dict[str, str] = None,
         doc_hints: dict[str, str] | None = None,
+        debug_trace: dict[str, Any] | None = None,
     ) -> AnalysisResult:
         """Analyse a problematic task and return a root-cause + resolution result.
 
@@ -185,8 +186,28 @@ class ReasoningNavigator:
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
-        graph_results, unmatched_symptoms = await self._query_graph_database(extracted_clues)
-        vector_results = await self._query_vector_database(extracted_clues, task_data)
+        if debug_trace is not None:
+            debug_trace["extracted_graph_nodes"] = [
+                {"type": str(n.node_type), "name": n.name, "description": n.description}
+                for n in extracted_graph.nodes
+            ]
+            debug_trace["extracted_clues"] = extracted_clues
+
+        gdb_trace: dict[str, Any] | None = {} if debug_trace is not None else None
+        graph_results, unmatched_symptoms = await self._query_graph_database(
+            extracted_clues, debug_trace=gdb_trace
+        )
+        if debug_trace is not None:
+            debug_trace["graph_db_probe"] = gdb_trace
+            debug_trace["unmatched_symptoms"] = unmatched_symptoms
+
+        vdb_trace: dict[str, Any] | None = {} if debug_trace is not None else None
+        vector_results = await self._query_vector_database(
+            extracted_clues, task_data, debug_trace=vdb_trace
+        )
+        if debug_trace is not None:
+            debug_trace["vector_db_probe"] = vdb_trace
+
         analysis = await self._identify_root_cause(
             task_data, external_data, graph_results, vector_results, domain_hints=domain_hints
         )
@@ -198,13 +219,47 @@ class ReasoningNavigator:
             f"reasoning:  {analysis.get('reasoning')}",
         )
 
-        # --- Exploratory investigation when confidence is too low ---
+        if debug_trace is not None:
+            debug_trace["root_cause_analysis"] = {
+                k: analysis.get(k)
+                for k in ("root_cause", "confidence", "resolution", "reasoning")
+            }
+            debug_trace["decision_trace"] = {
+                "novel_incident": bool(unmatched_symptoms),
+                "unmatched_symptoms": unmatched_symptoms,
+                "vector_match_count": len(vector_results),
+                "confidence": analysis.get("confidence"),
+                "confidence_threshold": EXPLORATORY_INVESTIGATION_THRESHOLD,
+                "would_trigger_exploration": (
+                    analysis.get("confidence", 0.0) < EXPLORATORY_INVESTIGATION_THRESHOLD
+                    or bool(unmatched_symptoms)
+                ),
+                "exploration_reason": (
+                    "novel_symptoms" if bool(unmatched_symptoms)
+                    and analysis.get("confidence", 0.0) >= EXPLORATORY_INVESTIGATION_THRESHOLD
+                    else "low_confidence" if analysis.get("confidence", 0.0) < EXPLORATORY_INVESTIGATION_THRESHOLD
+                    else "none"
+                ),
+            }
+
+        # --- Exploratory investigation when confidence is low OR symptom is novel ---
+        # Novel symptoms (no KB precedent) always trigger exploration regardless of
+        # LLM confidence — the LLM may appear confident from the raw error message
+        # alone, but without a KB match its resolution is unvalidated.
         capability_gaps: list[dict] = []
-        if analysis.get("confidence", 0.0) < EXPLORATORY_INVESTIGATION_THRESHOLD:
-            say(
-                f"Confidence {analysis.get('confidence', 0.0):.2f} below threshold "
-                f"{EXPLORATORY_INVESTIGATION_THRESHOLD} — starting exploratory investigation..."
-            )
+        low_confidence = analysis.get("confidence", 0.0) < EXPLORATORY_INVESTIGATION_THRESHOLD
+        if low_confidence or unmatched_symptoms:
+            if unmatched_symptoms and not low_confidence:
+                say(
+                    f"Novel symptom(s) detected with no knowledge-base precedent "
+                    f"({', '.join(unmatched_symptoms)}) — starting exploratory investigation "
+                    "to validate resolution before acting on it..."
+                )
+            else:
+                say(
+                    f"Confidence {analysis.get('confidence', 0.0):.2f} below threshold "
+                    f"{EXPLORATORY_INVESTIGATION_THRESHOLD} — starting exploratory investigation..."
+                )
             exploration_result, capability_gaps = await self._run_exploratory_investigation(
                 extracted_clues=extracted_clues,
                 task_data=task_data,
@@ -280,6 +335,7 @@ class ReasoningNavigator:
             explanation=analysis["reasoning"],
             supporting_evidence=analysis.get("supporting_evidence", []),
             capability_gaps=capability_gaps,
+            unmatched_symptoms=unmatched_symptoms,
             metadata={
                 "extracted_clues": extracted_clues,
                 "graph_results_count": len(graph_results),
@@ -296,7 +352,9 @@ class ReasoningNavigator:
     # ------------------------------------------------------------------
 
     async def _query_graph_database(
-        self, extracted_clues: dict[str, Any]
+        self,
+        extracted_clues: dict[str, Any],
+        debug_trace: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """Query the graph DB for causes that match the extracted clues.
 
@@ -306,6 +364,8 @@ class ReasoningNavigator:
 
         Args:
             extracted_clues: Output of :meth:`_extract_clues_from_graph`.
+            debug_trace:     Optional dict populated with per-symptom query
+                             results when provided (for ``--debug-report``).
 
         Returns:
             A ``(results, unmatched_symptoms)`` tuple.  ``results`` is the
@@ -316,6 +376,7 @@ class ReasoningNavigator:
         logger.info("ReasoningNavigator: querying graph database")
         symptoms = extracted_clues.get("symptoms") or []
         unmatched_symptoms: list[str] = []
+        per_symptom: dict[str, Any] = {} if debug_trace is not None else {}
         for symptom in symptoms:
             single = await self.graph_db.find_causes(symptoms=[symptom], limit=1)
             if not single:
@@ -325,6 +386,16 @@ class ReasoningNavigator:
                     symptom,
                 )
                 unmatched_symptoms.append(symptom)
+            if debug_trace is not None:
+                per_symptom[symptom] = {"matched": bool(single), "causes": single}
+
+        if debug_trace is not None:
+            debug_trace["per_symptom"] = per_symptom
+            debug_trace["pipeline_decision"] = (
+                f"NOVEL_INCIDENT — unmatched: {unmatched_symptoms}"
+                if unmatched_symptoms
+                else "KNOWN — all symptoms matched"
+            )
 
         if unmatched_symptoms:
             return [], unmatched_symptoms
@@ -337,6 +408,10 @@ class ReasoningNavigator:
             limit=10,
         )
         logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
+
+        if debug_trace is not None:
+            debug_trace["full_query_result"] = results
+
         return results, []
 
     async def _query_procedures(
@@ -364,7 +439,10 @@ class ReasoningNavigator:
         return results
 
     async def _query_vector_database(
-        self, extracted_clues: dict[str, Any], task_data: dict[str, Any]
+        self,
+        extracted_clues: dict[str, Any],
+        task_data: dict[str, Any],
+        debug_trace: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Find similar past cases using two-step vector retrieval.
 
@@ -380,6 +458,8 @@ class ReasoningNavigator:
             extracted_clues: Output of :meth:`_extract_clues_from_graph`.
             task_data:       Raw task data (``description`` field used as an
                              additional query if present).
+            debug_trace:     Optional dict populated with per-section hit
+                             details when provided (for ``--debug-report``).
 
         Returns:
             List of summary dicts, each augmented with a ``score`` field
@@ -421,6 +501,7 @@ class ReasoningNavigator:
 
         # Step 1: collect best score per graph_id across all sections
         graph_id_scores: dict[str, float] = {}
+        per_query_results: list[dict] = [] if debug_trace is not None else []
         for section, query_text in section_queries:
             query_embedding = await self.embeddings.aembed_query(query_text)
             hits = await self.vector_db.search_similar(
@@ -435,6 +516,32 @@ class ReasoningNavigator:
                     score = hit.get("score", 0.0)
                     if score > graph_id_scores.get(graph_id, 0.0):
                         graph_id_scores[graph_id] = score
+            if debug_trace is not None:
+                per_query_results.append({
+                    "section": section,
+                    "query": query_text,
+                    "hits": [
+                        {
+                            "score": h.get("score"),
+                            "graph_id": h.get("metadata", {}).get("graph_id"),
+                            "content": h.get("content", ""),
+                        }
+                        for h in hits
+                    ],
+                })
+
+        if debug_trace is not None:
+            debug_trace["score_threshold"] = 0.7
+            # per_query_results replaces the old per_section_hits dict — each entry
+            # has (section, query, hits) so repeated sections (e.g. Task_Context)
+            # are all preserved rather than overwriting each other.
+            debug_trace["per_query_results"] = per_query_results
+            debug_trace["matched_graph_ids"] = list(graph_id_scores.keys())
+            if not extracted_clues.get("errors"):
+                debug_trace["pipeline_note"] = (
+                    "'errors' key absent from extracted_clues — Error section skipped "
+                    "(extractor produces 'symptoms'; vector query looks for 'errors')"
+                )
 
         if not graph_id_scores:
             logger.info("ReasoningNavigator: no matching graphs found in vector DB")

@@ -163,3 +163,10 @@ class AnalysisResult(BaseModel):
             "'suggested_tool_capability' keys."
         ),
     )
+    unmatched_symptoms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Symptoms extracted from the task that had no match in the graph DB. "
+            "Non-empty means this is a novel incident with no KB precedent."
+        ),
+    )

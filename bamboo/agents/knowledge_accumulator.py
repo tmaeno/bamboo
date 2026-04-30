@@ -101,6 +101,7 @@ class KnowledgeAccumulator:
         task_logs: dict[str, str] = None,
         dry_run: bool = False,
         require_procedures: bool = False,
+        debug_trace: dict[str, Any] | None = None,
     ) -> ExtractedKnowledge:
         """Process one resolved incident and persist the extracted knowledge.
 
@@ -132,6 +133,8 @@ class KnowledgeAccumulator:
                            :attr:`ExtractedKnowledge.stored` is set to
                            ``False`` in that case; the caller should exit
                            with a non-zero status code.
+            debug_trace:   Optional dict populated with intermediate state
+                           at each pipeline phase (for ``--debug-report``).
 
         Returns:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
@@ -147,6 +150,10 @@ class KnowledgeAccumulator:
             graph_id = self._deterministic_id("graph", task_id)
         else:
             graph_id = str(uuid.uuid4())
+
+        if debug_trace is not None:
+            debug_trace["graph_id"] = graph_id
+            debug_trace["dry_run"] = dry_run
 
         from bamboo.agents.knowledge_reviewer import build_sources_summary, summarise_email_investigations
 
@@ -255,6 +262,24 @@ class KnowledgeAccumulator:
         # in the graph regardless of whether we are in dry-run mode or not.
         self._add_context_edges(graph)
 
+        if debug_trace is not None:
+            debug_trace["extracted_nodes"] = [
+                {"type": n.node_type.value, "name": n.name, "description": n.description}
+                for n in graph.nodes
+            ]
+            debug_trace["extracted_relationships"] = [
+                {"src": r.source_id, "rel": r.relation_type.value, "tgt": r.target_id,
+                 "confidence": r.confidence}
+                for r in graph.relationships
+            ]
+            if review_result is not None:
+                debug_trace["reviewer_outcome"] = {
+                    "approved": review_result.approved,
+                    "feedback": getattr(review_result, "feedback", None),
+                    "issues": [str(i) for i in getattr(review_result, "issues", [])],
+                    "confidence": getattr(review_result, "confidence", None),
+                }
+
         _has_procedures = any(n.node_type.value == "Procedure" for n in graph.nodes)
         if require_procedures and not _has_procedures:
             say(
@@ -289,12 +314,16 @@ class KnowledgeAccumulator:
             logger.info(
                 "KnowledgeAccumulator: dry-run mode — skipping all database writes"
             )
+            if debug_trace is not None:
+                debug_trace["previously_processed"] = None  # unknown in dry-run
         else:
             # Pre-check: if a Summary vector already exists for this graph_id the
             # task was previously processed.  Clean up its stale Neo4j contribution
             # before re-storing so old relationships don't accumulate.
+            _previously_processed = False
             if self.vector_db is not None:
                 existing = await self.vector_db.get_summaries_by_graph_ids([graph_id])
+                _previously_processed = bool(existing)
                 if existing:
                     say(
                         f"Task previously stored (graph_id={graph_id}) — "
@@ -312,10 +341,15 @@ class KnowledgeAccumulator:
                         graph_id,
                         counts,
                     )
+            if debug_trace is not None:
+                debug_trace["previously_processed"] = _previously_processed
             await self._store_graph(graph)
 
         summary = await self._generate_summary(graph, doc_hints=_doc_hints, email_text=email_text)
         key_insights = await self._extract_key_insights(graph)
+
+        if debug_trace is not None:
+            debug_trace["generated_summary"] = summary
 
         if not dry_run:
             await self._store_in_vector_db(graph, summary, key_insights)
@@ -367,6 +401,7 @@ class KnowledgeAccumulator:
         plain_error = ""
         if error_dialog:
             plain_error = re.sub(r"<[^>]+>", " ", error_dialog)
+            plain_error = re.sub("#[^ ]+", " ", plain_error)
             plain_error = " ".join(plain_error.split())
 
         # Build a single focused query from LLM-extracted keywords.
