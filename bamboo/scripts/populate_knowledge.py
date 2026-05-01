@@ -165,6 +165,7 @@ async def _run_populate(
 
     from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.panda_source_navigator import PandaSourceNavigator
     from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
     from bamboo.config import get_settings
     from bamboo.mcp.factory import build_mcp_client
@@ -172,7 +173,7 @@ async def _run_populate(
     settings = get_settings()
     reviewer = KnowledgeReviewer()
     _mcp = build_mcp_client(settings)
-    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp), source_navigator=PandaSourceNavigator())
     accumulator_kwargs = {}
     if max_retries is not None:
         accumulator_kwargs["max_review_retries"] = max_retries

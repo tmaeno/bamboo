@@ -296,6 +296,8 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
     from bamboo.agents.email_drafter import EmailDrafter
     from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.knowledge_accumulator import prefetch_panda_docs
+    from bamboo.agents.panda_source_navigator import PandaSourceNavigator
     from bamboo.agents.prescription_composer import PrescriptionComposer
     from bamboo.config import get_settings
     from bamboo.mcp.factory import build_mcp_client
@@ -309,15 +311,19 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
 
         settings = get_settings()
         _mcp = build_mcp_client(settings)
-        explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+        explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp), source_navigator=PandaSourceNavigator())
         agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
 
         debug_trace: dict | None = {} if debug_report else None
+
+        click.echo("Fetching PanDA documentation hints...")
+        _doc_hints = await prefetch_panda_docs(task_dict or {})
 
         click.echo("Analyzing task...")
         result = await agent.analyze_task(
             task_data=task_dict,
             external_data=external_dict,
+            doc_hints=_doc_hints,
             debug_trace=debug_trace,
         )
 

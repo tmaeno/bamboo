@@ -66,21 +66,32 @@ _MAX_ERROR_DIALOG_LOGS = 5
 # Fields kept from parent task dicts in retry-chain results (keeps LLM context compact).
 _RETRY_CHAIN_FIELDS = ("jediTaskID", "status", "errorDialog", "retryID", "transUses")
 
-# PanDA WMS documentation GitHub repository.
+# PanDA WMS documentation GitHub repository (source enumeration + task_params fetch).
 _PANDA_DOCS_ORG = "tmaeno"
 _PANDA_DOCS_RAW_BASE = f"https://raw.githubusercontent.com/{_PANDA_DOCS_ORG}/panda-docs/main"
-_PANDA_DOCS_WEB_BASE = f"https://github.com/{_PANDA_DOCS_ORG}/panda-docs/blob/main"
 _PANDA_DOCS_TREE_URL = (
     f"https://api.github.com/repos/{_PANDA_DOCS_ORG}/panda-docs/git/trees/main?recursive=1"
 )
+# Built ReadTheDocs site — Sphinx has already rendered all roles/directives.
+_PANDA_DOCS_HTML_BASE = "https://panda-wms.readthedocs.io/en/latest"
+_PANDA_DOCS_WEB_BASE = _PANDA_DOCS_HTML_BASE
+
+
+def _rst_path_to_html_url(rst_path: str) -> str:
+    """Map a GitHub RST path to its ReadTheDocs HTML URL."""
+    rel = rst_path.removeprefix("docs/source/").removesuffix(".rst") + ".html"
+    return f"{_PANDA_DOCS_HTML_BASE}/{rel}"
+
 
 _TASK_PARAMS_RST_PATH = "docs/source/advanced/task_params.rst"
+_GDPCONFIG_RST_PATH = "docs/source/advanced/gdpconfig.rst"
 _BROKERAGE_RST_PATH = "docs/source/advanced/brokerage.rst"
 
 # RST files excluded from the BM25 full-text index because they are handled
 # by dedicated structured parsers (e.g. _fetch_task_params_table).
 _BM25_EXCLUDE: frozenset[str] = frozenset({
     _TASK_PARAMS_RST_PATH,  # parsed by _fetch_task_params_table
+    _GDPCONFIG_RST_PATH,    # parsed by _fetch_gdpconfig_table
 })
 
 # In-process BM25 index: None = not yet built.
@@ -93,6 +104,10 @@ _bm25_data: tuple | None = None
 # Maps parameter name (e.g. "useExhausted") to its one-line description.
 # None = not yet fetched; {} = fetch attempted but failed or table was empty.
 _task_params_table: dict[str, str] | None = None
+
+# Parsed gdpconfig parameter table from docs/source/advanced/gdpconfig.rst.
+# Maps UPPERCASE_KEY (and base form without wildcard suffixes) to description.
+_gdpconfig_table: dict[str, str] | None = None
 
 
 async def _fetch_task_params_table() -> dict[str, str]:
@@ -198,6 +213,111 @@ def _parse_task_params_table(rst_text: str) -> dict[str, str]:
     if state == 3 and param and desc_parts:
         result[param] = " ".join(desc_parts)
 
+    return result
+
+
+async def _fetch_gdpconfig_table() -> dict[str, str]:
+    """Fetch and parse the gdpconfig parameter table from gdpconfig.rst.
+
+    Returns a dict mapping parameter key → description.  Both the exact key
+    (e.g. ``"SCOUT_MEM_LEAK_PER_CORE_<activity>"``) and its base form with
+    wildcard suffixes stripped (e.g. ``"SCOUT_MEM_LEAK_PER_CORE"``) are stored
+    so callers can match by either form.
+    Result is cached process-wide.  Returns ``{}`` on any error (fail-open).
+    """
+    global _gdpconfig_table
+    if _gdpconfig_table is not None:
+        return _gdpconfig_table
+
+    url = f"{_PANDA_DOCS_RAW_BASE}/{_GDPCONFIG_RST_PATH}"
+    try:
+        import httpx  # noqa: PLC0415
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            rst_text = r.text
+    except Exception as exc:
+        logger.warning("_fetch_gdpconfig_table: failed to fetch %s: %s", url, exc)
+        _gdpconfig_table = {}
+        return _gdpconfig_table
+
+    _gdpconfig_table = _parse_gdpconfig_table(rst_text)
+    logger.info(
+        "_fetch_gdpconfig_table: parsed %d gdpconfig parameter(s)",
+        len(_gdpconfig_table),
+    )
+    return _gdpconfig_table
+
+
+def _parse_gdpconfig_table(rst_text: str) -> dict[str, str]:
+    """Parse the two-column ``.. list-table::`` in gdpconfig.rst.
+
+    Stores each key twice:
+    - Exact form: ``"SCOUT_MEM_LEAK_PER_CORE_<activity>"``
+    - Base form (wildcard suffixes stripped): ``"SCOUT_MEM_LEAK_PER_CORE"``
+
+    Both map to the same description so lookup succeeds regardless of which
+    form appears in doc_hints text.
+    """
+    result: dict[str, str] = {}
+    # State: 0=seeking entry, 1=got key, 2=in description
+    state = 0
+    key = ""
+    desc_parts: list[str] = []
+
+    def _flush() -> None:
+        if key and desc_parts:
+            desc = " ".join(desc_parts)
+            result[key] = desc
+            # Also store the base form with wildcard suffixes removed.
+            base = re.sub(r"\[_<[^>]+>\]$", "", key)   # KEY[_<x>] → KEY
+            base = re.sub(r"_<[^>]+>$", "", base)       # KEY_<x>   → KEY
+            if base and base != key:
+                result.setdefault(base, desc)
+
+    for line in rst_text.splitlines():
+        stripped = line.strip()
+        if state == 0:
+            if stripped.startswith("* - "):
+                candidate = stripped[4:].strip()
+                # gdpconfig keys are UPPERCASE (allow [ < > _ as part of name)
+                if candidate and candidate[0].isupper():
+                    key = candidate
+                    desc_parts = []
+                    state = 1
+        elif state == 1:
+            if stripped.startswith("- "):
+                desc_parts = [stripped[2:].strip()]
+                state = 2
+            elif not stripped:
+                state = 0
+        elif state == 2:
+            if stripped.startswith("* - "):
+                _flush()
+                candidate = stripped[4:].strip()
+                if candidate and candidate[0].isupper():
+                    key = candidate
+                    desc_parts = []
+                    state = 1
+                else:
+                    key = ""
+                    desc_parts = []
+                    state = 0
+            elif stripped.startswith("- "):
+                _flush()
+                key = ""
+                desc_parts = []
+                state = 0
+            elif not stripped:
+                _flush()
+                key = ""
+                desc_parts = []
+                state = 0
+            else:
+                desc_parts.append(stripped)
+
+    _flush()
     return result
 
 
@@ -877,50 +997,28 @@ class PandaMcpClient(McpClient):
 
         from rank_bm25 import BM25Okapi  # noqa: PLC0415
 
-        bm25, paragraphs = await _build_bm25_index(httpx, BM25Okapi)
+        bm25, sections = await _build_bm25_index(httpx, BM25Okapi)
         if bm25 is None:
             return []
 
         tokens = re.findall(r"[a-z0-9]+", query.lower())
         bm25_scores = bm25.get_scores(tokens)
 
-        # Rank all paragraphs and collect the top ones, grouped by source file.
-        # We gather up to max_results * 3 candidate paragraphs so each file can
-        # contribute more than one passage (adjacent sections may both be relevant).
         ranked = sorted(
             range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
         )
         ranked = [i for i in ranked if bm25_scores[i] > 0]
 
-        # Collect one anchor paragraph index per source file (the highest-scoring).
-        # Paragraphs within a file are stored in document order, so we can walk
-        # forward from the anchor to grab the surrounding section context.
-        seen_paths: dict[str, int] = {}  # path → anchor paragraph index
-        for idx in ranked:
-            path = paragraphs[idx][0]
-            if path not in seen_paths:
-                seen_paths[path] = idx
-            if len(seen_paths) >= max_results:
-                break
-
         results: list[dict[str, Any]] = []
-        for path, anchor_idx in seen_paths.items():
-            title = path.split("/")[-1].replace(".rst", "").replace("_", " ").title()
-            # Collect the anchor paragraph + up to 8 following paragraphs from
-            # the same file to capture section bullets/prose that scored 0
-            # (they don't repeat the query term but are part of the same section).
-            context_parts: list[str] = []
-            for j in range(anchor_idx, min(anchor_idx + 9, len(paragraphs))):
-                if paragraphs[j][0] == path:
-                    context_parts.append(paragraphs[j][1])
-                else:
-                    break
-            snippet = "\n".join(context_parts)[:1500]
+        for idx in ranked:
+            path, title, text = sections[idx]
             results.append({
-                "title": title,
-                "url": f"{_PANDA_DOCS_WEB_BASE}/{path}",
-                "snippet": snippet,
+                "title": title or path.split("/")[-1].replace(".rst", "").replace("_", " ").title(),
+                "url": _rst_path_to_html_url(path),
+                "snippet": text,
             })
+            if len(results) >= max_results:
+                break
 
         logger.info(
             "PandaMcpClient.search_panda_docs: %d result(s) for query=%r", len(results), query
@@ -1010,12 +1108,12 @@ async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
     Phase 1: fetch the repository file tree (Git Trees API — no auth needed
     for public repos) to discover every ``docs/source/**/*.rst`` path.
     Phase 2: download all files concurrently from raw.githubusercontent.com.
-    Phase 3: split each file into paragraphs, clean RST markup, tokenise, and
-    build a BM25Okapi index.
+    Phase 3: split each file into RST sections using docutils, clean markup,
+    tokenise, and build a BM25Okapi index.
 
-    Returns ``(bm25, paragraphs)`` where *paragraphs* is a list of
-    ``(path, text)`` tuples parallel to the BM25 corpus.  On any fatal error
-    returns ``(None, [])``.
+    Returns ``(bm25, sections)`` where *sections* is a list of
+    ``(path, title, text)`` tuples parallel to the BM25 corpus.  On any fatal
+    error returns ``(None, [])``.
     """
     global _bm25_data
     if _bm25_data is not None:
@@ -1054,7 +1152,7 @@ async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
     # --- Phase 2: fetch all files concurrently ---
     async def _fetch(client: Any, path: str) -> tuple[str, str]:
         try:
-            r = await client.get(f"{_PANDA_DOCS_RAW_BASE}/{path}")
+            r = await client.get(_rst_path_to_html_url(path))
             r.raise_for_status()
             return path, r.text
         except Exception as exc:
@@ -1066,32 +1164,62 @@ async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
 
     raw_files = {path: content for path, content in fetched if content}
     logger.info(
-        "PandaMcpClient.search_panda_docs: fetched %d/%d RST file(s)",
+        "PandaMcpClient.search_panda_docs: fetched %d/%d HTML page(s)",
         len(raw_files), len(rst_paths),
     )
 
-    # --- Phase 3: split into paragraphs and build BM25 index ---
+    # --- Phase 3: extract sections from HTML and build BM25 index ---
+    from bs4 import BeautifulSoup  # noqa: PLC0415
+
     def _clean(text: str) -> str:
-        text = re.sub(r"\.\. \S+::.*", "", text)           # directives
-        text = re.sub(r":[a-z]+:`([^`]*)`", r"\1", text)  # inline roles → bare text
-        text = re.sub(r"\*{1,2}([^*\n]+)\*{1,2}", r"\1", text)  # **bold** / *italic*
-        text = re.sub(r"^[=\-~^#*+]{3,}\s*$", "", text, flags=re.MULTILINE)  # underlines
         text = re.sub(r"\s+", " ", text)
         return text.strip()
 
-    paragraphs: list[tuple[str, str]] = []
-    for path, content in raw_files.items():
-        for raw_para in re.split(r"\n{2,}", content):
-            cleaned = _clean(raw_para)
+    def _html_sections(path: str, html: str) -> list[tuple[str, str, str]]:
+        """Return [(path, title, cleaned_text)] from one ReadTheDocs HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        main = (
+            soup.find("div", role="main")
+            or soup.find("article")
+            or soup.find("div", class_="document")
+            or soup.body
+        )
+        if not main:
+            return []
+        results: list[tuple[str, str, str]] = []
+        for section in main.find_all("section"):
+            heading = section.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+            title = heading.get_text(" ", strip=True) if heading else ""
+            # Direct content only — skip nested <section> children so BM25
+            # scores each section by its own prose, not its descendants'.
+            parts = []
+            for child in section.children:
+                if getattr(child, "name", None) == "section":
+                    continue
+                if hasattr(child, "get_text"):
+                    parts.append(child.get_text(" ", strip=True))
+                elif isinstance(child, str):
+                    parts.append(child.strip())
+            cleaned = _clean(" ".join(parts))
             if cleaned:
-                paragraphs.append((path, cleaned))
+                results.append((path, title, cleaned))
+        if not results:
+            body_text = _clean(main.get_text(" ", strip=True))
+            if body_text:
+                file_title = path.split("/")[-1].replace(".rst", "").replace("_", " ").title()
+                results.append((path, file_title, body_text))
+        return results
 
-    corpus = [re.findall(r"[a-z0-9]+", text.lower()) for _, text in paragraphs]
+    sections: list[tuple[str, str, str]] = []  # (path, title, text)
+    for path, html in raw_files.items():
+        sections.extend(_html_sections(path, html))
+
+    corpus = [re.findall(r"[a-z0-9]+", text.lower()) for _, _, text in sections]
     bm25 = BM25Okapi(corpus)
 
-    _bm25_data = (bm25, paragraphs)
+    _bm25_data = (bm25, sections)
     logger.info(
-        "PandaMcpClient.search_panda_docs: BM25 index built over %d paragraph(s)",
-        len(paragraphs),
+        "PandaMcpClient.search_panda_docs: BM25 index built over %d section(s)",
+        len(sections),
     )
     return _bm25_data

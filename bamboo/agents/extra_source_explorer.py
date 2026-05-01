@@ -21,7 +21,7 @@ from typing import Any
 from bamboo.agents.knowledge_reviewer import _build_task_summary
 from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
 from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in type hints)
-from bamboo.utils.narrator import say, thinking
+from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +66,15 @@ class ExtraSourceExplorer:
                     if the planner returns ``None``.
     """
 
-    def __init__(self, mcp_client: McpClient, planner=None) -> None:
+    def __init__(
+        self,
+        mcp_client: McpClient,
+        planner=None,
+        source_navigator=None,
+    ) -> None:
         self._client = mcp_client
         self._planner = planner
+        self._source_navigator = source_navigator
         self._llm = None  # lazy — same pattern as KnowledgeAccumulator
 
     @property
@@ -147,12 +153,7 @@ class ExtraSourceExplorer:
                     for i, step in enumerate(plan.steps, 1):
                         say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
                         coros = [
-                            self._client.execute(
-                                tc["tool"],
-                                **({**tc.get("args", {}), "task_data": task_data}
-                                   if tc["tool"] in task_data_tool_names
-                                   else tc.get("args", {})),
-                            )
+                            self._tool_coro(tc, task_data, task_data_tool_names)
                             for tc in step.tool_calls
                         ]
                         results = await asyncio.gather(*coros, return_exceptions=True)
@@ -161,6 +162,8 @@ class ExtraSourceExplorer:
                                 say(f"    {tc['tool']}: failed — {result}")
                             else:
                                 say(f"    {tc['tool']}: done.")
+                                if isinstance(result, str) and result:
+                                    show_block(tc["tool"], result)
                             self._merge_tool_result(tc["tool"], result, out)
                 return out
 
@@ -217,12 +220,7 @@ class ExtraSourceExplorer:
                     for i, step in enumerate(plan.steps, 1):
                         say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
                         coros = [
-                            self._client.execute(
-                                tc["tool"],
-                                **({**tc.get("args", {}), "task_data": task_data}
-                                   if tc["tool"] in task_data_tool_names
-                                   else tc.get("args", {})),
-                            )
+                            self._tool_coro(tc, task_data, task_data_tool_names)
                             for tc in step.tool_calls
                         ]
                         results = await asyncio.gather(*coros, return_exceptions=True)
@@ -231,6 +229,8 @@ class ExtraSourceExplorer:
                                 say(f"    {tc['tool']}: failed — {result}")
                             else:
                                 say(f"    {tc['tool']}: done.")
+                                if isinstance(result, str) and result:
+                                    show_block(tc["tool"], result)
                             self._merge_tool_result(tc["tool"], result, out)
                     return out
                 if plan is not None and not plan.steps:
@@ -254,15 +254,7 @@ class ExtraSourceExplorer:
             )
             say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
 
-            coros = [
-                self._client.execute(
-                    tc["tool"],
-                    **({**tc.get("args", {}), "task_data": task_data}
-                       if tc["tool"] in task_data_tool_names
-                       else tc.get("args", {})),
-                )
-                for tc in tool_calls
-            ]
+            coros = [self._tool_coro(tc, task_data, task_data_tool_names) for tc in tool_calls]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
             out.tool_calls.extend(tool_calls)
@@ -271,6 +263,8 @@ class ExtraSourceExplorer:
                     say(f"  {tc['tool']}: failed — {result}")
                 else:
                     say(f"  {tc['tool']}: done.")
+                    if isinstance(result, str) and result:
+                        show_block(tc["tool"], result)
                 self._merge_tool_result(tc["tool"], result, out)
 
             return out
@@ -307,6 +301,27 @@ class ExtraSourceExplorer:
             logger.exception("ExtraSourceExplorer: LLM tool-selection call failed — failing open")
             return []
 
+    def _tool_coro(
+        self,
+        tc: dict,
+        task_data: dict[str, Any],
+        task_data_tool_names: frozenset[str],
+    ):
+        """Return the coroutine for one planned tool call.
+
+        Routes ``search_panda_server_source`` to :attr:`_source_navigator` when
+        one is configured, otherwise falls through to the MCP client.
+        """
+        if tc["tool"] == "search_panda_server_source" and self._source_navigator is not None:
+            query = tc.get("args", {}).get("query", "")
+            return self._source_navigator.navigate(query)
+        args = (
+            {**tc.get("args", {}), "task_data": task_data}
+            if tc["tool"] in task_data_tool_names
+            else tc.get("args", {})
+        )
+        return self._client.execute(tc["tool"], **args)
+
     def _merge_tool_result(
         self,
         tool_name: str,
@@ -341,7 +356,9 @@ class ExtraSourceExplorer:
             if isinstance(result, list) and result:
                 out.task_logs["jedi:input_datasets"] = json.dumps(result, indent=2, default=str)
         elif tool_name == "search_panda_server_source":
-            if isinstance(result, list) and result:
+            if isinstance(result, str) and result:
+                out.task_logs["panda_server:source_search"] = result
+            elif isinstance(result, list) and result:
                 out.task_logs["panda_server:source_search"] = json.dumps(result, indent=2)
         elif tool_name == "search_panda_docs":
             if isinstance(result, list) and result:

@@ -1146,3 +1146,51 @@ Write a clear, professional email that:
 
 Generate the email content:"""
 
+# ---------------------------------------------------------------------------
+# PandaSourceNavigator prompts
+# ---------------------------------------------------------------------------
+
+PANDA_SOURCE_NAV_PROMPT = """\
+You are navigating panda-server Python source code to answer this question:
+
+  {question}
+
+CANDIDATE METHODS (qualname, docstring summary, module path):
+{candidates}
+
+ALREADY READ: {already_read}
+
+Decide which methods to read next. Respond with ONLY a valid JSON object:
+
+{{
+  "action": "read",
+  "read": [
+    {{"module": "taskbuffer/OraDBProxy.py", "qualname": "OraDBProxy.getScoutRamCount"}}
+  ],
+  "follow_up_symbols": ["calcRamCount", "actualMemoryUsed"],
+  "reasoning": "one sentence"
+}}
+
+Rules:
+- Select only methods from CANDIDATE METHODS that are directly relevant to the question.
+- "follow_up_symbols": list symbol names you expect to find referenced inside the methods \
+you are about to read — these will be searched in the next round. Leave as [] if \
+no follow-up is needed.
+- If ALREADY READ already contains enough to answer the question, set \
+"action": "done" and omit all other keys.
+- Never re-read a method already in ALREADY READ.
+"""
+
+PANDA_SOURCE_SYNTHESIS_PROMPT = """\
+You have read the following panda-server source code snippets to answer this question:
+
+  {question}
+
+SOURCE CODE:
+{sources}
+
+Write a concise technical answer (3–10 sentences) explaining exactly how the relevant \
+code works with respect to the question. Reference specific variable names, function \
+names, and logic from the source. Do not repeat the source verbatim — synthesise it.
+"""
+

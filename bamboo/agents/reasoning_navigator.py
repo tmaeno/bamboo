@@ -183,6 +183,7 @@ class ReasoningNavigator:
             task_data=task_data,
             external_data=external_data,
             task_logs=task_logs,
+            doc_hints=doc_hints,
         )
         extracted_clues = self._extract_clues_from_graph(extracted_graph)
 
