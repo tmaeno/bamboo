@@ -1,4 +1,4 @@
-"""Factory for building the MCP client used by :class:`ExtraSourceExplorer`.
+"""Factory for building the MCP client used by :class:`ContextEnricher`.
 
 :func:`build_mcp_client` is the single entry point.  It returns a bare
 :class:`~bamboo.mcp.PandaMcpClient` when no external servers are configured
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_mcp_client(settings: object) -> McpClient:
-    """Build the MCP client for :class:`~bamboo.agents.ExtraSourceExplorer`.
+    """Build the MCP client for :class:`~bamboo.agents.ContextEnricher`.
 
     Args:
         settings: :class:`~bamboo.config.Settings` instance.

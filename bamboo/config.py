@@ -180,7 +180,7 @@ class Settings(BaseSettings):
     pseudonym_salt: str = ""
 
     # External MCP servers: optional path to a JSON file listing additional
-    # MCP servers to expose to ExtraSourceExplorer alongside PandaMcpClient.
+    # MCP servers to expose to ContextEnricher alongside PandaMcpClient.
     # The 'mcp' package is included in the main dependencies.
     # Example: MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
     mcp_servers_config: str = ""

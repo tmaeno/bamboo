@@ -60,7 +60,7 @@ class ReasoningNavigator:
     Args:
         graph_db:  Connected :class:`GraphDatabaseClient`.
         vector_db: Connected :class:`VectorDatabaseClient`.
-        explorer:  Optional :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
+        explorer:  Optional :class:`~bamboo.agents.context_enricher.ContextEnricher`.
                    When provided with a configured planner, enables exploratory investigation
                    of low-confidence incidents (Phase 0) in addition to Phase 2
                    procedure-driven investigation.
@@ -268,7 +268,7 @@ class ReasoningNavigator:
                 partial_vector_results=vector_results,
                 unmatched_symptoms=unmatched_symptoms,
                 initial_result=analysis,
-                domain_hints=domain_hints,
+                doc_hints=doc_hints,
             )
             if exploration_result is not None and (
                 exploration_result.external_data or exploration_result.task_logs
@@ -644,7 +644,7 @@ class ReasoningNavigator:
         partial_vector_results: list[dict[str, Any]],
         unmatched_symptoms: list[str],
         initial_result: dict[str, Any],
-        domain_hints: str = "(none)",
+        doc_hints: dict[str, str] | None = None,
     ) -> tuple[Any, list[dict]]:
         """Plan and execute an exploratory investigation for a low-confidence incident.
 
@@ -679,7 +679,6 @@ class ReasoningNavigator:
             logger.info("ReasoningNavigator: exploratory investigation skipped — no tools available")
             return None, []
 
-        doc_hints_dict = None  # domain_hints already formatted; planner accepts dict or None
         plan = await self._explorer.planner.plan_investigation(
             task_data=task_data,
             extracted_clues=extracted_clues,
@@ -688,7 +687,7 @@ class ReasoningNavigator:
             unmatched_symptoms=unmatched_symptoms,
             initial_result=initial_result,
             tools=tools,
-            doc_hints=doc_hints_dict,
+            doc_hints=doc_hints,
         )
 
         if plan is None:
@@ -766,7 +765,7 @@ class ReasoningNavigator:
             logger.info("ReasoningNavigator: investigation note: %s", note)
             return {"procedures": procedures, "investigation_note": note}
 
-        # Delegate to ExtraSourceExplorer — reuses its LLM tool selection,
+        # Delegate to ContextEnricher — reuses its LLM tool selection,
         # asyncio.gather execution, and _merge_tool_result routing.
         issues = []
         for p in procedures:

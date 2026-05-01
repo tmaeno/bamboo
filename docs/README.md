@@ -26,7 +26,7 @@ for live incidents, and batch (`seed-drafts → review-drafts → batch-populate
 bulk commissioning.
 
 ### 🤖 [Agent Reference](AGENTS.md)
-All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ExtraSourceExplorer`, `ReasoningNavigator`, and their components.
+All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ContextEnricher`, `ReasoningNavigator`, and their components.
 
 ### 👨‍💻 [Development Guide](DEVELOPMENT.md)
 Development setup, code style, extension points (agents, node types, relationships, prompts), testing, and deployment.

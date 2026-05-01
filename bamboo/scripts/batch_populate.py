@@ -189,7 +189,7 @@ async def _run(
 
     # Set up KnowledgeAccumulator (shared across all tasks)
     from bamboo.agents.exploration_planner import ExplorationPlanner
-    from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+    from bamboo.agents.context_enricher import ContextEnricher
     from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
     from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
     from bamboo.config import get_settings
@@ -200,7 +200,7 @@ async def _run(
     settings = get_settings()
     reviewer = KnowledgeReviewer()
     _mcp = build_mcp_client(settings)
-    explorer = ExtraSourceExplorer(_mcp, planner=ExplorationPlanner(_mcp))
+    explorer = ContextEnricher(_mcp, planner=ExplorationPlanner(_mcp))
 
     neo4j = GraphDatabaseClient()
     qdrant = VectorDatabaseClient()

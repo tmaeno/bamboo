@@ -1,7 +1,7 @@
-"""Two-phase exploration planner for :class:`~bamboo.agents.ExtraSourceExplorer`.
+"""Two-phase exploration planner for :class:`~bamboo.agents.ContextEnricher`.
 
 :class:`ExplorationPlanner` sits between :class:`~bamboo.agents.KnowledgeReviewer`
-and :class:`~bamboo.agents.ExtraSourceExplorer`.  Given the reviewer's issues it
+and :class:`~bamboo.agents.ContextEnricher`.  Given the reviewer's issues it
 runs two sequential LLM calls:
 
 1. **Gap analysis** — convert raw reviewer issues into precise, tool-neutral
@@ -12,7 +12,7 @@ runs two sequential LLM calls:
    extraction context).
 
 The planner is **fail-open**: any error in either phase causes :meth:`plan` to
-return ``None``, which signals :class:`ExtraSourceExplorer` to fall back to its
+return ``None``, which signals :class:`ContextEnricher` to fall back to its
 existing single-LLM-call ``_select_tools`` path.
 """
 
@@ -57,7 +57,7 @@ class PlanStep:
         reason:     Plain-English description of what this step fetches and
                     which gap it closes.
         tool_calls: List of ``{"tool": str, "args": dict}`` dicts — same
-                    format as :func:`~bamboo.agents.extra_source_explorer._parse_tool_calls`.
+                    format as :func:`~bamboo.agents.context_enricher._parse_tool_calls`.
     """
 
     reason: str
@@ -195,7 +195,7 @@ class ExplorationPlanner:
             return None
         try:
             from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
-            from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
+            from bamboo.agents.context_enricher import _build_tools_description  # noqa: PLC0415
 
             truncated_vector = [
                 {"score": r.get("score", 0.0), "entry": r.get("entry"), "content": str(r.get("content", ""))[:300]}
@@ -267,7 +267,7 @@ class ExplorationPlanner:
         Returns ``[]`` on parse error.
         """
         from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
-        from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
+        from bamboo.agents.context_enricher import _build_tools_description  # noqa: PLC0415
 
         task_summary = _build_task_summary(task_data)
         tools_description = _build_tools_description(tools)
@@ -312,7 +312,7 @@ class ExplorationPlanner:
         applying generic diagnostic reasoning.
         """
         from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints  # noqa: PLC0415
-        from bamboo.agents.extra_source_explorer import _build_tools_description  # noqa: PLC0415
+        from bamboo.agents.context_enricher import _build_tools_description  # noqa: PLC0415
 
         task_summary = _build_task_summary(task_data)
         tools_description = _build_tools_description(tools)

@@ -64,14 +64,14 @@ class McpClient(ABC):
     async def connect(self) -> None:
         """Establish connection and discover remote tools.
 
-        Called by :class:`~bamboo.agents.ExtraSourceExplorer` before the first
+        Called by :class:`~bamboo.agents.ContextEnricher` before the first
         :meth:`list_tools` call.  No-op for in-process clients.
         """
 
     async def close(self) -> None:
         """Release the connection acquired by :meth:`connect`.
 
-        Called by :class:`~bamboo.agents.ExtraSourceExplorer` after all tool
+        Called by :class:`~bamboo.agents.ContextEnricher` after all tool
         calls have completed.  No-op for in-process clients.
         """
 

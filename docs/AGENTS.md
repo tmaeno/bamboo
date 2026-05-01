@@ -22,7 +22,7 @@ includes an optional quality-gate loop.
 │                         │                                      │
 │                         ├─ KnowledgeReviewer                   │
 │                         │                                      │
-│                         └─ ExtraSourceExplorer                 │
+│                         └─ ContextEnricher                 │
 │                                ├─ ExplorationPlanner           │
 │                                └─ MCP client layer             │
 │                                     ├─ PandaMcpClient          │
@@ -38,10 +38,10 @@ includes an optional quality-gate loop.
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
 │                    │      └─ ExplorationPlanner.plan_investigation() │
-│                    │             └─ ExtraSourceExplorer              │
+│                    │             └─ ContextEnricher              │
 │                    │                                                 │
 │                    └─ Procedure-driven investigation  (Phase 2)      │
-│                           └─ ExtraSourceExplorer                     │
+│                           └─ ContextEnricher                     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -51,8 +51,8 @@ The **review–explore loop** inside `KnowledgeAccumulator` always runs:
 extract → KnowledgeReviewer
               │ approved          → store
               │ rejected (pass 0) → ExplorationPlanner
-              │                          │ plan OK  → ExtraSourceExplorer (step-by-step)
-              │                          │ plan None → ExtraSourceExplorer (single-wave fallback)
+              │                          │ plan OK  → ContextEnricher (step-by-step)
+              │                          │ plan None → ContextEnricher (single-wave fallback)
               │                     → re-extract → KnowledgeReviewer
               │ rejected (pass N) → store best result (with warning)
 ```
@@ -88,7 +88,7 @@ indexing.
 | `--max-retries N` | `2` | Reviewer retry limit (`bamboo extract` CLI only) |
 
 **Retry loop:** on each rejection the accumulator increments `attempt`.  The
-`ExtraSourceExplorer` fires exactly once (at `attempt == 0`).  After
+`ContextEnricher` fires exactly once (at `attempt == 0`).  After
 `max_review_retries` rejections the best result is stored with a warning.
 
 ---
@@ -175,7 +175,7 @@ for the extractor on retry).
 
 **File:** `bamboo/agents/exploration_planner.py`
 
-Sits between `KnowledgeReviewer` and `ExtraSourceExplorer`.  Converts the reviewer's raw
+Sits between `KnowledgeReviewer` and `ContextEnricher`.  Converts the reviewer's raw
 issue list into a structured `ExplorationPlan` via two sequential LLM calls, then hands
 the plan to the explorer for execution.
 
@@ -210,9 +210,9 @@ final `AnalysisResult` to guide future tool development.  Fail-open: returns `No
 
 ---
 
-### `ExtraSourceExplorer`  *(fires once per run)*
+### `ContextEnricher`  *(fires once per run)*
 
-**File:** `bamboo/agents/extra_source_explorer.py`
+**File:** `bamboo/agents/context_enricher.py`
 
 Sits between the first reviewer rejection and the second extraction attempt.  Executes
 the `ExplorationPlan` produced by `ExplorationPlanner` (if available) or falls back to
@@ -251,7 +251,7 @@ planning phases are skipped and the plan steps are executed directly.  Used by
 ### MCP Client Layer
 
 The MCP client is built by `build_mcp_client()` in `bamboo/mcp/factory.py` and passed to
-`ExtraSourceExplorer` at startup.  When no external servers are configured it returns a bare
+`ContextEnricher` at startup.  When no external servers are configured it returns a bare
 `PandaMcpClient`; otherwise it returns a `CompositeMcpClient` that aggregates `PandaMcpClient`
 with one or more `ExternalMcpClient` instances.
 
@@ -263,7 +263,7 @@ Built-in client that exposes PanDA data tools.  No external connection needed.
 
 | Tool | Trigger condition | Routes to | Returns |
 |---|---|---|---|
-| `fetch_error_dialog_logs` | Symptom nodes too vague; log evidence absent | `task_logs` | `dict[url → content]` |
+| `fetch_linked_log_files` | Symptom nodes too vague; log evidence absent | `task_logs` | `dict[url → content]` |
 | `get_parent_task` | `retryID` present but root cause unclear | `external_data` | Parent task dict |
 | `get_retry_chain` | Failure spans multiple retry attempts | `external_data` | List of ancestor task summaries |
 | `get_task_jobs_summary` | Job-level failure distribution missing | `external_data` | Status counts + top error diags |
@@ -412,11 +412,11 @@ pipeline, then drafts a resolution email for the task submitter.
    statement with confidence score.  Always runs, even when graph or vector results are empty.
 5. **Exploratory investigation** *(if `confidence < EXPLORATORY_INVESTIGATION_THRESHOLD`,
    default 0.5)* — `ExplorationPlanner.plan_investigation()` generates a targeted plan from
-   partial DB evidence and novel leads; `ExtraSourceExplorer` executes it via MCP tools.
+   partial DB evidence and novel leads; `ContextEnricher` executes it via MCP tools.
    Root-cause is re-synthesised with the gathered evidence.  Investigation directions that no
    available tool can address are collected as `capability_gaps`.
 6. **Procedure-driven investigation** *(Phase 2, if a known cause was identified)* — query
-   graph DB for `ProcedureNode` entries linked to the cause; run via `ExtraSourceExplorer`.
+   graph DB for `ProcedureNode` entries linked to the cause; run via `ContextEnricher`.
 7. **Email draft** — generate a professional resolution email for the task submitter.
 
 **Output:** `AnalysisResult` — `root_cause`, `confidence`, `resolution`, `explanation`,
@@ -463,7 +463,7 @@ continues with what it has rather than aborting.
 | `ExplorationPlanner.plan()` either LLM call | Returns `None` → explorer falls back to `_select_tools` |
 | `ExplorationPlanner.plan_investigation()` LLM call | Returns `None` → exploratory investigation skipped |
 | `ReasoningNavigator._run_exploratory_investigation()` (no planner) | Returns `(None, [])`, skips exploratory investigation silently |
-| `ExtraSourceExplorer` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
+| `ContextEnricher` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |

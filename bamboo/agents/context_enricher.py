@@ -1,6 +1,6 @@
 """Source exploration agent: fetches additional data on reviewer rejection.
 
-:class:`ExtraSourceExplorer` sits between the first reviewer rejection and the
+:class:`ContextEnricher` sits between the first reviewer rejection and the
 second extraction attempt.  It asks an LLM which MCP tools to invoke (given
 the reviewer's issues and available tools), executes them concurrently, and
 returns an :class:`ExplorationResult` ready to be merged into the next
@@ -47,7 +47,7 @@ class ExplorationResult:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
-class ExtraSourceExplorer:
+class ContextEnricher:
     """LLM-driven single-pass source explorer.
 
     Given the reviewer's issues list and the current task data, either follows
@@ -145,7 +145,7 @@ class ExtraSourceExplorer:
                 if plan.steps:
                     all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
                     logger.info(
-                        "ExtraSourceExplorer: executing pre-built plan — %d step(s), %d tool call(s)",
+                        "ContextEnricher: executing pre-built plan — %d step(s), %d tool call(s)",
                         len(plan.steps),
                         len(all_tool_calls),
                     )
@@ -195,7 +195,7 @@ class ExtraSourceExplorer:
                 self._merge_tool_result("request_human_input", result, out)
             elif procedure_issues:
                 logger.info(
-                    "ExtraSourceExplorer: procedure gap found but request_human_input "
+                    "ContextEnricher: procedure gap found but request_human_input "
                     "not available — skipping"
                 )
                 say("  Procedure gap: request_human_input not available.")
@@ -212,7 +212,7 @@ class ExtraSourceExplorer:
                 if plan is not None and plan.steps:
                     all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
                     logger.info(
-                        "ExtraSourceExplorer: executing plan — %d step(s), %d tool call(s)",
+                        "ContextEnricher: executing plan — %d step(s), %d tool call(s)",
                         len(plan.steps),
                         len(all_tool_calls),
                     )
@@ -235,20 +235,20 @@ class ExtraSourceExplorer:
                     return out
                 if plan is not None and not plan.steps:
                     logger.info(
-                        "ExtraSourceExplorer: planner found no steps — falling back to _select_tools"
+                        "ContextEnricher: planner found no steps — falling back to _select_tools"
                     )
                     say("Explorer: planner found no steps — falling back to direct tool selection.")
 
             # ── Fallback: single-wave concurrent path (no planner / plan=None) ─
             tool_calls = await self._select_tools(task_data, other_issues, tools)
             if not tool_calls:
-                logger.info("ExtraSourceExplorer: LLM selected no tools — nothing to explore")
+                logger.info("ContextEnricher: LLM selected no tools — nothing to explore")
                 say("Explorer selected no additional tools.")
                 return out
 
             tool_names = [tc["tool"] for tc in tool_calls]
             logger.info(
-                "ExtraSourceExplorer: executing %d tool call(s): %s",
+                "ContextEnricher: executing %d tool call(s): %s",
                 len(tool_calls),
                 tool_names,
             )
@@ -298,7 +298,7 @@ class ExtraSourceExplorer:
                 response = await self.llm.ainvoke(prompt)
             return _parse_tool_calls(response.content)
         except Exception:
-            logger.exception("ExtraSourceExplorer: LLM tool-selection call failed — failing open")
+            logger.exception("ContextEnricher: LLM tool-selection call failed — failing open")
             return []
 
     def _tool_coro(
@@ -331,11 +331,11 @@ class ExtraSourceExplorer:
         """Route one tool result into the correct :class:`ExplorationResult` field."""
         if isinstance(result, BaseException):
             logger.warning(
-                "ExtraSourceExplorer: tool %r raised %s — skipped", tool_name, result
+                "ContextEnricher: tool %r raised %s — skipped", tool_name, result
             )
             return
 
-        if tool_name == "fetch_error_dialog_logs":
+        if tool_name == "fetch_linked_log_files":
             if isinstance(result, dict):
                 for url, content in result.items():
                     key = f"explorer:error_dialog:{url}"
@@ -371,7 +371,7 @@ class ExtraSourceExplorer:
             # Store raw result in external_data so the LLM extractor receives
             # it as additional unstructured context on the next attempt.
             logger.debug(
-                "ExtraSourceExplorer: storing raw result for unrecognised tool %r",
+                "ContextEnricher: storing raw result for unrecognised tool %r",
                 tool_name,
             )
             out.external_data[f"tool:{tool_name}"] = result
@@ -402,7 +402,7 @@ def _parse_tool_calls(response: str) -> list[dict[str, Any]]:
     try:
         data = json.loads(text)
         if not isinstance(data, list):
-            logger.warning("ExtraSourceExplorer: LLM returned non-list JSON — ignoring")
+            logger.warning("ContextEnricher: LLM returned non-list JSON — ignoring")
             return []
         valid = []
         for item in data:
@@ -410,5 +410,5 @@ def _parse_tool_calls(response: str) -> list[dict[str, Any]]:
                 valid.append(item)
         return valid
     except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning("ExtraSourceExplorer: failed to parse tool-selection response: %s", exc)
+        logger.warning("ContextEnricher: failed to parse tool-selection response: %s", exc)
         return []

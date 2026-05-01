@@ -1,101 +1,123 @@
-"""Iterative LLM agent for navigating panda-server source code."""
+"""Iterative LLM agent for navigating panda-server / pandajedi source code."""
 
 from __future__ import annotations
 
 import ast
-import importlib.util
+import asyncio
 import json
-import math
 import re
 from pathlib import Path
 from typing import Any
 
-_method_index_cache: dict[str, list[dict[str, Any]]] | None = None
+_PANDA_PACKAGES = ["pandaserver", "pandajedi"]
+
+_pkg_roots_cache: dict[str, Path] = {}
 
 
-def _get_pkg_root() -> Path | None:
-    spec = importlib.util.find_spec("pandaserver")
-    return Path(spec.origin).parent if spec and spec.origin else None
+def _get_pkg_roots() -> dict[str, Path]:
+    global _pkg_roots_cache
+    if not _pkg_roots_cache:
+        from importlib.metadata import Distribution, PackageNotFoundError, packages_distributions
+        # packages_distributions() maps import name → [dist name, ...] from on-disk
+        # metadata — independent of sys.modules, so pandaclient's monkey-patch
+        # of sys.modules["pandaserver"] cannot mislead it.
+        pkg_to_dist = packages_distributions()
+        for pkg in _PANDA_PACKAGES:
+            for dist_name in pkg_to_dist.get(pkg, []):
+                try:
+                    dist = Distribution.from_name(dist_name)
+                    pkg_dir = Path(dist.locate_file("")).resolve() / pkg
+                    if pkg_dir.is_dir():
+                        _pkg_roots_cache[pkg] = pkg_dir
+                        break
+                except PackageNotFoundError:
+                    pass
+    return _pkg_roots_cache
 
 
-def _tokenize(text: str) -> list[str]:
-    """Split on whitespace and camelCase boundaries. 'ramCount' → ['ram', 'count']."""
-    return re.findall(r"[a-z0-9]+", text.lower())
+def _grep_candidates(
+    pkg_roots: dict[str, Path],
+    terms: list[str],
+    max_results: int = 30,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Return (methods, stats) where methods whose body contains one or more of *terms*.
 
-
-def _build_index(pkg_root: Path) -> dict[str, list[dict[str, Any]]]:
-    """AST-parse all .py files → {rel_path: [{name, qualname, docstring_first_line, line, module}]}."""
-    index: dict[str, list[dict[str, Any]]] = {}
-    for py_file in sorted(pkg_root.rglob("*.py")):
-        rel = str(py_file.relative_to(pkg_root))
-        try:
-            tree = ast.parse(py_file.read_text(errors="replace"))
-        except SyntaxError:
-            continue
-        entries: list[dict[str, Any]] = []
-        # Class methods — track class context explicitly
-        for cls_node in ast.walk(tree):
-            if isinstance(cls_node, ast.ClassDef):
+    Each .py file is pre-filtered with a fast ``in`` check before AST parsing.
+    Results are sorted descending by the number of matching terms.
+    Module paths are package-prefixed: ``pandaserver/taskbuffer/task_utils.py``.
+    stats keys: files_scanned, files_hit (contain term in text), methods_found.
+    """
+    if not terms:
+        return [], {"files_scanned": 0, "files_hit": 0, "methods_found": 0}
+    results: list[dict[str, Any]] = []
+    files_scanned = 0
+    files_hit = 0
+    for pkg_name, pkg_root in pkg_roots.items():
+        for py_file in sorted(pkg_root.rglob("*.py")):
+            files_scanned += 1
+            try:
+                source_text = py_file.read_text(errors="replace")
+            except Exception:
+                continue
+            if not any(t in source_text for t in terms):
+                continue
+            files_hit += 1
+            try:
+                tree = ast.parse(source_text)
+            except SyntaxError:
+                continue
+            lines = source_text.splitlines()
+            rel = f"{pkg_name}/{py_file.relative_to(pkg_root)}"
+            for cls_node in ast.walk(tree):
+                if not isinstance(cls_node, ast.ClassDef):
+                    continue
                 for item in cls_node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    body = "\n".join(lines[item.lineno - 1 : item.end_lineno])
+                    score = sum(1 for t in terms if t in body)
+                    if score:
                         doc = ast.get_docstring(item) or ""
-                        entries.append({
+                        results.append({
                             "name": item.name,
                             "qualname": f"{cls_node.name}.{item.name}",
                             "docstring_first_line": doc.split("\n")[0].strip(),
                             "line": item.lineno,
                             "module": rel,
+                            "_score": score,
                         })
-        # Top-level functions
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                doc = ast.get_docstring(node) or ""
-                entries.append({
-                    "name": node.name,
-                    "qualname": node.name,
-                    "docstring_first_line": doc.split("\n")[0].strip(),
-                    "line": node.lineno,
-                    "module": rel,
-                })
-        if entries:
-            index[rel] = entries
-    return index
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                body = "\n".join(lines[node.lineno - 1 : node.end_lineno])
+                score = sum(1 for t in terms if t in body)
+                if score:
+                    doc = ast.get_docstring(node) or ""
+                    results.append({
+                        "name": node.name,
+                        "qualname": node.name,
+                        "docstring_first_line": doc.split("\n")[0].strip(),
+                        "line": node.lineno,
+                        "module": rel,
+                        "_score": score,
+                    })
+    results.sort(key=lambda x: x["_score"], reverse=True)
+    for r in results:
+        r.pop("_score")
+    stats = {"files_scanned": files_scanned, "files_hit": files_hit, "methods_found": len(results)}
+    return results[:max_results], stats
 
 
-def _get_index(pkg_root: Path) -> dict[str, list[dict[str, Any]]]:
-    global _method_index_cache
-    if _method_index_cache is None:
-        _method_index_cache = _build_index(pkg_root)
-    return _method_index_cache
+def _read_method(module: str, qualname: str) -> dict[str, Any] | None:
+    """Return full source of a named method: {module, qualname, source, line_start, line_end}.
 
-
-def _keyword_filter(
-    index: dict[str, list[dict[str, Any]]],
-    query: str,
-    max_results: int = 30,
-) -> list[dict[str, Any]]:
-    """Return methods whose name+docstring keyword-match the query.
-
-    Uses camelCase-aware tokenization and a majority-match threshold (≥60% of
-    query tokens must appear) so that natural-language words in the query that
-    don't appear in source identifiers don't kill the match.
+    ``module`` must be a package-prefixed path, e.g. ``pandaserver/task/taskrefiner.py``.
     """
-    tokens = _tokenize(query)
-    if not tokens:
-        return []
-    threshold = max(1, math.ceil(len(tokens) * 0.6))
-    results: list[dict[str, Any]] = []
-    for entries in index.values():
-        for e in entries:
-            haystack = set(_tokenize(e["qualname"] + " " + e["docstring_first_line"]))
-            if sum(1 for t in tokens if t in haystack) >= threshold:
-                results.append(e)
-    return results[:max_results]
-
-
-def _read_method(pkg_root: Path, module: str, qualname: str) -> dict[str, Any] | None:
-    """Return full source of a named method: {module, qualname, source, line_start, line_end}."""
-    py_file = pkg_root / module
+    pkg_name, rel_path = module.split("/", 1)
+    pkg_root = _get_pkg_roots().get(pkg_name)
+    if pkg_root is None:
+        return None
+    py_file = pkg_root / rel_path
     try:
         source_text = py_file.read_text(errors="replace")
         tree = ast.parse(source_text)
@@ -128,12 +150,12 @@ def _parse_nav_decision(text: str) -> dict[str, Any]:
 
 
 class PandaSourceNavigator:
-    """Iteratively navigates panda-server AST to answer a code question.
+    """Iteratively navigates pandaserver/pandajedi AST to answer a code question.
 
-    Each round the LLM sees the accumulated source it has read so far and
-    decides whether to read more methods or declare the question answered.
-    This mirrors how Claude Code uses grep + read in a loop, applied to an
-    AST-indexed view of the pandaserver package.
+    Candidate methods are found by asking the LLM to extract specific grep terms
+    from the question, then searching method bodies for those exact strings.
+    The LLM then reads selected methods and may follow up with additional symbols
+    across up to MAX_ROUNDS rounds before synthesising a final answer.
     """
 
     MAX_ROUNDS = 3
@@ -149,57 +171,141 @@ class PandaSourceNavigator:
         return self._llm
 
     async def navigate(self, question: str) -> str:
-        """Return a synthesized answer to a code question about panda-server."""
+        """Return a synthesized answer to a code question about panda-server/pandajedi."""
         from langchain_core.messages import HumanMessage, SystemMessage
-        from bamboo.llm.prompts import PANDA_SOURCE_NAV_PROMPT, PANDA_SOURCE_SYNTHESIS_PROMPT
+        from bamboo.llm.prompts import (
+            PANDA_SOURCE_NAV_PROMPT,
+            PANDA_SOURCE_SYNTHESIS_PROMPT,
+            SOURCE_GREP_TERMS_PROMPT,
+        )
+        from bamboo.utils.narrator import say, show_block, thinking
 
-        pkg_root = _get_pkg_root()
-        if pkg_root is None:
-            return "pandaserver package not installed — cannot navigate source."
+        pkg_roots = _get_pkg_roots()
+        if not pkg_roots:
+            return "Neither pandaserver nor pandajedi is installed — cannot navigate source."
 
-        index = _get_index(pkg_root)
-        candidates = _keyword_filter(index, question)
+        for pkg_name, pkg_root in pkg_roots.items():
+            say(f"pkg_root: {pkg_name} → {pkg_root}")
+
+        # Step 0: ask LLM which exact strings to grep for in the source
+        with thinking("Extracting source grep terms"):
+            resp = await self.llm.ainvoke([
+                HumanMessage(content=SOURCE_GREP_TERMS_PROMPT.format(question=question))
+            ])
+        raw = resp.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
+        try:
+            grep_terms: list[str] = [t for t in json.loads(raw) if isinstance(t, str) and t]
+        except Exception:
+            grep_terms = [w for w in question.split() if len(w) >= 4]
+        say(f"Suggested grep terms: {grep_terms}")
+
+        loop = asyncio.get_event_loop()
+        with thinking("Scanning source files"):
+            candidates, scan_stats = await loop.run_in_executor(
+                None, _grep_candidates, pkg_roots, grep_terms
+            )
+        say(
+            f"Scanned {scan_stats['files_scanned']} files, "
+            f"{scan_stats['files_hit']} contained a term, "
+            f"{scan_stats['methods_found']} method(s) matched"
+        )
         if not candidates:
-            return "No methods found matching the query in pandaserver."
+            say("No candidates found")
+            return "No methods found matching the query in pandaserver/pandajedi."
+
+        say(f"{len(candidates)} candidate(s) found")
+        show_block(
+            "candidates",
+            "\n".join(
+                f"{c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
+                for c in candidates
+            ),
+        )
 
         accumulated: list[dict[str, Any]] = []
+        accumulated_qualnames: set[str] = set()
 
-        for _ in range(self.MAX_ROUNDS):
-            already_read = [f"{s['module']}::{s['qualname']}" for s in accumulated]
-            prompt = PANDA_SOURCE_NAV_PROMPT.format(
-                question=question,
-                candidates=json.dumps(candidates, indent=2),
-                already_read=json.dumps(already_read),
-            )
-            response = await self.llm.ainvoke([
-                SystemMessage(content="You are navigating panda-server Python source code."),
-                HumanMessage(content=prompt),
-            ])
-            decision = _parse_nav_decision(response.content)
-
-            if decision.get("action") == "done":
-                break
-
-            for ref in decision.get("read", []):
-                src = _read_method(pkg_root, ref["module"], ref["qualname"])
+        for round_num in range(self.MAX_ROUNDS):
+            # Read every candidate in this round automatically.
+            new_this_round = 0
+            for candidate in candidates:
+                qualname = candidate["qualname"]
+                if qualname in accumulated_qualnames:
+                    continue
+                say(f"Reading {candidate['module']}::{qualname}")
+                src = _read_method(candidate["module"], qualname)
                 if src:
                     accumulated.append(src)
+                    accumulated_qualnames.add(qualname)
+                    new_this_round += 1
+                    show_block(
+                        f"{qualname} (lines {src['line_start']}–{src['line_end']})",
+                        src["source"],
+                        max_lines=80,
+                    )
+                else:
+                    say(f"  (not found)")
+
+            if not accumulated:
+                break
+
+            # Ask LLM whether follow-up symbols are needed, based on what was read.
+            sources_read = json.dumps(
+                [{"qualname": s["qualname"], "source": s["source"]} for s in accumulated],
+                indent=2,
+            )
+            prompt = PANDA_SOURCE_NAV_PROMPT.format(
+                question=question,
+                sources_read=sources_read,
+            )
+            say(f"Round {round_num + 1}/{self.MAX_ROUNDS}: asking LLM for follow-up "
+                f"(read so far: {list(accumulated_qualnames)})")
+            with thinking(f"Round {round_num + 1} — follow-up decision"):
+                response = await self.llm.ainvoke([
+                    SystemMessage(content="You are navigating panda-server Python source code."),
+                    HumanMessage(content=prompt),
+                ])
+            show_block(f"follow-up decision (round {round_num + 1})", response.content)
+            decision = _parse_nav_decision(response.content)
+
+            if decision.get("action") != "follow_up":
+                say("LLM declared done")
+                break
 
             follow_symbols = decision.get("follow_up_symbols") or []
-            if follow_symbols:
-                candidates = _keyword_filter(index, " ".join(follow_symbols))
-            else:
+            if not follow_symbols:
                 break
+            say(f"Follow-up symbols: {follow_symbols}")
+            with thinking("Scanning source files"):
+                candidates, _ = await loop.run_in_executor(
+                    None, _grep_candidates, pkg_roots, follow_symbols
+                )
+            say(f"{len(candidates)} candidate(s) for follow-up")
+            if not candidates:
+                break
+            show_block(
+                "follow-up candidates",
+                "\n".join(
+                    f"{c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
+                    for c in candidates
+                ),
+            )
 
         if not accumulated:
             return "Found candidate methods but could not read their source."
 
+        say(f"Synthesizing from {len(accumulated)} method(s): "
+            f"{[s['qualname'] for s in accumulated]}")
         prompt = PANDA_SOURCE_SYNTHESIS_PROMPT.format(
             question=question,
             sources=json.dumps(accumulated, indent=2),
         )
-        response = await self.llm.ainvoke([
-            SystemMessage(content="You are analyzing panda-server Python source code."),
-            HumanMessage(content=prompt),
-        ])
+        with thinking("Synthesizing answer"):
+            response = await self.llm.ainvoke([
+                SystemMessage(content="You are analyzing panda-server Python source code."),
+                HumanMessage(content=prompt),
+            ])
+        show_block("source navigator result", response.content)
         return response.content

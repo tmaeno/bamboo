@@ -2,7 +2,7 @@
 
 :class:`InteractiveMcpClient` exposes tools marked ``requires_interaction=True``
 that are only offered to the LLM when running in an interactive terminal.
-The :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer` filters
+The :class:`~bamboo.agents.context_enricher.ContextEnricher` filters
 these out automatically when ``sys.stdout.isatty()`` is ``False``.
 """
 

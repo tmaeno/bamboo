@@ -72,7 +72,7 @@ Prompt constants
 ``EXPLORER_TOOL_SELECTION_PROMPT``
     Given a reviewer's issue list and available MCP tools, selects which
     tools to call to fill data gaps before a re-extraction attempt.
-    Used by :class:`~bamboo.agents.extra_source_explorer.ExtraSourceExplorer`.
+    Used by :class:`~bamboo.agents.context_enricher.ContextEnricher`.
 
 ``KNOWLEDGE_REVIEW_PROMPT``
     Reviews an extracted knowledge graph for completeness, accuracy, and
@@ -663,7 +663,7 @@ Output ONLY the JSON array — no markdown, no explanation outside the JSON.
 Example (do not copy literally — populate args from the actual task context above):
 [
   {{
-    "tool": "fetch_error_dialog_logs",
+    "tool": "fetch_linked_log_files",
     "args": {{"task_id": 12345, "error_dialog": "<a href=\\"http://...\\">log</a>"}},
     "reason": "Reviewer noted Symptom nodes are too vague; log content will provide specific error codes."
   }}
@@ -1155,30 +1155,28 @@ You are navigating panda-server Python source code to answer this question:
 
   {question}
 
-CANDIDATE METHODS (qualname, docstring summary, module path):
-{candidates}
+You have just read these source snippets:
+{sources_read}
 
-ALREADY READ: {already_read}
+Decide whether more code is needed. Respond with ONLY a valid JSON object:
 
-Decide which methods to read next. Respond with ONLY a valid JSON object:
-
+If the snippets above are sufficient to answer the question:
 {{
-  "action": "read",
-  "read": [
-    {{"module": "taskbuffer/OraDBProxy.py", "qualname": "OraDBProxy.getScoutRamCount"}}
-  ],
+  "action": "done",
+  "reasoning": "one sentence"
+}}
+
+If you need to trace into symbols referenced in the snippets above:
+{{
+  "action": "follow_up",
   "follow_up_symbols": ["calcRamCount", "actualMemoryUsed"],
   "reasoning": "one sentence"
 }}
 
 Rules:
-- Select only methods from CANDIDATE METHODS that are directly relevant to the question.
-- "follow_up_symbols": list symbol names you expect to find referenced inside the methods \
-you are about to read — these will be searched in the next round. Leave as [] if \
-no follow-up is needed.
-- If ALREADY READ already contains enough to answer the question, set \
-"action": "done" and omit all other keys.
-- Never re-read a method already in ALREADY READ.
+- Only request follow-up for symbol names that actually appear in the source snippets above.
+- Do NOT request follow-up for symbols you imagine might exist — only ones visible in the code.
+- "follow_up_symbols": exact identifiers as they appear in the source (case-sensitive).
 """
 
 PANDA_SOURCE_SYNTHESIS_PROMPT = """\
@@ -1193,4 +1191,22 @@ Write a concise technical answer (3–10 sentences) explaining exactly how the r
 code works with respect to the question. Reference specific variable names, function \
 names, and logic from the source. Do not repeat the source verbatim — synthesise it.
 """
+
+SOURCE_GREP_TERMS_PROMPT = """You are helping navigate PanDA Python source code.
+
+Given this navigation question, extract 2-6 specific Python identifiers or string \
+literals that would appear verbatim in the source code.
+
+Return ONLY a JSON array of strings, no explanation.
+
+Rules:
+- Return exact strings as they would appear in Python source (case-sensitive).
+- Prefer specific identifiers: camelCase names, snake_case tokens, error message fragments.
+- Include both variable/function names and string literals that may appear in f-strings or log lines.
+- Do not include generic Python keywords (if, for, return, def, etc.).
+- Each term must be at least 4 characters.
+
+Question: {question}
+
+JSON array:"""
 

@@ -10,7 +10,7 @@ bamboo/
 │   ├── agents/            # AI agent implementations
 │   │   ├── knowledge_accumulator.py    # Orchestrates extraction + review loop
 │   │   ├── knowledge_reviewer.py       # LLM quality gate
-│   │   └── extra_source_explorer.py    # LLM-driven extra source fetcher
+│   │   └── context_enricher.py    # Fetches additional context (logs, parent tasks) before re-extraction
 │   ├── database/          # Database clients
 │   ├── extractors/        # Knowledge extractors
 │   ├── llm/               # LLM integration
@@ -66,7 +66,7 @@ cp "$(python -c "import importlib.resources; print(importlib.resources.files('ba
 ```
 
 > Each extraction attempt is evaluated by `KnowledgeReviewer` before being written to the
-> databases.  If the reviewer rejects the graph, `ExtraSourceExplorer` fires once to fetch
+> databases.  If the reviewer rejects the graph, `ContextEnricher` fires once to fetch
 > additional PanDA data sources (parent task, retry chain, job diagnostics, error-dialog logs)
 > and the extraction is retried with the enriched context and reviewer feedback (up to 2
 > retries total).
@@ -526,12 +526,12 @@ async def test_full_knowledge_extraction():
     await vector_db.connect()
 
     try:
-        # Optional: enable the review gate and extra source explorer
+        # Optional: enable the review gate and context enricher
         # from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
-        # from bamboo.agents.extra_source_explorer import ExtraSourceExplorer
+        # from bamboo.agents.context_enricher import ContextEnricher
         # from bamboo.mcp.panda_mcp_client import PandaMcpClient
         # reviewer = KnowledgeReviewer()
-        # explorer = ExtraSourceExplorer(PandaMcpClient())
+        # explorer = ContextEnricher(PandaMcpClient())
         # agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
 
         agent = KnowledgeAccumulator(graph_db, vector_db)

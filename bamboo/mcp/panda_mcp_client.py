@@ -7,7 +7,7 @@ job-level failure statistics, and per-job failure details.
 
 Tool catalogue
 --------------
-``fetch_error_dialog_logs``
+``fetch_linked_log_files``
     Extracts and downloads log files linked in a task's ``errorDialog`` HTML.
 
 ``get_parent_task``
@@ -330,7 +330,7 @@ class PandaMcpClient(McpClient):
     def __init__(self) -> None:
         self._tools: list[McpTool] = [
             McpTool(
-                name="fetch_error_dialog_logs",
+                name="fetch_linked_log_files",
                 description=(
                     "Extracts all log file URLs from a task's errorDialog HTML and downloads "
                     "their content.  Use this when the reviewer reports that Symptom nodes are "
@@ -553,7 +553,7 @@ class PandaMcpClient(McpClient):
             ),
         ]
         self._dispatch = {
-            "fetch_error_dialog_logs": self._fetch_error_dialog_logs,
+            "fetch_linked_log_files": self._fetch_linked_log_files,
             "get_parent_task": self._get_parent_task,
             "get_retry_chain": self._get_retry_chain,
             "get_task_jobs_summary": self._get_task_jobs_summary,
@@ -591,7 +591,7 @@ class PandaMcpClient(McpClient):
     # Tool implementations
     # ------------------------------------------------------------------
 
-    async def _fetch_error_dialog_logs(
+    async def _fetch_linked_log_files(
         self,
         task_data: dict[str, Any],
     ) -> dict[str, str]:
@@ -606,7 +606,7 @@ class PandaMcpClient(McpClient):
         urls = extract_log_urls(error_dialog)[:_MAX_ERROR_DIALOG_LOGS]
         if not urls:
             logger.debug(
-                "PandaMcpClient.fetch_error_dialog_logs: no log URLs in errorDialog "
+                "PandaMcpClient.fetch_linked_log_files: no log URLs in errorDialog "
                 "for task_id=%s",
                 task_id,
             )
@@ -625,7 +625,7 @@ class PandaMcpClient(McpClient):
             elif content:
                 result[url] = content
         logger.info(
-            "PandaMcpClient.fetch_error_dialog_logs: fetched %d/%d log(s) for task_id=%s",
+            "PandaMcpClient.fetch_linked_log_files: fetched %d/%d log(s) for task_id=%s",
             len(result),
             len(urls),
             task_id,
@@ -1031,7 +1031,7 @@ class PandaMcpClient(McpClient):
     ) -> dict[str, Any]:
         """Return the full unfiltered brokerage log(s) and the brokerage RST page.
 
-        Unlike ``fetch_error_dialog_logs``, no log filter is applied so the
+        Unlike ``fetch_linked_log_files``, no log filter is applied so the
         complete site-selection funnel is visible to the LLM.
         """
         error_dialog: str = (task_data or {}).get("errorDialog") or ""
