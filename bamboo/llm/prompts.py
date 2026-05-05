@@ -1194,17 +1194,22 @@ names, and logic from the source. Do not repeat the source verbatim — synthesi
 
 SOURCE_GREP_TERMS_PROMPT = """You are helping navigate PanDA Python source code.
 
-Given this navigation question, extract 2-6 specific Python identifiers or string \
-literals that would appear verbatim in the source code.
+Given this string (a log/error message or a code question), return a JSON array
+of distilled search strings suitable for grepping PanDA Python source code.
 
-Return ONLY a JSON array of strings, no explanation.
+For natural-language log messages:
+  Strip all incident-specific values: numbers, percentages, memory sizes, task IDs,
+  file paths, dataset names, and any token that varies between incidents.
+  Each time you strip a value, split the result at that removal point — the text
+  before the gap and the text after the gap become separate entries.
+  Keep the original word order and spacing within each entry.
+  Omit entries shorter than two words unless they are identifiers (see below).
 
-Rules:
-- Return exact strings as they would appear in Python source (case-sensitive).
-- Prefer specific identifiers: camelCase names, snake_case tokens, error message fragments.
-- Include both variable/function names and string literals that may appear in f-strings or log lines.
-- Do not include generic Python keywords (if, for, return, def, etc.).
-- Each term must be at least 4 characters.
+For camelCase or snake_case identifiers present in the input:
+  Copy them verbatim as separate entries.
+
+Return ONLY a JSON array of strings. No explanation, no invented tokens.
+Every string must be a verbatim substring of the input after stripping variables.
 
 Question: {question}
 

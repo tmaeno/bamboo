@@ -138,6 +138,38 @@ def _read_method(module: str, qualname: str) -> dict[str, Any] | None:
     return None
 
 
+_MIN_WORDS = 2
+
+
+def _grep_sliding_window(
+    pkg_roots: dict[str, Path],
+    phrase: str,
+    min_words: int = _MIN_WORDS,
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Try all K-word windows of *phrase*, largest K first.
+
+    Single-token phrases (no spaces) are searched directly — they are camelCase /
+    snake_case identifiers or short fragments and need no windowing.
+
+    Multi-word phrases use a sliding window: K decreases from len(words) down to
+    min_words.  Stops at the first K that yields any candidates.  Never degrades
+    below min_words, so noisy single-word fallbacks are avoided.
+
+    Returns (candidates, stats, term_used).
+    """
+    words = phrase.split()
+    if len(words) == 1:
+        candidates, stats = _grep_candidates(pkg_roots, [phrase])
+        return candidates, stats, phrase
+    for k in range(len(words), min_words - 1, -1):
+        for start in range(len(words) - k + 1):
+            term = " ".join(words[start : start + k])
+            candidates, stats = _grep_candidates(pkg_roots, [term])
+            if candidates:
+                return candidates, stats, term
+    return [], {"files_scanned": 0, "files_hit": 0, "methods_found": 0}, phrase
+
+
 def _parse_nav_decision(text: str) -> dict[str, Any]:
     """Parse LLM JSON navigation decision. Fail-open to 'done' on any error."""
     match = re.search(r"\{.*\}", text, re.DOTALL)
@@ -196,30 +228,52 @@ class PandaSourceNavigator:
         if raw.startswith("```"):
             raw = "\n".join(l for l in raw.splitlines() if not l.startswith("```")).strip()
         try:
-            grep_terms: list[str] = [t for t in json.loads(raw) if isinstance(t, str) and t]
+            grep_terms: list[str] = list(dict.fromkeys(
+                t for t in json.loads(raw) if isinstance(t, str) and t
+            ))
         except Exception:
-            grep_terms = [w for w in question.split() if len(w) >= 4]
+            grep_terms = [w for w in question.split() if len(w) >= 6]
         say(f"Suggested grep terms: {grep_terms}")
 
         loop = asyncio.get_event_loop()
+
+        # Per-fragment sliding-window search with overlap-count ranking.
+        qualname_counts: dict[str, int] = {}
+        qualname_to_candidate: dict[str, dict[str, Any]] = {}
+
         with thinking("Scanning source files"):
-            candidates, scan_stats = await loop.run_in_executor(
-                None, _grep_candidates, pkg_roots, grep_terms
-            )
-        say(
-            f"Scanned {scan_stats['files_scanned']} files, "
-            f"{scan_stats['files_hit']} contained a term, "
-            f"{scan_stats['methods_found']} method(s) matched"
+            for fragment in grep_terms:
+                frag_candidates, _, term_used = await loop.run_in_executor(
+                    None, _grep_sliding_window, pkg_roots, fragment
+                )
+                say(f"  fragment {fragment!r} → term {term_used!r} → {len(frag_candidates)} hit(s)")
+                for c in frag_candidates:
+                    qn = c["qualname"]
+                    qualname_counts[qn] = qualname_counts.get(qn, 0) + 1
+                    qualname_to_candidate.setdefault(qn, c)
+
+        # Keep only highest-overlap candidates; fall back to all if none score > 1.
+        all_ranked = sorted(
+            qualname_to_candidate.values(),
+            key=lambda c: qualname_counts[c["qualname"]],
+            reverse=True,
         )
+        max_count = qualname_counts[all_ranked[0]["qualname"]] if all_ranked else 0
+        candidates = (
+            [c for c in all_ranked if qualname_counts[c["qualname"]] >= 2]
+            if max_count >= 2
+            else all_ranked
+        )[:30]
+
         if not candidates:
             say("No candidates found")
             return "No methods found matching the query in pandaserver/pandajedi."
 
-        say(f"{len(candidates)} candidate(s) found")
+        say(f"{len(candidates)} candidate(s) found (max overlap score: {max_count})")
         show_block(
             "candidates",
             "\n".join(
-                f"{c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
+                f"[{qualname_counts[c['qualname']]}] {c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
                 for c in candidates
             ),
         )

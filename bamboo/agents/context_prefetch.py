@@ -104,9 +104,11 @@ async def prefetch_panda_docs(
     try:
         results = await panda_client.execute("search_panda_docs", query=combined_query)
         if isinstance(results, list) and results:
+            _api_title_re = re.compile(r"\bAPI\b", re.IGNORECASE)
             rendered = "\n\n".join(
                 f"[{e.get('title', '')}] {e.get('snippet', '')}".strip()
-                for e in results if e.get("snippet")
+                for e in results
+                if e.get("snippet") and not _api_title_re.search(e.get("title", ""))
             )
             if rendered:
                 doc_hints[combined_query] = rendered
