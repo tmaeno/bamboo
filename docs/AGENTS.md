@@ -27,7 +27,7 @@ includes an optional quality-gate loop.
 │                                ├─ ExplorationPlanner           │
 │                                ├─ source_navigator()           │
 │                                └─ MCP client layer             │
-│                                     ├─ PandaMcpClient          │
+│                                     ├─ builtin clients (strategy)│
 │                                     ├─ ExternalMcpClient (HTTP)│
 │                                     └─ StdioMcpClient  (stdio) │
 └────────────────────────────────────────────────────────────────┘

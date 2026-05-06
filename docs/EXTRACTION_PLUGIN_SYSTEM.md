@@ -2,86 +2,62 @@
 
 ## Overview
 
-The Bamboo extraction system now uses a **pluggable architecture** for extracting knowledge graphs from different task management systems. This allows you to optimize extraction based on your specific system type and data format.
+The Bamboo extraction system uses a **pluggable architecture** for extracting knowledge graphs
+from different task management systems.  A strategy encapsulates all system-specific logic:
+how to parse fields, how to pre-fetch context, which MCP tools to expose, and which source
+navigator to use during exploration.
 
 ## Supported Extraction Strategies
 
-### 1. LLM-Based Extraction
-- **Name:** `llm`
-- **Best For:** Unstructured data, email threads, natural language text
-- **Method:** Uses LLM to understand and extract information
-- **Advantages:**
-  - Handles unstructured/semi-structured data
-  - Natural language understanding
-  - Flexible interpretation
-- **Disadvantages:**
-  - Requires LLM API calls
-  - Slower than rule-based
-  - Costs per API call
-
-### 2. System-Specific Extraction
-- **PanDA:** `panda` - Optimized for PanDA, leverages rule-based extraction for PanDA-specific structured fields and formats and LLM-based extraction for unstructured descriptions and comments.
-
-- Can be extended for others
+| Name | Class | Best for |
+|---|---|---|
+| `panda` *(default)* | `PandaKnowledgeExtractor` | PanDA WMS task data — see [PanDA Integration](PANDA_INTEGRATION.md) |
+| `llm` | `LLMBasedKnowledgeExtractor` | Unstructured data, email threads, natural language text |
+| `rule_based` / `jira` | `RuleBasedExtractionStrategy` | Structured key-value data without a dedicated strategy |
 
 ## Configuration
 
-### Setting the Extraction Strategy
-
-In `.env` or configuration:
 ```env
-EXTRACTION_STRATEGY=llm   # Options: llm, panda, [custom strategies]
-```
-
-### Environment Variables
-```env
-# Choose extraction method
-EXTRACTION_STRATEGY=llm   # Default: llm
-                          # Options: llm, panda, [custom strategies]
+# .env
+EXTRACTION_STRATEGY=panda   # Default. Options: panda, llm, rule_based, [custom]
 ```
 
 ## Usage
 
-### Basic Usage (Auto-configured)
+### Basic (auto-configured)
+
 ```python
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 
-# Uses configured strategy from settings
-extractor = KnowledgeGraphExtractor()
+extractor = KnowledgeGraphExtractor()   # uses EXTRACTION_STRATEGY from config
 
 graph = await extractor.extract_from_sources(
     email_text=email,
     task_data=task_dict,
     external_data=external_data,
-    task_logs={"jedi": "...", "harvester": "..."},   # task-level orchestration logs
+    task_logs={"scheduler": "...", "worker": "..."},
 )
 ```
 
-### Specify Strategy
+### Explicit strategy
+
 ```python
-from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
-
-# Use specific strategy
-extractor = KnowledgeGraphExtractor(strategy="panda")
-
-graph = await extractor.extract_from_sources(
-    task_data=task_data,
-)
+extractor = KnowledgeGraphExtractor(strategy="llm")
+graph = await extractor.extract_from_sources(task_data=task_data)
 ```
 
-### Get Available Strategies
+### List registered strategies
 
 ```python
 from bamboo.agents.extractors import list_extraction_strategies
 
-strategies = list_extraction_strategies()
-for strategy in strategies:
-    print(f"{strategy['name']}: {strategy['description']}")
+for s in list_extraction_strategies():
+    print(f"{s['name']}: {s['description']}")
 ```
 
-## Adding Custom Extraction Strategies
+## Adding a Custom Strategy
 
-### Step 1: Create Strategy Class
+### Step 1: Create the strategy class
 
 ```python
 # bamboo/agents/extractors/my_system_strategy.py
@@ -90,19 +66,23 @@ from bamboo.agents.extractors.base import ExtractionStrategy
 from bamboo.models.knowledge_entity import KnowledgeGraph
 
 
-class MySystemExtractionStrategy(ExtractionStrategy):
+class MySystemStrategy(ExtractionStrategy):
     """Extract from MySystem task format."""
+
+    # ------------------------------------------------------------------
+    # Required — must implement all four
+    # ------------------------------------------------------------------
 
     async def extract(
         self,
         email_text: str = "",
         task_data: dict = None,
         external_data: dict = None,
-        task_logs: dict[str, str] = None,   # task-level orchestration logs
-    ):
-        # Extract using MySystem-specific logic
-        # Return KnowledgeGraph
-        pass
+        task_logs: dict[str, str] = None,
+        doc_hints: dict[str, str] = None,
+    ) -> KnowledgeGraph:
+        # Build and return a KnowledgeGraph from the provided sources.
+        ...
 
     def supports_system(self, system_type: str) -> bool:
         return system_type.lower() == "mysystem"
@@ -114,185 +94,102 @@ class MySystemExtractionStrategy(ExtractionStrategy):
     @property
     def description(self) -> str:
         return "Extract from MySystem task management"
+
+    # ------------------------------------------------------------------
+    # Optional hooks — override only when your system needs them
+    # ------------------------------------------------------------------
+
+    async def prefetch_hints(self, task_data=None, email_text="") -> dict[str, str]:
+        # Return domain-specific context fetched before extraction.
+        # Results are passed to extract() as doc_hints.
+        # Omit to use the default no-op (returns {}).
+        return await fetch_my_system_docs(task_data or {})
+
+    def source_navigator(self):
+        # Return a source navigator for ContextEnricher, or None.
+        # Used for source-code-level investigation during exploration.
+        return MySystemSourceNavigator()
+
+    def builtin_mcp_clients(self) -> list:
+        # Return built-in MCP client instances for this system.
+        # build_mcp_client() prepends these before any external servers.
+        from bamboo.mcp.my_system_mcp_client import MySystemMcpClient
+        return [MySystemMcpClient()]
 ```
 
-### Step 2: Register Strategy
+### Step 2: Register the strategy
 
 ```python
-# In your initialization code
 from bamboo.agents.extractors import register_extraction_strategy
-from bamboo.agents.extractors.my_system_strategy import MySystemExtractionStrategy
+from bamboo.agents.extractors.my_system_strategy import MySystemStrategy
 
-register_extraction_strategy("mysystem", MySystemExtractionStrategy)
+register_extraction_strategy("mysystem", MySystemStrategy)
 ```
 
-### Step 3: Use Strategy
+### Step 3: Activate via config
+
 ```env
 EXTRACTION_STRATEGY=mysystem
 ```
 
+## Strategy Interface: `ExtractionStrategy`
+
+**File:** `bamboo/agents/extractors/base.py`
+
+### Required (abstract)
+
+| Method | Description |
+|---|---|
+| `async extract(email_text, task_data, external_data, task_logs, doc_hints)` | Extract and return a `KnowledgeGraph` |
+| `supports_system(system_type)` | Return `True` if this strategy handles the given system identifier |
+| `name` *(property)* | Short unique identifier (e.g. `"mysystem"`) |
+| `description` *(property)* | Human-readable description shown in strategy listings |
+
+### Optional hooks (default no-ops)
+
+| Method | Called by | Default | Override when |
+|---|---|---|---|
+| `async prefetch_hints(task_data, email_text)` | `KnowledgeGraphExtractor.prefetch_hints()` → accumulator & navigator | `{}` | Your system has domain docs or source analysis to fetch before extraction |
+| `source_navigator()` | `build_mcp_client()` callers → `ContextEnricher(source_navigator=...)` | `None` | Your system has navigable source code for root-cause investigation |
+| `builtin_mcp_clients()` | `build_mcp_client()` | `[]` | Your system has native MCP tools (task fetching, log retrieval, etc.) |
+
 ## Strategy Selection Logic
 
-When you create a `GraphExtractor`:
+`KnowledgeGraphExtractor` (and `build_mcp_client`) resolve the strategy once at construction:
 
-1. **Explicit strategy:** Uses the specified strategy
-   ```python
-   GraphExtractor(strategy="jira")  # Uses Jira strategy
-   ```
+1. **Explicit name:** `KnowledgeGraphExtractor(strategy="mysystem")`
+2. **Config value:** `EXTRACTION_STRATEGY=mysystem` in `.env`
+3. **System-type matching:** `supports_system()` is checked if the name is unknown
 
-2. **Configuration setting:** Uses `EXTRACTION_STRATEGY`
-   ```env
-   EXTRACTION_STRATEGY=github
-   ```
-
-3. **System support matching:** Finds strategy that supports the value
-   - Rule-based supports: jira, github, generic, structured
-   - LLM supports: all systems
-
-## Use Cases
-
-### Jira Integration
-```python
-from bamboo.agents.graph_extractor import GraphExtractor
-
-extractor = GraphExtractor(strategy="jira")
-
-# Jira-optimized extraction
-graph = await extractor.extract_from_sources(
-    task_data={
-        "key": "PROJ-123",
-        "summary": "Database connection timeout",
-        "description": "...",
-        "labels": ["database", "production"],
-        "environment": {"os": "Linux", "java": "11"},
-        "status": "In Progress"
-    }
-)
-```
-
-### GitHub Integration
-```python
-extractor = GraphExtractor(strategy="github")
-
-graph = await extractor.extract_from_sources(
-    task_data={
-        "title": "API timeout on large requests",
-        "body": "...",
-        "labels": ["bug", "performance"],
-        "environment": {"node": "18"}
-    }
-)
-```
-
-### Generic Unstructured Data
-```python
-extractor = GraphExtractor(strategy="llm")
-
-graph = await extractor.extract_from_sources(
-    email_text="Email discussion about the issue...",
-    task_data={"description": "Task details..."},
-    external_data={"logs": [...], "metrics": [...]}
-)
-```
-
-## Implementation Details
-
-### Base Class: `ExtractionStrategy`
-```python
-class ExtractionStrategy(ABC):
-    async def extract(self, email_text, task_data, external_data) -> KnowledgeGraph:
-        """Extract knowledge graph."""
-    
-    def supports_system(self, system_type: str) -> bool:
-        """Check if supports this system type."""
-    
-    @property
-    def name(self) -> str:
-        """Strategy name."""
-    
-    @property
-    def description(self) -> str:
-        """Human-readable description."""
-```
-
-### Factory Functions
-
-**get_extraction_strategy(strategy)**
-- Returns appropriate strategy instance
-- Raises ValueError if no strategy found
-
-**list_extraction_strategies()**
-- Returns list of registered strategies with details
-- Useful for UI/debugging
-
-**register_extraction_strategy(name, strategy_class)**
-- Register new strategy
-- Called automatically for built-ins
-
-## Architecture Diagram
+## Architecture
 
 ```
-GraphExtractor
-    ↓
-get_extraction_strategy()
-    ↓
-Strategy Registry
-    ├─ llm
-    ├─ rule_based
-    ├─ jira
-    ├─ github
-    └─ [custom strategies]
-    ↓
-Selected Strategy
-    ├─ LLMExtractionStrategy
-    ├─ RuleBasedExtractionStrategy
-    └─ [CustomStrategy]
-    ↓
-extract()
-    ↓
-KnowledgeGraph
+KnowledgeGraphExtractor
+    │
+    └─ ExtractionStrategy  (resolved once at construction)
+            ├─ prefetch_hints()      → doc_hints → passed to extract()
+            ├─ extract()             → KnowledgeGraph
+            ├─ source_navigator()    → ContextEnricher(source_navigator=...)
+            └─ builtin_mcp_clients() → build_mcp_client() prepends these
 ```
 
-## Benefits
+## Factory Functions
 
-✅ **Flexibility** - Choose extraction method based on data source  
-✅ **Performance** - Use fast rule-based for structured data  
-✅ **Accuracy** - Use LLM for complex unstructured data  
-✅ **Extensibility** - Easy to add system-specific strategies  
-✅ **Maintainability** - Clear separation of concerns  
-✅ **Reusability** - Share strategies across projects  
+| Function | Description |
+|---|---|
+| `get_extraction_strategy(name=None)` | Instantiate the active (or named) strategy |
+| `register_extraction_strategy(name, cls)` | Register a new strategy class |
+| `list_extraction_strategies()` | List all registered strategies with name and description |
 
 ## Troubleshooting
 
-### Strategy Not Found
-```
-ValueError: No extraction strategy found for: mysystem
-```
-Solution: Register the strategy before using it
-
-### Wrong Strategy Selected
-Use explicit `strategy` parameter:
-```python
-GraphExtractor(strategy="llm")
-```
-
-### Performance Issues
-Switch to rule-based for structured data:
-```env
-EXTRACTION_STRATEGY=rule_based
-```
-
-## Future Enhancements
-
-Potential strategies to implement:
-- **Azure DevOps** - Azure-specific extraction
-- **Linear** - Linear.app optimization
-- **Slack** - Slack thread extraction
-- **GitLab** - GitLab issue optimization
-- **Hybrid** - Combine LLM + rule-based
-- **ML-based** - Trained models for specific systems
+| Symptom | Fix |
+|---|---|
+| `ValueError: No extraction strategy found for: mysystem` | Call `register_extraction_strategy` before using it |
+| Wrong strategy selected | Pass an explicit `strategy=` argument to `KnowledgeGraphExtractor` |
+| `prefetch_hints` not called | Ensure the accumulator/navigator is using `KnowledgeGraphExtractor.prefetch_hints()`, not a direct import |
 
 ---
 
-For more information, see the extraction strategies in `bamboo/agents/extractors/`.
-
+For the PanDA strategy implementation details see [PanDA Integration](PANDA_INTEGRATION.md).  
+For the extractor source see `bamboo/agents/extractors/`.

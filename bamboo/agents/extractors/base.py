@@ -95,6 +95,15 @@ class ExtractionStrategy(ABC):
         """
         return None
 
+    def builtin_mcp_clients(self) -> list:
+        """Return strategy-specific built-in MCP client instances.
+
+        These are prepended to any external MCP clients by ``build_mcp_client()``.
+        The default no-op returns an empty list, keeping all existing strategies
+        working without modification.
+        """
+        return []
+
     @property
     @abstractmethod
     def name(self) -> str:

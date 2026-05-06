@@ -1,10 +1,8 @@
 """Factory for building the MCP client used by :class:`ContextEnricher`.
 
-:func:`build_mcp_client` is the single entry point.  It returns a bare
-:class:`~bamboo.mcp.PandaMcpClient` when no external servers are configured
-(identical behaviour to before), and a
-:class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient` wrapping
-PanDA + any enabled external servers otherwise.
+:func:`build_mcp_client` is the single entry point.  It returns a
+:class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient` combining the
+strategy's built-in clients with any configured external servers.
 """
 
 from __future__ import annotations
@@ -12,32 +10,39 @@ from __future__ import annotations
 import logging
 
 from bamboo.mcp.base import McpClient
-from bamboo.mcp.panda_mcp_client import PandaMcpClient
 
 logger = logging.getLogger(__name__)
 
 
-def build_mcp_client(settings: object) -> McpClient:
+def build_mcp_client(settings: object, strategy=None) -> McpClient:
     """Build the MCP client for :class:`~bamboo.agents.ContextEnricher`.
 
     Args:
         settings: :class:`~bamboo.config.Settings` instance.
+        strategy: Optional :class:`~bamboo.agents.extractors.base.ExtractionStrategy`.
+                  When ``None`` the active strategy is resolved via
+                  :func:`~bamboo.agents.extractors.get_extraction_strategy`.
+                  Built-in clients are sourced from
+                  :meth:`~bamboo.agents.extractors.base.ExtractionStrategy.builtin_mcp_clients`.
 
     Returns:
-        :class:`~bamboo.mcp.PandaMcpClient` when ``settings.mcp_servers_config``
-        is empty.  :class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient`
-        combining PanDA tools with all *enabled* external server tools otherwise.
+        :class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient` combining
+        strategy built-in tools, the interactive client, and any enabled
+        external server tools.
     """
+    from bamboo.agents.extractors import get_extraction_strategy  # noqa: PLC0415
     from bamboo.mcp.external_mcp_client import (  # noqa: PLC0415
         CompositeMcpClient,
         ExternalMcpClient,
         StdioMcpClient,
     )
+    from bamboo.mcp.interactive_mcp_client import InteractiveMcpClient  # noqa: PLC0415
     from bamboo.mcp.server_config import load_server_configs  # noqa: PLC0415
 
-    from bamboo.mcp.interactive_mcp_client import InteractiveMcpClient  # noqa: PLC0415
+    if strategy is None:
+        strategy = get_extraction_strategy()
 
-    clients: list[McpClient] = [PandaMcpClient(), InteractiveMcpClient()]
+    clients: list[McpClient] = [*strategy.builtin_mcp_clients(), InteractiveMcpClient()]
 
     config_path: str = getattr(settings, "mcp_servers_config", "") or ""
     if config_path:

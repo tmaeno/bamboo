@@ -1041,6 +1041,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         from bamboo.agents.panda_source_navigator import PandaSourceNavigator  # noqa: PLC0415
         return PandaSourceNavigator()
 
+    def builtin_mcp_clients(self) -> list:
+        from bamboo.mcp.panda_mcp_client import PandaMcpClient  # noqa: PLC0415
+        return [PandaMcpClient()]
+
     async def extract(
         self,
         email_text: str = "",
