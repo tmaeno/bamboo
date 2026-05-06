@@ -176,6 +176,9 @@ class ReasoningNavigator:
         task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         logger.info("ReasoningNavigator: analysing task '%s'", task_id)
 
+        if doc_hints is None:
+            doc_hints = await self.extractor.prefetch_hints(task_data or {}, email_text="")
+
         domain_hints = _join_doc_hints(doc_hints)
 
         extracted_graph = await self.extractor.extract_from_sources(

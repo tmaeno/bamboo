@@ -14,21 +14,18 @@ includes an optional quality-gate loop.
 ┌────────────────────────────────────────────────────────────────┐
 │  Knowledge Accumulation                                        │
 │                                                                │
-│  incident data ──► prefetch_panda_context()     (parallel)     │
-│                         ├─ PandaSourceNavigator → doc_hints    │
-│                         └─ PanDA doc fetcher    → doc_hints    │
-│                              │                                 │
-│                              ▼                                 │
-│                    KnowledgeAccumulator  (receives doc_hints)  │
+│  incident data ──► KnowledgeAccumulator                        │
 │                         │                                      │
 │                         ├─ KnowledgeGraphExtractor             │
-│                         │      └─ PandaKnowledgeExtractor      │
-│                         │            └─ PandaJobDataAggregator │
+│                         │      └─ ExtractionStrategy           │
+│                         │            ├─ prefetch_hints() → doc_hints  (parallel)   │
+│                         │            └─ extract()                                   │
 │                         │                                      │
 │                         ├─ KnowledgeReviewer                   │
 │                         │                                      │
 │                         └─ ContextEnricher                     │
 │                                ├─ ExplorationPlanner           │
+│                                ├─ source_navigator()  (from strategy)               │
 │                                └─ MCP client layer             │
 │                                     ├─ PandaMcpClient          │
 │                                     ├─ ExternalMcpClient (HTTP)│
@@ -38,13 +35,12 @@ includes an optional quality-gate loop.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Reasoning Navigation                                                │
 │                                                                      │
-│  task data ──► prefetch_panda_context()         (parallel)           │
-│                    ├─ PandaSourceNavigator  → doc_hints              │
-│                    └─ PanDA doc fetcher     → doc_hints              │
-│                         │                                            │
-│                         ▼                                            │
-│               ReasoningNavigator  (receives doc_hints)               │
+│  task data ──► ReasoningNavigator                                    │
+│                    │                                                 │
 │                    ├─ KnowledgeGraphExtractor  (read-only)           │
+│                    │      └─ ExtractionStrategy                      │
+│                    │            ├─ prefetch_hints() → doc_hints  (parallel)         │
+│                    │            └─ extract()                         │
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
 │                    │      └─ ExplorationPlanner.plan_investigation() │

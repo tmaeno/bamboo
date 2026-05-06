@@ -1029,6 +1029,18 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
     def supports_system(self, system_type: str) -> bool:
         return system_type.lower() in self._SUPPORTED_SYSTEMS
 
+    async def prefetch_hints(
+        self,
+        task_data: dict[str, Any] = None,
+        email_text: str = "",
+    ) -> dict[str, str]:
+        from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
+        return await prefetch_panda_context(task_data or {}, email_text)
+
+    def source_navigator(self):
+        from bamboo.agents.panda_source_navigator import PandaSourceNavigator  # noqa: PLC0415
+        return PandaSourceNavigator()
+
     async def extract(
         self,
         email_text: str = "",

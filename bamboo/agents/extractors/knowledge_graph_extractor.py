@@ -40,6 +40,14 @@ class KnowledgeGraphExtractor:
         self._desc_cache: dict[str, str] = {}
         logger.info("KnowledgeGraphExtractor: using strategy '%s'", self.strategy.name)
 
+    async def prefetch_hints(
+        self,
+        task_data: dict[str, Any] = None,
+        email_text: str = "",
+    ) -> dict[str, str]:
+        """Delegate pre-extraction hint fetching to the active strategy."""
+        return await self.strategy.prefetch_hints(task_data, email_text)
+
     async def extract_from_sources(
         self,
         email_text: str = "",

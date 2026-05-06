@@ -74,6 +74,27 @@ class ExtractionStrategy(ABC):
         """
         pass
 
+    async def prefetch_hints(
+        self,
+        task_data: dict[str, Any] = None,
+        email_text: str = "",
+    ) -> dict[str, str]:
+        """Optionally pre-fetch strategy-specific context hints before extraction.
+
+        Called before the first extraction pass.  Results are passed to
+        :meth:`extract` as ``doc_hints``.  The default no-op keeps all existing
+        strategies working without modification.
+        """
+        return {}
+
+    def source_navigator(self):
+        """Return a strategy-specific source navigator instance, or ``None``.
+
+        Used to populate ``ContextEnricher(source_navigator=...)``.  The default
+        no-op keeps all existing strategies working without modification.
+        """
+        return None
+
     @property
     @abstractmethod
     def name(self) -> str:

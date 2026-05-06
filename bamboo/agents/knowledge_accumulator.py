@@ -163,10 +163,9 @@ class KnowledgeAccumulator:
         _task_logs = dict(task_logs or {})
         _external_data = dict(external_data or {})
 
-        # Pre-fetch PanDA documentation context before the first extraction.
+        # Pre-fetch strategy-specific context hints before the first extraction.
         # Stored separately from task_logs — docs are domain hints, not execution logs.
-        from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
-        _doc_hints = await prefetch_panda_context(task_data or {}, email_text=email_text or "")
+        _doc_hints = await self.extractor.prefetch_hints(task_data or {}, email_text=email_text or "")
 
         email_investigation = ""
         if email_text and email_text.strip():
