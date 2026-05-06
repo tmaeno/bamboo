@@ -33,7 +33,12 @@ includes an optional quality-gate loop.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Reasoning Navigation                                                │
 │                                                                      │
-│  task data ──► ReasoningNavigator                                    │
+│  task data ──► prefetch_panda_context()         (parallel)          │
+│                    ├─ PandaSourceNavigator  → doc_hints             │
+│                    └─ PanDA doc fetcher     → doc_hints             │
+│                         │                                            │
+│                         ▼                                            │
+│               ReasoningNavigator  (receives doc_hints)              │
 │                    ├─ KnowledgeGraphExtractor  (read-only)           │
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
@@ -392,6 +397,72 @@ Install bamboo-mcp in a separate virtual environment, then add this entry to you
 
 ## Reasoning Navigation Pipeline
 
+### `PandaSourceNavigator`
+
+**File:** `bamboo/agents/panda_source_navigator.py`  
+**Entry point:** `bamboo/agents/context_prefetch.py` → `prefetch_panda_source()`
+
+Runs **before** `ReasoningNavigator` as part of `prefetch_panda_context()`.  Iteratively
+navigates the pandaserver / pandajedi Python source to answer a code-level question derived
+from a task's `errorDialog`, and delivers its answer as a `doc_hints` entry so the
+downstream reasoner and reviewer have source-code context.
+
+**Navigation steps:**
+
+1. **Term extraction** — an LLM call (`SOURCE_GREP_TERMS_PROMPT`) distils the `errorDialog`
+   into 2–5 grep strings suitable for source search: identifiers are copied verbatim;
+   instance-specific values (numbers, paths, dataset names) are stripped, and the text on
+   each side of a stripped value becomes a separate entry.  Falls back to splitting on
+   words ≥ 6 characters if the LLM returns invalid JSON.
+
+2. **Sliding-window grep** — for each fragment a sliding window tries sub-phrases of
+   decreasing length (largest first, minimum 2 words) against every `.py` file in
+   `pandaserver` / `pandajedi`.  Files are pre-filtered with a fast `in` check before AST
+   parsing.  Matching class methods and module-level functions are returned ranked by
+   how many distinct grep terms appear in their body.
+
+3. **Multi-fragment overlap ranking** — candidates that appear across multiple grep-term
+   fragments score higher (qualname overlap count).  If any candidate scores ≥ 2, only
+   those high-overlap candidates are kept (up to 30).
+
+4. **Iterative navigation** (`MAX_ROUNDS = 3`) — in each round every new candidate method
+   is read in full, then the LLM decides (via `PANDA_SOURCE_NAV_PROMPT`) whether
+   additional follow-up symbols are needed.  The LLM can only request symbols that are
+   visible in the already-read source; it cannot invent new names.  Stops when the LLM
+   responds `action: "done"` or no follow-up candidates are found.
+
+5. **Synthesis** — `PANDA_SOURCE_SYNTHESIS_PROMPT` produces a plain-English explanation of
+   the relevant code behaviour, stored as `doc_hints["source code analysis"]`.
+
+**Instrumentation attributes** (set on each `PandaSourceNavigator` instance after `navigate()` returns, useful for evaluation):
+
+| Attribute | Type | Description |
+|---|---|---|
+| `last_grep_terms` | `list[str]` | Terms extracted by the LLM in step 1 |
+| `last_term_extraction_succeeded` | `bool` | `False` if LLM returned invalid JSON and the naive fallback was used |
+| `last_candidates_count` | `int` | Number of candidate methods after overlap ranking |
+| `last_max_overlap` | `int` | Highest per-qualname overlap score across all grep fragments |
+| `last_rounds_used` | `int` | Number of navigation rounds completed (0 if no LLM round ran) |
+
+**Failure signals** (returned strings that callers check for):
+
+| Return value prefix | Meaning |
+|---|---|
+| `"No methods found …"` | Grep produced zero candidates — terms too specific or error not in panda source |
+| `"Neither pandaserver …"` | Neither package is installed |
+| `"Found candidate methods but …"` | Candidates found but none could be read |
+
+**Fail-open:** `prefetch_panda_source()` catches all exceptions and returns an empty dict,
+so a navigator failure never affects the reasoning pipeline.
+
+**Evaluation script:** `bamboo/scripts/eval_source_navigator.py` — batch-evaluates the
+navigator over a collection of errorDialog strings (accepts JSON / CSV files or PanDA task IDs),
+deduplicates inputs by normalised pattern, and classifies results as `relevant`,
+`irrelevant`, `no_candidates`, `too_many_candidates`, `empty_error_dialog`, or `error`.
+See the script's module docstring for usage.
+
+---
+
 ### `ReasoningNavigator`
 
 **File:** `bamboo/agents/reasoning_navigator.py`
@@ -469,6 +540,7 @@ continues with what it has rather than aborting.
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
 | `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; PanDA tools still available |
 | `StdioMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
+| `PandaSourceNavigator.navigate()` exception | `prefetch_panda_source` logs warning, returns `{}` — doc_hints has no source entry |
 | `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
 | `search_panda_docs` (GitHub API or network error) | Logs warning, returns empty list; `doc_hints` remains empty |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |

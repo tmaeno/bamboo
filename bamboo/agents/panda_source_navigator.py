@@ -194,6 +194,11 @@ class PandaSourceNavigator:
 
     def __init__(self) -> None:
         self._llm = None
+        self.last_rounds_used: int = 0
+        self.last_term_extraction_succeeded: bool = False
+        self.last_grep_terms: list[str] = []
+        self.last_candidates_count: int = 0
+        self.last_max_overlap: int = 0
 
     @property
     def llm(self):
@@ -231,8 +236,11 @@ class PandaSourceNavigator:
             grep_terms: list[str] = list(dict.fromkeys(
                 t for t in json.loads(raw) if isinstance(t, str) and t
             ))
+            self.last_term_extraction_succeeded = True
         except Exception:
             grep_terms = [w for w in question.split() if len(w) >= 6]
+            self.last_term_extraction_succeeded = False
+        self.last_grep_terms = grep_terms
         say(f"Suggested grep terms: {grep_terms}")
 
         loop = asyncio.get_event_loop()
@@ -265,6 +273,9 @@ class PandaSourceNavigator:
             else all_ranked
         )[:30]
 
+        self.last_candidates_count = len(candidates)
+        self.last_max_overlap = max_count
+
         if not candidates:
             say("No candidates found")
             return "No methods found matching the query in pandaserver/pandajedi."
@@ -281,6 +292,7 @@ class PandaSourceNavigator:
         accumulated: list[dict[str, Any]] = []
         accumulated_qualnames: set[str] = set()
 
+        rounds_completed = 0
         for round_num in range(self.MAX_ROUNDS):
             # Read every candidate in this round automatically.
             new_this_round = 0
@@ -324,6 +336,7 @@ class PandaSourceNavigator:
             show_block(f"follow-up decision (round {round_num + 1})", response.content)
             decision = _parse_nav_decision(response.content)
 
+            rounds_completed = round_num + 1
             if decision.get("action") != "follow_up":
                 say("LLM declared done")
                 break
@@ -346,6 +359,8 @@ class PandaSourceNavigator:
                     for c in candidates
                 ),
             )
+
+        self.last_rounds_used = rounds_completed
 
         if not accumulated:
             return "Found candidate methods but could not read their source."
