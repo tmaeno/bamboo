@@ -14,9 +14,9 @@ includes an optional quality-gate loop.
 ┌────────────────────────────────────────────────────────────────┐
 │  Knowledge Accumulation                                        │
 │                                                                │
-│  incident data ──► prefetch_panda_context()     (parallel)    │
-│                         ├─ PandaSourceNavigator → doc_hints   │
-│                         └─ PanDA doc fetcher    → doc_hints   │
+│  incident data ──► prefetch_panda_context()     (parallel)     │
+│                         ├─ PandaSourceNavigator → doc_hints    │
+│                         └─ PanDA doc fetcher    → doc_hints    │
 │                              │                                 │
 │                              ▼                                 │
 │                    KnowledgeAccumulator  (receives doc_hints)  │
@@ -27,7 +27,7 @@ includes an optional quality-gate loop.
 │                         │                                      │
 │                         ├─ KnowledgeReviewer                   │
 │                         │                                      │
-│                         └─ ContextEnricher                 │
+│                         └─ ContextEnricher                     │
 │                                ├─ ExplorationPlanner           │
 │                                └─ MCP client layer             │
 │                                     ├─ PandaMcpClient          │
@@ -38,20 +38,20 @@ includes an optional quality-gate loop.
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Reasoning Navigation                                                │
 │                                                                      │
-│  task data ──► prefetch_panda_context()         (parallel)          │
-│                    ├─ PandaSourceNavigator  → doc_hints             │
-│                    └─ PanDA doc fetcher     → doc_hints             │
+│  task data ──► prefetch_panda_context()         (parallel)           │
+│                    ├─ PandaSourceNavigator  → doc_hints              │
+│                    └─ PanDA doc fetcher     → doc_hints              │
 │                         │                                            │
 │                         ▼                                            │
-│               ReasoningNavigator  (receives doc_hints)              │
+│               ReasoningNavigator  (receives doc_hints)               │
 │                    ├─ KnowledgeGraphExtractor  (read-only)           │
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
 │                    │      └─ ExplorationPlanner.plan_investigation() │
-│                    │             └─ ContextEnricher              │
+│                    │             └─ ContextEnricher                  │
 │                    │                                                 │
 │                    └─ Procedure-driven investigation  (Phase 2)      │
-│                           └─ ContextEnricher                     │
+│                           └─ ContextEnricher                         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
