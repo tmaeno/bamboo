@@ -11,26 +11,26 @@ includes an optional quality-gate loop.
 ## Pipeline Overview
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│  Knowledge Accumulation                                        │
-│                                                                │
-│  incident data ──► KnowledgeAccumulator                        │
-│                         │                                      │
-│                         ├─ KnowledgeGraphExtractor             │
-│                         │      └─ ExtractionStrategy           │
-│                         │            ├─ prefetch_hints()       │
-│                         │            └─ extract()              │
-│                         │                                      │
-│                         ├─ KnowledgeReviewer                   │
-│                         │                                      │
-│                         └─ ContextEnricher                     │
-│                                ├─ ExplorationPlanner           │
-│                                ├─ source_navigator()           │
-│                                └─ MCP client layer             │
+┌──────────────────────────────────────────────────────────────────┐
+│  Knowledge Accumulation                                          │
+│                                                                  │
+│  incident data ──► KnowledgeAccumulator                          │
+│                         │                                        │
+│                         ├─ KnowledgeGraphExtractor               │
+│                         │      └─ ExtractionStrategy             │
+│                         │            ├─ prefetch_hints()         │
+│                         │            └─ extract()                │
+│                         │                                        │
+│                         ├─ KnowledgeReviewer                     │
+│                         │                                        │
+│                         └─ ContextEnricher                       │
+│                                ├─ ExplorationPlanner             │
+│                                ├─ source_navigator()             │
+│                                └─ MCP client layer               │
 │                                     ├─ builtin clients (strategy)│
-│                                     ├─ ExternalMcpClient (HTTP)│
-│                                     └─ StdioMcpClient  (stdio) │
-└────────────────────────────────────────────────────────────────┘
+│                                     ├─ ExternalMcpClient (HTTP)  │
+│                                     └─ StdioMcpClient  (stdio)   │
+└──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
 │  Reasoning Navigation                                                │
