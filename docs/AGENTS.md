@@ -18,14 +18,14 @@ includes an optional quality-gate loop.
 │                         │                                      │
 │                         ├─ KnowledgeGraphExtractor             │
 │                         │      └─ ExtractionStrategy           │
-│                         │            ├─ prefetch_hints() → doc_hints  (parallel)   │
-│                         │            └─ extract()                                   │
+│                         │            ├─ prefetch_hints()       │
+│                         │            └─ extract()              │
 │                         │                                      │
 │                         ├─ KnowledgeReviewer                   │
 │                         │                                      │
 │                         └─ ContextEnricher                     │
 │                                ├─ ExplorationPlanner           │
-│                                ├─ source_navigator()  (from strategy)               │
+│                                ├─ source_navigator()           │
 │                                └─ MCP client layer             │
 │                                     ├─ PandaMcpClient          │
 │                                     ├─ ExternalMcpClient (HTTP)│
@@ -39,7 +39,7 @@ includes an optional quality-gate loop.
 │                    │                                                 │
 │                    ├─ KnowledgeGraphExtractor  (read-only)           │
 │                    │      └─ ExtractionStrategy                      │
-│                    │            ├─ prefetch_hints() → doc_hints  (parallel)         │
+│                    │            ├─ prefetch_hints()                  │
 │                    │            └─ extract()                         │
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
@@ -80,9 +80,9 @@ indexing.
 | Parameter | Type | Description |
 |---|---|---|
 | `email_text` | `str` | Full email thread from the incident |
-| `task_data` | `dict` | Structured PanDA task fields |
+| `task_data` | `dict` | Structured task/system fields |
 | `external_data` | `dict` | Supplementary key→value metadata |
-| `task_logs` | `dict[str, str]` | Task-level logs keyed by source name (e.g. `"jedi"`) |
+| `task_logs` | `dict[str, str]` | Task-level logs keyed by source name (e.g. `"scheduler"`) |
 | `dry_run` | `bool` | Skip all DB writes; useful for `bamboo extract` previews |
 
 **Output:** `ExtractedKnowledge` — graph, narrative summary, vector key insights, metadata.
@@ -110,34 +110,7 @@ extraction strategy directly — they always go through this class.
 **Configuration:** `EXTRACTION_STRATEGY` env var (default: `"panda"`).  See
 [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) for adding custom strategies.
 
----
-
-### `PandaKnowledgeExtractor`
-
-**File:** `bamboo/agents/extractors/panda_knowledge_extractor.py`
-
-The default extraction strategy for PanDA task data.  Combines structured field parsing with
-several LLM sub-calls to produce a complete `KnowledgeGraph`.
-
-**Input routing:**
-
-| Source | Node types produced |
-|---|---|
-| `task_data` discrete fields (site, processingType, …) | `TaskFeatureNode` |
-| `task_data` continuous fields (ramCount, walltime, …) | `TaskFeatureNode` (bucketed) |
-| `task_data.errorDialog` | `SymptomNode` (canonical category name; raw text in `description`) |
-| `task_data.status` | `SymptomNode` (when `broken` / `failed`) |
-| `task_data` free-form fields (taskName, …) | `TaskContextNode` (vector DB only) |
-| `external_data` key→value pairs | `TaskFeatureNode` |
-| `email_text` | `CauseNode`, `ResolutionNode`, `ProcedureNode`, `TaskContextNode` (LLM) |
-| `task_logs` | `SymptomNode`, `ComponentNode`, `TaskContextNode` (LLM) |
-
-The `errorDialog` field is also scanned for embedded HTML log links; each linked file is
-downloaded and processed as a task-level log.
-
-**Canonicalisation:** error categories, cause names, and resolution names are normalised via
-a vector-DB + LLM round-trip so the same concept always maps to the same node name across
-incidents.
+The default strategy (`"panda"`) is `PandaKnowledgeExtractor` — see [PanDA Integration](PANDA_INTEGRATION.md) for its input routing and canonicalisation details.
 
 ---
 
@@ -165,7 +138,7 @@ prohibited.
 When a gap could be resolved by a specific tool, the reviewer annotates the issue string
 accordingly — e.g. `"SymptomNode present but no Cause found → resolvable with get_task_logs"`.
 This makes the explorer's downstream tool-selection more reliable without changing the
-`ReviewResult` schema.  The reviewer only sees tools that are statically registered (PanDA
+`ReviewResult` schema.  The reviewer only sees tools that are statically registered (built-in
 tools are always available; external server tools appear after the first `connect()`).
 
 **Fail-open:** any LLM or parse error returns `approved=True` so a reviewer malfunction
@@ -261,29 +234,12 @@ The MCP client is built by `build_mcp_client()` in `bamboo/mcp/factory.py` and p
 `PandaMcpClient`; otherwise it returns a `CompositeMcpClient` that aggregates `PandaMcpClient`
 with one or more `ExternalMcpClient` instances.
 
-#### `PandaMcpClient`
+#### Built-in MCP client
 
-**File:** `bamboo/mcp/panda_mcp_client.py`
-
-Built-in client that exposes PanDA data tools.  No external connection needed.
-
-| Tool | Trigger condition | Routes to | Returns |
-|---|---|---|---|
-| `fetch_linked_log_files` | Symptom nodes too vague; log evidence absent | `task_logs` | `dict[url → content]` |
-| `get_parent_task` | `retryID` present but root cause unclear | `external_data` | Parent task dict |
-| `get_retry_chain` | Failure spans multiple retry attempts | `external_data` | List of ancestor task summaries |
-| `get_task_jobs_summary` | Job-level failure distribution missing | `external_data` | Status counts + top error diags |
-| `get_failed_job_details` | Scout failures, site-specific errors needing job-level detail | `external_data` | List of compact job dicts |
-| `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
-| `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
-| `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |
-| `search_panda_docs` | Node name or error pattern requires domain-level explanation (e.g. what a task status means, when it is entered, what causes it) | `doc_hints` | Plain-text snippets from the official PanDA WMS documentation, passed as domain background to the reviewer and planner (not stored as graph nodes) |
-
-All tools are safe to call concurrently.  Tools routed to `task_logs` (formatted JSON text)
-are processed by the LLM extractor alongside error dialog logs.  Tools routed to
-`external_data` are consumed by the structured extractor path.  Results from
-`search_panda_docs` go into `doc_hints`, a dedicated dict that flows to the reviewer
-and exploration planner as authoritative domain context.
+A **built-in MCP client** is always included by `build_mcp_client()`.  It exposes
+system-specific tools (task data fetching, log retrieval, documentation search, source
+navigation).  See [PanDA Integration](PANDA_INTEGRATION.md) for the full tool catalogue when
+using the PanDA strategy.
 
 #### `ExternalMcpClient`
 
@@ -291,11 +247,11 @@ and exploration planner as authoritative domain context.
 
 Connects to one external MCP server using the **StreamableHTTP** transport from the official
 `mcp` Python SDK.  Tools are discovered at connect time via `session.list_tools()` and are
-presented to the LLM alongside the built-in PanDA tools.
+presented to the LLM alongside the built-in tools.
 
 - The `mcp` package is a main dependency — no extra install needed.
 - If the `mcp` package is missing or the server is unreachable, `connect()` logs the error
-  and this client contributes zero tools — the pipeline continues with PanDA tools only.
+  and this client contributes zero tools — the pipeline continues with built-in tools only.
 
 #### `StdioMcpClient`
 
@@ -313,8 +269,8 @@ is needed — bamboo manages the subprocess lifetime automatically.
 
 **File:** `bamboo/mcp/external_mcp_client.py`
 
-Aggregates any number of `McpClient` instances (PanDA, HTTP, stdio) into one.
-`PandaMcpClient` is always first, so its tool names win on any name clash with external servers.
+Aggregates any number of `McpClient` instances (built-in, HTTP, stdio) into one.
+The built-in client is always first, so its tool names win on any name clash with external servers.
 
 #### Configuring external MCP servers
 
@@ -360,109 +316,9 @@ MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
 
 See `bamboo/mcp/server_config.py` for the full schema.
 
-#### Integrating bamboo-mcp
-
-[bamboo-mcp](https://github.com/BNLNPPS/bamboo-mcp) is a companion MCP server that provides
-additional tools useful during exploration, notably:
-
-| Tool | Description |
-|---|---|
-| `panda_log_analysis` | Log analysis + failure classification for a job |
-| `panda_task_status` | Detailed task metadata including per-job breakdown |
-| `panda_job_status` | Individual job metadata, pilot errors, and file summary |
-| `panda_queue_info` | Look up queue and site configuration |
-| `panda_harvester_workers` | Fetch Harvester worker (pilot) counts by site |
-
-Results from these tools are stored in `external_data` under `"tool:<name>"` by the explorer's
-generic fallback and forwarded to the LLM extractor as additional context.
-
-Install bamboo-mcp in a separate virtual environment, then add this entry to your `mcp_servers.json`:
-
-```json
-{
-  "servers": [
-    {
-      "name": "bamboo_mcp",
-      "command": "/separate_venv/bin/python3",
-      "args": ["-m", "bamboo.server"],
-      "env": {"PYTHONPATH": "/path/to/bamboo-mcp/core",
-              "PANDA_BASE_URL": "https://bigpanda.monitor.url"},
-      "exclude_tools": ["bamboo_.*"],
-      "enabled": true
-    }
-  ]
-}
-```
-
 ---
 
 ## Reasoning Navigation Pipeline
-
-### `PandaSourceNavigator`
-
-**File:** `bamboo/agents/panda_source_navigator.py`  
-**Entry point:** `bamboo/agents/context_prefetch.py` → `prefetch_panda_source()`
-
-Runs **before** `ReasoningNavigator` as part of `prefetch_panda_context()`.  Iteratively
-navigates the pandaserver / pandajedi Python source to answer a code-level question derived
-from a task's `errorDialog`, and delivers its answer as a `doc_hints` entry so the
-downstream reasoner and reviewer have source-code context.
-
-**Navigation steps:**
-
-1. **Term extraction** — an LLM call (`SOURCE_GREP_TERMS_PROMPT`) distils the `errorDialog`
-   into 2–5 grep strings suitable for source search: identifiers are copied verbatim;
-   instance-specific values (numbers, paths, dataset names) are stripped, and the text on
-   each side of a stripped value becomes a separate entry.  Falls back to splitting on
-   words ≥ 6 characters if the LLM returns invalid JSON.
-
-2. **Sliding-window grep** — for each fragment a sliding window tries sub-phrases of
-   decreasing length (largest first, minimum 2 words) against every `.py` file in
-   `pandaserver` / `pandajedi`.  Files are pre-filtered with a fast `in` check before AST
-   parsing.  Matching class methods and module-level functions are returned ranked by
-   how many distinct grep terms appear in their body.
-
-3. **Multi-fragment overlap ranking** — candidates that appear across multiple grep-term
-   fragments score higher (qualname overlap count).  If any candidate scores ≥ 2, only
-   those high-overlap candidates are kept (up to 30).
-
-4. **Iterative navigation** (`MAX_ROUNDS = 3`) — in each round every new candidate method
-   is read in full, then the LLM decides (via `PANDA_SOURCE_NAV_PROMPT`) whether
-   additional follow-up symbols are needed.  The LLM can only request symbols that are
-   visible in the already-read source; it cannot invent new names.  Stops when the LLM
-   responds `action: "done"` or no follow-up candidates are found.
-
-5. **Synthesis** — `PANDA_SOURCE_SYNTHESIS_PROMPT` produces a plain-English explanation of
-   the relevant code behaviour, stored as `doc_hints["source code analysis"]`.
-
-**Instrumentation attributes** (set on each `PandaSourceNavigator` instance after `navigate()` returns, useful for evaluation):
-
-| Attribute | Type | Description |
-|---|---|---|
-| `last_grep_terms` | `list[str]` | Terms extracted by the LLM in step 1 |
-| `last_term_extraction_succeeded` | `bool` | `False` if LLM returned invalid JSON and the naive fallback was used |
-| `last_candidates_count` | `int` | Number of candidate methods after overlap ranking |
-| `last_max_overlap` | `int` | Highest per-qualname overlap score across all grep fragments |
-| `last_rounds_used` | `int` | Number of navigation rounds completed (0 if no LLM round ran) |
-
-**Failure signals** (returned strings that callers check for):
-
-| Return value prefix | Meaning |
-|---|---|
-| `"No methods found …"` | Grep produced zero candidates — terms too specific or error not in panda source |
-| `"Neither pandaserver …"` | Neither package is installed |
-| `"Found candidate methods but …"` | Candidates found but none could be read |
-
-**Fail-open:** `prefetch_panda_source()` catches all exceptions and returns an empty dict,
-so a navigator failure never affects the reasoning pipeline.
-
-**Evaluation script:** `bamboo/scripts/eval_source_navigator.py` — batch-evaluates the
-navigator over a collection of errorDialog strings (accepts JSON / CSV files or PanDA task IDs),
-deduplicates inputs by normalised pattern, and classifies results as `relevant`,
-`irrelevant`, `no_candidates`, `too_many_candidates`, `empty_error_dialog`, or `error`.
-See the script's module docstring for usage.
-
----
 
 ### `ReasoningNavigator`
 
@@ -510,15 +366,6 @@ confidence was high enough to skip exploratory investigation or no explorer is c
 | `LLM_MODEL` | `gpt-4-turbo-preview` | All LLM calls across all agents |
 | `MCP_SERVERS_CONFIG` | _(empty)_ | Path to JSON file listing external MCP servers |
 
-The `search_panda_server_source` tool requires panda-server installed in the same environment:
-
-```
-pip install "bamboo[panda]"
-```
-
-> **Note:** `panda-server` currently installs with full server-side dependencies.
-> This will be updated to a lightweight source-only package once one is available.
-
 The `--max-retries N` flag on `bamboo extract` overrides the reviewer retry limit for a single
 run without changing the default.
 
@@ -537,11 +384,9 @@ continues with what it has rather than aborting.
 | `ReasoningNavigator._run_exploratory_investigation()` (no planner) | Returns `(None, [])`, skips exploratory investigation silently |
 | `ContextEnricher` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
 | Individual MCP tool call | Logs warning, skips that tool's result |
-| `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; PanDA tools still available |
+| `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; built-in tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
-| `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; PanDA tools still available |
+| `StdioMcpClient` connect (subprocess fails) | Logs warning, contributes zero tools; built-in tools still available |
 | `StdioMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |
-| `PandaSourceNavigator.navigate()` exception | `prefetch_panda_source` logs warning, returns `{}` — doc_hints has no source entry |
-| `search_panda_server_source` (`pandaserver` not installed) | Logs install hint, returns empty list |
-| `search_panda_docs` (GitHub API or network error) | Logs warning, returns empty list; `doc_hints` remains empty |
+| `ExtractionStrategy.source_navigator().navigate()` exception | `prefetch_hints` logs warning, returns `{}` — doc_hints has no source entry |
 | `KnowledgeReviewer` repeated rejection | Stores best result after `max_review_retries`, logs warning |
