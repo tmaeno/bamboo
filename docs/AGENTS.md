@@ -14,7 +14,12 @@ includes an optional quality-gate loop.
 ┌────────────────────────────────────────────────────────────────┐
 │  Knowledge Accumulation                                        │
 │                                                                │
-│  incident data ──► KnowledgeAccumulator                        │
+│  incident data ──► prefetch_panda_context()     (parallel)    │
+│                         ├─ PandaSourceNavigator → doc_hints   │
+│                         └─ PanDA doc fetcher    → doc_hints   │
+│                              │                                 │
+│                              ▼                                 │
+│                    KnowledgeAccumulator  (receives doc_hints)  │
 │                         │                                      │
 │                         ├─ KnowledgeGraphExtractor             │
 │                         │      └─ PandaKnowledgeExtractor      │

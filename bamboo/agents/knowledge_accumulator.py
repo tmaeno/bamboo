@@ -56,6 +56,7 @@ class KnowledgeAccumulator:
                    reviewer rejection to fetch additional source data (log
                    files, retry chain context) before the re-extraction
                    attempt.  Has no effect when *reviewer* is ``None``.
+                   Independent of PanDA doc/source prefetching, which always runs.
     """
 
     def __init__(
@@ -164,9 +165,8 @@ class KnowledgeAccumulator:
 
         # Pre-fetch PanDA documentation context before the first extraction.
         # Stored separately from task_logs — docs are domain hints, not execution logs.
-        _doc_hints: dict[str, str] = {}
-        if self._explorer is not None:
-            _doc_hints = await self._prefetch_panda_docs(task_data or {}, email_text=email_text or "")
+        from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
+        _doc_hints = await prefetch_panda_context(task_data or {}, email_text=email_text or "")
 
         email_investigation = ""
         if email_text and email_text.strip():
@@ -376,12 +376,6 @@ class KnowledgeAccumulator:
                 "explorer_external_added": len(_external_data) - len(external_data or {}),
             },
         )
-
-    async def _prefetch_panda_docs(
-        self, task_data: dict[str, Any], email_text: str = ""
-    ) -> dict[str, str]:
-        from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
-        return await prefetch_panda_context(task_data, email_text)
 
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
         """Create schema-defined edges that span extractor boundaries.
