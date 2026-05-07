@@ -1,6 +1,5 @@
-"""Tests for bamboo.data.panda_client — PanDA data-fetching helper."""
+"""Tests for bamboo.utils.panda_client — PanDA data-fetching helper."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,20 +20,44 @@ _SAMPLE_TASK = {
 }
 
 
-def _patched_pandaclient(status=0, data=None):
-    """Return a (context_manager, mock_client) pair.
+def _patched_http_client(status=0, response=None):
+    """Return a (context_manager, mock_instance) pair that stubs HttpClient.
 
-    ``fetch_task_data`` does ``from pandaclient import Client`` at call time, so
-    we mock ``pandaclient`` in ``sys.modules`` so that the import resolves to our
-    stub before any real network call is made.
+    ``_call_api`` does ``from pandaserver.api.v1.http_client import HttpClient``
+    at call time, so we inject a fake module into sys.modules the same way the
+    original tests injected a fake pandaclient module.
+
+    ``status``   — 0 for a completed HTTP exchange, 255 for connection error.
+    ``response`` — the second element of the (status, response) tuple returned
+                   by HttpClient.get / HttpClient.post.
     """
-    mock_client = MagicMock()
-    mock_client.get_task_details_json.return_value = (status, data)
+    mock_instance = MagicMock()
+    mock_instance.get.return_value = (status, response)
+    mock_instance.post.return_value = (status, response)
 
-    mock_pandaclient = MagicMock()
-    mock_pandaclient.Client = mock_client
+    mock_class = MagicMock(return_value=mock_instance)
 
-    return patch.dict("sys.modules", {"pandaclient": mock_pandaclient}), mock_client
+    mock_module = MagicMock()
+    mock_module.HttpClient = mock_class
+    mock_module.api_url_ssl = "https://mock-panda.example.com/api/v1"
+
+    return (
+        patch.dict(
+            "sys.modules",
+            {
+                "pandaserver.api.v1.http_client": mock_module,
+            },
+        ),
+        mock_instance,
+    )
+
+
+def _success_response(data):
+    return {"success": True, "data": data, "message": ""}
+
+
+def _error_response(message="task not found"):
+    return {"success": False, "data": None, "message": message}
 
 
 # ---------------------------------------------------------------------------
@@ -45,24 +68,30 @@ def _patched_pandaclient(status=0, data=None):
 class TestFetchTaskDataSuccess:
     @pytest.mark.asyncio
     async def test_returns_dict_on_success(self):
-        ctx, _ = _patched_pandaclient(status=0, data=_SAMPLE_TASK)
+        ctx, _ = _patched_http_client(status=0, response=_success_response(_SAMPLE_TASK))
         with ctx:
             result = await fetch_task_data(12345)
         assert result == _SAMPLE_TASK
 
     @pytest.mark.asyncio
     async def test_accepts_string_task_id(self):
-        ctx, mock_client = _patched_pandaclient(status=0, data=_SAMPLE_TASK)
+        ctx, mock_instance = _patched_http_client(
+            status=0, response=_success_response(_SAMPLE_TASK)
+        )
         with ctx:
             result = await fetch_task_data("12345")
         assert result["jediTaskID"] == 12345
         # The underlying call must have received an int, not a string.
-        mock_client.get_task_details_json.assert_called_once_with(12345)
+        _, call_kwargs = mock_instance.get.call_args
+        args, _ = mock_instance.get.call_args
+        assert args[1].get("task_id") == 12345
 
     @pytest.mark.asyncio
     async def test_all_fields_preserved(self):
         large_task = {k: f"v{i}" for i, k in enumerate(["a", "b", "c", "d"])}
-        ctx, _ = _patched_pandaclient(status=0, data=large_task)
+        ctx, _ = _patched_http_client(
+            status=0, response=_success_response(large_task)
+        )
         with ctx:
             result = await fetch_task_data(9999)
         assert result == large_task
@@ -75,80 +104,45 @@ class TestFetchTaskDataSuccess:
 
 class TestFetchTaskDataErrors:
     @pytest.mark.asyncio
-    async def test_raises_runtime_error_on_nonzero_status(self):
-        ctx, _ = _patched_pandaclient(status=255, data=None)
+    async def test_raises_runtime_error_on_connection_failure(self):
+        ctx, _ = _patched_http_client(status=255, response="connection refused")
         with ctx:
-            with pytest.raises(RuntimeError, match="status=255"):
+            with pytest.raises(RuntimeError, match="task_id=99999"):
                 await fetch_task_data(99999)
 
     @pytest.mark.asyncio
-    async def test_raises_runtime_error_when_data_is_none(self):
-        """Status 0 but data=None must still raise (server returned empty body)."""
-        ctx, _ = _patched_pandaclient(status=0, data=None)
+    async def test_raises_runtime_error_on_api_error(self):
+        """Status 0 but success=False must raise RuntimeError."""
+        ctx, _ = _patched_http_client(
+            status=0, response=_error_response("task not found")
+        )
         with ctx:
-            with pytest.raises(RuntimeError, match="status=0"):
-                await fetch_task_data(12345)
-
-    @pytest.mark.asyncio
-    async def test_raises_runtime_error_when_data_is_list(self):
-        """If the server sends a list instead of a dict, raise RuntimeError."""
-        ctx, _ = _patched_pandaclient(status=0, data=[{"key": "val"}])
-        with ctx:
-            with pytest.raises(RuntimeError, match="Unexpected response type"):
-                await fetch_task_data(12345)
-
-    @pytest.mark.asyncio
-    async def test_raises_runtime_error_when_data_is_string(self):
-        ctx, _ = _patched_pandaclient(status=0, data="error message from server")
-        with ctx:
-            with pytest.raises(RuntimeError, match="Unexpected response type"):
+            with pytest.raises(RuntimeError, match="task not found"):
                 await fetch_task_data(12345)
 
     @pytest.mark.asyncio
     async def test_raises_value_error_on_non_numeric_task_id(self):
         """A non-numeric string task_id must raise ValueError before any network call."""
-        ctx, mock_client = _patched_pandaclient(status=0, data=_SAMPLE_TASK)
+        ctx, mock_instance = _patched_http_client(
+            status=0, response=_success_response(_SAMPLE_TASK)
+        )
         with ctx:
             with pytest.raises(ValueError):
                 await fetch_task_data("not-a-number")
-        # The network call must never have been made.
-        mock_client.get_task_details_json.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_raises_import_error_when_pandaclient_missing(self):
-        """ImportError is raised with a helpful message when panda-client-light is absent."""
-        saved = {k: v for k, v in sys.modules.items() if "pandaclient" in k}
-        for key in list(saved):
-            del sys.modules[key]
-
-        import builtins
-
-        real_import = builtins.__import__
-
-        def _block_pandaclient(name, *args, **kwargs):
-            if name == "pandaclient" or name.startswith("pandaclient."):
-                raise ImportError(f"No module named '{name}'")
-            return real_import(name, *args, **kwargs)
-
-        try:
-            with patch("builtins.__import__", side_effect=_block_pandaclient):
-                with pytest.raises(ImportError, match="panda-client-light"):
-                    await fetch_task_data(12345)
-        finally:
-            sys.modules.update(saved)
+        mock_instance.get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_error_message_includes_task_id(self):
         """The RuntimeError message must include the offending task_id."""
-        ctx, _ = _patched_pandaclient(status=255, data=None)
+        ctx, _ = _patched_http_client(status=255, response="err")
         with ctx:
             with pytest.raises(RuntimeError, match="99999"):
                 await fetch_task_data(99999)
 
     @pytest.mark.asyncio
-    async def test_error_message_mentions_panda_url(self):
-        """The RuntimeError message should hint at PANDA_URL env vars."""
-        ctx, _ = _patched_pandaclient(status=255, data=None)
+    async def test_error_message_mentions_panda_api_url(self):
+        """The RuntimeError message should hint at PANDA_API_URL_SSL."""
+        ctx, _ = _patched_http_client(status=255, response="err")
         with ctx:
-            with pytest.raises(RuntimeError, match="PANDA_URL"):
+            with pytest.raises(RuntimeError, match="PANDA_API_URL_SSL"):
                 await fetch_task_data(12345)

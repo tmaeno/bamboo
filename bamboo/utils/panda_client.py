@@ -1,16 +1,14 @@
-"""Synchronous wrapper around ``pandaclient.Client.get_task_details_json``.
-
-This module provides :func:`fetch_task_data` — a helper that retrieves full
-task details from a live PanDA server and returns them as a plain Python
-``dict`` ready for use as ``task_data`` in the Bamboo pipeline.
+"""Utilities for fetching data from the PanDA server.
 
 PanDA server configuration
 --------------------------
-The underlying ``panda-client-light`` library reads the server URL from the
-environment:
+``HttpClient`` reads the server URL from the environment:
 
-* ``PANDA_URL``      – plain HTTP base URL  (default: ``http://pandaserver.cern.ch:25080``)
-* ``PANDA_URL_SSL``  – HTTPS base URL       (default: ``https://pandaserver.cern.ch``)
+* ``PANDA_API_URL_SSL`` – HTTPS API base URL (default: ``https://pandaserver.cern.ch:25443/api/v1``)
+* ``PANDA_AUTH``        – set to ``oidc`` to use OIDC token auth instead of X.509
+* ``PANDA_AUTH_VO``     – VO name when using OIDC
+* ``PANDA_AUTH_ID_TOKEN`` – OIDC token (or ``file:<path>``)
+* ``X509_USER_PROXY``   – path to X.509 proxy certificate
 
 Set these variables (or place them in your ``.env`` file) to point at a
 different PanDA instance (e.g. a development server).
@@ -26,9 +24,6 @@ from typing import Any
 from bamboo.utils.narrator import thinking
 
 logger = logging.getLogger(__name__)
-
-# Status code returned by panda-client-light on success.
-_PANDA_OK = 0
 
 # Matches <a href="URL">...</a> in HTML fragments (e.g. errorDialog values).
 _HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
@@ -117,18 +112,44 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
         return None
 
 
+def _call_api(method: str, endpoint: str, data: dict) -> Any:
+    """Call a PanDA REST API endpoint and return the ``data`` field of the response.
+
+    Raises ``RuntimeError`` on connection failure or a non-success server response.
+    This is a blocking function; wrap with ``asyncio.to_thread`` in async contexts.
+    """
+    from pandaserver.api.v1.http_client import HttpClient, api_url_ssl  # noqa: PLC0415
+
+    client = HttpClient()
+    url = f"{api_url_ssl}/{endpoint}"
+    if method == "get":
+        status, response = client.get(url, data)
+    else:
+        status, response = client.post(url, data)
+
+    if status != 0:
+        raise RuntimeError(
+            f"PanDA connection error for {endpoint!r}: {response}. "
+            "Check PANDA_API_URL_SSL."
+        )
+    if not isinstance(response, dict) or not response.get("success"):
+        message = response.get("message", "unknown error") if isinstance(response, dict) else str(response)
+        raise RuntimeError(
+            f"PanDA returned error for {endpoint!r}: {message}"
+        )
+    return response.get("data")
+
+
 async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str, Any]:
     """Fetch full task details from PanDA and return them as a ``dict``.
 
-    The blocking ``panda-client-light`` call is offloaded to a thread pool so
+    The blocking ``HttpClient`` call is offloaded to a thread pool so
     the event loop stays responsive.
 
     Args:
         task_id: The PanDA ``jediTaskID`` to look up (int or numeric string).
-        verbose: If ``True``, the underlying ``panda-client-light`` library
-            will print every curl command it constructs and the raw server
-            response to stdout, which is useful for diagnosing network or
-            authentication issues.
+        verbose: If ``True``, sets the bamboo logger to DEBUG level, which
+            is useful for diagnosing network or authentication issues.
 
     Returns:
         A ``dict`` containing the task details as returned by the PanDA
@@ -137,19 +158,10 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
         or any extraction strategy.
 
     Raises:
-        ImportError:  If ``panda-client-light`` is not installed.
         RuntimeError: If the PanDA server returns a non-zero status code or
                       an error response.
-        ValueError:   If *task_id* cannot be converted to ``int``.2
+        ValueError:   If *task_id* cannot be converted to ``int``.
     """
-    try:
-        from pandaclient import Client  # noqa: PLC0415  (conditional import)
-    except ImportError as exc:
-        raise ImportError(
-            "panda-client-light is required to fetch task data from PanDA. "
-            "Install it with: pip install panda-client-light"
-        ) from exc
-
     task_id_int = int(task_id)
 
     if verbose:
@@ -158,29 +170,15 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
     with thinking("Working"):
-        status, data = await asyncio.to_thread(
-            Client.get_task_details_json, task_id_int, verbose=verbose
-        )
-
-    if status != _PANDA_OK:
-        raise RuntimeError(
-            f"PanDA returned status={status} for task_id={task_id_int}. "
-            "Check that the task ID is valid and the PanDA server is reachable "
-            "(PANDA_URL / PANDA_URL_SSL environment variables)."
-        )
-
-    if not isinstance(data, tuple):
-        raise RuntimeError(
-            f"Unexpected response type from PanDA: {type(data).__name__!r}. "
-            f"Expected tuple, got: {data!r}"
-        )
-
-    if not data[0]:
-        raise RuntimeError(
-            f"PanDA gave the following error message for task_id={task_id_int}: {data[-1]}."
-        )
-
-    data = data[1]
+        try:
+            data = await asyncio.to_thread(
+                _call_api, "get", "task/get_detailed_info", {"task_id": task_id_int}
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"PanDA returned error for task_id={task_id_int}: {exc}. "
+                "Check PANDA_API_URL_SSL."
+            ) from exc
 
     logger.info(
         "Successfully fetched task details for task_id=%s (%d fields)",
