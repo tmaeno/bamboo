@@ -69,36 +69,12 @@ _RETRY_CHAIN_FIELDS = ("jediTaskID", "status", "errorDialog", "retryID", "transU
 # PanDA WMS documentation GitHub repository (source enumeration + task_params fetch).
 _PANDA_DOCS_ORG = "tmaeno"
 _PANDA_DOCS_RAW_BASE = f"https://raw.githubusercontent.com/{_PANDA_DOCS_ORG}/panda-docs/main"
-_PANDA_DOCS_TREE_URL = (
-    f"https://api.github.com/repos/{_PANDA_DOCS_ORG}/panda-docs/git/trees/main?recursive=1"
-)
-# Built ReadTheDocs site — Sphinx has already rendered all roles/directives.
-_PANDA_DOCS_HTML_BASE = "https://panda-wms.readthedocs.io/en/latest"
-_PANDA_DOCS_WEB_BASE = _PANDA_DOCS_HTML_BASE
-
-
-def _rst_path_to_html_url(rst_path: str) -> str:
-    """Map a GitHub RST path to its ReadTheDocs HTML URL."""
-    rel = rst_path.removeprefix("docs/source/").removesuffix(".rst") + ".html"
-    return f"{_PANDA_DOCS_HTML_BASE}/{rel}"
-
-
 _TASK_PARAMS_RST_PATH = "docs/source/advanced/task_params.rst"
 _GDPCONFIG_RST_PATH = "docs/source/advanced/gdpconfig.rst"
 _BROKERAGE_RST_PATH = "docs/source/advanced/brokerage.rst"
 
-# RST files excluded from the BM25 full-text index because they are handled
-# by dedicated structured parsers (e.g. _fetch_task_params_table).
-_BM25_EXCLUDE: frozenset[str] = frozenset({
-    _TASK_PARAMS_RST_PATH,  # parsed by _fetch_task_params_table
-    _GDPCONFIG_RST_PATH,    # parsed by _fetch_gdpconfig_table
-})
-
-# In-process BM25 index: None = not yet built.
-# Built on the first search_panda_docs call from all docs/source/**/*.rst files
-# except those listed in _BM25_EXCLUDE.
-# Tuple layout: (BM25Okapi index, list of (path, paragraph_text) parallel to the corpus).
-_bm25_data: tuple | None = None
+# Lazy-initialised doc navigator — built on the first search_panda_docs call.
+_doc_navigator: Any = None
 
 # Parsed splitRule parameter table from docs/source/advanced/task_params.rst.
 # Maps parameter name (e.g. "useExhausted") to its one-line description.
@@ -492,8 +468,10 @@ class PandaMcpClient(McpClient):
                     "TaskStatusExhausted; query='too many files input dataset limit' to "
                     "understand TooManyFilesInDataset; query='scout job memory overestimate' "
                     "for resource-related pending tasks.  "
-                    "Returns up to 3 matching doc sections with page title, URL, and a "
-                    "text snippet from the relevant passage.  "
+                    "Returns up to 3 matching doc sections, each with: title, URL, "
+                    "full section content, parent_context (summary of the parent section), "
+                    "breadcrumb (ancestor heading path), and source ('semantic', "
+                    "'llm_traversal', or 'both').  "
                     "Do NOT call for errors that are already fully explained by the "
                     "errorDialog or pilot error code alone."
                 ),
@@ -983,47 +961,48 @@ class PandaMcpClient(McpClient):
         query: str,
         max_results: int = 5,
     ) -> list[dict[str, Any]]:
-        """Search the PanDA WMS documentation using a local in-process RST cache.
+        """Search PanDA WMS documentation via the graph-based semantic navigator.
 
-        On the first call, fetches the repository file tree (Git Trees API —
-        public, no token) and then downloads every ``docs/source/**/*.rst`` file
-        concurrently from ``raw.githubusercontent.com``.  The content is cached
-        in-process so subsequent calls are instant.
+        On the first call, builds a heading-level graph from the ReadTheDocs HTML
+        pages, LLM-summarises every node, and stores embeddings in a dedicated
+        Qdrant collection.  Subsequent calls reuse the stored index, rebuilding
+        only when the upstream GitHub tree SHA has changed.
 
-        Returns a list of ``{"title", "url", "snippet"}`` dicts, or an empty list
-        on any network or parse error.
+        Two strategies run in parallel: flat semantic search (fast, good for
+        paraphrase/synonym queries) and LLM-guided top-down traversal (catches
+        non-obvious relevance).  Results are merged and ranked.
+
+        Returns a list of ``{"title", "url", "content", "parent_context",
+        "breadcrumb", "source"}`` dicts, or an empty list on any error.
         """
-        import httpx
+        global _doc_navigator
+        from bamboo.agents.panda_doc_navigator import PandaDocNavigator  # noqa: PLC0415
 
-        from rank_bm25 import BM25Okapi  # noqa: PLC0415
-
-        bm25, sections = await _build_bm25_index(httpx, BM25Okapi)
-        if bm25 is None:
+        try:
+            if _doc_navigator is None:
+                _doc_navigator = PandaDocNavigator()
+            results = await _doc_navigator.search(query, top_k=max_results)
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.search_panda_docs: navigator failed for query=%r: %s",
+                query, exc,
+            )
             return []
-
-        tokens = re.findall(r"[a-z0-9]+", query.lower())
-        bm25_scores = bm25.get_scores(tokens)
-
-        ranked = sorted(
-            range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
-        )
-        ranked = [i for i in ranked if bm25_scores[i] > 0]
-
-        results: list[dict[str, Any]] = []
-        for idx in ranked:
-            path, title, text = sections[idx]
-            results.append({
-                "title": title or path.split("/")[-1].replace(".rst", "").replace("_", " ").title(),
-                "url": _rst_path_to_html_url(path),
-                "snippet": text,
-            })
-            if len(results) >= max_results:
-                break
 
         logger.info(
             "PandaMcpClient.search_panda_docs: %d result(s) for query=%r", len(results), query
         )
-        return results
+        return [
+            {
+                "title": r.title,
+                "url": r.url,
+                "content": r.content,
+                "parent_context": r.parent_summary,
+                "breadcrumb": r.breadcrumb,
+                "source": r.source,
+            }
+            for r in results
+        ]
 
     async def _fetch_brokerage_context(
         self,
@@ -1097,129 +1076,3 @@ class PandaMcpClient(McpClient):
             logger.warning("PandaMcpClient: failed to fetch brokerage doc: %s", exc)
             return "", _BROKERAGE_RST_PATH
 
-
-# ---------------------------------------------------------------------------
-# Module-level helpers for search_panda_docs
-# ---------------------------------------------------------------------------
-
-async def _build_bm25_index(httpx_module: Any, BM25Okapi: Any) -> tuple:
-    """Build and cache the BM25 index over PanDA docs RST paragraphs.
-
-    Phase 1: fetch the repository file tree (Git Trees API — no auth needed
-    for public repos) to discover every ``docs/source/**/*.rst`` path.
-    Phase 2: download all files concurrently from raw.githubusercontent.com.
-    Phase 3: split each file into RST sections using docutils, clean markup,
-    tokenise, and build a BM25Okapi index.
-
-    Returns ``(bm25, sections)`` where *sections* is a list of
-    ``(path, title, text)`` tuples parallel to the BM25 corpus.  On any fatal
-    error returns ``(None, [])``.
-    """
-    global _bm25_data
-    if _bm25_data is not None:
-        return _bm25_data
-
-    _gh_headers = {
-        "User-Agent": "bamboo-panda-docs-search",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    # --- Phase 1: discover RST paths ---
-    try:
-        async with httpx_module.AsyncClient(timeout=15) as client:
-            resp = await client.get(_PANDA_DOCS_TREE_URL, headers=_gh_headers)
-            resp.raise_for_status()
-            tree = resp.json().get("tree", [])
-    except Exception as exc:
-        logger.warning(
-            "PandaMcpClient.search_panda_docs: failed to fetch doc tree: %s", exc
-        )
-        _bm25_data = (None, [])
-        return _bm25_data
-
-    rst_paths = [
-        item["path"]
-        for item in tree
-        if item.get("type") == "blob"
-        and item.get("path", "").startswith("docs/source/")
-        and item["path"].endswith(".rst")
-        and item["path"] not in _BM25_EXCLUDE
-    ]
-    logger.info(
-        "PandaMcpClient.search_panda_docs: discovered %d RST file(s)", len(rst_paths)
-    )
-
-    # --- Phase 2: fetch all files concurrently ---
-    async def _fetch(client: Any, path: str) -> tuple[str, str]:
-        try:
-            r = await client.get(_rst_path_to_html_url(path))
-            r.raise_for_status()
-            return path, r.text
-        except Exception as exc:
-            logger.debug("PandaMcpClient.search_panda_docs: skipped %s: %s", path, exc)
-            return path, ""
-
-    async with httpx_module.AsyncClient(timeout=15) as client:
-        fetched = await asyncio.gather(*[_fetch(client, p) for p in rst_paths])
-
-    raw_files = {path: content for path, content in fetched if content}
-    logger.info(
-        "PandaMcpClient.search_panda_docs: fetched %d/%d HTML page(s)",
-        len(raw_files), len(rst_paths),
-    )
-
-    # --- Phase 3: extract sections from HTML and build BM25 index ---
-    from bs4 import BeautifulSoup  # noqa: PLC0415
-
-    def _clean(text: str) -> str:
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
-
-    def _html_sections(path: str, html: str) -> list[tuple[str, str, str]]:
-        """Return [(path, title, cleaned_text)] from one ReadTheDocs HTML page."""
-        soup = BeautifulSoup(html, "html.parser")
-        main = (
-            soup.find("div", role="main")
-            or soup.find("article")
-            or soup.find("div", class_="document")
-            or soup.body
-        )
-        if not main:
-            return []
-        results: list[tuple[str, str, str]] = []
-        for section in main.find_all("section"):
-            heading = section.find(["h1", "h2", "h3", "h4", "h5", "h6"])
-            title = heading.get_text(" ", strip=True) if heading else ""
-            # Direct content only — skip nested <section> children so BM25
-            # scores each section by its own prose, not its descendants'.
-            parts = []
-            for child in section.children:
-                if getattr(child, "name", None) == "section":
-                    continue
-                if hasattr(child, "get_text"):
-                    parts.append(child.get_text(" ", strip=True))
-                elif isinstance(child, str):
-                    parts.append(child.strip())
-            cleaned = _clean(" ".join(parts))
-            if cleaned:
-                results.append((path, title, cleaned))
-        if not results:
-            body_text = _clean(main.get_text(" ", strip=True))
-            if body_text:
-                file_title = path.split("/")[-1].replace(".rst", "").replace("_", " ").title()
-                results.append((path, file_title, body_text))
-        return results
-
-    sections: list[tuple[str, str, str]] = []  # (path, title, text)
-    for path, html in raw_files.items():
-        sections.extend(_html_sections(path, html))
-
-    corpus = [re.findall(r"[a-z0-9]+", text.lower()) for _, _, text in sections]
-    bm25 = BM25Okapi(corpus)
-
-    _bm25_data = (bm25, sections)
-    logger.info(
-        "PandaMcpClient.search_panda_docs: BM25 index built over %d section(s)",
-        len(sections),
-    )
-    return _bm25_data
