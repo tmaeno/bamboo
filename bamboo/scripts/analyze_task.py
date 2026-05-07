@@ -63,7 +63,7 @@ async def _write_novel_draft(
     type=int,
     default=None,
     help=(
-        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. Requires PANDA_URL / PANDA_URL_SSL to be set (or uses the CERN defaults). Mutually exclusive with --task-data."
+        "PanDA jediTaskID — fetch task data directly from PanDA instead of a file. Requires PANDA_API_URL_SSL to be set (or uses the CERN defaults). Mutually exclusive with --task-data."
     ),
 )
 @click.option(

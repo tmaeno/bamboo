@@ -55,14 +55,14 @@ The call to `pandaclient.Client.get_task_details_json` is wrapped in
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PANDA_URL` | `http://pandaserver.cern.ch:25080` | Plain HTTP base URL |
-| `PANDA_URL_SSL` | `https://pandaserver.cern.ch` | HTTPS base URL (used for most calls) |
+| `PANDA_API_URL` | `http://pandaserver.cern.ch:25080/api/v1` | Plain HTTP API base URL |
+| `PANDA_API_URL_SSL` | `https://pandaserver.cern.ch:25443/api/v1` | HTTPS API base URL (used for most calls) |
 
 To point at a development or local PanDA instance:
 
 ```bash
-export PANDA_URL=http://mypanda.example.org:25080
-export PANDA_URL_SSL=https://mypanda.example.org
+export PANDA_API_URL=http://mypanda.example.org:25080/api/v1
+export PANDA_API_URL_SSL=https://mypanda.example.org:25443/api/v1
 ```
 
 Other configuration parameters (e.g. `PANDA_AUTH`) can be set as needed — refer to the
@@ -174,7 +174,7 @@ Enter PanDA jediTaskID: 12345
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `ImportError: panda-client-light is required` | Package not installed | `pip install panda-client-light` or `pip install "bamboo[panda]"` |
-| `RuntimeError: status=255` | Network failure or wrong server URL | Check `PANDA_URL_SSL`; verify the server is reachable |
+| `RuntimeError: status=255` | Network failure or wrong server URL | Check `PANDA_API_URL_SSL`; verify the server is reachable |
 | `RuntimeError: status=0 … data=None` | Task ID not found on the server | Confirm the `jediTaskID` is correct |
 | `ValueError` | Non-numeric string passed as `task_id` | Pass an integer or numeric string |
 
@@ -199,7 +199,7 @@ Covered cases:
 - Non-dict response body → `RuntimeError`
 - Non-numeric task ID → `ValueError`
 - Missing `panda-client-light` → `ImportError` with install hint
-- Error messages include task ID and `PANDA_URL` hint
+- Error messages include task ID and `PANDA_API_URL_SSL` hint
 
 ---
 

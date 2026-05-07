@@ -146,6 +146,9 @@ class Settings(BaseSettings):
     # Extraction
     extraction_strategy: Literal["llm", "panda"] = "panda"
 
+    # PanDA monitor base URL — used to construct filebrowser job-log URLs.
+    panda_monitor_url: str = "https://bigpanda.cern.ch"
+
     # Database backend selection
     graph_database_backend: Literal["neo4j"] = "neo4j"
     vector_database_backend: Literal["qdrant"] = "qdrant"

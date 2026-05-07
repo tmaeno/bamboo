@@ -55,6 +55,10 @@ from bamboo.utils.panda_client import (
     async_fetch_log_content,
     extract_log_urls,
     fetch_task_data,
+    get_datasets_and_files,
+    get_job_descriptions,
+    get_job_log,
+    get_similar_successful_tasks,
 )
 
 logger = logging.getLogger(__name__)
@@ -529,6 +533,65 @@ class PandaMcpClient(McpClient):
                     "required": ["component"],
                 },
             ),
+            McpTool(
+                name="find_similar_successful_tasks",
+                description=(
+                    "Finds recently finished tasks similar to the current failing task by "
+                    "matching userName, processingType, software release (transUses/transHome), "
+                    "and architecture.  Use this when all jobs failed and you want a reference "
+                    "successful task to compare logs against.  Returns a ranked list of "
+                    "candidate task dicts; pass the jediTaskID of the best match to "
+                    "get_successful_job_logs."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "days_back": {
+                            "type": "integer",
+                            "default": 30,
+                            "description": "How many days back to search (max 30)",
+                        },
+                        "n_tasks": {
+                            "type": "integer",
+                            "default": 50,
+                            "description": "Maximum number of candidate tasks to retrieve",
+                        },
+                    },
+                    "required": [],
+                },
+            ),
+            McpTool(
+                name="get_failed_job_logs",
+                description=(
+                    "Downloads payload.stdout for one representative failed job of the "
+                    "current task.  Use alongside get_successful_job_logs to compare job "
+                    "output and identify where execution diverged from a successful run."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+            McpTool(
+                name="get_successful_job_logs",
+                description=(
+                    "Downloads payload.stdout for one finished job from a reference "
+                    "successful task.  Pass the jediTaskID returned by "
+                    "find_similar_successful_tasks.  Compare the output against "
+                    "get_failed_job_logs to identify the divergence point."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": ["integer", "string"],
+                            "description": "jediTaskID of the reference successful task",
+                        },
+                    },
+                    "required": ["task_id"],
+                },
+            ),
         ]
         self._dispatch = {
             "fetch_linked_log_files": self._fetch_linked_log_files,
@@ -541,6 +604,9 @@ class PandaMcpClient(McpClient):
             "search_panda_docs": self._search_panda_docs,
             "fetch_brokerage_context": self._fetch_brokerage_context,
             "fetch_cli_options": self._fetch_cli_options,
+            "find_similar_successful_tasks": self._find_similar_successful_tasks,
+            "get_failed_job_logs": self._get_failed_job_logs,
+            "get_successful_job_logs": self._get_successful_job_logs,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -702,21 +768,11 @@ class PandaMcpClient(McpClient):
         Returns ``{"error": "<reason>"}`` on any failure so the explorer degrades
         gracefully.
         """
+        from collections import Counter  # noqa: PLC0415
+
+        task_id = int(task_data["jediTaskID"])
         try:
-            from pandaclient import Client  # noqa: PLC0415
-        except ImportError:
-            return {"error": "panda-client-light not installed"}
-
-        try:
-            from collections import Counter
-
-            task_id = int(task_data["jediTaskID"])
-            status, jobs = await asyncio.to_thread(
-                Client.get_job_descriptions, task_id
-            )
-            if status != 0 or not isinstance(jobs, list):
-                return {"error": f"get_job_descriptions returned status={status}"}
-
+            jobs = await get_job_descriptions(task_id)
             status_counts = dict(Counter(j.get("jobStatus", "unknown") for j in jobs))
             failed = [
                 j for j in jobs
@@ -746,7 +802,7 @@ class PandaMcpClient(McpClient):
         except Exception as exc:
             logger.warning(
                 "PandaMcpClient.get_task_jobs_summary: failed for task_id=%s: %s",
-                task_data.get("jediTaskID", "unknown"),
+                task_id,
                 exc,
             )
             return {"error": str(exc)}
@@ -769,12 +825,6 @@ class PandaMcpClient(McpClient):
         ``extendedProdSourceLabel``, ``maxPSS`` (maximum proportional set size, kB),
         ``actualCoreCount``, ``memory_leak``.  Returns an empty list on any error.
         """
-        try:
-            from pandaclient import Client  # noqa: PLC0415
-        except ImportError:
-            logger.warning("PandaMcpClient.get_scout_job_details: panda-client-light not installed")
-            return []
-
         _COMPACT = (
             "jobID",
             "computingSite",
@@ -799,22 +849,17 @@ class PandaMcpClient(McpClient):
 
         try:
             task_id_int = int(task_data["jediTaskID"])
-
-            # fetche jobs:
-            all_status, all_raw = await asyncio.to_thread(
-                Client.get_job_descriptions, task_id_int, False
-                )
+            all_raw = await get_job_descriptions(task_id_int)
 
             scouts: list[dict[str, Any]] = []
             other_failed: list[dict[str, Any]] = []
 
-            if all_status == 0 and isinstance(all_raw, list):
-                for j in all_raw:
-                    if isinstance(j, dict):
-                        if str(j.get("extendedProdSourceLabel", "")).endswith("scout"):
-                            scouts.append(_compact(j))
-                        elif j.get("jobStatus") in ("failed", "cancelled", "closed"):
-                            other_failed.append(_compact(j))
+            for j in all_raw:
+                if isinstance(j, dict):
+                    if str(j.get("extendedProdSourceLabel", "")).endswith("scout"):
+                        scouts.append(_compact(j))
+                    elif j.get("jobStatus") in ("failed", "cancelled", "closed"):
+                        other_failed.append(_compact(j))
 
             # Scout-first (all statuses), then distinct pilotErrorCode from failed non-scouts
             selected: list[dict[str, Any]] = list(scouts[:max_jobs])
@@ -853,41 +898,91 @@ class PandaMcpClient(McpClient):
     ) -> list[dict[str, Any]]:
         """Fetch input and pseudo-input dataset descriptions for *task_id*.
 
-        Returns a list of dataset dicts (name, type, file counts, availability)
-        from the ``get_files_in_datasets`` endpoint.  Returns an empty list on
-        any failure so the explorer degrades gracefully.
+        Returns a list of ``{"dataset": {"name": ..., "id": ...}, "files": [...]}``
+        dicts.  Returns an empty list on any failure so the explorer degrades
+        gracefully.
         """
+        task_id_int = int(task_data["jediTaskID"])
         try:
-            from pandaclient import Client  # noqa: PLC0415
-        except ImportError:
-            logger.warning("PandaMcpClient.get_task_input_datasets: panda-client-light not installed")
-            return []
-
-        try:
-            task_id_int = int(task_data["jediTaskID"])
-            status, datasets = await asyncio.to_thread(
-                Client.get_files_in_datasets, task_id_int, "input,pseudo_input"
-            )
-            if status != 0 or not isinstance(datasets, list):
-                logger.warning(
-                    "PandaMcpClient.get_task_input_datasets: returned status=%s for task_id=%s",
-                    status,
-                    task_id_int,
-                )
-                return []
+            datasets = await get_datasets_and_files(task_id_int)
             logger.info(
                 "PandaMcpClient.get_task_input_datasets: fetched %d dataset(s) for task_id=%s",
                 len(datasets),
-                task_id,
+                task_id_int,
             )
             return datasets
         except Exception as exc:
             logger.warning(
                 "PandaMcpClient.get_task_input_datasets: failed for task_id=%s: %s",
-                task_id,
+                task_id_int,
                 exc,
             )
             return []
+
+    async def _find_similar_successful_tasks(
+        self,
+        task_data: dict[str, Any],
+        days_back: int = 30,
+        n_tasks: int = 50,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Return recently-finished tasks similar to the failing task."""
+        try:
+            results = await get_similar_successful_tasks(task_data, days_back, n_tasks)
+            logger.info(
+                "PandaMcpClient.find_similar_successful_tasks: found %d candidate(s)",
+                len(results),
+            )
+            return results
+        except Exception as exc:
+            logger.warning("PandaMcpClient.find_similar_successful_tasks: failed: %s", exc)
+            return {"error": str(exc)}
+
+    async def _get_failed_job_logs(
+        self,
+        task_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Download payload.stdout for one representative failed job."""
+        task_id = int(task_data["jediTaskID"])
+        try:
+            jobs = await get_job_descriptions(task_id, unsuccessful_only=True)
+            if not jobs:
+                return {"error": "no failed jobs found"}
+            panda_id = jobs[0].get("PandaID") or jobs[0].get("jobID")
+            content = await get_job_log(panda_id)
+            logger.info(
+                "PandaMcpClient.get_failed_job_logs: fetched log for PandaID=%s", panda_id
+            )
+            return {"pandaID": panda_id, "filename": "payload.stdout", "content": content or ""}
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.get_failed_job_logs: failed for task_id=%s: %s", task_id, exc
+            )
+            return {"error": str(exc)}
+
+    async def _get_successful_job_logs(
+        self,
+        task_id: int | str,
+    ) -> dict[str, Any]:
+        """Download payload.stdout for one finished job of a reference task."""
+        task_id_int = int(task_id)
+        try:
+            jobs = await get_job_descriptions(task_id_int)
+            finished = [j for j in jobs if j.get("jobStatus") == "finished"]
+            if not finished:
+                return {"error": "no finished jobs found"}
+            panda_id = finished[0].get("PandaID") or finished[0].get("jobID")
+            content = await get_job_log(panda_id)
+            logger.info(
+                "PandaMcpClient.get_successful_job_logs: fetched log for PandaID=%s", panda_id
+            )
+            return {"pandaID": panda_id, "filename": "payload.stdout", "content": content or ""}
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.get_successful_job_logs: failed for task_id=%s: %s",
+                task_id_int,
+                exc,
+            )
+            return {"error": str(exc)}
 
     async def _search_panda_server_source(
         self,

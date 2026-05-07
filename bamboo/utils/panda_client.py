@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import logging
+import os
 import re
+from datetime import datetime, timedelta
 from typing import Any
 from bamboo.utils.narrator import thinking
 
@@ -186,3 +189,125 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
         len(data),
     )
     return data
+
+
+async def get_job_descriptions(
+    task_id: int, unsuccessful_only: bool = False
+) -> list[dict[str, Any]]:
+    """Return job description dicts for *task_id*.
+
+    Args:
+        task_id: The PanDA ``jediTaskID``.
+        unsuccessful_only: When ``True`` only failed, cancelled, and closed jobs
+            are returned (server-side filter).
+
+    Returns:
+        List of job dicts.  Empty list on any error.
+    """
+    try:
+        data = await asyncio.to_thread(
+            _call_api,
+            "get",
+            "task/get_job_descriptions",
+            {"task_id": task_id, "unsuccessful_only": unsuccessful_only},
+        )
+        return data if isinstance(data, list) else []
+    except RuntimeError as exc:
+        logger.warning("get_job_descriptions: failed for task_id=%s: %s", task_id, exc)
+        return []
+
+
+async def get_datasets_and_files(
+    task_id: int,
+    dataset_types: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return dataset and file information for *task_id*.
+
+    Each entry has the form ``{"dataset": {"name": ..., "id": ...}, "files": [...]}``.
+
+    Args:
+        task_id: The PanDA ``jediTaskID``.
+        dataset_types: Dataset type filter (default: ``["input", "pseudo_input"]``).
+
+    Returns:
+        List of dataset dicts.  Empty list on any error.
+    """
+    params: dict[str, Any] = {"task_id": task_id}
+    if dataset_types:
+        params["dataset_types"] = dataset_types
+    try:
+        data = await asyncio.to_thread(
+            _call_api, "get", "task/get_datasets_and_files", params
+        )
+        return data if isinstance(data, list) else []
+    except RuntimeError as exc:
+        logger.warning("get_datasets_and_files: failed for task_id=%s: %s", task_id, exc)
+        return []
+
+
+async def get_similar_successful_tasks(
+    task_data: dict[str, Any],
+    days_back: int = 30,
+    n_tasks: int = 50,
+) -> list[dict[str, Any]]:
+    """Find recently finished tasks similar to the failing task.
+
+    Uses ``get_tasks_detailed_info_since`` with a ``filters`` dict.  Plain-value
+    filters (``userName``, ``processingType``, ``transUses``, ``transHome``,
+    ``architecture``) are pushed to SQL.  ``"finished|done"`` is applied via
+    ``re.search`` server-side.
+
+    Args:
+        task_data: The failing task's data dict.
+        days_back: How many days back to search (max 30 per server limit).
+        n_tasks: Maximum number of task IDs to retrieve before filtering.
+
+    Returns:
+        List of matching task detail dicts sorted by ``modificationTime`` descending.
+        Empty list on any error.
+    """
+    since = (datetime.now() - timedelta(days=min(days_back, 30))).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    filters = {
+        k: v
+        for k, v in {
+            "status": "finished|done",
+            "userName": task_data.get("userName"),
+            "processingType": task_data.get("processingType"),
+            "transUses": task_data.get("transUses"),
+            "transHome": task_data.get("transHome"),
+            "architecture": task_data.get("architecture"),
+        }.items()
+        if v
+    }
+    params = {"since": since, "n_tasks": n_tasks, "filters": json.dumps(filters)}
+    try:
+        data = await asyncio.to_thread(
+            _call_api, "get", "task/get_tasks_detailed_info_since", params
+        )
+        tasks = data if isinstance(data, list) else []
+        return sorted(
+            tasks, key=lambda t: t.get("modificationTime", ""), reverse=True
+        )
+    except RuntimeError as exc:
+        logger.warning("get_similar_successful_tasks: failed: %s", exc)
+        return []
+
+
+async def get_job_log(
+    panda_id: int,
+    filename: str = "payload.stdout",
+) -> str | None:
+    """Download a job log file from the PanDA monitor filebrowser.
+
+    Args:
+        panda_id: The ``PandaID`` of the job.
+        filename: Log filename to fetch (default: ``payload.stdout``).
+
+    Returns:
+        Log content as a string, or ``None`` on any error.
+    """
+    base_url = os.getenv("PANDA_MONITOR_URL", "https://bigpanda.cern.ch")
+    url = f"{base_url}/filebrowser/?pandaid={panda_id}&json&filename={filename}"
+    return await async_fetch_log_content(url)
