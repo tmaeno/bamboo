@@ -6,47 +6,6 @@ JSON file before running the pipeline.
 
 ---
 
-## Module
-
-```
-bamboo/utils/panda_client.py
-```
-
-All PanDA-facing helpers live here so they can be reused by extractors, agents, scripts, and
-the CLI without creating circular imports.  New functions (e.g. job-list fetching, task-status
-polling) should be added to this module.
-
-### `fetch_task_data(task_id, verbose=False)`
-
-```python
-from bamboo.utils.panda_client import fetch_task_data
-
-task_data = await fetch_task_data(12345)
-
-# with full communication logging
-task_data = await fetch_task_data(12345, verbose=True)
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `task_id` | `int` or `str` | PanDA `jediTaskID` |
-| `verbose` | `bool` | If `True`, sets the `bamboo` logger to DEBUG level. Useful for diagnosing network or auth issues. Default: `False`. |
-
-**Returns** – a `dict` of task fields exactly as returned by the PanDA server, ready to pass
-as `task_data` to `KnowledgeAccumulator` or any extraction strategy.
-
-**Raises**
-
-| Exception | When |
-|-----------|------|
-| `ValueError` | `task_id` cannot be converted to `int` |
-| `RuntimeError` | Server returns a non-zero status code or a non-success response body |
-
-The blocking `HttpClient.get` call is offloaded via `asyncio.to_thread` so it never
-blocks the event loop.
-
----
-
 ## Server Configuration
 
 `HttpClient` reads the server URL and authentication settings from environment variables.
@@ -111,16 +70,6 @@ asyncio.run(main())
 
 ---
 
-## Error Handling
-
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| `RuntimeError: PanDA connection error` | Network failure or wrong server URL | Check `PANDA_API_URL_SSL`; verify the server is reachable |
-| `RuntimeError: PanDA returned error` | Task ID not found, or server-side error | Confirm the `jediTaskID` is correct; check the error message for details |
-| `ValueError` | Non-numeric string passed as `task_id` | Pass an integer or numeric string |
-
----
-
 ## Testing
 
 Unit tests for `fetch_task_data` are in `tests/test_panda_client.py`.  All tests inject a
@@ -170,40 +119,6 @@ downloaded and processed as a task-level log.
 **Canonicalisation:** error categories, cause names, and resolution names are normalised via
 a vector-DB + LLM round-trip so the same concept always maps to the same node name across
 incidents.
-
----
-
-### `PandaMcpClient`
-
-**File:** `bamboo/mcp/panda_mcp_client.py`
-
-The built-in MCP client for PanDA.  No external connection needed.
-
-| Tool | Trigger condition | Routes to | Returns |
-|---|---|---|---|
-| `fetch_linked_log_files` | Symptom nodes too vague; log evidence absent | `task_logs` | `dict[url → content]` |
-| `get_parent_task` | `retryID` present but root cause unclear | `external_data` | Parent task dict |
-| `get_retry_chain` | Failure spans multiple retry attempts | `external_data` | List of ancestor task summaries |
-| `get_task_jobs_summary` | Job-level failure distribution missing | `external_data` | Status counts + top error diags |
-| `get_failed_job_details` | Scout failures, site-specific errors needing job-level detail | `external_data` | List of compact job dicts |
-| `get_task_jedi_details` | Unclear failure cause despite clean `errorDialog`; scheduling/resource bottleneck suspected | `task_logs` | Enriched JEDI task dict (scheduling params, split rules, resource allocation) |
-| `get_task_input_datasets` | Symptoms suggest input data issues (`STAGEIN_FAILED`, dataset not found) | `task_logs` | List of input dataset dicts with file counts |
-| `search_panda_server_source` | Task pending due to overestimated resources from scouts; vague errorDialog message with no clear cause | `task_logs` | List of `{file, line, context}` code snippets from panda-server source |
-| `search_panda_docs` | Node name or error pattern requires domain-level explanation | `doc_hints` | Plain-text snippets from PanDA WMS documentation, passed as domain background to the reviewer and planner |
-
-All tools are safe to call concurrently.  Tools routed to `task_logs` are processed by the LLM
-extractor alongside error dialog logs.  Tools routed to `external_data` are consumed by the
-structured extractor path.  Results from `search_panda_docs` go into `doc_hints`, a dedicated
-dict that flows to the reviewer and exploration planner as authoritative domain context.
-
-The `search_panda_server_source` tool requires panda-server installed in the same environment:
-
-```
-pip install "bamboo[panda]"
-```
-
-> **Note:** `panda-server` currently installs with full server-side dependencies.
-> This will be updated to a lightweight source-only package once one is available.
 
 ---
 
@@ -265,13 +180,27 @@ navigator over a collection of errorDialog strings (JSON / CSV files or PanDA ta
 deduplicates inputs by normalised pattern, and classifies results as `relevant`, `irrelevant`,
 `no_candidates`, `too_many_candidates`, `empty_error_dialog`, or `error`.
 
+```bash
+# Single string smoke-test:
+python -m bamboo.scripts.panda.eval_source_navigator "scout_ramCount threshold exceeded"
+
+# Batch from a JSON file of task IDs; write report:
+python -m bamboo.scripts.panda.eval_source_navigator --from-file task_ids.json --output report.json
+
+# Terms-only mode (LLM extraction + grep, no navigation rounds):
+python -m bamboo.scripts.panda.eval_source_navigator --from-file errors.json --terms-only
+
+# With LLM judge on suspicious results:
+python -m bamboo.scripts.panda.eval_source_navigator --from-file errors.json --judge
+```
+
 ---
 
 ### `PandaDocNavigator`
 
 **File:** `bamboo/agents/panda_doc_navigator.py`
 
-Replaces the BM25 full-text index for `search_panda_docs`. Builds a heading-hierarchy graph
+Builds a heading-hierarchy graph
 from the ReadTheDocs HTML pages, LLM-summarises every node, and stores embeddings in a
 dedicated Qdrant collection (`panda_docs`). Index is rebuilt lazily on first use and when
 the upstream GitHub tree SHA changes.
@@ -289,6 +218,22 @@ Results are merged and deduped by node URL. Each `DocResult` carries: `title`, `
 **Staleness detection:** stores `{"sha": "...", "built_at": "..."}` in
 `bamboo/data/panda_docs_meta.json`; compares against the live GitHub tree SHA on every
 startup.
+
+**Evaluation script:** `bamboo/scripts/panda/eval_doc_navigator.py` — batch-evaluates
+the navigator over a collection of query strings (JSON file or single argument),
+reports result counts, source-strategy distribution (semantic / LLM traversal / both),
+and optional LLM-as-judge verdicts.
+
+```bash
+# Single query smoke-test:
+python -m bamboo.scripts.panda.eval_doc_navigator "how to set memory limit for jobs"
+
+# Batch from a JSON file of queries; with LLM judge; write report:
+python -m bamboo.scripts.panda.eval_doc_navigator --from-file queries.json --judge --output report.json
+
+# Verbose — print top result titles and URLs per query:
+python -m bamboo.scripts.panda.eval_doc_navigator --verbose "exhausted task retry limit"
+```
 
 ---
 
