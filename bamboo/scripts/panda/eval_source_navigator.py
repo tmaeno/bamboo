@@ -8,16 +8,16 @@ flags (term_fallback, low_term_quality, rounds_exhausted).
 Usage::
 
     # Terms-only (LLM extraction + grep, no navigation rounds):
-    python -m bamboo.scripts.eval_source_navigator --from-file errors.json --terms-only
+    python -m bamboo.scripts.panda.eval_source_navigator --from-file errors.json --terms-only
 
     # Full pipeline on a file of task IDs (auto-detected, fetched from PanDA):
-    python -m bamboo.scripts.eval_source_navigator --from-file task_ids.json --output report.json
+    python -m bamboo.scripts.panda.eval_source_navigator --from-file task_ids.json --output report.json
 
     # With LLM judge on suspicious results (identifier coverage < 0.3):
-    python -m bamboo.scripts.eval_source_navigator --from-file errors.json --judge
+    python -m bamboo.scripts.panda.eval_source_navigator --from-file errors.json --judge
 
     # Single string smoke-test:
-    python -m bamboo.scripts.eval_source_navigator "scout_ramCount threshold exceeded"
+    python -m bamboo.scripts.panda.eval_source_navigator "scout_ramCount threshold exceeded"
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
 # PanDA Integration
 
 Bamboo can fetch task data directly from a live **PanDA** (Production and Distributed Analysis)
-server via the `panda-client-light` package, eliminating the need to prepare a local JSON file
-before running the pipeline.
+server via `pandaserver.api.v1.http_client.HttpClient`, eliminating the need to prepare a local
+JSON file before running the pipeline.
 
 ---
 
@@ -30,7 +30,7 @@ task_data = await fetch_task_data(12345, verbose=True)
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `task_id` | `int` or `str` | PanDA `jediTaskID` |
-| `verbose` | `bool` | If `True`, prints every curl command and raw server response to stdout. Useful for debugging auth or network issues. Default: `False`. |
+| `verbose` | `bool` | If `True`, sets the `bamboo` logger to DEBUG level. Useful for diagnosing network or auth issues. Default: `False`. |
 
 **Returns** – a `dict` of task fields exactly as returned by the PanDA server, ready to pass
 as `task_data` to `KnowledgeAccumulator` or any extraction strategy.
@@ -40,82 +40,38 @@ as `task_data` to `KnowledgeAccumulator` or any extraction strategy.
 | Exception | When |
 |-----------|------|
 | `ValueError` | `task_id` cannot be converted to `int` |
-| `ImportError` | `panda-client-light` is not installed |
-| `RuntimeError` | Server returns a non-zero status code, `None`, or a non-dict body |
+| `RuntimeError` | Server returns a non-zero status code or a non-success response body |
 
-The call to `pandaclient.Client.get_task_details_json` is wrapped in
-`asyncio.run_in_executor` so it never blocks the event loop.
+The blocking `HttpClient.get` call is offloaded via `asyncio.to_thread` so it never
+blocks the event loop.
 
 ---
 
-## Server Configuration and Obtaining Access Tokens
+## Server Configuration
 
-`panda-client-light` reads the server URL from environment variables.  Set them in your
-`.env` file or shell before running Bamboo:
+`HttpClient` reads the server URL and authentication settings from environment variables.
+Set them in your `.env` file or shell before running Bamboo:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PANDA_API_URL` | `http://pandaserver.cern.ch:25080/api/v1` | Plain HTTP API base URL |
-| `PANDA_API_URL_SSL` | `https://pandaserver.cern.ch:25443/api/v1` | HTTPS API base URL (used for most calls) |
+| `PANDA_API_URL_SSL` | `https://pandaserver.cern.ch:25443/api/v1` | HTTPS API base URL |
+| `PANDA_AUTH` | *(unset)* | Set to `oidc` to use OIDC token auth instead of X.509 |
+| `PANDA_AUTH_VO` | *(unset)* | VO name when using OIDC |
+| `PANDA_AUTH_ID_TOKEN` | *(unset)* | OIDC token value, or `file:<path>` |
+| `X509_USER_PROXY` | *(unset)* | Path to X.509 proxy certificate |
 
 To point at a development or local PanDA instance:
 
 ```bash
-export PANDA_API_URL=http://mypanda.example.org:25080/api/v1
 export PANDA_API_URL_SSL=https://mypanda.example.org:25443/api/v1
 ```
 
-Other configuration parameters (e.g. `PANDA_AUTH`) can be set as needed — refer to the
-[PanDA client setup guide](https://panda-wms.readthedocs.io/en/latest/client/panda-client.html#setup)
-for the full list.
-
-Then you need to obtain an access token for authentication. This typically involves:
-
-```bash
-python -c "from pandaclient import Client; print(Client.get_access_token())"
-```
-
-> **macOS note:** if you see an error about invalid credentials, you may need to install
-> Python's SSL certificates first:
-> ```bash
-> /Applications/Python\ 3.x/Install\ Certificates.command
-> ```
+Refer to the [PanDA client setup guide](https://panda-wms.readthedocs.io/en/latest/client/panda-client.html#setup)
+for authentication setup (obtaining an OIDC token or X.509 proxy).
 
 ---
 
 ## Usage
-
-### Via CLI commands
-
-**Inspect raw task data** without running the full pipeline:
-
-```bash
-# Print JSON to stdout
-bamboo fetch-task 12345
-
-# Save to a file
-bamboo fetch-task 12345 --output task_12345.json
-
-# Show all curl commands and raw server responses (debug auth/network issues)
-bamboo fetch-task 12345 --verbose
-```
-
-**Populate knowledge base** from a live task (instead of a local JSON file):
-
-```bash
-bamboo populate --task-id 12345
-bamboo populate --task-id 12345 --email-thread incident.txt
-```
-
-**Analyze a task** fetched directly from PanDA:
-
-```bash
-bamboo analyze --task-id 12345
-bamboo analyze --task-id 12345 --output result.json
-```
-
-`--task-id` and `--task-data` are mutually exclusive on both commands.
-
 
 ### Programmatically
 
@@ -155,36 +111,21 @@ asyncio.run(main())
 
 ---
 
-## Interactive Mode
-
-When running `bamboo interactive`, the **Populate** and **Analyze** menus both offer
-"Fetch from PanDA by task ID" as an alternative to loading a local file:
-
-```
-Do you have task data? [y/N]: y
-Fetch task data directly from PanDA by task ID? [y/N]: y
-Enter PanDA jediTaskID: 12345
-✓ Fetched 47 fields for task 12345
-```
-
----
-
 ## Error Handling
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `ImportError: panda-client-light is required` | Package not installed | `pip install panda-client-light` or `pip install "bamboo[panda]"` |
-| `RuntimeError: status=255` | Network failure or wrong server URL | Check `PANDA_API_URL_SSL`; verify the server is reachable |
-| `RuntimeError: status=0 … data=None` | Task ID not found on the server | Confirm the `jediTaskID` is correct |
+| `RuntimeError: PanDA connection error` | Network failure or wrong server URL | Check `PANDA_API_URL_SSL`; verify the server is reachable |
+| `RuntimeError: PanDA returned error` | Task ID not found, or server-side error | Confirm the `jediTaskID` is correct; check the error message for details |
 | `ValueError` | Non-numeric string passed as `task_id` | Pass an integer or numeric string |
 
 ---
 
 ## Testing
 
-Unit tests for `fetch_task_data` are in `tests/test_panda_client.py`.  All tests mock
-`pandaclient.Client` via `unittest.mock.patch.dict` on `sys.modules` — no live PanDA
-server is required.
+Unit tests for `fetch_task_data` are in `tests/test_panda_client.py`.  All tests inject a
+fake `pandaserver.api.v1.http_client` module via `patch.dict(sys.modules, ...)` — no live
+PanDA server is required.
 
 ```bash
 pytest tests/test_panda_client.py -v
@@ -195,10 +136,8 @@ Covered cases:
 - Successful fetch returning a `dict`
 - String task ID coerced to `int`
 - Non-zero status code → `RuntimeError`
-- `None` response body → `RuntimeError`
-- Non-dict response body → `RuntimeError`
+- API error (`success=False`) → `RuntimeError` with server message
 - Non-numeric task ID → `ValueError`
-- Missing `panda-client-light` → `ImportError` with install hint
 - Error messages include task ID and `PANDA_API_URL_SSL` hint
 
 ---
@@ -321,10 +260,35 @@ answer a code-level question derived from a task's `errorDialog`, and delivers i
 
 **Fail-open:** `prefetch_panda_source()` catches all exceptions and returns an empty dict.
 
-**Evaluation script:** `bamboo/scripts/eval_source_navigator.py` — batch-evaluates the
+**Evaluation script:** `bamboo/scripts/panda/eval_source_navigator.py` — batch-evaluates the
 navigator over a collection of errorDialog strings (JSON / CSV files or PanDA task IDs),
 deduplicates inputs by normalised pattern, and classifies results as `relevant`, `irrelevant`,
 `no_candidates`, `too_many_candidates`, `empty_error_dialog`, or `error`.
+
+---
+
+### `PandaDocNavigator`
+
+**File:** `bamboo/agents/panda_doc_navigator.py`
+
+Replaces the BM25 full-text index for `search_panda_docs`. Builds a heading-hierarchy graph
+from the ReadTheDocs HTML pages, LLM-summarises every node, and stores embeddings in a
+dedicated Qdrant collection (`panda_docs`). Index is rebuilt lazily on first use and when
+the upstream GitHub tree SHA changes.
+
+**Search uses two parallel strategies:**
+- *Flat semantic search* — embeds the query and retrieves top-k Qdrant matches; walks the
+  parent chain to attach breadcrumb and parent summary.
+- *LLM-guided traversal* — one LLM call per hierarchy level selects relevant pages /
+  sections, using the parent node's summary as context at each drill-down step.
+
+Results are merged and deduped by node URL. Each `DocResult` carries: `title`, `url`,
+`content` (full section text, no truncation), `parent_summary`, `breadcrumb`, `source`
+(`"semantic"` | `"llm_traversal"` | `"both"`).
+
+**Staleness detection:** stores `{"sha": "...", "built_at": "..."}` in
+`bamboo/data/panda_docs_meta.json`; compares against the live GitHub tree SHA on every
+startup.
 
 ---
 

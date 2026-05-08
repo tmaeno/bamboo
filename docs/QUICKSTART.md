@@ -143,7 +143,35 @@ bamboo analyze \
   --output results.json
 ```
 
-### Example 3: Interactive Mode
+### Example 3: Fetching tasks from PanDA
+
+If your environment has access to a PanDA server, you can fetch task data directly instead
+of loading a local JSON file.
+
+**Inspect raw task data:**
+
+```bash
+bamboo fetch-task 12345
+bamboo fetch-task 12345 --output task_12345.json
+bamboo fetch-task 12345 --verbose   # sets bamboo logger to DEBUG
+```
+
+**Populate and analyze using a live task ID:**
+
+```bash
+bamboo populate --task-id 12345
+bamboo populate --task-id 12345 --email-thread incident.txt
+bamboo analyze --task-id 12345
+bamboo analyze --task-id 12345 --output result.json
+```
+
+`--task-id` and `--task-data` are mutually exclusive on both commands.
+
+See `docs/PANDA_INTEGRATION.md` for server configuration and authentication setup.
+
+---
+
+### Example 4: Interactive Mode
 
 ```bash
 bamboo interactive
