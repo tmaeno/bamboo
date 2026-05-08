@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import click
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -216,7 +218,26 @@ class ReviewApp(App[None]):
         return None
 
 
+@click.command("review-drafts")
+@click.option(
+    "--drafts",
+    "drafts_dir",
+    default="drafts",
+    show_default=True,
+    type=click.Path(),
+    help="Directory containing draft JSON files to review.",
+)
 def main(drafts_dir: str = "drafts") -> None:
+    """Interactively review and approve draft email notifications.
+
+    Opens a terminal UI showing each draft side-by-side with editable
+    email-body fields.  Use Ctrl+D to approve, Ctrl+S to save without
+    approving, and Ctrl+Q to quit.
+
+    \b
+      bamboo review-drafts
+      bamboo review-drafts --drafts my_drafts/
+    """
     if not Path(drafts_dir).is_dir():
         print(f"Error: '{drafts_dir}' is not a directory.", file=sys.stderr)
         sys.exit(1)

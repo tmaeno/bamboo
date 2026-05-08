@@ -465,5 +465,14 @@ def main() -> int:
         return 1
 
 
+import click
+
+
+@click.command("verify")
+def cmd() -> None:
+    """Verify that the Bamboo package is correctly installed."""
+    sys.exit(main())
+
+
 if __name__ == "__main__":
     sys.exit(main())

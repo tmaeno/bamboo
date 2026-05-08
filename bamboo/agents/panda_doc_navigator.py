@@ -32,6 +32,7 @@ from langchain_core.messages import HumanMessage
 
 from bamboo.config import get_settings
 from bamboo.llm import get_embeddings, get_extraction_llm, get_summary_llm
+from bamboo.utils.narrator import counting, say, thinking
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,19 @@ _EXCLUDED_RST_PATHS: frozenset[str] = frozenset({
 
 _COLLECTION = "panda_docs"
 _META_FILE = Path(__file__).parent.parent / "data" / "panda_docs_meta.json"
+
+
+def invalidate_doc_cache() -> bool:
+    """Delete the doc-index metadata, forcing a full rebuild on next use.
+
+    Returns ``True`` if the cache file existed and was deleted, ``False`` if it
+    was already absent.
+    """
+    if _META_FILE.exists():
+        _META_FILE.unlink()
+        return True
+    return False
+
 
 # ---------------------------------------------------------------------------
 # LLM prompt templates
@@ -153,16 +167,19 @@ class PandaDocNavigator:
         """Ensure the doc index is built and loaded into memory."""
         if self._initialized:
             return
+        say("Checking PanDA doc index …")
         needs_rebuild = await self._check_staleness()
         if needs_rebuild:
             await self._build_index()
         else:
+            say("Doc index up to date — loading from Qdrant")
             await self._load_graph_from_qdrant()
         self._initialized = True
 
     async def search(self, query: str, top_k: int = 5) -> list[DocResult]:
         """Search the doc graph. Runs flat semantic + LLM traversal in parallel."""
         await self.ensure_initialized()
+        say(f"Searching PanDA docs: {query!r}")
 
         semantic_task = self._semantic_search(query, top_k=top_k)
         traversal_task = self._llm_traversal(query)
@@ -193,6 +210,7 @@ class PandaDocNavigator:
             merged.values(),
             key=lambda r: (0 if r.source == "both" else 1, -r.score),
         )
+        say(f"PanDA doc search: {len(results[:top_k])} result(s)")
         return results[:top_k]
 
     # ------------------------------------------------------------------
@@ -246,23 +264,24 @@ class PandaDocNavigator:
     async def _load_graph_from_qdrant(self) -> None:
         """Rebuild in-memory graph by scrolling all Qdrant points."""
         client = self._make_qdrant_client()
-        try:
-            all_points = []
-            offset = None
-            while True:
-                points, next_offset = await client.scroll(
-                    collection_name=_COLLECTION,
-                    offset=offset,
-                    limit=100,
-                    with_payload=True,
-                    with_vectors=False,
-                )
-                all_points.extend(points)
-                if next_offset is None:
-                    break
-                offset = next_offset
-        finally:
-            await client.close()
+        with thinking("Loading PanDA doc index from Qdrant"):
+            try:
+                all_points = []
+                offset = None
+                while True:
+                    points, next_offset = await client.scroll(
+                        collection_name=_COLLECTION,
+                        offset=offset,
+                        limit=100,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    all_points.extend(points)
+                    if next_offset is None:
+                        break
+                    offset = next_offset
+            finally:
+                await client.close()
 
         self._graph = {}
         for point in all_points:
@@ -284,20 +303,26 @@ class PandaDocNavigator:
             "PandaDocNavigator: loaded %d nodes (%d pages) from Qdrant",
             len(self._graph), len(self._page_ids),
         )
+        say(f"Loaded {len(self._graph)} nodes ({len(self._page_ids)} pages) from Qdrant")
 
     # ------------------------------------------------------------------
     # Index build pipeline
     # ------------------------------------------------------------------
 
     async def _build_index(self) -> None:
+        say("Building PanDA doc index — this may take a few minutes")
         logger.info("PandaDocNavigator: building doc index — this may take a few minutes")
 
-        rst_paths, tree_sha = await self._fetch_rst_paths()
+        with thinking("Fetching PanDA doc file list"):
+            rst_paths, tree_sha = await self._fetch_rst_paths()
         if not rst_paths:
             logger.warning("PandaDocNavigator: no RST paths found — aborting build")
             return
+        say(f"Discovered {len(rst_paths)} RST paths")
 
-        html_pages = await self._fetch_html_pages(rst_paths)
+        with thinking(f"Downloading {len(rst_paths)} HTML pages"):
+            html_pages = await self._fetch_html_pages(rst_paths)
+        say(f"Fetched {len(html_pages)}/{len(rst_paths)} pages")
 
         from bs4 import BeautifulSoup  # noqa: PLC0415 — lazy import
         all_nodes: list[DocNode] = []
@@ -305,9 +330,14 @@ class PandaDocNavigator:
             all_nodes.extend(self._parse_page_to_nodes(rst_path, html, BeautifulSoup))
 
         logger.info("PandaDocNavigator: parsed %d nodes across %d pages", len(all_nodes), len(html_pages))
+        say(f"Parsed {len(all_nodes)} nodes across {len(html_pages)} pages")
 
-        await self._summarize_nodes(all_nodes)
-        await self._embed_and_upsert(all_nodes)
+        with counting(f"Summarising {len(all_nodes)} nodes", total=len(all_nodes)) as advance:
+            await self._summarize_nodes(all_nodes, advance_fn=advance)
+        say(f"Summarised {len(all_nodes)} nodes")
+
+        with thinking("Embedding and indexing nodes"):
+            await self._embed_and_upsert(all_nodes)
 
         self._graph = {n.id: n for n in all_nodes}
         self._page_ids = [n.id for n in all_nodes if n.level == 0]
@@ -319,6 +349,7 @@ class PandaDocNavigator:
             "PandaDocNavigator: index ready — %d nodes, %d pages",
             len(all_nodes), len(self._page_ids),
         )
+        say(f"Doc index ready — {len(all_nodes)} nodes, {len(self._page_ids)} pages")
 
     async def _fetch_rst_paths(self) -> tuple[list[str], str | None]:
         try:
@@ -432,26 +463,30 @@ class PandaDocNavigator:
 
         return nodes
 
-    async def _summarize_nodes(self, nodes: list[DocNode]) -> None:
+    async def _summarize_nodes(self, nodes: list[DocNode], advance_fn=None) -> None:
         semaphore = asyncio.Semaphore(10)
 
         async def _one(node: DocNode) -> None:
-            if not node.content.strip():
-                node.summary = node.title
-                return
-            prompt = _SUMMARIZE_PROMPT.format(
-                title=node.title,
-                content=node.content[:3000],
-            )
-            async with semaphore:
-                try:
-                    resp = await self._summary_llm.ainvoke([HumanMessage(content=prompt)])
-                    node.summary = resp.content.strip()
-                except Exception as exc:
-                    logger.warning(
-                        "PandaDocNavigator: summarize failed for %r: %s", node.title, exc
-                    )
-                    node.summary = node.content[:300]
+            try:
+                if not node.content.strip():
+                    node.summary = node.title
+                    return
+                prompt = _SUMMARIZE_PROMPT.format(
+                    title=node.title,
+                    content=node.content[:3000],
+                )
+                async with semaphore:
+                    try:
+                        resp = await self._summary_llm.ainvoke([HumanMessage(content=prompt)])
+                        node.summary = resp.content.strip()
+                    except Exception as exc:
+                        logger.warning(
+                            "PandaDocNavigator: summarize failed for %r: %s", node.title, exc
+                        )
+                        node.summary = node.content[:300]
+            finally:
+                if advance_fn:
+                    advance_fn()
 
         await asyncio.gather(*[_one(n) for n in nodes])
         logger.info("PandaDocNavigator: summarized %d nodes", len(nodes))
@@ -541,6 +576,7 @@ class PandaDocNavigator:
             _TRAVERSAL_PAGE_PROMPT.format(query=query, pages_text=pages_text),
             candidates=[pid for pid, _ in page_items],
         )
+        say(f"LLM selected {len(chosen_page_ids)} relevant doc page(s)")
         if not chosen_page_ids:
             return []
 
@@ -579,6 +615,7 @@ class PandaDocNavigator:
         for pr in page_results:
             if isinstance(pr, list):
                 results.extend(pr)
+        say(f"LLM traversal: {len(results)} section(s) found")
         return results
 
     async def _llm_select(self, prompt: str, candidates: list[str]) -> list[str]:

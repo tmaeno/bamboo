@@ -91,6 +91,12 @@ async def _write_novel_draft(
     show_default=True,
     help="Minimum number of tasks that must share an edge for it to appear in the pattern output.",
 )
+@click.option(
+    "--rebuild-docs",
+    is_flag=True,
+    default=False,
+    help="Force a full rebuild of the doc index (clears cached metadata).",
+)
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
 @click.option(
     "--debug-report",
@@ -108,7 +114,7 @@ async def _write_novel_draft(
     type=click.Path(),
     help="Directory to write seed draft JSON for novel incidents.",
 )
-def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir):
+def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir, rebuild_docs):
     """Analyze a problematic task and generate a resolution.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -121,6 +127,14 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
     accumulated with ``bamboo populate``.
     """
     setup_logging()
+
+    if rebuild_docs:
+        from bamboo.agents.panda_doc_navigator import invalidate_doc_cache  # noqa: PLC0415
+        deleted = invalidate_doc_cache()
+        click.echo(
+            "✓ Doc index cache cleared — will rebuild on next use." if deleted
+            else "Doc index cache was already empty."
+        )
 
     if task_data and task_id:
         raise click.UsageError("--task-data and --task-id are mutually exclusive.")

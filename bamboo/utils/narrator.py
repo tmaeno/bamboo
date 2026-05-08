@@ -22,21 +22,23 @@ without any global state.
 from __future__ import annotations
 
 import inspect
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-import time
-from typing import Generator
-import threading
+from typing import Callable, Generator
 
-from rich.live import Live
-from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.console import Console
-from rich.text import Text
-from rich.columns import Columns
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
+
+# Shared Progress instance for all concurrent thinking() callers.
+# _progress_lock is only held briefly (no await inside), so no deadlock risk.
+_progress: Progress | None = None
+_progress_ref_count: int = 0
+_progress_lock = threading.Lock()
 
 
 def set_narrator(console: Console, verbose: bool = False) -> Token:
@@ -92,54 +94,107 @@ def show_block(title: str, content: str, max_lines: int = 60) -> None:
 
 @contextmanager
 def thinking(msg: str) -> Generator[None, None, None]:
-    """Show a spinner labelled *msg* while a slow operation runs.
+    """Show a spinner row labelled *msg* while a slow operation runs.
 
-    The spinner renders in a background thread so ``await`` inside the
-    ``with`` block works normally::
-
-        with thinking("Summarizing the graph..."):
-            response = await llm.ainvoke(prompt)
+    Multiple concurrent callers each get their own row in a shared
+    :class:`~rich.progress.Progress` display; all rows disappear together
+    when the last one exits (``transient=True``).
 
     The label is prefixed with the caller's module name, e.g.
-    ``[knowledge_accumulator] Summarizing the graph...``
+    ``[knowledge_accumulator] Summarizing the graph…``
 
     No-op when no narrator console is active.
     """
+    global _progress, _progress_ref_count
+
     c = _console.get()
     if c is None:
         yield
         return
+
     caller = inspect.stack()[2]
     module = inspect.getmodule(caller[0])
     module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
+    description = f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg}[/cyan]"
 
-    spinner = Spinner("dots")
-    stop_event = threading.Event()
-
-    # This function runs in a background thread to update the spinner label with animated dots
-    def update_loop(live):
-        n_dots = 10
-        counter = 0
-        while not stop_event.is_set():
-            if (counter // n_dots) % 2 == 0:
-                dots = "." * (counter % n_dots + 1)
-            else:
-                dots = "." * (n_dots - (counter % n_dots))
-            label = Text.from_markup(
-                f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg}{dots}[/cyan]"
+    with _progress_lock:
+        if _progress is None:
+            _progress = Progress(
+                SpinnerColumn("dots"),
+                TextColumn("{task.description}"),
+                console=c,
+                transient=True,
             )
-            live.update(Columns([spinner, label]))
-            counter += 1
-            time.sleep(0.1)  # Faster dots feel more responsive
+            _progress.start()
+        _progress_ref_count += 1
+        task_id = _progress.add_task(description, total=None)
 
-    with Live("", refresh_per_second=10, transient=True) as live:
-        # Start the "dots" animation in the background
-        thread = threading.Thread(target=update_loop, args=(live,), daemon=True)
-        thread.start()
+    try:
+        yield
+    finally:
+        with _progress_lock:
+            if _progress is not None:
+                _progress.remove_task(task_id)
+                _progress_ref_count -= 1
+                if _progress_ref_count == 0:
+                    _progress.stop()
+                    _progress = None
 
-        try:
-            yield  # The code inside the 'with' block runs HERE
-        finally:
-            # Tell the background thread to stop when the 'with' block finishes
-            stop_event.set()
-            thread.join(timeout=0.1)
+
+@contextmanager
+def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
+    """Like :func:`thinking`, but yields an ``advance()`` callable that shows X/total progress.
+
+    Usage::
+
+        with counting("Summarising nodes", total=len(nodes)) as advance:
+            for node in nodes:
+                process(node)
+                advance()
+
+    No-op (yields a no-op callable) when no narrator console is active.
+    """
+    global _progress, _progress_ref_count
+
+    c = _console.get()
+    if c is None:
+        yield lambda: None
+        return
+
+    caller = inspect.stack()[2]
+    module = inspect.getmodule(caller[0])
+    module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
+    done = 0
+
+    def _desc(n: int) -> str:
+        return f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg} ({n}/{total})[/cyan]"
+
+    with _progress_lock:
+        if _progress is None:
+            _progress = Progress(
+                SpinnerColumn("dots"),
+                TextColumn("{task.description}"),
+                console=c,
+                transient=True,
+            )
+            _progress.start()
+        _progress_ref_count += 1
+        task_id = _progress.add_task(_desc(0), total=None)
+
+    def advance() -> None:
+        nonlocal done
+        done += 1
+        with _progress_lock:
+            if _progress is not None:
+                _progress.update(task_id, description=_desc(done))
+
+    try:
+        yield advance
+    finally:
+        with _progress_lock:
+            if _progress is not None:
+                _progress.remove_task(task_id)
+                _progress_ref_count -= 1
+                if _progress_ref_count == 0:
+                    _progress.stop()
+                    _progress = None

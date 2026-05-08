@@ -85,10 +85,16 @@ from bamboo.utils.logging import setup_logging
         "Useful for investigating unexpected extraction or storage behaviour."
     ),
 )
+@click.option(
+    "--rebuild-docs",
+    is_flag=True,
+    default=False,
+    help="Force a full rebuild of the doc index (clears cached metadata).",
+)
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable DEBUG logging.")
 def main(
     email_thread, task_data, task_id, external_data, require_procedures,
-    dry_run, output, max_retries, debug_report, verbose,
+    dry_run, output, max_retries, debug_report, verbose, rebuild_docs,
 ):
     """Populate knowledge base from various sources.
 
@@ -109,6 +115,14 @@ def main(
       bamboo populate --task-id 12345 --debug-report debug.json
     """
     setup_logging()
+
+    if rebuild_docs:
+        from bamboo.agents.panda_doc_navigator import invalidate_doc_cache  # noqa: PLC0415
+        deleted = invalidate_doc_cache()
+        click.echo(
+            "✓ Doc index cache cleared — will rebuild on next use." if deleted
+            else "Doc index cache was already empty."
+        )
 
     if task_data and task_id:
         raise click.UsageError("--task-data and --task-id are mutually exclusive.")
