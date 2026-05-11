@@ -43,6 +43,8 @@ SDK client is constructed only once per process.
     # or: pip install "bamboo[local]"
 """
 
+import contextlib
+import io
 from functools import lru_cache
 
 from langchain_anthropic import ChatAnthropic
@@ -160,7 +162,9 @@ def get_embeddings() -> Embeddings:
                 "Install them with:  pip install 'bamboo[local]'"
             ) from exc
         try:
-            return HuggingFaceEmbeddings(model_name=settings.embedding_model)
+            _sink = io.StringIO()
+            with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+                return HuggingFaceEmbeddings(model_name=settings.embedding_model)
         except (NameError, AttributeError) as exc:
             # transformers>=4.45 breaks with torch<2.4:
             #   NameError: name 'nn' is not defined
@@ -176,3 +180,26 @@ def get_embeddings() -> Embeddings:
         f"Unsupported embeddings provider: {settings.embeddings_provider!r}. "
         "Supported values: 'openai', 'local'."
     )
+
+
+@lru_cache
+def get_reranker():
+    """Return the configured cross-encoder reranker, or None if RERANKER_MODEL is unset.
+
+    Set ``RERANKER_MODEL`` to a sentence-transformers cross-encoder model name, e.g.
+    ``cross-encoder/ms-marco-MiniLM-L-6-v2``, to enable post-retrieval reranking.
+    Requires ``pip install sentence-transformers``.
+    """
+    settings = get_settings()
+    if not settings.reranker_model:
+        return None
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError as exc:
+        raise ImportError(
+            "RERANKER_MODEL requires 'sentence-transformers'.\n"
+            "Install it with:  pip install sentence-transformers"
+        ) from exc
+    _sink = io.StringIO()
+    with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+        return CrossEncoder(settings.reranker_model)

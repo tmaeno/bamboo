@@ -168,6 +168,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
+    reranker_model: str = ""
 
     # Privacy: comma-separated extra task-data field names to redact before
     # any data is sent to an LLM.  Added on top of the built-in defaults in

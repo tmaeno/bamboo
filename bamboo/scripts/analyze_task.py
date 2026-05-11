@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -212,6 +213,8 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
             result.email_content = email_content
         output_path.write_text(result.model_dump_json(indent=2))
         click.echo(f"\n✓ Results saved to {output}")
+
+    os._exit(0)
 
 
 async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:

@@ -10,7 +10,7 @@ collection (``panda_docs``), and provides a dual-strategy search:
   relevant pages, then drills into section summaries with parent context;
   catches non-obvious relevance that embedding distance misses.
 
-Both strategies run in parallel; results are merged and deduped by URL.
+All three strategies run in parallel; results are merged via Reciprocal Rank Fusion.
 
 Staleness is detected by comparing the GitHub tree SHA stored in
 ``bamboo/data/panda_docs_meta.json`` against the upstream repo.  The index
@@ -20,6 +20,8 @@ is rebuilt automatically when the SHA changes or the file is absent.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import re
@@ -31,10 +33,29 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from bamboo.config import get_settings
-from bamboo.llm import get_embeddings, get_extraction_llm, get_summary_llm
+from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm
 from bamboo.utils.narrator import counting, say, thinking
 
 logger = logging.getLogger(__name__)
+
+
+def _embed_documents_silently(emb, texts: list[str]) -> list[list[float]]:
+    _sink = io.StringIO()
+    with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+        return emb.embed_documents(texts)
+
+
+def _embed_query_silently(emb, query: str) -> list[float]:
+    _sink = io.StringIO()
+    with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+        return emb.embed_query(query)
+
+
+def _predict_silently(model, pairs: list[tuple[str, str]]) -> list[float]:
+    _sink = io.StringIO()
+    with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+        return model.predict(pairs).tolist()
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -60,6 +81,7 @@ _COLLECTION = "panda_docs"
 _META_FILE = Path(__file__).parent.parent / "data" / "panda_docs_meta.json"
 
 
+
 def invalidate_doc_cache() -> bool:
     """Delete the doc-index metadata, forcing a full rebuild on next use.
 
@@ -81,15 +103,23 @@ _SUMMARIZE_PROMPT = (
     "Preserve verbatim: all parameter names, option flags (e.g. --nFilesPerJob), "
     "error codes, class names, and any text that appeared in code formatting.\n"
     "Keep it concise and factual.\n\n"
+    "Also classify the section:\n"
+    '- "concept": explains PanDA terminology, system concepts, data structures, '
+    "task/job states, or how a mechanism works\n"
+    '- "other": operational guide, FAQ, API reference, parameter table, or how-to\n\n'
     "Title: {title}\n\n"
-    "Content:\n{content}"
+    "Content:\n{content}\n\n"
+    'Return ONLY a JSON object: {{"summary": "...", "doc_type": "concept|other"}}'
 )
 
 _TRAVERSAL_PAGE_PROMPT = (
     "Search query: {query}\n\n"
     "Review these PanDA WMS documentation page summaries. "
-    "Return a JSON array of IDs for pages that are likely to contain relevant information. "
-    "Return an empty array [] if none are relevant.\n\n"
+    "Return a JSON array of IDs for pages whose content is relevant to the query — "
+    "including pages that explain the concept, describe the status/error, "
+    "list the parameters involved, or provide context needed to understand it. "
+    "Exclude pages that are only about unrelated workflows or unrelated system components. "
+    "Return an empty array [] if none apply.\n\n"
     "Pages:\n{pages_text}\n\n"
     "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
 )
@@ -99,8 +129,11 @@ _TRAVERSAL_SECTION_PROMPT = (
     "You are exploring page: \"{page_title}\"\n"
     "Page context: {page_summary}\n\n"
     "Review these section summaries. "
-    "Return a JSON array of IDs for sections likely to contain relevant information. "
-    "Return an empty array [] if none are relevant.\n\n"
+    "Return a JSON array of IDs for sections that answer, explain, or provide relevant "
+    "context for the query — including sections that describe the relevant status, "
+    "error cause, or parameter. "
+    "Exclude sections that are only about unrelated actions or unrelated system components. "
+    "Return an empty array [] if none apply.\n\n"
     "Sections:\n{sections_text}\n\n"
     "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
 )
@@ -120,6 +153,7 @@ class DocNode:
     summary: str = ""
     parent_id: str | None = None
     children: list[str] = field(default_factory=list)
+    doc_type: str = "other"  # "concept" | "other"
 
 
 @dataclass
@@ -131,6 +165,7 @@ class DocResult:
     breadcrumb: list[str]  # ancestor titles from root to parent
     source: str          # "semantic" | "llm_traversal" | "both"
     score: float = 0.0
+    doc_type: str = "other"  # "concept" | "other"
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +193,8 @@ class PandaDocNavigator:
         self._embeddings = get_embeddings()
         self._summary_llm = get_summary_llm()
         self._extraction_llm = get_extraction_llm()
+        self._bm25: Any = None
+        self._bm25_ids: list[str] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -174,18 +211,31 @@ class PandaDocNavigator:
         else:
             say("Doc index up to date — loading from Qdrant")
             await self._load_graph_from_qdrant()
+        self._build_bm25_index()
         self._initialized = True
 
-    async def search(self, query: str, top_k: int = 5) -> list[DocResult]:
-        """Search the doc graph. Runs flat semantic + LLM traversal in parallel."""
+    async def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        keyword_query: str | None = None,
+    ) -> list[DocResult]:
+        """Search the doc graph. Runs semantic, LLM traversal, and BM25 in parallel.
+
+        query         — natural-language query for semantic search and LLM traversal.
+        keyword_query — exact-term query for BM25 (defaults to query if not provided).
+        """
         await self.ensure_initialized()
-        say(f"Searching PanDA docs: {query!r}")
+        _kw = keyword_query or query
+        say(f"NL query (semantic+LLM): {query!r}")
+        say(f"Keyword query (BM25):    {_kw!r}")
 
         semantic_task = self._semantic_search(query, top_k=top_k)
         traversal_task = self._llm_traversal(query)
+        bm25_task = asyncio.to_thread(self._bm25_search, _kw, top_k)
 
-        semantic_results, traversal_results = await asyncio.gather(
-            semantic_task, traversal_task, return_exceptions=True
+        semantic_results, traversal_results, bm25_results = await asyncio.gather(
+            semantic_task, traversal_task, bm25_task, return_exceptions=True
         )
 
         if isinstance(semantic_results, BaseException):
@@ -194,24 +244,69 @@ class PandaDocNavigator:
         if isinstance(traversal_results, BaseException):
             logger.warning("PandaDocNavigator: LLM traversal failed: %s", traversal_results)
             traversal_results = []
+        if isinstance(bm25_results, BaseException):
+            logger.warning("PandaDocNavigator: BM25 search failed: %s", bm25_results)
+            bm25_results = []
 
-        # Merge and dedup by URL; track which strategy found each result.
-        merged: dict[str, DocResult] = {}
-        for r in semantic_results:
-            merged[r.url] = r
-        for r in traversal_results:
-            if r.url in merged:
-                merged[r.url].source = "both"
-            else:
-                merged[r.url] = r
-
-        # "both" first, then by descending semantic score.
-        results = sorted(
-            merged.values(),
-            key=lambda r: (0 if r.source == "both" else 1, -r.score),
+        say(
+            f"Raw hits — semantic:{len(semantic_results)} "
+            f"llm:{len(traversal_results)} "
+            f"bm25:{len(bm25_results)}"
         )
-        say(f"PanDA doc search: {len(results[:top_k])} result(s)")
-        return results[:top_k]
+
+        # Deduplicate by URL; label each result with every strategy that found it.
+        merged: dict[str, DocResult] = {}
+        _strategies: dict[str, list[str]] = {}
+        for strategy_name, result_list in [
+            ("semantic", semantic_results),
+            ("llm", traversal_results),
+            ("bm25", bm25_results),
+        ]:
+            for r in result_list:
+                _strategies.setdefault(r.url, []).append(strategy_name)
+                if r.url not in merged:
+                    merged[r.url] = r
+        for url, r in merged.items():
+            r.source = ",".join(_strategies[url])
+        results = list(merged.values())
+
+        reranker = get_reranker()
+        try:
+            pairs = [(query, f"{r.title}\n{r.content[:500]}") for r in results]
+            scores = await asyncio.to_thread(_predict_silently, reranker, pairs)
+            for r, s in zip(results, scores):
+                r.score = float(s)
+            results = sorted(results, key=lambda r: -r.score)
+            filtered = [r for r in results if r.score > 0.0]
+            rejected = [r for r in results if r.score <= 0.0]
+            n_before = len(results)
+            if filtered:
+                results = filtered
+            say(
+                f"Reranked: {len(filtered)}/{n_before} passed threshold "
+                f"(top score {results[0].score:.2f})"
+            )
+            for r in rejected:
+                label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
+                say(f"  ✗ \\[{r.source}] {label}  ({r.score:.2f})")
+        except Exception as exc:
+            logger.warning("PandaDocNavigator: reranking failed: %s", exc)
+
+        # Reserved slots: top (top_k - 2) diagnostic + top 2 concept (by cross-encoder rank)
+        n_diag = max(1, top_k - 2)
+        diag = results[:n_diag]
+        seen = {r.url for r in diag}
+        concept = [r for r in results if r.doc_type == "concept" and r.url not in seen][:2]
+        final = diag + concept
+
+        say(f"PanDA doc search: {len(final)} result(s) ({len(diag)} diagnostic + {len(concept)} concept)")
+        for r in diag:
+            label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f})")
+        for r in concept:
+            label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f}) [concept]")
+        return final
 
     # ------------------------------------------------------------------
     # Staleness detection
@@ -295,6 +390,7 @@ class PandaDocNavigator:
                 summary=p["summary"],
                 parent_id=p.get("parent_id"),
                 children=p.get("children", []),
+                doc_type=p.get("doc_type", "other"),
             )
             self._graph[node.id] = node
 
@@ -392,6 +488,22 @@ class PandaDocNavigator:
         logger.info("PandaDocNavigator: fetched %d/%d HTML pages", len(result), len(rst_paths))
         return result
 
+    @staticmethod
+    def _iter_sections(elem: Any):
+        """Yield direct child <section> or <div class='section'> elements.
+
+        Handles both HTML5 Sphinx output (<section>) and the classic Sphinx
+        theme (<div class="section">) so subsections are parsed correctly
+        regardless of the ReadTheDocs theme in use.
+        """
+        for child in elem.children:
+            if not hasattr(child, "name"):
+                continue
+            if child.name == "section":
+                yield child
+            elif child.name == "div" and "section" in (child.get("class") or []):
+                yield child
+
     def _parse_page_to_nodes(self, rst_path: str, html: str, BeautifulSoup: Any) -> list[DocNode]:
         """Recursively parse an HTML page into DocNode tree using section nesting.
 
@@ -441,12 +553,20 @@ class PandaDocNavigator:
                 parent_id=parent_id,
             )
             nodes.append(node)
-            for child_sec in elem.find_all("section", recursive=False):
+            for child_sec in self._iter_sections(elem):
                 child = _parse_section(child_sec, level + 1, node.id)
                 node.children.append(child.id)
             return node
 
-        top_sections = main.find_all("section", recursive=False)
+        top_sections = list(self._iter_sections(main))
+        if not top_sections:
+            # ReadTheDocs wraps content in an anonymous <div> with no class.
+            # Look one level deeper into any plain div children.
+            for child in main.children:
+                if hasattr(child, "name") and child.name == "div":
+                    top_sections = list(self._iter_sections(child))
+                    if top_sections:
+                        break
         if top_sections:
             for sec in top_sections:
                 _parse_section(sec, level=0, parent_id=None)
@@ -470,6 +590,7 @@ class PandaDocNavigator:
             try:
                 if not node.content.strip():
                     node.summary = node.title
+                    node.doc_type = "other"
                     return
                 prompt = _SUMMARIZE_PROMPT.format(
                     title=node.title,
@@ -478,12 +599,26 @@ class PandaDocNavigator:
                 async with semaphore:
                     try:
                         resp = await self._summary_llm.ainvoke([HumanMessage(content=prompt)])
-                        node.summary = resp.content.strip()
+                        raw = resp.content.strip()
+                        if raw.startswith("```"):
+                            raw = "\n".join(
+                                line for line in raw.splitlines() if not line.startswith("```")
+                            ).strip()
+                        try:
+                            parsed = json.loads(raw)
+                            node.summary = parsed.get("summary", "") or node.content[:300]
+                            node.doc_type = parsed.get("doc_type", "other")
+                            if node.doc_type not in ("concept", "other"):
+                                node.doc_type = "other"
+                        except (json.JSONDecodeError, AttributeError):
+                            node.summary = raw or node.content[:300]
+                            node.doc_type = "other"
                     except Exception as exc:
                         logger.warning(
                             "PandaDocNavigator: summarize failed for %r: %s", node.title, exc
                         )
                         node.summary = node.content[:300]
+                        node.doc_type = "other"
             finally:
                 if advance_fn:
                     advance_fn()
@@ -509,7 +644,7 @@ class PandaDocNavigator:
             )
 
             texts = [f"{n.title} {n.summary}" for n in nodes]
-            embeddings = await asyncio.to_thread(self._embeddings.embed_documents, texts)
+            embeddings = await asyncio.to_thread(_embed_documents_silently, self._embeddings, texts)
 
             points = [
                 PointStruct(
@@ -524,6 +659,7 @@ class PandaDocNavigator:
                         "summary": node.summary,
                         "parent_id": node.parent_id,
                         "children": node.children,
+                        "doc_type": node.doc_type,
                     },
                 )
                 for node, emb in zip(nodes, embeddings)
@@ -541,15 +677,39 @@ class PandaDocNavigator:
     # Search strategies
     # ------------------------------------------------------------------
 
+    def _build_bm25_index(self) -> None:
+        """Build an in-memory BM25 index over node content for exact-term matching."""
+        from rank_bm25 import BM25Okapi  # noqa: PLC0415
+        self._bm25_ids = list(self._graph.keys())
+        corpus = [self._graph[nid].content.split() for nid in self._bm25_ids]
+        self._bm25 = BM25Okapi(corpus)
+        logger.info("PandaDocNavigator: BM25 index built over %d nodes", len(self._bm25_ids))
+
+    def _bm25_search(self, query: str, top_k: int) -> list[DocResult]:
+        """Keyword search using BM25 — reliable for exact technical identifiers.
+
+        Scores are normalised to [0, 1] by dividing by the top result's score so
+        they are comparable to cosine-similarity scores from semantic search.
+        """
+        if self._bm25 is None:
+            return []
+        scores = self._bm25.get_scores(query.split())
+        ranked = sorted(zip(scores, self._bm25_ids), reverse=True)[:top_k]
+        max_score = ranked[0][0] if ranked and ranked[0][0] > 0 else 1.0
+        return [
+            self._make_result(self._graph[nid], source="bm25", score=float(s) / max_score)
+            for s, nid in ranked
+            if s > 0
+        ]
+
     async def _semantic_search(self, query: str, top_k: int) -> list[DocResult]:
-        query_emb = await asyncio.to_thread(self._embeddings.embed_query, query)
+        query_emb = await asyncio.to_thread(_embed_query_silently, self._embeddings, query)
         client = self._make_qdrant_client()
         try:
             response = await client.query_points(
                 collection_name=_COLLECTION,
                 query=query_emb,
                 limit=top_k,
-                score_threshold=0.5,
                 with_payload=True,
             )
         finally:
@@ -563,13 +723,24 @@ class PandaDocNavigator:
         return results
 
     async def _llm_traversal(self, query: str) -> list[DocResult]:
-        """Top-down LLM traversal: choose pages, then sections within each page."""
+        """Top-down LLM traversal: choose pages, then recursively drill into sections."""
         if not self._page_ids:
             return []
 
         page_items = [(pid, self._graph[pid]) for pid in self._page_ids if pid in self._graph]
+
+        def _child_titles(node: DocNode) -> str:
+            children = [self._graph[c] for c in node.children[:6] if c in self._graph]
+            if not children:
+                return ""
+            def _first_sentence(text: str) -> str:
+                end = text.find(". ")
+                return text[: end + 1] if end != -1 else text[:150]
+            parts = [f"    - {c.title!r}: {_first_sentence(c.summary)}" for c in children]
+            return "  Sections:\n" + "\n".join(parts)
+
         pages_text = "\n".join(
-            f'- ID: "{pid}", Title: {node.title!r}, Summary: {node.summary}'
+            f'- ID: "{pid}", Title: {node.title!r}, Summary: {node.summary}{_child_titles(node)}'
             for pid, node in page_items
         )
         chosen_page_ids = await self._llm_select(
@@ -580,32 +751,33 @@ class PandaDocNavigator:
         if not chosen_page_ids:
             return []
 
-        async def _explore_page(page_id: str) -> list[DocResult]:
-            page = self._graph.get(page_id)
-            if page is None:
-                return []
-            if not page.children:
-                return [self._make_result(page, source="llm_traversal")]
-
-            child_items = [(cid, self._graph[cid]) for cid in page.children if cid in self._graph]
+        async def _explore_node(node: DocNode, depth: int) -> list[DocResult]:
+            if not node.children or depth >= 2:
+                return [self._make_result(node, source="llm_traversal")]
+            child_items = [(cid, self._graph[cid]) for cid in node.children if cid in self._graph]
             sections_text = "\n".join(
-                f'- ID: "{cid}", Title: {node.title!r}, Summary: {node.summary}'
-                for cid, node in child_items
+                f'- ID: "{cid}", Title: {child.title!r}, Summary: {child.summary}'
+                for cid, child in child_items
             )
             chosen_ids = await self._llm_select(
                 _TRAVERSAL_SECTION_PROMPT.format(
                     query=query,
-                    page_title=page.title,
-                    page_summary=page.summary,
+                    page_title=node.title,
+                    page_summary=node.summary,
                     sections_text=sections_text,
                 ),
                 candidates=[cid for cid, _ in child_items],
             )
-            return [
-                self._make_result(self._graph[cid], source="llm_traversal")
-                for cid in chosen_ids
-                if cid in self._graph
-            ]
+            sub_results: list[DocResult] = []
+            for cid in chosen_ids:
+                child = self._graph.get(cid)
+                if child:
+                    sub_results.extend(await _explore_node(child, depth + 1))
+            return sub_results
+
+        async def _explore_page(page_id: str) -> list[DocResult]:
+            page = self._graph.get(page_id)
+            return await _explore_node(page, depth=0) if page else []
 
         page_results = await asyncio.gather(
             *[_explore_page(pid) for pid in chosen_page_ids],
@@ -658,6 +830,7 @@ class PandaDocNavigator:
             breadcrumb=breadcrumb,
             source=source,
             score=score,
+            doc_type=node.doc_type,
         )
 
     # ------------------------------------------------------------------

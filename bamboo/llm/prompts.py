@@ -1036,15 +1036,15 @@ Description B:
 
 Merged description:"""
 
-DOC_SEARCH_KEYWORDS_PROMPT = """You are helping to query PanDA system documentation.
+DOC_SEARCH_KEYWORDS_PROMPT = """You are helping to query system documentation.
 
-Given the following error information from a PanDA task, extract 2-5 short,
-focused search terms that would best retrieve the relevant PanDA documentation
-sections. Return ONLY a JSON array of strings, no explanation.
+Given the following error information from a task, return a JSON object with:
+- "nl_query": a concise natural-language description of the problem (1 sentence, no identifiers)
+- "keywords": 2-5 exact system identifiers from the text (snake_case tokens, ALL_CAPS constants)
 
-Rules:
+Rules for keywords:
 - Only use terms that appear in the provided text — do not invent terms.
-- Prefer PanDA system identifiers exactly as written — ALL_CAPS constants
+- Prefer system identifiers exactly as written — ALL_CAPS constants
   and snake_case reason tokens are the most precise search terms.
 - Each term must be at least 4 characters.
 - Omit generic single words (job, task, log, error, failed, timeout) unless
@@ -1056,7 +1056,7 @@ Error dialog:
 Email / operator notes (may be empty):
 {email_text}
 
-JSON array:"""
+JSON object:"""
 
 PRESCRIPTION_CLASSIFY_PROMPT = """You are a PanDA task failure analyst.
 

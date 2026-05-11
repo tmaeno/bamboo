@@ -30,6 +30,8 @@ from typing import Callable, Generator
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.highlighter import RegexHighlighter
+from rich.theme import Theme
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
@@ -39,6 +41,12 @@ _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
 _progress: Progress | None = None
 _progress_ref_count: int = 0
 _progress_lock = threading.Lock()
+
+# custom highlighter
+class CustomHighlighter(RegexHighlighter):
+    base_style = "custom."
+    highlights = [r"(?P<number>(?<=[ (:/])\d+\.?\d*|^\d+\.?\d*)",
+                  r"(?P<string>\"[^\"]*\"|'[^']*')"]
 
 
 def set_narrator(console: Console, verbose: bool = False) -> Token:
@@ -51,6 +59,9 @@ def set_narrator(console: Console, verbose: bool = False) -> Token:
     previous state with ``_console.reset(token)`` if needed.
     """
     _verbose.set(verbose)
+    custom_theme = Theme({"custom.number": "bold magenta", "custom.string": "bold green"})
+    console.highlighter = CustomHighlighter()
+    console.push_theme(custom_theme)
     return _console.set(console)
 
 

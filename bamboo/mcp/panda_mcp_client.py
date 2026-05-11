@@ -497,6 +497,14 @@ class PandaMcpClient(McpClient):
                             "default": 3,
                             "description": "Maximum number of doc sections to return (1–5)",
                         },
+                        "keyword_query": {
+                            "type": "string",
+                            "description": (
+                                "Optional exact-term query for BM25 keyword search "
+                                "(snake_case identifiers, ALL_CAPS constants). "
+                                "If omitted, the main query is used for all strategies."
+                            ),
+                        },
                     },
                     "required": ["query"],
                 },
@@ -1055,6 +1063,7 @@ class PandaMcpClient(McpClient):
         self,
         query: str,
         max_results: int = 5,
+        keyword_query: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search PanDA WMS documentation via the graph-based semantic navigator.
 
@@ -1076,7 +1085,9 @@ class PandaMcpClient(McpClient):
         try:
             if _doc_navigator is None:
                 _doc_navigator = PandaDocNavigator()
-            results = await _doc_navigator.search(query, top_k=max_results)
+            results = await _doc_navigator.search(
+                query, top_k=max_results, keyword_query=keyword_query
+            )
         except Exception as exc:
             logger.warning(
                 "PandaMcpClient.search_panda_docs: navigator failed for query=%r: %s",

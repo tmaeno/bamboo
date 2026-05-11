@@ -53,7 +53,8 @@ async def prefetch_panda_docs(
         plain_error = re.sub("#[^ ]+", " ", plain_error)
         plain_error = " ".join(plain_error.split())
 
-    doc_query = ""
+    nl_query_from_llm = ""
+    keyword_query_str = ""
     if plain_error or email_text:
         try:
             from bamboo.llm import DOC_SEARCH_KEYWORDS_PROMPT, get_extraction_llm  # noqa: PLC0415
@@ -61,68 +62,76 @@ async def prefetch_panda_docs(
 
             llm = get_extraction_llm()
             prompt = DOC_SEARCH_KEYWORDS_PROMPT.format(
-                error_dialog=plain_error[:500].rsplit(None, 1)[0] if plain_error else "(none)",
-                email_text=email_text[:500].rsplit(None, 1)[0] if email_text else "(none)",
+                error_dialog=plain_error.rsplit(None, 1)[0] if plain_error else "(none)",
+                email_text=email_text.rsplit(None, 1)[0] if email_text else "(none)",
             )
-            with thinking("Extracting doc search keywords"):
+            with thinking("Extracting doc search queries"):
                 response = await llm.ainvoke([HumanMessage(content=prompt)])
             raw = response.content.strip()
             if raw.startswith("```"):
                 raw = "\n".join(
                     line for line in raw.splitlines() if not line.startswith("```")
                 ).strip()
-            keywords: list[str] = json.loads(raw)
-            clean = [k for k in keywords if k and isinstance(k, str)]
-            if clean:
-                doc_query = " ".join(clean)
-                say(f"Doc search keywords: {clean}")
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                nl_query_from_llm = parsed.get("nl_query", "") or ""
+                keywords: list[str] = parsed.get("keywords", []) or []
+            else:
+                # fallback: old format was a plain array
+                keywords = parsed if isinstance(parsed, list) else []
+            clean_kw = [k for k in keywords if k and isinstance(k, str)]
+            if nl_query_from_llm or clean_kw:
+                keyword_query_str = " ".join(clean_kw)
+                say(f"Doc NL query: {nl_query_from_llm!r}")
+                say(f"Doc keywords: {clean_kw}")
         except Exception as exc:
             logger.warning(
-                "prefetch_panda_docs: keyword extraction failed (%s) — falling back to raw errorDialog",
+                "prefetch_panda_docs: query extraction failed (%s) — falling back to raw errorDialog",
                 exc,
             )
 
-        if not doc_query and plain_error:
-            doc_query = plain_error[:120]
+        if not nl_query_from_llm and not keyword_query_str and plain_error:
+            nl_query_from_llm = plain_error[:120]
 
     status = task_data.get("status", "")
-    parts: list[str] = []
-    if status:
-        parts.append(f"task status {status}")
-    if doc_query:
-        parts.append(doc_query)
+    status_prefix = f"task status {status}" if status else ""
 
-    if not parts:
-        return {}
+    meta: dict[str, str] = {"nl_query": "", "keyword_query": ""}
 
-    combined_query = " ".join(parts)
+    if not status_prefix and not nl_query_from_llm:
+        return {}, meta
+
+    # NL query for semantic search and LLM traversal
+    nl_query = " ".join(filter(None, [status_prefix, nl_query_from_llm]))
+    # Keyword query for BM25 (explicit identifiers)
+    keyword_query = " ".join(filter(None, [status_prefix, keyword_query_str])) or None
+    meta["nl_query"] = nl_query
+    meta["keyword_query"] = keyword_query or ""
 
     from bamboo.mcp.panda_mcp_client import PandaMcpClient, _fetch_task_params_table  # noqa: PLC0415
 
     panda_client = PandaMcpClient()
     doc_hints: dict[str, str] = {}
+
     try:
-        results = await panda_client.execute("search_panda_docs", query=combined_query)
-        if isinstance(results, list) and results:
-            _api_title_re = re.compile(r"\bAPI\b", re.IGNORECASE)
-            rendered = "\n\n".join(
-                f"[{e.get('title', '')}] {e.get('snippet', '')}".strip()
-                for e in results
-                if e.get("snippet") and not _api_title_re.search(e.get("title", ""))
-            )
-            if rendered:
-                doc_hints[combined_query] = rendered
-                say(
-                    f"Pre-fetched {len(results)} PanDA doc section(s) "
-                    f"for query: {combined_query!r}"
-                )
-                show_block(f"doc_hints: {combined_query}", rendered, max_lines=120)
-    except Exception as exc:
-        logger.warning(
-            "prefetch_panda_docs: search_panda_docs failed for query=%r: %s",
-            combined_query,
-            exc,
+        results = await panda_client.execute(
+            "search_panda_docs", query=nl_query, keyword_query=keyword_query
         )
+    except Exception as exc:
+        logger.warning("prefetch_panda_docs: search failed for query=%r: %s", nl_query, exc)
+        results = []
+
+    _api_title_re = re.compile(r"\bAPI\b", re.IGNORECASE)
+    if results:
+        rendered = "\n\n".join(
+            f"[{e.get('title', '')}] {e.get('content', '')[:500]}".strip()
+            for e in results
+            if e.get("content") and not _api_title_re.search(e.get("title", ""))
+        )
+        if rendered:
+            doc_hints[nl_query] = rendered
+            say(f"Pre-fetched {len(results)} PanDA doc section(s) for query: {nl_query!r}")
+            show_block(f"doc_hints: {nl_query}", rendered, max_lines=120)
 
     split_rule_str = task_data.get("splitRule", "") or ""
     if split_rule_str:
@@ -169,7 +178,7 @@ async def prefetch_panda_docs(
                 say(f"Looked up {len(found_gdp)} gdpconfig param(s) from gdpconfig.rst")
                 show_block("doc_hints: gdpconfig params", doc_hints["gdpconfig params"], max_lines=120)
 
-    return doc_hints
+    return doc_hints, meta
 
 
 async def prefetch_panda_source(task_data: dict[str, Any]) -> dict[str, str]:
@@ -203,7 +212,7 @@ async def prefetch_panda_context(
     throughout the pipeline.  Either sub-fetch may return empty without
     affecting the other.
     """
-    doc_hints, src_hints = await asyncio.gather(
+    (doc_hints, _meta), src_hints = await asyncio.gather(
         prefetch_panda_docs(task_data, email_text),
         prefetch_panda_source(task_data),
     )

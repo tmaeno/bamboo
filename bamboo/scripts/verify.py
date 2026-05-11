@@ -284,6 +284,24 @@ def check_api_keys() -> bool:
             )
             ok = False
 
+    # Reranker (cross-encoder) — required
+    if s.reranker_model:
+        _ok(f"Reranker: {s.reranker_model}")
+        try:
+            from sentence_transformers import CrossEncoder  # noqa: F401
+        except ImportError:
+            _fail(
+                "sentence-transformers is not installed (needed for reranker)",
+                "Run:  pip install sentence-transformers",
+            )
+            ok = False
+    else:
+        _fail(
+            "RERANKER_MODEL is not set",
+            "Add RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2 to your .env file",
+        )
+        ok = False
+
     return ok
 
 
