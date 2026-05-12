@@ -171,22 +171,8 @@ async def eval_one(
     nl_query = meta.get("nl_query", "")
     keyword_query: str | None = meta.get("keyword_query") or None
 
-    # Re-fetch raw results using the exact same queries prefetch used,
-    # so we can count hits and break down by source strategy.
-    source_dist: dict[str, int] = {"semantic": 0, "llm_traversal": 0, "bm25": 0, "multi": 0}
-    result_count = 0
-    if nl_query and exc_msg is None:
-        try:
-            from bamboo.mcp.panda_mcp_client import PandaMcpClient  # noqa: PLC0415
-            raw = await PandaMcpClient().execute(
-                "search_panda_docs", query=nl_query, keyword_query=keyword_query
-            ) or []
-            result_count = len(raw)
-            for r in raw:
-                src = r.get("source", "semantic")
-                source_dist[src] = source_dist.get(src, 0) + 1
-        except Exception as exc:
-            logger.warning("eval_one: search_panda_docs failed: %s", exc)
+    result_count: int = meta.get("result_count", 0)
+    source_dist: dict[str, int] = meta.get("source_dist", {})
 
     top_query = nl_query[:42] if nl_query else ""
 
@@ -349,12 +335,10 @@ def _format_source_dist(sd: dict[str, int]) -> str:
     parts = []
     if sd.get("semantic"):
         parts.append(f"S:{sd['semantic']}")
-    if sd.get("llm_traversal"):
-        parts.append(f"L:{sd['llm_traversal']}")
+    if sd.get("llm"):
+        parts.append(f"L:{sd['llm']}")
     if sd.get("bm25"):
         parts.append(f"B:{sd['bm25']}")
-    if sd.get("multi"):
-        parts.append(f"M:{sd['multi']}")
     return " ".join(parts) if parts else "-"
 
 

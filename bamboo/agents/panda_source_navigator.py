@@ -139,6 +139,7 @@ def _read_method(module: str, qualname: str) -> dict[str, Any] | None:
 
 
 _MIN_WORDS = 2
+_MAX_FRAG_HITS = 10
 
 
 def _grep_sliding_window(
@@ -255,20 +256,29 @@ class PandaSourceNavigator:
                     None, _grep_sliding_window, pkg_roots, fragment
                 )
                 say(f"  fragment {fragment!r} → term {term_used!r} → {len(frag_candidates)} hit(s)")
+                if len(frag_candidates) > _MAX_FRAG_HITS:
+                    say("  (skipping — too many hits, fragment is too generic)")
+                    continue
                 for c in frag_candidates:
-                    qn = c["qualname"]
+                    say(f"    \\[{c['module']}] {c['qualname']}")
+                seen_in_fragment: set[str] = set()
+                for c in frag_candidates:
+                    qn = f"{c['module']}::{c['qualname']}"
+                    if qn in seen_in_fragment:
+                        continue
+                    seen_in_fragment.add(qn)
                     qualname_counts[qn] = qualname_counts.get(qn, 0) + 1
                     qualname_to_candidate.setdefault(qn, c)
 
         # Keep only highest-overlap candidates; fall back to all if none score > 1.
         all_ranked = sorted(
             qualname_to_candidate.values(),
-            key=lambda c: qualname_counts[c["qualname"]],
+            key=lambda c: qualname_counts[f"{c['module']}::{c['qualname']}"],
             reverse=True,
         )
-        max_count = qualname_counts[all_ranked[0]["qualname"]] if all_ranked else 0
+        max_count = qualname_counts[f"{all_ranked[0]['module']}::{all_ranked[0]['qualname']}"] if all_ranked else 0
         candidates = (
-            [c for c in all_ranked if qualname_counts[c["qualname"]] >= 2]
+            [c for c in all_ranked if qualname_counts[f"{c['module']}::{c['qualname']}"] >= 2]
             if max_count >= 2
             else all_ranked
         )[:30]
@@ -284,7 +294,7 @@ class PandaSourceNavigator:
         show_block(
             "candidates",
             "\n".join(
-                f"[{qualname_counts[c['qualname']]}] {c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
+                f"[{qualname_counts[c['module'] + '::' + c['qualname']]}] {c['module']}::{c['qualname']}  |  {c['docstring_first_line'][:80]}"
                 for c in candidates
             ),
         )
@@ -298,13 +308,14 @@ class PandaSourceNavigator:
             new_this_round = 0
             for candidate in candidates:
                 qualname = candidate["qualname"]
-                if qualname in accumulated_qualnames:
+                full_qn = f"{candidate['module']}::{qualname}"
+                if full_qn in accumulated_qualnames:
                     continue
                 say(f"Reading {candidate['module']}::{qualname}")
                 src = _read_method(candidate["module"], qualname)
                 if src:
                     accumulated.append(src)
-                    accumulated_qualnames.add(qualname)
+                    accumulated_qualnames.add(full_qn)
                     new_this_round += 1
                     show_block(
                         f"{qualname} (lines {src['line_start']}–{src['line_end']})",
@@ -338,6 +349,10 @@ class PandaSourceNavigator:
 
             rounds_completed = round_num + 1
             if decision.get("action") != "follow_up":
+                relevant = decision.get("relevant_qualnames")
+                if relevant:
+                    accumulated = [s for s in accumulated if s["qualname"] in relevant]
+                    say(f"LLM filtered to {len(accumulated)} relevant method(s): {[s['qualname'] for s in accumulated]}")
                 say("LLM declared done")
                 break
 

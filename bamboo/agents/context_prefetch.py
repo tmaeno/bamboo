@@ -47,10 +47,13 @@ async def prefetch_panda_docs(
     Returns an empty dict on any error so the caller is unaffected.
     """
     error_dialog = task_data.get("errorDialog", "") or ""
+    status = task_data.get("status", "")
+    status_prefix = f"task status {status}" if status else ""
     plain_error = ""
     if error_dialog:
         plain_error = re.sub(r"<[^>]+>", " ", error_dialog)
         plain_error = re.sub("#[^ ]+", " ", plain_error)
+        plain_error = ". ".join(filter(None, [status_prefix, plain_error]))
         plain_error = " ".join(plain_error.split())
 
     nl_query_from_llm = ""
@@ -93,16 +96,13 @@ async def prefetch_panda_docs(
         if not nl_query_from_llm and not keyword_query_str and plain_error:
             nl_query_from_llm = plain_error[:120]
 
-    status = task_data.get("status", "")
-    status_prefix = f"task status {status}" if status else ""
-
-    meta: dict[str, str] = {"nl_query": "", "keyword_query": ""}
+    meta: dict[str, Any] = {"nl_query": "", "keyword_query": "", "result_count": 0, "source_dist": {}}
 
     if not status_prefix and not nl_query_from_llm:
         return {}, meta
 
     # NL query for semantic search and LLM traversal
-    nl_query = " ".join(filter(None, [status_prefix, nl_query_from_llm]))
+    nl_query = ". ".join(filter(None, [status_prefix, nl_query_from_llm]))
     # Keyword query for BM25 (explicit identifiers)
     keyword_query = " ".join(filter(None, [status_prefix, keyword_query_str])) or None
     meta["nl_query"] = nl_query
@@ -120,6 +120,14 @@ async def prefetch_panda_docs(
     except Exception as exc:
         logger.warning("prefetch_panda_docs: search failed for query=%r: %s", nl_query, exc)
         results = []
+
+    source_dist: dict[str, int] = {}
+    for r in (results or []):
+        for strat in r.get("source", "unknown").split(","):
+            strat = strat.strip()
+            source_dist[strat] = source_dist.get(strat, 0) + 1
+    meta["result_count"] = len(results or [])
+    meta["source_dist"] = source_dist
 
     _api_title_re = re.compile(r"\bAPI\b", re.IGNORECASE)
     if results:

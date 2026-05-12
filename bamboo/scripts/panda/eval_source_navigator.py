@@ -415,9 +415,12 @@ _ALL_CATEGORIES = (
 @click.option("--verbose", is_flag=True, default=False,
               help="Show navigator internals (grep terms, candidates, each round). "
                    "Useful when testing a single string.")
+@click.option("--task-id", "task_id", default=None, metavar="ID",
+              help="Fetch errorDialog from a single PanDA task ID.")
 def main(
     query: str | None,
     from_file: str | None,
+    task_id: str | None,
     terms_only: bool,
     use_judge: bool,
     judge_all: bool,
@@ -428,13 +431,14 @@ def main(
     """Batch-evaluate PandaSourceNavigator over a collection of errorDialog strings."""
     console = Console()
     set_narrator(console, verbose=verbose)
-    asyncio.run(_run(console, query, from_file, terms_only, use_judge, judge_all, limit, output))
+    asyncio.run(_run(console, query, from_file, task_id, terms_only, use_judge, judge_all, limit, output))
 
 
 async def _run(
     console: Console,
     query: str | None,
     from_file: str | None,
+    task_id: str | None,
     terms_only: bool,
     use_judge: bool,
     judge_all: bool,
@@ -450,10 +454,12 @@ async def _run(
 
     if from_file:
         raw_strings = await load_strings_from_file(from_file, console)
+    elif task_id:
+        raw_strings = await _fetch_from_task_ids([task_id], console)
     elif query:
         raw_strings = [query]
     else:
-        console.print("[red]Provide a QUERY argument or --from-file FILE.[/red]")
+        console.print("[red]Provide a QUERY argument, --task-id ID, or --from-file FILE.[/red]")
         return
 
     console.print(f"Loaded [bold]{len(raw_strings)}[/bold] raw string(s).")

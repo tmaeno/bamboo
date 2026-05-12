@@ -34,6 +34,11 @@ from langchain_core.messages import HumanMessage
 
 from bamboo.config import get_settings
 from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm
+from bamboo.llm.prompts import (
+    PANDA_DOC_SUMMARIZE_PROMPT as _SUMMARIZE_PROMPT,
+    PANDA_DOC_TRAVERSAL_PAGE_PROMPT as _TRAVERSAL_PAGE_PROMPT,
+    PANDA_DOC_TRAVERSAL_SECTION_PROMPT as _TRAVERSAL_SECTION_PROMPT,
+)
 from bamboo.utils.narrator import counting, say, thinking
 
 logger = logging.getLogger(__name__)
@@ -95,48 +100,13 @@ def invalidate_doc_cache() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LLM prompt templates
+# Constants
 # ---------------------------------------------------------------------------
 
-_SUMMARIZE_PROMPT = (
-    "Summarize the following PanDA WMS documentation section in 2-3 sentences.\n"
-    "Preserve verbatim: all parameter names, option flags (e.g. --nFilesPerJob), "
-    "error codes, class names, and any text that appeared in code formatting.\n"
-    "Keep it concise and factual.\n\n"
-    "Also classify the section:\n"
-    '- "concept": explains PanDA terminology, system concepts, data structures, '
-    "task/job states, or how a mechanism works\n"
-    '- "other": operational guide, FAQ, API reference, parameter table, or how-to\n\n'
-    "Title: {title}\n\n"
-    "Content:\n{content}\n\n"
-    'Return ONLY a JSON object: {{"summary": "...", "doc_type": "concept|other"}}'
-)
-
-_TRAVERSAL_PAGE_PROMPT = (
-    "Search query: {query}\n\n"
-    "Review these PanDA WMS documentation page summaries. "
-    "Return a JSON array of IDs for pages whose content is relevant to the query — "
-    "including pages that explain the concept, describe the status/error, "
-    "list the parameters involved, or provide context needed to understand it. "
-    "Exclude pages that are only about unrelated workflows or unrelated system components. "
-    "Return an empty array [] if none apply.\n\n"
-    "Pages:\n{pages_text}\n\n"
-    "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
-)
-
-_TRAVERSAL_SECTION_PROMPT = (
-    "Search query: {query}\n\n"
-    "You are exploring page: \"{page_title}\"\n"
-    "Page context: {page_summary}\n\n"
-    "Review these section summaries. "
-    "Return a JSON array of IDs for sections that answer, explain, or provide relevant "
-    "context for the query — including sections that describe the relevant status, "
-    "error cause, or parameter. "
-    "Exclude sections that are only about unrelated actions or unrelated system components. "
-    "Return an empty array [] if none apply.\n\n"
-    "Sections:\n{sections_text}\n\n"
-    "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
-)
+_CONCEPT_PAGE_KEYWORDS = frozenset({
+    "basic concepts", "concept", "architecture", "overview",
+    "terminology", "system design", "introduction",
+})
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -276,7 +246,7 @@ class PandaDocNavigator:
             scores = await asyncio.to_thread(_predict_silently, reranker, pairs)
             for r, s in zip(results, scores):
                 r.score = float(s)
-            results = sorted(results, key=lambda r: -r.score)
+            all_ranked = results  # full sorted list before threshold filter
             filtered = [r for r in results if r.score > 0.0]
             rejected = [r for r in results if r.score <= 0.0]
             n_before = len(results)
@@ -288,24 +258,29 @@ class PandaDocNavigator:
             )
             for r in rejected:
                 label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
-                say(f"  ✗ \\[{r.source}] {label}  ({r.score:.2f})")
+                concept_tag = " \\[concept]" if r.doc_type == "concept" else ""
+                say(f"  ✗ \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}")
         except Exception as exc:
             logger.warning("PandaDocNavigator: reranking failed: %s", exc)
+            all_ranked = results
 
-        # Reserved slots: top (top_k - 2) diagnostic + top 2 concept (by cross-encoder rank)
+        # Reserved slots: top (top_k - 2) diagnostic + top 2 concept (by cross-encoder rank).
+        # Concept nodes are selected from the full ranked list so below-threshold concept docs
+        # are still rescued (MS MARCO cross-encoder is miscalibrated for domain docs).
         n_diag = max(1, top_k - 2)
         diag = results[:n_diag]
         seen = {r.url for r in diag}
-        concept = [r for r in results if r.doc_type == "concept" and r.url not in seen][:2]
+        concept = [r for r in all_ranked if r.doc_type == "concept" and r.url not in seen][:2]
         final = diag + concept
 
         say(f"PanDA doc search: {len(final)} result(s) ({len(diag)} diagnostic + {len(concept)} concept)")
         for r in diag:
             label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
-            say(f"  \\[{r.source}] {label}  ({r.score:.2f})")
+            concept_tag = " \\[concept]" if r.doc_type == "concept" else ""
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}")
         for r in concept:
             label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
-            say(f"  \\[{r.source}] {label}  ({r.score:.2f}) [concept]")
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f}) \\[concept]")
         return final
 
     # ------------------------------------------------------------------
@@ -585,34 +560,49 @@ class PandaDocNavigator:
 
     async def _summarize_nodes(self, nodes: list[DocNode], advance_fn=None) -> None:
         semaphore = asyncio.Semaphore(10)
+        _node_map: dict[str, DocNode] = {n.id: n for n in nodes}
+
+        def _root_title(node: DocNode) -> str:
+            current = node
+            while current.parent_id:
+                parent = _node_map.get(current.parent_id)
+                if parent is None:
+                    break
+                current = parent
+            return current.title
 
         async def _one(node: DocNode) -> None:
             try:
+                page_title = _root_title(node)
                 if not node.content.strip():
                     node.summary = node.title
-                    node.doc_type = "other"
+                    page_lc = page_title.lower()
+                    node.doc_type = (
+                        "concept"
+                        if any(kw in page_lc for kw in _CONCEPT_PAGE_KEYWORDS)
+                        else "other"
+                    )
                     return
                 prompt = _SUMMARIZE_PROMPT.format(
+                    page_title=page_title,
                     title=node.title,
                     content=node.content[:3000],
                 )
                 async with semaphore:
                     try:
-                        resp = await self._summary_llm.ainvoke([HumanMessage(content=prompt)])
+                        resp = await self._extraction_llm.ainvoke([HumanMessage(content=prompt)])
                         raw = resp.content.strip()
                         if raw.startswith("```"):
                             raw = "\n".join(
                                 line for line in raw.splitlines() if not line.startswith("```")
                             ).strip()
-                        try:
-                            parsed = json.loads(raw)
-                            node.summary = parsed.get("summary", "") or node.content[:300]
-                            node.doc_type = parsed.get("doc_type", "other")
-                            if node.doc_type not in ("concept", "other"):
-                                node.doc_type = "other"
-                        except (json.JSONDecodeError, AttributeError):
-                            node.summary = raw or node.content[:300]
+                        parsed = json.loads(raw)
+                        node.summary = parsed.get("summary", "") or node.content[:300]
+                        node.doc_type = parsed.get("doc_type", "other")
+                        if node.doc_type not in ("concept", "other"):
                             node.doc_type = "other"
+                    except (json.JSONDecodeError, AttributeError):
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "PandaDocNavigator: summarize failed for %r: %s", node.title, exc

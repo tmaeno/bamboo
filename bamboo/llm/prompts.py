@@ -1163,6 +1163,7 @@ Decide whether more code is needed. Respond with ONLY a valid JSON object:
 If the snippets above are sufficient to answer the question:
 {{
   "action": "done",
+  "relevant_qualnames": ["TaskUtilsModule.setScoutJobData_JEDI"],
   "reasoning": "one sentence"
 }}
 
@@ -1177,6 +1178,9 @@ Rules:
 - Only request follow-up for symbol names that actually appear in the source snippets above.
 - Do NOT request follow-up for symbols you imagine might exist — only ones visible in the code.
 - "follow_up_symbols": exact identifiers as they appear in the source (case-sensitive).
+- "relevant_qualnames": list only the qualnames that directly answer the question. Omit
+  test methods, unrelated utilities, and anything that merely happened to be co-located.
+  List all relevant ones; never return an empty list unless truly nothing applies.
 """
 
 PANDA_SOURCE_SYNTHESIS_PROMPT = """\
@@ -1208,6 +1212,11 @@ For natural-language log messages:
 For camelCase or snake_case identifiers present in the input:
   Copy them verbatim as separate entries.
 
+Single-token entries are only valid if they are snake_case or camelCase identifiers
+(contain an underscore or a lowercase-to-uppercase transition).
+Do NOT emit as standalone entries: hash-prefixed markers (#KV, #ATM), short ALL-CAPS
+tokens, or plain English nouns (jobs, tasks, files, memory, etc.).
+
 Return ONLY a JSON array of strings. No explanation, no invented tokens.
 Every string must be a verbatim substring of the input after stripping variables.
 
@@ -1215,3 +1224,54 @@ Question: {question}
 
 JSON array:"""
 
+# ---------------------------------------------------------------------------
+# PandaDocNavigator prompts
+# ---------------------------------------------------------------------------
+
+PANDA_DOC_SUMMARIZE_PROMPT = (
+    "Summarize the following PanDA WMS documentation section in 2-3 sentences.\n"
+    "Preserve verbatim: all parameter names, option flags (e.g. --nFilesPerJob), "
+    "error codes, class names, and any text that appeared in code formatting.\n"
+    "Keep it concise and factual.\n\n"
+    "Also classify the section as exactly one of:\n"
+    '- "concept": ONLY for core PanDA vocabulary definitions — sections whose entire '
+    "purpose is to define WHAT a fundamental PanDA entity IS. This means: Task, Job, "
+    "Site, Scout job, Retry, and their status/state values. Nothing else qualifies. "
+    "Ask: would this entry appear unchanged in a one-page PanDA glossary? If no, "
+    'use "other".\n'
+    '- "other": everything else — system component descriptions (Harvester, JEDI, '
+    "plugins, brokers), architecture pages, how-to guides, FAQ entries, examples, "
+    "CLI option tables, API references, parameter/configuration tables, "
+    "troubleshooting procedures, and any section that describes HOW something "
+    'works or is used. When in doubt, use "other".\n\n'
+    "Page: {page_title}\n"
+    "Section: {title}\n\n"
+    "Content:\n{content}\n\n"
+    'Return ONLY a JSON object: {{"summary": "...", "doc_type": "concept|other"}}'
+)
+
+PANDA_DOC_TRAVERSAL_PAGE_PROMPT = (
+    "Search query: {query}\n\n"
+    "Review these PanDA WMS documentation page summaries. "
+    "Return a JSON array of IDs for pages whose content is relevant to the query — "
+    "including pages that explain the concept, describe the status/error, "
+    "list the parameters involved, or provide context needed to understand it. "
+    "Exclude pages that are only about unrelated workflows or unrelated system components. "
+    "Return an empty array [] if none apply.\n\n"
+    "Pages:\n{pages_text}\n\n"
+    "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
+)
+
+PANDA_DOC_TRAVERSAL_SECTION_PROMPT = (
+    "Search query: {query}\n\n"
+    "You are exploring page: \"{page_title}\"\n"
+    "Page context: {page_summary}\n\n"
+    "Review these section summaries. "
+    "Return a JSON array of IDs for sections that answer, explain, or provide relevant "
+    "context for the query — including sections that describe the relevant status, "
+    "error cause, or parameter. "
+    "Exclude sections that are only about unrelated actions or unrelated system components. "
+    "Return an empty array [] if none apply.\n\n"
+    "Sections:\n{sections_text}\n\n"
+    "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
+)
