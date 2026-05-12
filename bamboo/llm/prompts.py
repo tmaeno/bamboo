@@ -1040,15 +1040,23 @@ DOC_SEARCH_KEYWORDS_PROMPT = """You are helping to query system documentation.
 
 Given the following error information from a task, return a JSON object with:
 - "nl_query": a concise natural-language description of the problem (1 sentence, no identifiers)
-- "keywords": 2-5 exact system identifiers from the text (snake_case tokens, ALL_CAPS constants)
+- "keywords": 2-5 search terms optimised for PanDA documentation (ReadTheDocs)
 
 Rules for keywords:
-- Only use terms that appear in the provided text — do not invent terms.
-- Prefer system identifiers exactly as written — ALL_CAPS constants
-  and snake_case reason tokens are the most precise search terms.
+- Extract PanDA concept names, status names, and parameter names as they appear
+  in documentation prose — NOT as raw Python identifiers.
+- Decompose snake_case and camelCase identifiers into individual tokens likely
+  to appear in documentation:
+    action=set_exhausted  →  "exhausted"     (drop the verb prefix "set_")
+    reason=scout_ramCount →  "scout", "ramCount"  (split at underscore; keep
+                              camelCase parameter names intact — they appear
+                              in configuration tables)
+    low_cpuEfficiency     →  "cpuEfficiency" (drop the adjective prefix)
+- Ignore log-marker tokens (#KV, #ATM) and key= prefixes (action=, reason=).
+- Output individual tokens, not multi-word phrases.
 - Each term must be at least 4 characters.
-- Omit generic single words (job, task, log, error, failed, timeout) unless
-  combined with a more specific qualifier.
+- Omit generic words (job, task, log, error, failed, timeout).
+- Only use terms derivable from the provided text — do not invent terms.
 
 Error dialog:
 {error_dialog}
@@ -1240,8 +1248,8 @@ PANDA_DOC_SUMMARIZE_PROMPT = (
     "Ask: would this entry appear unchanged in a one-page PanDA glossary? If no, "
     'use "other".\n'
     '- "other": everything else — system component descriptions (Harvester, JEDI, '
-    "plugins, brokers), architecture pages, how-to guides, FAQ entries, examples, "
-    "CLI option tables, API references, parameter/configuration tables, "
+    "plugins, brokers), architecture pages, internal details, how-to guides, FAQ entries, "
+    "examples, CLI option tables, API references, parameter/configuration tables, "
     "troubleshooting procedures, and any section that describes HOW something "
     'works or is used. When in doubt, use "other".\n\n'
     "Page: {page_title}\n"

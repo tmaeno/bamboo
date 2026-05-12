@@ -246,6 +246,7 @@ class PandaDocNavigator:
             scores = await asyncio.to_thread(_predict_silently, reranker, pairs)
             for r, s in zip(results, scores):
                 r.score = float(s)
+            results.sort(key=lambda r: r.score, reverse=True)
             all_ranked = results  # full sorted list before threshold filter
             filtered = [r for r in results if r.score > 0.0]
             rejected = [r for r in results if r.score <= 0.0]

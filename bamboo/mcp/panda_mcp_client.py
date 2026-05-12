@@ -468,9 +468,12 @@ class PandaMcpClient(McpClient):
                     "task status, error pattern, or configuration concept.  Use this when "
                     "a node name or error string requires domain-level explanation — what "
                     "it means, when it occurs, and what typically causes or resolves it.  "
-                    "Examples: query='exhausted task status retry limit' to understand "
-                    "TaskStatusExhausted; query='too many files input dataset limit' to "
-                    "understand TooManyFilesInDataset; query='scout job memory overestimate' "
+                    "Always phrase the query as a natural-language question.  "
+                    "Examples: query='Why is a task set to exhausted after reaching the retry limit?' "
+                    "to understand TaskStatusExhausted; "
+                    "query='Why are there too many files in the input dataset?' "
+                    "to understand TooManyFilesInDataset; "
+                    "query='How does a scout job memory overestimate affect pending tasks?' "
                     "for resource-related pending tasks.  "
                     "Returns up to 3 matching doc sections, each with: title, URL, "
                     "full section content, parent_context (summary of the parent section), "
@@ -485,10 +488,12 @@ class PandaMcpClient(McpClient):
                         "query": {
                             "type": "string",
                             "description": (
-                                "Natural-language search query, e.g. "
-                                "'exhausted task status retry', "
-                                "'cpu efficiency threshold task killed', "
-                                "'scout job memory overestimate ramCount'.  "
+                                "Phrase as a natural-language question — this improves "
+                                "ranking quality.  Examples: "
+                                "'Why is a task set to exhausted after reaching the retry limit?', "
+                                "'When is a task killed due to low CPU efficiency?', "
+                                "'How does scout job memory overestimate affect ramCount?', "
+                                "'Why does brokerage find no candidate sites for a pending task?'  "
                                 "Use lowercase words; avoid CamelCase node names."
                             ),
                         },

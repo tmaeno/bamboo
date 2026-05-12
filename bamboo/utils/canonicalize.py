@@ -99,6 +99,7 @@ async def canonicalize_descriptions(
                 raw = "\n".join(
                     line for line in raw.splitlines() if not line.startswith("```")
                 ).strip()
+            raw = raw.replace("\\'", "'")
             rewritten: list[str] = json.loads(raw)
             if len(rewritten) != len(batch):
                 raise ValueError(
@@ -112,10 +113,11 @@ async def canonicalize_descriptions(
                         total_changed += 1
         except Exception as exc:
             logger.warning(
-                "canonicalize_descriptions: batch %d–%d failed (%s) — keeping original descriptions",
+                "canonicalize_descriptions: batch %d–%d failed (%s) — keeping original descriptions\nRaw response: %r",
                 batch_start,
                 batch_start + len(batch) - 1,
                 exc,
+                locals().get("raw", "<no response>"),
             )
 
     logger.debug(
