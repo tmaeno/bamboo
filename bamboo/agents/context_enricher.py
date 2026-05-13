@@ -13,10 +13,24 @@ the pipeline never stalls.
 """
 
 import asyncio
+import builtins as _builtins_module
 import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+_SAFE_BUILTINS = {
+    name: getattr(_builtins_module, name)
+    for name in (
+        "len", "isinstance", "issubclass", "type",
+        "dict", "list", "tuple", "set", "str", "int", "float", "bool",
+        "range", "enumerate", "zip", "map", "filter", "sorted", "reversed",
+        "any", "all", "min", "max", "sum", "abs", "round",
+        "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
+        "None", "True", "False", "repr",
+    )
+    if hasattr(_builtins_module, name)
+}
 
 from bamboo.agents.knowledge_reviewer import _build_task_summary
 from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
@@ -45,6 +59,36 @@ class ExplorationResult:
     task_logs: dict[str, str] = field(default_factory=dict)
     external_data: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+class ToolProxy:
+    """Exposes MCP tools as async methods for LLM-generated orchestration code.
+
+    ``task_data`` is pre-injected for tools that accept it, so the generated
+    code never handles it directly.  Any tool name the LLM produces is
+    forwarded to the MCP client; unknown names fail at runtime (caught by
+    :meth:`ContextEnricher._run_orchestration_code`).
+    """
+
+    def __init__(
+        self,
+        client,
+        task_data: dict[str, Any],
+        task_data_tool_names: frozenset[str],
+        call_log: list[str],
+    ) -> None:
+        self._client = client
+        self._task_data = task_data
+        self._td_names = task_data_tool_names
+        self._log = call_log
+
+    def __getattr__(self, name: str):
+        async def call(**kwargs):
+            self._log.append(name)
+            if name in self._td_names:
+                kwargs["task_data"] = self._task_data
+            return await self._client.execute(name, **kwargs)
+        return call
 
 
 class ContextEnricher:
@@ -205,39 +249,58 @@ class ContextEnricher:
 
             # ── Primary path: planner ────
             if self._planner is not None:
-                plan = await self._planner.plan(
-                    task_data, other_issues, tools,
-                    doc_hints=doc_hints, skip_gap_analysis=skip_gap_analysis,
-                )
-                if plan is not None and plan.steps:
-                    all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
-                    logger.info(
-                        "ContextEnricher: executing plan — %d step(s), %d tool call(s)",
-                        len(plan.steps),
-                        len(all_tool_calls),
+                if not skip_gap_analysis:
+                    # Exploratory path: LLM generates Python orchestration code
+                    # that handles sequential dependent tool calls natively.
+                    code = await self._planner.generate_orchestration_code(
+                        task_data, other_issues, tools, doc_hints=doc_hints
                     )
-                    out.tool_calls.extend(all_tool_calls)
-                    for i, step in enumerate(plan.steps, 1):
-                        say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
-                        coros = [
-                            self._tool_coro(tc, task_data, task_data_tool_names)
-                            for tc in step.tool_calls
-                        ]
-                        results = await asyncio.gather(*coros, return_exceptions=True)
-                        for tc, result in zip(step.tool_calls, results):
-                            if isinstance(result, BaseException):
-                                say(f"    {tc['tool']}: failed — {result}")
-                            else:
-                                say(f"    {tc['tool']}: done.")
-                                if isinstance(result, str) and result:
-                                    show_block(tc["tool"], result)
-                            self._merge_tool_result(tc["tool"], result, out)
-                    return out
-                if plan is not None and not plan.steps:
-                    logger.info(
-                        "ContextEnricher: planner found no steps — falling back to _select_tools"
+                    if code is not None:
+                        raw = await self._run_orchestration_code(
+                            code, task_data, task_data_tool_names
+                        )
+                        for key, value in raw.items():
+                            label = f"orchestration:{key}"
+                            out.external_data[label] = value
+                            if isinstance(value, str) and value:
+                                show_block(label, value[:2000])
+                        return out
+                    say("Explorer: code generation failed — falling back to direct tool selection.")
+                else:
+                    # Procedure-driven path: static JSON plan from procedure instructions.
+                    plan = await self._planner.plan(
+                        task_data, other_issues, tools,
+                        doc_hints=doc_hints, skip_gap_analysis=True,
                     )
-                    say("Explorer: planner found no steps — falling back to direct tool selection.")
+                    if plan is not None and plan.steps:
+                        all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
+                        logger.info(
+                            "ContextEnricher: executing plan — %d step(s), %d tool call(s)",
+                            len(plan.steps),
+                            len(all_tool_calls),
+                        )
+                        out.tool_calls.extend(all_tool_calls)
+                        for i, step in enumerate(plan.steps, 1):
+                            say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
+                            coros = [
+                                self._tool_coro(tc, task_data, task_data_tool_names)
+                                for tc in step.tool_calls
+                            ]
+                            results = await asyncio.gather(*coros, return_exceptions=True)
+                            for tc, result in zip(step.tool_calls, results):
+                                if isinstance(result, BaseException):
+                                    say(f"    {tc['tool']}: failed — {result}")
+                                else:
+                                    say(f"    {tc['tool']}: done.")
+                                    if isinstance(result, str) and result:
+                                        show_block(tc["tool"], result)
+                                self._merge_tool_result(tc["tool"], result, out)
+                        return out
+                    if plan is not None and not plan.steps:
+                        logger.info(
+                            "ContextEnricher: planner found no steps — falling back to _select_tools"
+                        )
+                        say("Explorer: planner found no steps — falling back to direct tool selection.")
 
             # ── Fallback: single-wave concurrent path (no planner / plan=None) ─
             tool_calls = await self._select_tools(task_data, other_issues, tools)
@@ -274,6 +337,46 @@ class ContextEnricher:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _run_orchestration_code(
+        self,
+        code: str,
+        task_data: dict[str, Any],
+        task_data_tool_names: frozenset[str],
+    ) -> dict[str, Any]:
+        """Execute LLM-generated orchestration code in a sandboxed namespace.
+
+        The code runs as the body of ``async def _fn(tools, asyncio)`` with
+        only :data:`_SAFE_BUILTINS` available.  Any exception (syntax, runtime,
+        or timeout) is logged and an empty dict is returned (fail-open).
+        """
+        call_log: list[str] = []
+        proxy = ToolProxy(self._client, task_data, task_data_tool_names, call_log)
+        namespace: dict[str, Any] = {"asyncio": asyncio, "__builtins__": _SAFE_BUILTINS}
+        indented = "\n".join(f"    {line}" for line in code.splitlines())
+        full_code = f"async def _fn(tools, asyncio):\n{indented}"
+        try:
+            exec(full_code, namespace)  # noqa: S102
+        except SyntaxError as exc:
+            logger.warning("ContextEnricher: orchestration code has syntax error: %s", exc)
+            return {}
+        try:
+            result = await asyncio.wait_for(namespace["_fn"](proxy, asyncio), timeout=120)
+        except asyncio.TimeoutError:
+            logger.warning("ContextEnricher: orchestration code timed out after 120 s")
+            return {}
+        except Exception as exc:
+            logger.warning("ContextEnricher: orchestration code raised: %s", exc)
+            return {}
+        if call_log:
+            say(f"  orchestration called: {', '.join(call_log)}")
+        if not isinstance(result, dict):
+            logger.warning(
+                "ContextEnricher: orchestration code returned %r — expected dict",
+                type(result).__name__,
+            )
+            return {}
+        return result
 
     async def _select_tools(
         self,

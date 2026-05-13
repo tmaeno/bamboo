@@ -186,6 +186,11 @@ CAUSE_IDENTIFICATION_PROMPT = """You are a root cause analysis expert. Analyze t
 
 Task Information:
 {task_info}
+Note: Use external_info to identify the failure's bottleneck stages or error patterns,
+then cite only the task_info fields that explain WHY those specific bottlenecks occurred.
+Do not cite task_info fields that have no connection to the observed failure patterns.
+(Concept-level matching is fine: e.g. a "memory check" bottleneck in external_info
+justifies citing a memory/RAM field from task_info even if the names differ.)
 
 External Information:
 {external_info}
@@ -627,8 +632,16 @@ If a description is already generic (no instance-specific data), return it uncha
 
 Input: {descriptions_json}
 
-Return a JSON array of the rewritten descriptions in the SAME ORDER as the input.
-Return ONLY the JSON array — no explanation, no markdown code fences.
+Return the rewritten descriptions as plain text, one description per line,
+in the SAME ORDER as the input.
+Rules for the output:
+- No JSON, no numbering, no bullet points, no markdown.
+- Each description must be plain readable text — no quotation marks, backslashes,
+  or other special characters.
+- For complex command-line strings or structured data, write a brief English phrase
+  (e.g. "panda job submission command with source archive and output files")
+  rather than a templated version of the command.
+- Output exactly {n} lines — one per input description.
 """
 
 EXPLORER_TOOL_SELECTION_PROMPT = """You are a diagnostic data-collection agent for a PanDA computing task.
@@ -1283,3 +1296,33 @@ PANDA_DOC_TRAVERSAL_SECTION_PROMPT = (
     "Sections:\n{sections_text}\n\n"
     "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
 )
+
+TOOL_ORCHESTRATION_CODE_PROMPT = """You are writing orchestration logic for PanDA task diagnosis.
+
+GAPS TO RESOLVE:
+{gaps}
+
+TASK CONTEXT:
+{task_summary}
+
+AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
+{tools_description}
+
+Write the body of this async Python function to fetch the data needed to resolve the gaps:
+  async def orchestrate(tools, asyncio):
+
+Rules:
+- Call tools with `await tools.<tool_name>(arg=value)`.
+- Tools that accept task_data receive it automatically — do not pass task_data.
+- Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
+- Use sequential `await` when a downstream call needs the result of an upstream call:
+    similar = await tools.find_similar_successful_tasks()
+    if similar and not isinstance(similar, dict):
+        logs = await tools.get_successful_job_logs(task_id=similar[0]["jediTaskID"])
+- Check for empty / error results before passing them to downstream calls.
+- Return a dict mapping descriptive labels to fetched values:
+    return {{"failed_job_log": failed, "successful_job_log": successful}}
+- Only call tools listed in AVAILABLE TOOLS. Do not import anything. Do not use open() or exec().
+
+Output only the function body (no `def` line, no markdown fences).
+"""

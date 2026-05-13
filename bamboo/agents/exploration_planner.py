@@ -28,6 +28,7 @@ from bamboo.llm import (
     EXPLORATION_PLAN_PROMPT,
     INVESTIGATION_PLAN_PROMPT,
     PROCEDURE_EXECUTION_PROMPT,
+    TOOL_ORCHESTRATION_CODE_PROMPT,
     get_extraction_llm,
 )
 from bamboo.mcp.base import McpClient, McpTool
@@ -247,6 +248,51 @@ class ExplorationPlanner:
             logger.warning(
                 "ExplorationPlanner.plan_investigation: failed (%s) — returning None", exc
             )
+            return None
+
+    async def generate_orchestration_code(
+        self,
+        task_data: dict[str, Any],
+        review_issues: list[str],
+        tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
+    ) -> str | None:
+        """Generate a Python async function body that orchestrates tool calls.
+
+        Phase 1 identifies information gaps; phase 2 generates executable Python
+        that fetches the needed data, using ``asyncio.gather`` for independent
+        calls and sequential ``await`` for dependent ones.
+
+        Returns the function body as a string, or ``None`` on any failure
+        (fail-open — caller falls back to :meth:`_select_tools`).
+        """
+        if not review_issues or not tools:
+            return None
+        try:
+            gaps = await self._analyse_gaps(task_data, review_issues, tools, doc_hints)
+            if not gaps:
+                say("Planner found no actionable gaps.")
+                return None
+
+            from bamboo.agents.knowledge_reviewer import _build_task_summary  # noqa: PLC0415
+            from bamboo.agents.context_enricher import _build_tools_description  # noqa: PLC0415
+
+            prompt = TOOL_ORCHESTRATION_CODE_PROMPT.format(
+                gaps="\n".join(f"- {g}" for g in gaps),
+                task_summary=_build_task_summary(task_data),
+                tools_description=_build_tools_description(tools),
+            )
+            say("Generating tool orchestration code...")
+            with thinking("Generating code"):
+                response = await self.llm.ainvoke(prompt)
+
+            code = _strip_fences(response.content).strip()
+            if not code:
+                return None
+            show_block("planner: orchestration code", code)
+            return code
+        except Exception as exc:
+            logger.warning("ExplorationPlanner.generate_orchestration_code: failed (%s)", exc)
             return None
 
     # ------------------------------------------------------------------

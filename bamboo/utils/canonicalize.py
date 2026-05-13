@@ -89,7 +89,8 @@ async def canonicalize_descriptions(
         batch = to_canonicalize[batch_start : batch_start + _BATCH_SIZE]
         original_descs = [n.description for n in batch]
         prompt = DESCRIPTION_CANONICALIZE_PROMPT.format(
-            descriptions_json=json.dumps(original_descs, ensure_ascii=False)
+            descriptions_json=json.dumps(original_descs, ensure_ascii=False),
+            n=len(batch),
         )
         try:
             with thinking("Working"):
@@ -99,8 +100,7 @@ async def canonicalize_descriptions(
                 raw = "\n".join(
                     line for line in raw.splitlines() if not line.startswith("```")
                 ).strip()
-            raw = raw.replace("\\'", "'")
-            rewritten: list[str] = json.loads(raw)
+            rewritten: list[str] = [line.strip() for line in raw.splitlines() if line.strip()]
             if len(rewritten) != len(batch):
                 raise ValueError(
                     f"Expected {len(batch)} items, got {len(rewritten)}"

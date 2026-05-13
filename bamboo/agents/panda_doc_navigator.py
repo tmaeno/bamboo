@@ -770,10 +770,11 @@ class PandaDocNavigator:
             page = self._graph.get(page_id)
             return await _explore_node(page, depth=0) if page else []
 
-        page_results = await asyncio.gather(
-            *[_explore_page(pid) for pid in chosen_page_ids],
-            return_exceptions=True,
-        )
+        with thinking("Traversing relevant pages and sections"):
+            page_results = await asyncio.gather(
+                *[_explore_page(pid) for pid in chosen_page_ids],
+                return_exceptions=True,
+            )
         results: list[DocResult] = []
         for pr in page_results:
             if isinstance(pr, list):
