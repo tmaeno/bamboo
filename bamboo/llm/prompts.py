@@ -1326,3 +1326,42 @@ Rules:
 
 Output only the function body (no `def` line, no markdown fences).
 """
+
+PANDA_SYSTEM_SUMMARY_PROMPT = """You are reviewing PanDA ATLAS computing system
+documentation to create a concise system knowledge summary for use as background
+context by an AI that diagnoses task failures.
+
+Documentation (overview and concept pages from PanDA docs):
+{concept_docs}
+
+Write a 400-600 word factual summary of PanDA system behavior. Cover:
+
+- The roles of key components (JEDI, brokerage, pilot, scout jobs, Rucio, etc.)
+  and what each one decides or executes.
+- How a task is decomposed into jobs: how JEDI generates jobs from a task,
+  what relationship a single job has to the parent task, and how job-level
+  outcomes (succeeded / failed / lost) aggregate into task-level state.
+- How parameters flow through the system: which parameters users supply via
+  submission flags (e.g. --memory, --nFilesPerJob), which the system derives
+  from defaults or task structure, and which the system may adjust at runtime
+  (e.g. via scout jobs and Dynamic Optimization). For each parameter you
+  mention, describe the initial-value source AND whether / when the system
+  overrides it. Do NOT categorize parameters into "automatic" vs "manual"
+  buckets — many parameters are both.
+- The temporal sequence of system actions during a task's lifetime: when
+  brokerage runs and re-runs, when scout jobs are generated and execute,
+  when Dynamic Optimization is triggered, and what events advance a task
+  between major states. Make the ordering explicit (which step depends on
+  which).
+
+Style:
+- Describe mechanisms, not actions. Do not write "Action:" guidance,
+  "do not advise users", or any imperative direction to the reader.
+- Be precise about which fields are user inputs, system-derived, or both.
+- The AI consuming this summary derives correct recommendations from the facts;
+  it does not need to be told what to advise.
+
+Out of scope (fetched dynamically by doc search when relevant — do NOT cover):
+- Specific task status meanings (surfaced via "task status {{status}}" query)
+- Specific brokerage filter stages (surfaced when errorDialog mentions brokerage)
+"""

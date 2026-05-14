@@ -1035,7 +1035,14 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         email_text: str = "",
     ) -> dict[str, str]:
         from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
-        return await prefetch_panda_context(task_data or {}, email_text)
+        from bamboo.agents.panda_doc_navigator import PandaDocNavigator  # noqa: PLC0415
+        from bamboo.utils.narrator import say  # noqa: PLC0415
+        hints = await prefetch_panda_context(task_data or {}, email_text)
+        system_summary = PandaDocNavigator().get_system_summary()
+        if system_summary:
+            hints["panda_system"] = system_summary
+            say("Included PanDA system knowledge summary in domain hints.")
+        return hints
 
     def source_navigator(self):
         from bamboo.agents.panda_source_navigator import PandaSourceNavigator  # noqa: PLC0415

@@ -208,7 +208,7 @@ class ContextEnricher:
                                 say(f"    {tc['tool']}: done.")
                                 if isinstance(result, str) and result:
                                     show_block(tc["tool"], result)
-                            self._merge_tool_result(tc["tool"], result, out)
+                            self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
                 return out
 
             # ── Hard-route: "No investigation procedure captured" → request_human_input ──
@@ -236,7 +236,7 @@ class ContextEnricher:
                 except Exception as exc:
                     say(f"  request_human_input: failed — {exc}")
                     result = exc
-                self._merge_tool_result("request_human_input", result, out)
+                self._merge_tool_result("request_human_input", result, out, task_data=task_data)
             elif procedure_issues:
                 logger.info(
                     "ContextEnricher: procedure gap found but request_human_input "
@@ -294,7 +294,7 @@ class ContextEnricher:
                                     say(f"    {tc['tool']}: done.")
                                     if isinstance(result, str) and result:
                                         show_block(tc["tool"], result)
-                                self._merge_tool_result(tc["tool"], result, out)
+                                self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
                         return out
                     if plan is not None and not plan.steps:
                         logger.info(
@@ -328,7 +328,7 @@ class ContextEnricher:
                     say(f"  {tc['tool']}: done.")
                     if isinstance(result, str) and result:
                         show_block(tc["tool"], result)
-                self._merge_tool_result(tc["tool"], result, out)
+                self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
 
             return out
         finally:
@@ -430,6 +430,7 @@ class ContextEnricher:
         tool_name: str,
         result: Any,
         out: ExplorationResult,
+        task_data: dict[str, Any] | None = None,
     ) -> None:
         """Route one tool result into the correct :class:`ExplorationResult` field."""
         if isinstance(result, BaseException):
@@ -443,6 +444,35 @@ class ContextEnricher:
                 for url, content in result.items():
                     key = f"explorer:error_dialog:{url}"
                     out.task_logs[key] = content
+        elif tool_name == "fetch_brokerage_context":
+            if isinstance(result, dict):
+                out.external_data["tool:fetch_brokerage_context"] = result
+                # Parse logs into a structured summary and surface at top level so the
+                # final analysis LLM sees the key facts (terminal filter, per-site fates)
+                # without having to synthesize them from dense raw log text.
+                from bamboo.utils.log_filters import parse_brokerage_summary  # noqa: PLC0415
+                sites_of_interest: list[str] = []
+                td = task_data or {}
+                site = (td.get("site") or "").strip() if isinstance(td.get("site"), str) else ""
+                if site:
+                    sites_of_interest.append(site)
+                included = td.get("includedSite") or []
+                if isinstance(included, str):
+                    included = [s.strip() for s in included.split(",") if s.strip()]
+                for s in included:
+                    if s and s not in sites_of_interest:
+                        sites_of_interest.append(s)
+                summaries: dict[str, dict] = {}
+                for url, log_text in (result.get("logs") or {}).items():
+                    if not isinstance(log_text, str):
+                        continue
+                    parsed = parse_brokerage_summary(
+                        log_text, sites_of_interest=sites_of_interest
+                    )
+                    if parsed:
+                        summaries[url] = parsed
+                if summaries:
+                    out.external_data["brokerage_summary"] = summaries
         elif tool_name == "get_parent_task":
             if result is not None:
                 out.external_data["parent_task"] = result

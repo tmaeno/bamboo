@@ -320,13 +320,60 @@ class PandaDocNavigator:
         except (FileNotFoundError, json.JSONDecodeError):
             return None
 
-    def _write_meta(self, sha: str) -> None:
+    def _write_meta(self, sha: str, system_summary: str = "") -> None:
         from datetime import datetime, timezone  # noqa: PLC0415
         _META_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _META_FILE.write_text(json.dumps({
+        meta: dict = {
             "sha": sha,
             "built_at": datetime.now(timezone.utc).isoformat(),
-        }))
+        }
+        if system_summary:
+            meta["system_summary"] = system_summary
+        _META_FILE.write_text(json.dumps(meta))
+
+    def get_system_summary(self) -> str:
+        """Return the pre-generated PanDA system knowledge summary, or empty string."""
+        meta = self._read_meta()
+        return meta.get("system_summary", "") if meta else ""
+
+    async def _generate_system_summary(self, nodes: list[DocNode]) -> str:
+        """Generate a system knowledge summary from top-level + concept pages."""
+        from bamboo.llm import PANDA_SYSTEM_SUMMARY_PROMPT  # noqa: PLC0415
+
+        candidates = [
+            n for n in nodes
+            if (n.level == 0 or n.doc_type == "concept") and (n.summary or n.content)
+        ]
+        seen: set[str] = set()
+        pages: list[DocNode] = []
+        for n in candidates:
+            if n.id not in seen:
+                seen.add(n.id)
+                pages.append(n)
+        if not pages:
+            logger.warning("PandaDocNavigator: no pages found for system summary")
+            return ""
+        say(
+            f"Generating PanDA system knowledge summary from {len(pages)} pages "
+            "(top-level + concept)..."
+        )
+        concept_docs = "\n\n".join(
+            f"[{n.title}]\n{n.summary or n.content[:300]}" for n in pages
+        )
+        try:
+            with thinking("Summarising PanDA system knowledge"):
+                resp = await self._summary_llm.ainvoke(
+                    [HumanMessage(content=PANDA_SYSTEM_SUMMARY_PROMPT.format(
+                        concept_docs=concept_docs
+                    ))]
+                )
+            summary = resp.content.strip()
+            if summary:
+                say(f"System knowledge summary generated ({len(summary)} chars).")
+            return summary
+        except Exception as exc:
+            logger.warning("PandaDocNavigator: system summary generation failed (%s)", exc)
+            return ""
 
     # ------------------------------------------------------------------
     # Graph loading from Qdrant
@@ -414,8 +461,10 @@ class PandaDocNavigator:
         self._graph = {n.id: n for n in all_nodes}
         self._page_ids = [n.id for n in all_nodes if n.level == 0]
 
+        system_summary = await self._generate_system_summary(all_nodes)
+
         if tree_sha:
-            self._write_meta(tree_sha)
+            self._write_meta(tree_sha, system_summary=system_summary)
 
         logger.info(
             "PandaDocNavigator: index ready — %d nodes, %d pages",

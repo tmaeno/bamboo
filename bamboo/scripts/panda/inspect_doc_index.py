@@ -14,6 +14,9 @@ Usage::
 
     # Only concept-tagged nodes
     python -m bamboo.scripts.panda.inspect_doc_index --concept-only
+
+    # Print the stored PanDA system knowledge summary
+    python -m bamboo.scripts.panda.inspect_doc_index --summary
 """
 
 from __future__ import annotations
@@ -40,13 +43,42 @@ _COLLECTION = "panda_docs"
     default=False,
     help="Only show nodes with doc_type == 'concept'.",
 )
-def main(title_filter: str | None, concept_only: bool) -> None:
+@click.option(
+    "--summary",
+    "show_summary",
+    is_flag=True,
+    default=False,
+    help="Print the stored PanDA system knowledge summary from panda_docs_meta.json.",
+)
+def main(title_filter: str | None, concept_only: bool, show_summary: bool) -> None:
     """Dump Qdrant panda_docs payload to stdout."""
-    asyncio.run(_run(title_filter, concept_only))
+    asyncio.run(_run(title_filter, concept_only, show_summary))
     os._exit(0)
 
 
-async def _run(title_filter: str | None, concept_only: bool) -> None:
+async def _run(title_filter: str | None, concept_only: bool, show_summary: bool) -> None:
+    if show_summary:
+        import json  # noqa: PLC0415
+
+        from bamboo.agents.panda_doc_navigator import _META_FILE  # noqa: PLC0415
+
+        try:
+            meta = json.loads(_META_FILE.read_text())
+        except FileNotFoundError:
+            click.echo(f"Metadata file not found: {_META_FILE}")
+            return
+        summary = meta.get("system_summary", "")
+        if not summary:
+            click.echo("No system_summary in metadata (rebuild docs to regenerate).")
+            return
+        click.echo("=" * 72)
+        click.echo("PanDA system knowledge summary")
+        click.echo("=" * 72)
+        click.echo(summary)
+        click.echo("=" * 72)
+        click.echo(f"({len(summary)} chars, from {_META_FILE})")
+        return
+
     from qdrant_client import AsyncQdrantClient
 
     from bamboo.config import get_settings

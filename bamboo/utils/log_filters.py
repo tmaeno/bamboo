@@ -83,6 +83,14 @@ _BROKERAGE_INITIAL_RE: re.Pattern = re.compile(
 # A site was excluded at some filter stage.
 _BROKERAGE_SKIP_RE: re.Pattern = re.compile(r"skip site=", re.IGNORECASE)
 
+# Detailed skip-line parser: captures site name, free-text reason, and criteria token.
+# Example match: "skip site=ANALY_CERN_T0_ART due to insufficient RAM less than ...
+#                 criteria=-lowmemory"
+_BROKERAGE_SKIP_DETAIL_RE: re.Pattern = re.compile(
+    r"skip\s+site=(?P<site>\S+)\s+(?P<reason>.*?)\s*criteria=(?P<criteria>[-\w]+)",
+    re.IGNORECASE,
+)
+
 # A site was selected for job submission.
 _BROKERAGE_USE_SITE_RE: re.Pattern = re.compile(
     r"use site=\S+.*?criteria=\+use", re.IGNORECASE
@@ -350,6 +358,126 @@ def filter_prod_job_brokerage_log(
         include_data_avail=False,
         fn_name="filter_prod_job_brokerage_log",
     )
+
+
+def parse_brokerage_summary(
+    log_text: str,
+    sites_of_interest: "list[str] | None" = None,
+) -> "dict | None":
+    """Parse a PanDA brokerage log into a structured summary dict.
+
+    Reads the funnel summary table at the bottom of the log and the per-site
+    ``skip site=…`` lines in the body. Returns a dict with:
+
+    - ``initial_candidates`` / ``final_candidates`` (int | None)
+    - ``stages`` — list of {name, before, after, cut_pct, criteria_seen} in
+      execution order (the summary table is already in execution order).
+    - ``terminal_filter`` / ``terminal_cut_pct`` — last stage in execution order
+      (= the stage that brought candidates to ``final_candidates``).
+    - ``sites_of_interest`` — echoed input list.
+    - ``sites_of_interest_fates`` — for each input site that has a matching
+      skip line in the log: {site, filtered_at, criteria, reason}.
+
+    Returns ``None`` when no ``===== Job brokerage summary =====`` section is
+    found in the log; the caller should fall back to the raw log only.
+
+    The function never raises and is safe to call on arbitrary text.
+    """
+    if not log_text or not _BROKERAGE_SUMMARY_HEADER_RE.search(log_text):
+        return None
+    sites_of_interest = list(sites_of_interest or [])
+
+    lines = log_text.splitlines()
+
+    # Locate the summary section: header line index.
+    summary_start = next(
+        (i for i, line in enumerate(lines) if _BROKERAGE_SUMMARY_HEADER_RE.search(line)),
+        None,
+    )
+    if summary_start is None:
+        return None
+    body_lines = lines[:summary_start]
+    summary_lines = lines[summary_start:]
+
+    # Parse summary entries in their natural (execution) order.
+    stages: list[dict] = []
+    for line in summary_lines:
+        m = _BROKERAGE_SUMMARY_ENTRY_RE.search(line)
+        if m:
+            stages.append({
+                "name": m.group(4).strip(),
+                "before": int(m.group(1)),
+                "after": int(m.group(2)),
+                "cut_pct": int(float(m.group(3))),
+                "criteria_seen": [],
+            })
+    if not stages:
+        return None
+
+    initial_m = next(
+        (_BROKERAGE_INITIAL_RE.search(line) for line in lines
+         if _BROKERAGE_INITIAL_RE.search(line)),
+        None,
+    )
+    # Final candidate count: also appears in the summary header block as
+    # "the number of final candidates: N" or inferred from the last stage.
+    _FINAL_RE = re.compile(r"final\s+candidates?:\s*(\d+)", re.IGNORECASE)
+    final_m = next(
+        (_FINAL_RE.search(line) for line in summary_lines if _FINAL_RE.search(line)),
+        None,
+    )
+
+    # Map each candidate-count milestone to its line index in the body so we
+    # can slice the body into per-stage sections. This mirrors the approach in
+    # _brokerage_filter_impl.
+    n_to_idx: dict[int, int] = {}
+    for i, line in enumerate(body_lines):
+        m = _BROKERAGE_INITIAL_RE.search(line) or _BROKERAGE_PROGRESS_RE.search(line)
+        if m and int(m.group(1)) not in n_to_idx:
+            n_to_idx[int(m.group(1))] = i
+
+    # Walk skip lines once and attribute each to a stage. A skip line at body
+    # index `j` belongs to the stage whose body slice contains `j`.
+    seen_per_stage: dict[str, set[str]] = {s["name"]: set() for s in stages}
+    fates: list[dict] = []
+    for j, line in enumerate(body_lines):
+        m = _BROKERAGE_SKIP_DETAIL_RE.search(line)
+        if not m:
+            continue
+        # Find the stage owning this body index.
+        owning_stage: dict | None = None
+        for s in stages:
+            start = n_to_idx.get(s["before"], 0)
+            end = n_to_idx.get(s["after"], len(body_lines))
+            if start <= j <= end:
+                owning_stage = s
+                break
+        if owning_stage is None:
+            continue
+        criteria = m.group("criteria")
+        seen_per_stage[owning_stage["name"]].add(criteria)
+        site = m.group("site")
+        if site in sites_of_interest and not any(f["site"] == site for f in fates):
+            fates.append({
+                "site": site,
+                "filtered_at": owning_stage["name"],
+                "criteria": criteria,
+                "reason": m.group("reason").strip(),
+            })
+
+    for s in stages:
+        s["criteria_seen"] = sorted(seen_per_stage[s["name"]])
+
+    terminal = stages[-1]
+    return {
+        "initial_candidates": int(initial_m.group(1)) if initial_m else None,
+        "final_candidates": int(final_m.group(1)) if final_m else terminal["after"],
+        "stages": stages,
+        "terminal_filter": terminal["name"],
+        "terminal_cut_pct": terminal["cut_pct"],
+        "sites_of_interest": sites_of_interest,
+        "sites_of_interest_fates": fates,
+    }
 
 
 # ---------------------------------------------------------------------------

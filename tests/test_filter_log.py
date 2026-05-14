@@ -6,6 +6,7 @@ from bamboo.utils.log_filters import (
     filter_log,
     filter_log_auto,
     filter_prod_job_brokerage_log,
+    parse_brokerage_summary,
 )
 
 # ---------------------------------------------------------------------------
@@ -564,3 +565,89 @@ class TestReduction:
         assert len(result_lines) < len(all_lines) * 0.5
         assert "brokerage failed" in result
         assert "no candidates" in result
+
+
+class TestParseBrokerageSummary:
+    """Tests for parse_brokerage_summary() — structured extraction from a brokerage log."""
+
+    def test_returns_none_for_non_brokerage_log(self):
+        assert parse_brokerage_summary("just some random text") is None
+        assert parse_brokerage_summary("") is None
+
+    def test_returns_none_when_no_summary_section(self):
+        log = "initial 100 candidates\nskip site=X criteria=-foo\n"
+        assert parse_brokerage_summary(log) is None
+
+    def test_basic_fields(self):
+        result = parse_brokerage_summary(_BROKERAGE_LOG)
+        assert result is not None
+        assert result["initial_candidates"] == 100
+        assert result["final_candidates"] == 0
+        assert len(result["stages"]) == 4
+
+    def test_stages_in_execution_order(self):
+        result = parse_brokerage_summary(_BROKERAGE_LOG)
+        names = [s["name"] for s in result["stages"]]
+        assert names == [
+            "input data check",
+            "avoid VP queue check",
+            "memory check",
+            "final check",
+        ]
+
+    def test_terminal_filter_is_last_stage(self):
+        result = parse_brokerage_summary(_BROKERAGE_LOG)
+        assert result["terminal_filter"] == "final check"
+        assert result["terminal_cut_pct"] == 100
+
+    def test_criteria_seen_per_stage(self):
+        result = parse_brokerage_summary(_BROKERAGE_LOG)
+        stage_by_name = {s["name"]: s for s in result["stages"]}
+        # memory check should have both -highmemory and -lowmemory criteria
+        assert set(stage_by_name["memory check"]["criteria_seen"]) == {
+            "-highmemory",
+            "-lowmemory",
+        }
+        # final check should have -badsite from the problematic-site lines
+        assert "-badsite" in stage_by_name["final check"]["criteria_seen"]
+
+    def test_sites_of_interest_fate_memory_stage(self):
+        """Site rejected at memory check is mapped to that stage."""
+        result = parse_brokerage_summary(
+            _BROKERAGE_LOG, sites_of_interest=["SITE_LO1/SCORE"]
+        )
+        fates = result["sites_of_interest_fates"]
+        assert len(fates) == 1
+        assert fates[0]["site"] == "SITE_LO1/SCORE"
+        assert fates[0]["filtered_at"] == "memory check"
+        assert fates[0]["criteria"] == "-lowmemory"
+        assert "RAM" in fates[0]["reason"]
+
+    def test_sites_of_interest_fate_final_stage(self):
+        """Site rejected at final check (problematic-site stage) is mapped correctly."""
+        result = parse_brokerage_summary(
+            _BROKERAGE_LOG, sites_of_interest=["SITE_A/SCORE"]
+        )
+        fates = result["sites_of_interest_fates"]
+        assert len(fates) == 1
+        assert fates[0]["site"] == "SITE_A/SCORE"
+        assert fates[0]["filtered_at"] == "final check"
+        assert fates[0]["criteria"] == "-badsite"
+
+    def test_empty_sites_of_interest(self):
+        """Empty sites_of_interest yields empty fates without breaking the parser."""
+        result = parse_brokerage_summary(_BROKERAGE_LOG, sites_of_interest=[])
+        assert result["sites_of_interest"] == []
+        assert result["sites_of_interest_fates"] == []
+
+    def test_none_sites_of_interest_treated_as_empty(self):
+        result = parse_brokerage_summary(_BROKERAGE_LOG, sites_of_interest=None)
+        assert result["sites_of_interest"] == []
+        assert result["sites_of_interest_fates"] == []
+
+    def test_site_not_in_log_yields_no_fate(self):
+        result = parse_brokerage_summary(
+            _BROKERAGE_LOG, sites_of_interest=["SITE_NOT_PRESENT"]
+        )
+        assert result["sites_of_interest"] == ["SITE_NOT_PRESENT"]
+        assert result["sites_of_interest_fates"] == []
