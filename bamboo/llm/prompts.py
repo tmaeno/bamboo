@@ -878,9 +878,19 @@ Produce TWO outputs:
      literal Python values in the call args.
    - DO NOT invent new tools, new parameters, or speculative reasoning steps.
    - DO NOT add steps for data the procedure does not mention.
-   - Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
-   - Use sequential `await` ONLY when the procedure text explicitly requires it
-     (e.g. "find Y first, then look up its log").
+   - INDEPENDENT calls MUST run concurrently inside a single `asyncio.gather`:
+       a, b, c = await asyncio.gather(
+           tools.x(),
+           tools.y(),
+           tools.z(),
+       )
+     Do NOT issue them as separate sequential `await`s — that wastes
+     wall-clock time and can exceed the orchestration timeout.
+   - Sequential `await` is ONLY for when the procedure text explicitly
+     requires it (e.g. "find Y first, then look up its log").
+   - If a procedure mixes independent and dependent calls, group the
+     independent ones in one `asyncio.gather`, then sequentially `await`
+     the dependent ones.
    - Tools that accept task_data receive it automatically — do not pass task_data.
    - Check for empty / error results before passing them to downstream calls.
    - Return a dict mapping descriptive labels to fetched values.
@@ -1213,11 +1223,22 @@ Produce TWO outputs:
    Rules for the function body:
    - Call tools with `await tools.<tool_name>(arg=value)`.
    - Tools that accept task_data receive it automatically — do not pass task_data.
-   - Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
-   - Use sequential `await` when a downstream call needs the result of an upstream call:
+   - INDEPENDENT calls MUST run concurrently inside a single `asyncio.gather`:
+       a, b, c = await asyncio.gather(
+           tools.x(),
+           tools.y(),
+           tools.z(),
+       )
+     Do NOT issue them as separate sequential `await`s — that wastes
+     wall-clock time and can exceed the orchestration timeout.
+   - Sequential `await` is ONLY for dependent chains where a later call's
+     args use an earlier call's result:
        similar = await tools.find_similar_successful_tasks()
        if similar and not isinstance(similar, dict):
            logs = await tools.get_successful_job_logs(task_id=similar[0]["jediTaskID"])
+   - If you have a mix of independent and dependent calls, group the
+     independent ones in one `asyncio.gather`, then sequentially `await`
+     the dependent ones.
    - Check for empty / error results before passing them to downstream calls.
    - Return a dict mapping descriptive labels to fetched values:
        return {{"failed_job_log": failed, "successful_job_log": successful}}

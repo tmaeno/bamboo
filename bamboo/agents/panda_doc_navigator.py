@@ -84,19 +84,28 @@ _EXCLUDED_RST_PATHS: frozenset[str] = frozenset({
 
 _COLLECTION = "panda_docs"
 _META_FILE = Path(__file__).parent.parent / "data" / "panda_docs_meta.json"
+_NODE_CACHE_FILE = Path(__file__).parent.parent / "data" / "panda_docs_node_cache.json"
 
 
 
 def invalidate_doc_cache() -> bool:
-    """Delete the doc-index metadata, forcing a full rebuild on next use.
+    """Delete the doc-index metadata and per-node cache, forcing a full rebuild.
 
-    Returns ``True`` if the cache file existed and was deleted, ``False`` if it
-    was already absent.
+    Returns ``True`` if either file existed and was deleted, ``False`` if both
+    were already absent.
     """
-    if _META_FILE.exists():
-        _META_FILE.unlink()
-        return True
-    return False
+    removed = False
+    for path in (_META_FILE, _NODE_CACHE_FILE):
+        if path.exists():
+            path.unlink()
+            removed = True
+    return removed
+
+
+def _content_hash(text: str) -> str:
+    """Return a stable hex digest of node content for cache invalidation."""
+    import hashlib  # noqa: PLC0415
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +329,12 @@ class PandaDocNavigator:
         except (FileNotFoundError, json.JSONDecodeError):
             return None
 
-    def _write_meta(self, sha: str, system_summary: str = "") -> None:
+    def _write_meta(
+        self,
+        sha: str,
+        system_summary: str = "",
+        file_shas: dict[str, str] | None = None,
+    ) -> None:
         from datetime import datetime, timezone  # noqa: PLC0415
         _META_FILE.parent.mkdir(parents=True, exist_ok=True)
         meta: dict = {
@@ -329,7 +343,23 @@ class PandaDocNavigator:
         }
         if system_summary:
             meta["system_summary"] = system_summary
+        if file_shas:
+            meta["file_shas"] = file_shas
         _META_FILE.write_text(json.dumps(meta))
+
+    def _read_node_cache(self) -> dict[str, dict]:
+        """Return the per-node summary cache, or {} on any error.
+
+        Schema: ``{node_id: {"content_hash": str, "summary": str, "title": str}}``.
+        """
+        try:
+            return json.loads(_NODE_CACHE_FILE.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _write_node_cache(self, cache: dict[str, dict]) -> None:
+        _NODE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _NODE_CACHE_FILE.write_text(json.dumps(cache))
 
     def get_system_summary(self) -> str:
         """Return the pre-generated PanDA system knowledge summary, or empty string."""
@@ -429,50 +459,135 @@ class PandaDocNavigator:
     # ------------------------------------------------------------------
 
     async def _build_index(self) -> None:
+        """Build or incrementally update the doc index.
+
+        Strategy: compare per-file blob SHAs against the stored ``file_shas`` in
+        ``panda_docs_meta.json``. Only re-fetch / re-parse / re-summarise /
+        re-embed files whose blob SHA changed (or are new). Drop Qdrant points
+        for files that were deleted. For first-run or legacy meta the diff is
+        empty, so this collapses to the full rebuild seen historically.
+        """
         say("Building PanDA doc index — this may take a few minutes")
         logger.info("PandaDocNavigator: building doc index — this may take a few minutes")
 
         with thinking("Fetching PanDA doc file list"):
-            rst_paths, tree_sha = await self._fetch_rst_paths()
+            rst_paths, tree_sha, file_shas = await self._fetch_rst_paths()
         if not rst_paths:
             logger.warning("PandaDocNavigator: no RST paths found — aborting build")
             return
         say(f"Discovered {len(rst_paths)} RST paths")
 
-        with thinking(f"Downloading {len(rst_paths)} HTML pages"):
-            html_pages = await self._fetch_html_pages(rst_paths)
-        say(f"Fetched {len(html_pages)}/{len(rst_paths)} pages")
+        # ── File-level diff against stored meta ─────────────────────────────
+        old_meta = self._read_meta() or {}
+        old_file_shas: dict[str, str] = old_meta.get("file_shas") or {}
+        current_paths_set = set(rst_paths)
+        changed_or_new = [
+            p for p in rst_paths
+            if file_shas.get(p) and file_shas[p] != old_file_shas.get(p)
+        ]
+        deleted = [p for p in old_file_shas if p not in current_paths_set]
+        unchanged_count = len(rst_paths) - len(changed_or_new)
 
-        from bs4 import BeautifulSoup  # noqa: PLC0415 — lazy import
-        all_nodes: list[DocNode] = []
-        for rst_path, html in html_pages.items():
-            all_nodes.extend(self._parse_page_to_nodes(rst_path, html, BeautifulSoup))
+        incremental = bool(old_file_shas) and (changed_or_new or deleted) and (
+            unchanged_count > 0
+        )
+        if old_file_shas and not changed_or_new and not deleted:
+            # All files unchanged but tree SHA differed (e.g. non-RST commit) —
+            # still cheap to walk through, but skip all heavy work.
+            say("No RST file content changed; refreshing meta only.")
+            await self._load_graph_from_qdrant()
+            if tree_sha:
+                self._write_meta(
+                    tree_sha,
+                    system_summary=old_meta.get("system_summary", ""),
+                    file_shas=file_shas,
+                )
+            return
 
-        logger.info("PandaDocNavigator: parsed %d nodes across %d pages", len(all_nodes), len(html_pages))
-        say(f"Parsed {len(all_nodes)} nodes across {len(html_pages)} pages")
+        if incremental:
+            say(
+                f"Incremental rebuild: {len(changed_or_new)} changed/new, "
+                f"{len(deleted)} deleted, {unchanged_count} unchanged."
+            )
+        else:
+            say(f"Full rebuild: {len(rst_paths)} pages.")
 
-        with counting(f"Summarising {len(all_nodes)} nodes", total=len(all_nodes)) as advance:
-            await self._summarize_nodes(all_nodes, advance_fn=advance)
-        say(f"Summarised {len(all_nodes)} nodes")
+        paths_to_process = changed_or_new if incremental else rst_paths
 
-        with thinking("Embedding and indexing nodes"):
-            await self._embed_and_upsert(all_nodes)
+        # ── Hydrate in-memory graph for unchanged files (incremental only) ──
+        if incremental:
+            await self._load_graph_from_qdrant()
+            # Drop kept-in-memory nodes for files we're about to re-parse —
+            # they'll be replaced. Identified by URL prefix.
+            stale_page_urls = [
+                _rst_path_to_html_url(p) for p in (changed_or_new + deleted)
+            ]
+            self._graph = {
+                nid: n for nid, n in self._graph.items()
+                if not any(n.url.startswith(u) for u in stale_page_urls)
+            }
+        else:
+            self._graph = {}
 
-        self._graph = {n.id: n for n in all_nodes}
-        self._page_ids = [n.id for n in all_nodes if n.level == 0]
+        # ── Fetch + parse the files we need to re-process ───────────────────
+        new_nodes: list[DocNode] = []
+        if paths_to_process:
+            with thinking(f"Downloading {len(paths_to_process)} HTML page(s)"):
+                html_pages = await self._fetch_html_pages(paths_to_process)
+            say(f"Fetched {len(html_pages)}/{len(paths_to_process)} pages")
 
-        system_summary = await self._generate_system_summary(all_nodes)
+            from bs4 import BeautifulSoup  # noqa: PLC0415 — lazy import
+            for rst_path, html in html_pages.items():
+                new_nodes.extend(self._parse_page_to_nodes(rst_path, html, BeautifulSoup))
+
+            logger.info(
+                "PandaDocNavigator: parsed %d nodes across %d pages",
+                len(new_nodes), len(html_pages),
+            )
+            say(f"Parsed {len(new_nodes)} nodes across {len(html_pages)} pages")
+
+            with counting(f"Summarising {len(new_nodes)} nodes", total=len(new_nodes)) as advance:
+                await self._summarize_nodes(new_nodes, advance_fn=advance)
+
+            with thinking("Embedding and indexing nodes"):
+                await self._embed_and_upsert(new_nodes)
+
+        # ── Drop Qdrant points for files that no longer exist or changed ────
+        if incremental:
+            stale_urls = [
+                _rst_path_to_html_url(p) for p in (changed_or_new + deleted)
+            ]
+            await self._delete_qdrant_points_by_urls(stale_urls)
+            # Re-upserted new_nodes (above) repopulate the changed_or_new pages.
+
+        # ── Merge new nodes into the in-memory graph ────────────────────────
+        for node in new_nodes:
+            self._graph[node.id] = node
+        self._page_ids = [nid for nid, n in self._graph.items() if n.level == 0]
+
+        all_nodes_for_summary = list(self._graph.values())
+        system_summary = await self._generate_system_summary(all_nodes_for_summary)
 
         if tree_sha:
-            self._write_meta(tree_sha, system_summary=system_summary)
+            self._write_meta(
+                tree_sha,
+                system_summary=system_summary,
+                file_shas=file_shas,
+            )
 
         logger.info(
             "PandaDocNavigator: index ready — %d nodes, %d pages",
-            len(all_nodes), len(self._page_ids),
+            len(self._graph), len(self._page_ids),
         )
-        say(f"Doc index ready — {len(all_nodes)} nodes, {len(self._page_ids)} pages")
+        say(f"Doc index ready — {len(self._graph)} nodes, {len(self._page_ids)} pages")
 
-    async def _fetch_rst_paths(self) -> tuple[list[str], str | None]:
+    async def _fetch_rst_paths(self) -> tuple[list[str], str | None, dict[str, str]]:
+        """Return (rst_paths, tree_sha, file_shas).
+
+        ``file_shas`` maps each RST path to its GitHub blob SHA, captured from the
+        same recursive tree listing — no extra HTTP call. Used by the incremental
+        rebuild path to detect which files actually changed.
+        """
         try:
             import httpx  # noqa: PLC0415
             async with httpx.AsyncClient(timeout=15) as client:
@@ -480,19 +595,25 @@ class PandaDocNavigator:
                 resp.raise_for_status()
                 data = resp.json()
             sha = data.get("sha")
-            rst_paths = [
-                item["path"]
-                for item in data.get("tree", [])
-                if item.get("type") == "blob"
-                and item.get("path", "").startswith("docs/source/")
-                and item["path"].endswith(".rst")
-                and item["path"] not in _EXCLUDED_RST_PATHS
-            ]
+            rst_paths: list[str] = []
+            file_shas: dict[str, str] = {}
+            for item in data.get("tree", []):
+                path = item.get("path", "")
+                if (
+                    item.get("type") == "blob"
+                    and path.startswith("docs/source/")
+                    and path.endswith(".rst")
+                    and path not in _EXCLUDED_RST_PATHS
+                ):
+                    rst_paths.append(path)
+                    blob_sha = item.get("sha")
+                    if blob_sha:
+                        file_shas[path] = blob_sha
             logger.info("PandaDocNavigator: discovered %d RST paths", len(rst_paths))
-            return rst_paths, sha
+            return rst_paths, sha, file_shas
         except Exception as exc:
             logger.warning("PandaDocNavigator: failed to fetch RST paths: %s", exc)
-            return [], None
+            return [], None, {}
 
     async def _fetch_html_pages(self, rst_paths: list[str]) -> dict[str, str]:
         import httpx  # noqa: PLC0415
@@ -609,8 +730,13 @@ class PandaDocNavigator:
         return nodes
 
     async def _summarize_nodes(self, nodes: list[DocNode], advance_fn=None) -> None:
+        """LLM-summarise every node, with a content-hash cache to avoid recomputing
+        summaries for nodes whose content is unchanged across rebuilds.
+        """
         semaphore = asyncio.Semaphore(10)
         _node_map: dict[str, DocNode] = {n.id: n for n in nodes}
+        node_cache = self._read_node_cache()
+        cache_hits = 0
 
         def _root_title(node: DocNode) -> str:
             current = node
@@ -622,6 +748,7 @@ class PandaDocNavigator:
             return current.title
 
         async def _one(node: DocNode) -> None:
+            nonlocal cache_hits
             try:
                 page_title = _root_title(node)
                 if not node.content.strip():
@@ -632,6 +759,16 @@ class PandaDocNavigator:
                         if any(kw in page_lc for kw in _CONCEPT_PAGE_KEYWORDS)
                         else "other"
                     )
+                    return
+                # Cache lookup: same node id + same content hash → reuse summary.
+                h = _content_hash(node.content)
+                cached = node_cache.get(node.id)
+                if cached and cached.get("content_hash") == h and cached.get("summary"):
+                    node.summary = cached["summary"]
+                    node.doc_type = cached.get("doc_type", "other")
+                    if node.doc_type not in ("concept", "other"):
+                        node.doc_type = "other"
+                    cache_hits += 1
                     return
                 prompt = _SUMMARIZE_PROMPT.format(
                     page_title=page_title,
@@ -651,6 +788,12 @@ class PandaDocNavigator:
                         node.doc_type = parsed.get("doc_type", "other")
                         if node.doc_type not in ("concept", "other"):
                             node.doc_type = "other"
+                        node_cache[node.id] = {
+                            "content_hash": h,
+                            "summary": node.summary,
+                            "doc_type": node.doc_type,
+                            "title": node.title,
+                        }
                     except (json.JSONDecodeError, AttributeError):
                         raise
                     except Exception as exc:
@@ -664,24 +807,41 @@ class PandaDocNavigator:
                     advance_fn()
 
         await asyncio.gather(*[_one(n) for n in nodes])
-        logger.info("PandaDocNavigator: summarized %d nodes", len(nodes))
+        self._write_node_cache(node_cache)
+        logger.info(
+            "PandaDocNavigator: summarized %d nodes (%d cache hits, %d LLM calls)",
+            len(nodes), cache_hits, len(nodes) - cache_hits,
+        )
+        if nodes:
+            say(
+                f"Summarised {len(nodes)} nodes "
+                f"(cache: {cache_hits}/{len(nodes)} hits)"
+            )
 
     async def _embed_and_upsert(self, nodes: list[DocNode]) -> None:
+        """Embed *nodes* and upsert them into Qdrant.
+
+        Does NOT recreate the collection on every call — only creates it when
+        absent. Node ids are stable (UUID5 of url) so upsert overwrites in place
+        for nodes whose content changed. Stale points from removed pages are
+        cleaned up by :meth:`_delete_qdrant_points_by_urls`.
+        """
+        if not nodes:
+            return
         from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: PLC0415
 
         client = self._make_qdrant_client()
         try:
             collections = await client.get_collections()
             existing = {c.name for c in collections.collections}
-            if _COLLECTION in existing:
-                await client.delete_collection(_COLLECTION)
-            await client.create_collection(
-                collection_name=_COLLECTION,
-                vectors_config=VectorParams(
-                    size=self._settings.embedding_dimension,
-                    distance=Distance.COSINE,
-                ),
-            )
+            if _COLLECTION not in existing:
+                await client.create_collection(
+                    collection_name=_COLLECTION,
+                    vectors_config=VectorParams(
+                        size=self._settings.embedding_dimension,
+                        distance=Distance.COSINE,
+                    ),
+                )
 
             texts = [f"{n.title} {n.summary}" for n in nodes]
             embeddings = await asyncio.to_thread(_embed_documents_silently, self._embeddings, texts)
@@ -710,6 +870,50 @@ class PandaDocNavigator:
                 await client.upsert(collection_name=_COLLECTION, points=points[i:i + batch])
 
             logger.info("PandaDocNavigator: upserted %d vectors to Qdrant", len(points))
+        finally:
+            await client.close()
+
+    async def _delete_qdrant_points_by_urls(self, page_urls: list[str]) -> None:
+        """Delete all Qdrant points whose payload ``url`` starts with one of
+        *page_urls*. Used during incremental rebuild to drop nodes belonging to
+        files that were removed or whose section structure changed.
+
+        Fail-open: any error is logged and ignored.
+        """
+        if not page_urls:
+            return
+        from qdrant_client.models import (  # noqa: PLC0415
+            FieldCondition,
+            Filter,
+            FilterSelector,
+            MatchText,
+        )
+
+        client = self._make_qdrant_client()
+        try:
+            collections = await client.get_collections()
+            if _COLLECTION not in {c.name for c in collections.collections}:
+                return
+            for page_url in page_urls:
+                try:
+                    await client.delete(
+                        collection_name=_COLLECTION,
+                        points_selector=FilterSelector(
+                            filter=Filter(
+                                must=[
+                                    FieldCondition(
+                                        key="url",
+                                        match=MatchText(text=page_url),
+                                    ),
+                                ],
+                            ),
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "PandaDocNavigator: delete-by-url failed for %s: %s",
+                        page_url, exc,
+                    )
         finally:
             await client.close()
 

@@ -421,9 +421,9 @@ class ContextEnricher:
             logger.warning("ContextEnricher: orchestration code has syntax error: %s", exc)
             return {}
         try:
-            result = await asyncio.wait_for(namespace["_fn"](proxy, asyncio), timeout=120)
+            result = await asyncio.wait_for(namespace["_fn"](proxy, asyncio), timeout=600)
         except asyncio.TimeoutError:
-            logger.warning("ContextEnricher: orchestration code timed out after 120 s")
+            logger.warning("ContextEnricher: orchestration code timed out after 600 s")
             return {}
         except Exception as exc:
             logger.warning("ContextEnricher: orchestration code raised: %s", exc)
