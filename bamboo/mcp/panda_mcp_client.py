@@ -551,10 +551,13 @@ class PandaMcpClient(McpClient):
                 description=(
                     "Finds recently finished tasks similar to the current failing task by "
                     "matching userName, processingType, software release (transUses/transHome), "
-                    "and architecture.  Use this when all jobs failed and you want a reference "
-                    "successful task to compare logs against.  Returns a ranked list of "
-                    "candidate task dicts; pass the jediTaskID of the best match to "
-                    "get_successful_job_logs."
+                    "and architecture.  Useful for differential diagnosis when the failure's "
+                    "root cause is ambiguous from the failing task alone (could be code crash, "
+                    "config error, transient infrastructure issue, etc.) — a similar successful "
+                    "task confirms the workflow itself works and isolates the failure to this "
+                    "task's specific inputs or environment.  Returns a ranked list of candidate "
+                    "task dicts; pass the jediTaskID of the best match to get_successful_job_logs "
+                    "to fetch its payload.stdout for comparison."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -576,9 +579,11 @@ class PandaMcpClient(McpClient):
             McpTool(
                 name="get_failed_job_logs",
                 description=(
-                    "Downloads payload.stdout for one representative failed job of the "
-                    "current task.  Use alongside get_successful_job_logs to compare job "
-                    "output and identify where execution diverged from a successful run."
+                    "Downloads payload.stdout from one representative failed job of the "
+                    "current task — the primary tool for inspecting crash output, error "
+                    "messages, stack traces, and other diagnostic content from a failure. "
+                    "No reference task required. Optionally pair with get_successful_job_logs "
+                    "to compare against a reference run when divergence analysis is needed."
                 ),
                 parameters_schema={
                     "type": "object",

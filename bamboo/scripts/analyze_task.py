@@ -311,7 +311,6 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             sys.exit(1)
 
     from bamboo.agents.email_drafter import EmailDrafter
-    from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.agents.context_enricher import ContextEnricher
     from bamboo.agents.extractors import get_extraction_strategy
     from bamboo.agents.prescription_composer import PrescriptionComposer
@@ -327,7 +326,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
 
         settings = get_settings()
         _mcp = build_mcp_client(settings)
-        explorer = ContextEnricher(_mcp, planner=ExplorationPlanner(_mcp), source_navigator=get_extraction_strategy().source_navigator())
+        explorer = ContextEnricher(_mcp, source_navigator=get_extraction_strategy().source_navigator())
         agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
 
         debug_trace: dict | None = {} if debug_report else None

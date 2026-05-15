@@ -652,9 +652,11 @@ class ReasoningNavigator:
         """Plan and execute an exploratory investigation for a low-confidence incident.
 
         Called when the initial root-cause synthesis confidence falls below
-        :data:`EXPLORATORY_INVESTIGATION_THRESHOLD`.  Uses the planner to generate
-        a targeted plan from partial DB evidence and novel symptom leads, then
-        executes it via the explorer.
+        :data:`EXPLORATORY_INVESTIGATION_THRESHOLD`.  Delegates to
+        :meth:`ContextEnricher.explore` which uses the orchestration-code path —
+        the LLM produces Python that natively handles dependent tool chains and
+        also emits ``capability_gaps`` for investigation directions no tool
+        addresses.
 
         Args:
             extracted_clues:       Clue dict from :meth:`_extract_clues_from_graph`.
@@ -663,54 +665,52 @@ class ReasoningNavigator:
             partial_vector_results: Similar past cases from the vector DB (may be empty).
             unmatched_symptoms:    Symptoms with no graph DB precedent.
             initial_result:        Dict from the initial :meth:`_identify_root_cause` call.
-            domain_hints:          Domain documentation string.
+            doc_hints:             Doc-hint dict passed through to the planner.
 
         Returns:
             ``(exploration_result, capability_gaps)`` — the MCP tool results and the
             list of investigation directions that no available tool could address.
-            Returns ``(None, [])`` when no explorer or planner is configured.
+            Returns ``(None, [])`` when no explorer is configured.
         """
-        if self._explorer is None or self._explorer.planner is None:
+        if self._explorer is None:
             logger.info(
                 "ReasoningNavigator: exploratory investigation skipped — "
-                "no explorer or planner configured"
+                "no explorer configured"
             )
             return None, []
 
-        tools = self._explorer.available_tools()
-        if not tools:
-            logger.info("ReasoningNavigator: exploratory investigation skipped — no tools available")
-            return None, []
-
-        plan = await self._explorer.planner.plan_investigation(
-            task_data=task_data,
-            extracted_clues=extracted_clues,
-            partial_graph_results=partial_graph_results,
-            partial_vector_results=partial_vector_results,
-            unmatched_symptoms=unmatched_symptoms,
-            initial_result=initial_result,
-            tools=tools,
-            doc_hints=doc_hints,
-        )
-
-        if plan is None:
-            return None, []
-
-        capability_gaps = plan.capability_gaps
-
-        if not plan.steps:
-            logger.info(
-                "ReasoningNavigator: exploratory plan has no executable steps "
-                "(%d capability gap(s) identified)",
-                len(capability_gaps),
+        # Build review_issues from the partial evidence and novel leads so the
+        # planner's gap-analysis phase has concrete prompts. Each entry frames a
+        # hypothesis or novel-symptom to investigate.
+        review_issues: list[str] = []
+        initial_cause = initial_result.get("root_cause") if isinstance(initial_result, dict) else None
+        initial_conf = initial_result.get("confidence") if isinstance(initial_result, dict) else None
+        if initial_cause:
+            review_issues.append(
+                f"Initial root cause hypothesis (confidence {initial_conf}): "
+                f"{initial_cause} — fetch evidence to confirm or refute."
             )
-            return None, capability_gaps
+        for cand in (partial_graph_results or [])[:3]:
+            name = cand.get("cause_name") if isinstance(cand, dict) else None
+            if name:
+                review_issues.append(
+                    f"Candidate cause from graph DB: {name} — fetch evidence to "
+                    "confirm or refute against this task."
+                )
+        for sym in (unmatched_symptoms or [])[:5]:
+            review_issues.append(
+                f"Novel symptom with no graph DB precedent: {sym} — fetch evidence "
+                "to characterise it."
+            )
 
-        say(
-            f"Exploratory investigation: executing {len(plan.steps)} step(s) "
-            f"({plan.total_tool_calls} tool call(s))..."
+        if not review_issues:
+            logger.info("ReasoningNavigator: no hypotheses or novel leads to investigate")
+            return None, []
+
+        say("Exploratory investigation: planning via orchestration-code path...")
+        exploration_result = await self._explorer.explore(
+            task_data, review_issues, doc_hints=doc_hints
         )
-        exploration_result = await self._explorer.explore(task_data, [], plan=plan)
 
         note = (
             f"Exploratory investigation ran {len(exploration_result.tool_calls)} tool call(s)."
@@ -719,7 +719,7 @@ class ReasoningNavigator:
         )
         logger.info("ReasoningNavigator: %s", note)
 
-        return exploration_result, capability_gaps
+        return exploration_result, exploration_result.capability_gaps
 
     async def _run_investigation(
         self,

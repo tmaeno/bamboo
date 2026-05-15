@@ -853,160 +853,57 @@ Output a JSON array only — no markdown, no explanation outside the JSON:
 ]
 """
 
-EXPLORATION_PLAN_PROMPT = """You are a diagnostic data-collection planner for a PanDA computing task.
+PROCEDURE_ORCHESTRATION_CODE_PROMPT = """You are writing orchestration logic for executing historical PanDA investigation procedures.
 
-You have identified these specific information gaps that need to be filled:
+Each gap below is a HISTORICAL PROCEDURE instruction from a prior incident
+(e.g. "Investigate 'X': curl_check. Historical parameters: [...]").
 
-GAPS TO RESOLVE:
+PROCEDURES TO EXECUTE:
 {gaps}
 
-TASK CONTEXT (key fields only):
+TASK CONTEXT:
 {task_summary}
 
-DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
-{domain_hints}
-
-AVAILABLE TOOLS:
+AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
 {tools_description}
 
-Your job: design an ordered execution plan of tool-call groups (steps).
+Produce TWO outputs:
 
-Step design rules:
-- Tools within one step run CONCURRENTLY — only group tools that are fully INDEPENDENT
-  of each other (neither's usefulness depends on the other's result).
-- If tool B would be most useful after tool A's results are available in the next
-  extraction pass, put B in a LATER step.
-- Each step must have a single "reason" string: what it fetches and which gap it closes.
-- Only select a tool if at least one gap directly implies that its data is needed.
-- A tool that requires a field that is absent or empty in the task context MUST NOT be
-  selected.
-- If no tool would help any gap, output an empty array.
+1) The body of this async Python function that executes the procedures verbatim:
+     async def orchestrate(tools, asyncio):
 
-Output a JSON array of steps only — no markdown, no explanation outside the JSON:
-[
-  {{
-    "reason": "<why this step is needed and which gap it addresses>",
-    "tool_calls": [
-      {{
-        "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
-        "args": {{ }}
-      }}
-    ]
-  }}
-]
-"""
+   Rules for the function body:
+   - For each procedure, choose the tool whose description matches what the
+     procedure asks to collect, and embed the historical parameter values as
+     literal Python values in the call args.
+   - DO NOT invent new tools, new parameters, or speculative reasoning steps.
+   - DO NOT add steps for data the procedure does not mention.
+   - Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
+   - Use sequential `await` ONLY when the procedure text explicitly requires it
+     (e.g. "find Y first, then look up its log").
+   - Tools that accept task_data receive it automatically — do not pass task_data.
+   - Check for empty / error results before passing them to downstream calls.
+   - Return a dict mapping descriptive labels to fetched values.
+   - Only call tools in AVAILABLE TOOLS. No imports, no open(), no exec().
 
-PROCEDURE_EXECUTION_PROMPT = """You are a diagnostic data-collection agent for a PanDA computing task.
+2) A list of capability gaps — procedures that no available tool can satisfy.
+   Each entry:
+     {{"investigation": "<the procedure that has no matching tool>",
+       "suggested_tool_capability": "<the capability a future tool would need>"}}
+   If every procedure has a matching tool, leave the list empty.
 
-You have been given an investigation procedure to execute.  Your only job is to
-select the tool(s) whose output directly serves the procedure.
+Return ONLY a single JSON object with these two keys (no markdown fences,
+no commentary). Use the JSON-escaped string form for `orchestration_code`
+(literal `\\n` for newlines):
 
-PROCEDURE:
-{gaps}
-
-TASK CONTEXT (key fields only):
-{task_summary}
-
-DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
-{domain_hints}
-
-AVAILABLE TOOLS:
-{tools_description}
-
-Selection rules:
-- Read each procedure instruction and find the tool whose description matches what
-  the instruction asks to collect.  Match on keywords: "scout jobs" → scout job tool,
-  "cpuConsumptionTime / wallTime / jobDuration" → tool that returns those fields,
-  "error logs" → log-fetching tool, etc.
-- Always prefer the most specific match.  A tool that explicitly mentions the same
-  metric or job type as the procedure is the right choice.
-- Do NOT add steps for data not mentioned in the procedure.
-- If genuinely no tool matches, output an empty array.
-
-Output a JSON array of steps only — no markdown, no explanation outside the JSON:
-[
-  {{
-    "reason": "<quote the procedure instruction this step executes>",
-    "tool_calls": [
-      {{
-        "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
-        "args": {{ }}
-      }}
-    ]
-  }}
-]
-"""
-
-INVESTIGATION_PLAN_PROMPT = """You are a diagnostic investigation planner for a PanDA computing task with no confirmed historical precedent.
-
-The initial root-cause analysis yielded low confidence.  Your job is to design a targeted
-investigation plan that either confirms a candidate hypothesis or uncovers a novel cause —
-and to flag any investigation directions that no available tool can address.
-
-TASK CONTEXT (key fields only):
-{task_summary}
-
-EXTRACTED CLUES (symptoms, features, environment, components observed in this task):
-{extracted_clues}
-
-CANDIDATE CAUSES from graph database (partial matches — treat as hypotheses to confirm or refute):
-{candidate_causes}
-
-SYMPTOMS WITH NO GRAPH DB MATCH (novel leads — no historical precedent found):
-{unmatched_symptoms}
-
-SIMILAR PAST CASES from vector database (narrative context — do not re-fetch this data):
-{similar_cases}
-
-INITIAL ANALYSIS (LLM synthesis before investigation):
-{initial_reasoning}
-
-DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
-{domain_hints}
-
-AVAILABLE TOOLS:
-{tools_description}
-
-Your task: design an ordered execution plan of tool-call groups (steps) that targets
-the hypotheses and novel leads above.
-
-Investigation strategy:
-- For each CANDIDATE CAUSE: design steps that fetch evidence to confirm or refute it.
-- For each UNMATCHED SYMPTOM: design steps to understand what could produce it.
-- Build on the INITIAL ANALYSIS reasoning — do not contradict it without evidence.
-- Use DOMAIN DOCUMENTATION to interpret what metrics and logs are relevant.
-
-Step design rules:
-- Tools within one step run CONCURRENTLY — only group tools that are fully INDEPENDENT.
-- If tool B needs tool A's result first, put B in a LATER step.
-- Only select a tool if the task context fields its args require are non-empty.
-- If no tool helps a hypothesis, omit the step — record it in capability_gaps instead.
-- If no tool helps anything, output steps as an empty array.
-
-Capability gaps: for each hypothesis or novel lead that NO available tool can investigate,
-record it so the tool ecosystem can be improved.
-
-Output a single JSON object only — no markdown, no explanation outside the JSON:
 {{
-  "steps": [
-    {{
-      "reason": "<which hypothesis or symptom this step targets and what it fetches>",
-      "tool_calls": [
-        {{
-          "tool": "<tool name exactly as listed in AVAILABLE TOOLS>",
-          "args": {{ }}
-        }}
-      ]
-    }}
-  ],
+  "orchestration_code": "    log = await tools.fetch_linked_log_files(urls=[...])\\n    return {{\\"log\\": log}}",
   "capability_gaps": [
-    {{
-      "investigation": "<what we would check to confirm/refute this hypothesis or symptom>",
-      "suggested_tool_capability": "<what a future tool would need to do to enable this investigation>"
-    }}
+    {{"investigation": "...", "suggested_tool_capability": "..."}}
   ]
 }}
 """
+
 
 JOB_DIAG_NORMALIZE_PROMPT = """You are an expert in distributed computing and data management systems.
 
@@ -1308,23 +1205,40 @@ TASK CONTEXT:
 AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
 {tools_description}
 
-Write the body of this async Python function to fetch the data needed to resolve the gaps:
-  async def orchestrate(tools, asyncio):
+Produce TWO outputs:
 
-Rules:
-- Call tools with `await tools.<tool_name>(arg=value)`.
-- Tools that accept task_data receive it automatically — do not pass task_data.
-- Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
-- Use sequential `await` when a downstream call needs the result of an upstream call:
-    similar = await tools.find_similar_successful_tasks()
-    if similar and not isinstance(similar, dict):
-        logs = await tools.get_successful_job_logs(task_id=similar[0]["jediTaskID"])
-- Check for empty / error results before passing them to downstream calls.
-- Return a dict mapping descriptive labels to fetched values:
-    return {{"failed_job_log": failed, "successful_job_log": successful}}
-- Only call tools listed in AVAILABLE TOOLS. Do not import anything. Do not use open() or exec().
+1) The body of this async Python function to fetch data needed to resolve the gaps:
+     async def orchestrate(tools, asyncio):
 
-Output only the function body (no `def` line, no markdown fences).
+   Rules for the function body:
+   - Call tools with `await tools.<tool_name>(arg=value)`.
+   - Tools that accept task_data receive it automatically — do not pass task_data.
+   - Run independent calls concurrently: `a, b = await asyncio.gather(tools.x(), tools.y())`
+   - Use sequential `await` when a downstream call needs the result of an upstream call:
+       similar = await tools.find_similar_successful_tasks()
+       if similar and not isinstance(similar, dict):
+           logs = await tools.get_successful_job_logs(task_id=similar[0]["jediTaskID"])
+   - Check for empty / error results before passing them to downstream calls.
+   - Return a dict mapping descriptive labels to fetched values:
+       return {{"failed_job_log": failed, "successful_job_log": successful}}
+   - Only call tools in AVAILABLE TOOLS. No imports, no open(), no exec().
+
+2) A list of capability gaps — investigation directions that no available tool
+   addresses. Each entry:
+     {{"investigation": "what we need to investigate",
+       "suggested_tool_capability": "the capability a future tool would need"}}
+   If every gap has a matching tool, leave the list empty.
+
+Return ONLY a single JSON object with these two keys (no markdown fences,
+no commentary). Use the JSON-escaped string form for `orchestration_code`
+(literal `\\n` for newlines):
+
+{{
+  "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    ...",
+  "capability_gaps": [
+    {{"investigation": "...", "suggested_tool_capability": "..."}}
+  ]
+}}
 """
 
 PANDA_SYSTEM_SUMMARY_PROMPT = """You are reviewing PanDA ATLAS computing system

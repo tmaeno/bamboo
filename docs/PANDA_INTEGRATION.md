@@ -51,13 +51,12 @@ async def main():
 
     from bamboo.agents.knowledge_reviewer import KnowledgeReviewer
     from bamboo.agents.context_enricher import ContextEnricher
-    from bamboo.agents.exploration_planner import ExplorationPlanner
     from bamboo.mcp.factory import build_mcp_client
     from bamboo.config import get_settings
 
     _mcp = build_mcp_client(get_settings())
     reviewer = KnowledgeReviewer()
-    explorer = ContextEnricher(_mcp, planner=ExplorationPlanner(_mcp))
+    explorer = ContextEnricher(_mcp)
     agent = KnowledgeAccumulator(graph_db, vector_db, reviewer=reviewer, explorer=explorer)
     result = await agent.process_knowledge(task_data=task_data)
     print(result.summary)

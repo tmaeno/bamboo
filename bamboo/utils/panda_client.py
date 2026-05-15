@@ -26,6 +26,11 @@ from datetime import datetime, timedelta
 from typing import Any
 from bamboo.utils.narrator import thinking
 
+import warnings
+from urllib3.exceptions import InsecureRequestWarning
+
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
+
 logger = logging.getLogger(__name__)
 
 # Matches <a href="URL">...</a> in HTML fragments (e.g. errorDialog values).
@@ -274,6 +279,7 @@ async def get_similar_successful_tasks(
         for k, v in {
             "status": "finished|done",
             "userName": task_data.get("userName"),
+            "prodSourceLabel": task_data.get("prodSourceLabel"),
             "processingType": task_data.get("processingType"),
             "transUses": task_data.get("transUses"),
             "transHome": task_data.get("transHome"),
@@ -288,7 +294,7 @@ async def get_similar_successful_tasks(
         )
         tasks = data if isinstance(data, list) else []
         return sorted(
-            tasks, key=lambda t: t.get("modificationTime", ""), reverse=True
+            tasks, key=lambda t: str(t.get("modificationTime", "")), reverse=True
         )
     except RuntimeError as exc:
         logger.warning("get_similar_successful_tasks: failed: %s", exc)

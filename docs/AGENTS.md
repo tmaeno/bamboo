@@ -24,7 +24,9 @@ includes an optional quality-gate loop.
 │                         ├─ KnowledgeReviewer                     │
 │                         │                                        │
 │                         └─ ContextEnricher                       │
-│                                ├─ ExplorationPlanner             │
+│                                ├─ gap analysis (LLM call 1)      │
+│                                ├─ orchestration code (LLM call 2)│
+│                                ├─ sandboxed code execution       │
 │                                ├─ source_navigator()             │
 │                                └─ MCP client layer               │
 │                                     ├─ builtin clients (strategy)│
@@ -43,11 +45,10 @@ includes an optional quality-gate loop.
 │                    │            └─ extract()                         │
 │                    │                                                 │
 │                    ├─ Exploratory investigation  (low-confidence)    │
-│                    │      └─ ExplorationPlanner.plan_investigation() │
-│                    │             └─ ContextEnricher                  │
+│                    │      └─ ContextEnricher (exploratory mode)      │
 │                    │                                                 │
 │                    └─ Procedure-driven investigation  (Phase 2)      │
-│                           └─ ContextEnricher                         │
+│                           └─ ContextEnricher (procedure mode)        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,10 +57,10 @@ The **review–explore loop** inside `KnowledgeAccumulator` always runs:
 ```
 extract → KnowledgeReviewer
               │ approved          → store
-              │ rejected (pass 0) → ExplorationPlanner
-              │                          │ plan OK  → ContextEnricher (step-by-step)
-              │                          │ plan None → ContextEnricher (single-wave fallback)
-              │                     → re-extract → KnowledgeReviewer
+              │ rejected (pass 0) → ContextEnricher
+              │                          │ code+gaps OK → execute code → re-extract
+              │                          │ code None    → _select_tools fallback → re-extract
+              │                     → KnowledgeReviewer
               │ rejected (pass N) → store best result (with warning)
 ```
 
@@ -150,80 +151,75 @@ for the extractor on retry).
 
 ---
 
-### `ExplorationPlanner`  *(optional, two-phase)*
-
-**File:** `bamboo/agents/exploration_planner.py`
-
-Sits between `KnowledgeReviewer` and `ContextEnricher`.  Converts the reviewer's raw
-issue list into a structured `ExplorationPlan` via two sequential LLM calls, then hands
-the plan to the explorer for execution.
-
-**Phase 1 — Gap analysis** (`EXPLORATION_GAP_ANALYSIS_PROMPT`):  
-Given the reviewer issues and the available tool catalogue, produce a list of precise,
-tool-neutral gap descriptions — *what* specific information is missing and *why* it
-matters.  Tool names are intentionally excluded; this phase only identifies the holes.
-Output is shown as a `[planner: gap analysis]` panel in verbose mode.
-
-**Phase 2 — Step planning** (`EXPLORATION_PLAN_PROMPT`):  
-Map each resolvable gap to one or more MCP tool calls, grouped into sequential
-`PlanStep` objects.  Tools within a step are independent and run concurrently;
-steps run in order so a later step can rely on earlier steps having populated the
-extraction context.
-
-**Output:** `ExplorationPlan` — `gaps` (list of gap strings), `steps` (list of `PlanStep`),
-`capability_gaps` (list of investigation directions no available tool can address).
-Each `PlanStep` has a `reason` (human-readable) and `tool_calls` (list of tool + args dicts).
-`capability_gaps` is only populated by `plan_investigation()` (see below).
-
-**Fail-open:** any error in either phase causes `plan()` to return `None`, signalling the
-explorer to fall back to its single-LLM-call `_select_tools` path.
-
-**Exploratory investigation** (`plan_investigation()`):  
-A separate entry point used exclusively by `ReasoningNavigator` when initial root-cause
-confidence is below the threshold.  Unlike `plan()`, it does not require reviewer issues.
-It takes partial graph DB results (candidate causes to confirm/refute) and unmatched symptoms
-(novel leads with no historical precedent) as context, and produces an `ExplorationPlan` via a
-**single LLM call** (`INVESTIGATION_PLAN_PROMPT`).  The output `ExplorationPlan.capability_gaps`
-lists investigation directions that no available tool can address — these are surfaced in the
-final `AnalysisResult` to guide future tool development.  Fail-open: returns `None` on any error.
-
----
-
 ### `ContextEnricher`  *(fires once per run)*
 
 **File:** `bamboo/agents/context_enricher.py`
 
-Sits between the first reviewer rejection and the second extraction attempt.  Executes
-the `ExplorationPlan` produced by `ExplorationPlanner` (if available) or falls back to
-a single LLM call that selects tools directly.
+Combined planner + executor for MCP tool calls. Sits between the first reviewer
+rejection and the second extraction attempt in the accumulation pipeline, and
+also runs from `ReasoningNavigator` for low-confidence or procedure-driven
+investigation. Produces Python orchestration code rather than static tool-call
+JSON, so dependent tool chains (e.g.
+`find_similar_successful_tasks` → `get_successful_job_logs(task_id=…)`) are
+expressed natively.
 
-**Flow (plan-based, default):**
+**Two LLM calls per run:**
 
-1. `connect()` the MCP client.
-2. List available tools; pass them to `ExplorationPlanner.plan()`.
-3. Execute plan steps **sequentially**; tools within each step run concurrently via `asyncio.gather`.
-4. Log `[step N/M] <reason>` for each step in verbose mode.
-5. Merge all results into `task_logs` and `external_data` for the next extraction pass.
-6. `close()` the MCP client.
+**Call 1 — Gap analysis** (`EXPLORATION_GAP_ANALYSIS_PROMPT`):  
+Given reviewer issues (or, in procedure mode, historical procedure strings) plus
+the available tool catalogue, produce precise, tool-neutral gap descriptions —
+*what* specific information is missing and *why* it matters. Shown as a
+`[planner: gap analysis]` panel in verbose mode. **Skipped** when called with
+`skip_gap_analysis=True` (procedure-driven path); the issues themselves are
+treated as the gaps.
 
-**Fallback flow (no planner, or planner returns `None`):**
+**Call 2 — Orchestration-code generation**:  
+The LLM emits a JSON object with two fields: `orchestration_code` (the body of
+an async Python function that calls the tools) and `capability_gaps` (a list of
+investigation directions no available tool can address). The prompt template
+switches by `mode`:
 
-Steps 1–2 as above, then a single LLM call (`EXPLORER_TOOL_SELECTION_PROMPT`) selects
-all tools at once and they run concurrently in a single wave.
+| Mode | Prompt | Used when |
+|---|---|---|
+| `"exploratory"` *(default)* | `TOOL_ORCHESTRATION_CODE_PROMPT` | Reviewer-issue exploration; ReasoningNavigator low-confidence path |
+| `"procedure"` | `PROCEDURE_ORCHESTRATION_CODE_PROMPT` | Procedure-driven path (`skip_gap_analysis=True`); embeds historical parameters as literal values, forbids speculative tool calls |
 
-The explorer fires **at most once** per accumulation run (at `attempt == 0` only).
-Any individual tool failure is logged and skipped — the pipeline never stalls.
+**Sandboxed execution** (`_run_orchestration_code`):  
+The generated function body runs as `async def _fn(tools, asyncio)` in a
+restricted namespace exposing only a curated `_SAFE_BUILTINS`, `asyncio`, and
+a `ToolProxy` (which auto-injects `task_data` for tools that accept it). A
+120-second timeout guards against runaway code. Any syntax error, runtime
+exception, or timeout is logged and the call returns `{}` — fail-open.
 
-Results from unrecognised tools (e.g. from external MCP servers) are stored in
-`external_data` under `"tool:<name>"` and forwarded to the LLM extractor as additional context.
+**Returned data** (`ExplorationResult`):
 
-**Pre-built plan path:**  
-`explore()` also accepts an optional `plan` keyword argument.  When a pre-built
-`ExplorationPlan` is provided (e.g. from `ExplorationPlanner.plan_investigation()`), all
-planning phases are skipped and the plan steps are executed directly.  Used by
-`ReasoningNavigator._run_exploratory_investigation()`.
+- `task_logs` — log content keyed by source label
+- `external_data` — structured tool outputs; the orchestration return dict is
+  stored under `external_data["orchestration:<key>"]`
+- `tool_calls` — record of tools that ran (observability)
+- `capability_gaps` — investigation directions no available tool addresses;
+  each entry has `"investigation"` and `"suggested_tool_capability"`. Empty
+  when the LLM did not flag any gap.
 
-**Output:** `ExplorationResult` — `task_logs`, `external_data`, `tool_calls` (all calls across all steps, for observability).
+**Fallback (`_select_tools`):**  
+If `_generate_orchestration_code` returns `None` (parse error, empty code, or
+LLM exception), `explore()` falls back to a single LLM call
+(`EXPLORER_TOOL_SELECTION_PROMPT`) that picks a flat list of tools to call
+concurrently. No chaining; no capability_gaps. Used as a safety net only.
+
+**Hard-routed branches:**  
+The reviewer issue marker `"no investigation procedure captured"` is routed
+deterministically (in Python, before the planner runs) to the
+`request_human_input` tool — the LLM consistently mis-routed this kind of gap.
+
+**Operational notes:**
+
+- The MCP client is `connect()`-ed on entry and `close()`-d on exit.
+- The explorer fires **at most once** per accumulation run (at `attempt == 0`).
+- Any individual tool failure is logged and skipped — the pipeline never stalls.
+- Results from unrecognised tools (e.g. external MCP servers) are stored in
+  `external_data` under `"tool:<name>"` and forwarded to the LLM extractor as
+  additional unstructured context.
 
 ---
 
@@ -339,12 +335,18 @@ pipeline, then drafts a resolution email for the task submitter.
 4. **Initial LLM diagnosis** — synthesise graph evidence + semantic evidence into a root-cause
    statement with confidence score.  Always runs, even when graph or vector results are empty.
 5. **Exploratory investigation** *(if `confidence < EXPLORATORY_INVESTIGATION_THRESHOLD`,
-   default 0.5)* — `ExplorationPlanner.plan_investigation()` generates a targeted plan from
-   partial DB evidence and novel leads; `ContextEnricher` executes it via MCP tools.
-   Root-cause is re-synthesised with the gathered evidence.  Investigation directions that no
-   available tool can address are collected as `capability_gaps`.
+   default 0.5)* — synthesise review-issue strings from the initial root cause,
+   partial graph DB candidates, and novel unmatched symptoms; call
+   `ContextEnricher.explore()` in **exploratory mode**.  The enricher's
+   orchestration-code path picks tools and natively chains dependent calls;
+   root-cause is then re-synthesised with the gathered evidence.  Any
+   `capability_gaps` returned (investigation directions no tool addresses) are
+   surfaced in the final result.
 6. **Procedure-driven investigation** *(Phase 2, if a known cause was identified)* — query
-   graph DB for `ProcedureNode` entries linked to the cause; run via `ContextEnricher`.
+   graph DB for `ProcedureNode` entries linked to the cause; convert each procedure into a
+   review-issue string and call `ContextEnricher.explore(skip_gap_analysis=True)`, which
+   switches to **procedure mode** (historical parameters embedded as literals, no speculative
+   tool calls).
 7. **Email draft** — generate a professional resolution email for the task submitter.
 
 **Output:** `AnalysisResult` — `root_cause`, `confidence`, `resolution`, `explanation`,
@@ -379,10 +381,11 @@ continues with what it has rather than aborting.
 | Component | On failure |
 |---|---|
 | `KnowledgeReviewer` LLM call | Returns `approved=True`, logs exception |
-| `ExplorationPlanner.plan()` either LLM call | Returns `None` → explorer falls back to `_select_tools` |
-| `ExplorationPlanner.plan_investigation()` LLM call | Returns `None` → exploratory investigation skipped |
-| `ReasoningNavigator._run_exploratory_investigation()` (no planner) | Returns `(None, [])`, skips exploratory investigation silently |
-| `ContextEnricher` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
+| `ContextEnricher._analyse_gaps` LLM call | Returns `[]` → orchestration-code generation skipped, fall back to `_select_tools` |
+| `ContextEnricher._generate_orchestration_code` LLM call | Returns `None` → fall back to `_select_tools` |
+| `ContextEnricher._run_orchestration_code` (syntax / runtime / timeout) | Logs warning, returns `{}` — no tool results that round |
+| `ContextEnricher._select_tools` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
+| `ReasoningNavigator._run_exploratory_investigation()` (no explorer) | Returns `(None, [])`, skips exploratory investigation silently |
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; built-in tools still available |
 | `ExternalMcpClient` connect (`mcp` not installed) | Logs install hint, contributes zero tools |

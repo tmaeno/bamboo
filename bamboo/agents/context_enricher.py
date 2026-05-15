@@ -32,8 +32,14 @@ _SAFE_BUILTINS = {
     if hasattr(_builtins_module, name)
 }
 
-from bamboo.agents.knowledge_reviewer import _build_task_summary
-from bamboo.llm import EXPLORER_TOOL_SELECTION_PROMPT, get_extraction_llm
+from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints
+from bamboo.llm import (
+    EXPLORATION_GAP_ANALYSIS_PROMPT,
+    EXPLORER_TOOL_SELECTION_PROMPT,
+    PROCEDURE_ORCHESTRATION_CODE_PROMPT,
+    TOOL_ORCHESTRATION_CODE_PROMPT,
+    get_extraction_llm,
+)
 from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in type hints)
 from bamboo.utils.narrator import say, show_block, thinking
 
@@ -45,20 +51,25 @@ class ExplorationResult:
     """Data fetched by the explorer to augment the next extraction pass.
 
     Attributes:
-        task_logs:     New log content keyed by a stable source label
-                       (``"explorer:error_dialog:<url>"``).
-                       Merged into ``task_logs`` in ``process_knowledge()``.
-        external_data: Structured data returned by non-log tools.
-                       Keys: ``"parent_task"``, ``"retry_chain"``,
-                       ``"jobs_summary"``.
-                       Merged (shallow) into ``external_data``.
-        tool_calls:    Record of which tools were selected and why, for
-                       observability (logging / metadata).
+        task_logs:        New log content keyed by a stable source label
+                          (``"explorer:error_dialog:<url>"``).
+                          Merged into ``task_logs`` in ``process_knowledge()``.
+        external_data:    Structured data returned by non-log tools.
+                          Keys: ``"parent_task"``, ``"retry_chain"``,
+                          ``"jobs_summary"``.
+                          Merged (shallow) into ``external_data``.
+        tool_calls:       Record of which tools were selected and why, for
+                          observability (logging / metadata).
+        capability_gaps:  Investigation directions the planner identified that
+                          no available tool can address. Each entry has
+                          ``"investigation"`` and ``"suggested_tool_capability"``.
+                          Populated only when the orchestration-code path runs.
     """
 
     task_logs: dict[str, str] = field(default_factory=dict)
     external_data: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    capability_gaps: list[dict] = field(default_factory=list)
 
 
 class ToolProxy:
@@ -94,30 +105,34 @@ class ToolProxy:
 class ContextEnricher:
     """LLM-driven single-pass source explorer.
 
-    Given the reviewer's issues list and the current task data, either follows
-    an :class:`~bamboo.agents.exploration_planner.ExplorationPlan` (when a
-    planner is configured) or falls back to asking the LLM directly which tools
-    to call.  In both cases the selected tools are executed and their results
-    merged into an :class:`ExplorationResult`.
+    Given the reviewer's issues list and the current task data, the explorer:
+
+    1. Identifies information gaps from the issues (LLM call 1, exploratory path
+       only — procedure-driven path treats issues as gaps directly).
+    2. Generates Python orchestration code that calls the appropriate MCP tools,
+       plus a list of ``capability_gaps`` for investigations no tool can address
+       (LLM call 2).
+    3. Executes the code in a sandboxed namespace via
+       :meth:`_run_orchestration_code`.
+
+    The orchestration-code path supports dependent tool chains natively (e.g.
+    ``find_similar_successful_tasks`` → ``get_successful_job_logs(task_id=…)``).
+    Falls back to :meth:`_select_tools` (single-wave LLM-driven selection) if
+    code generation fails.
 
     Args:
-        mcp_client: The :class:`~bamboo.mcp.base.McpClient` that provides
-                    available tools and executes them.
-        planner:    Optional :class:`~bamboo.agents.exploration_planner.ExplorationPlanner`.
-                    When provided, the explorer uses its two-phase plan
-                    (gap analysis → sequential steps) instead of the single
-                    ``_select_tools`` LLM call.  Falls back to ``_select_tools``
-                    if the planner returns ``None``.
+        mcp_client:       The :class:`~bamboo.mcp.base.McpClient` that provides
+                          available tools and executes them.
+        source_navigator: Optional source-code navigator (used for the
+                          ``source_navigator`` virtual tool).
     """
 
     def __init__(
         self,
         mcp_client: McpClient,
-        planner=None,
         source_navigator=None,
     ) -> None:
         self._client = mcp_client
-        self._planner = planner
         self._source_navigator = source_navigator
         self._llm = None  # lazy — same pattern as KnowledgeAccumulator
 
@@ -126,11 +141,6 @@ class ContextEnricher:
         if self._llm is None:
             self._llm = get_extraction_llm()  # temperature=0, deterministic JSON
         return self._llm
-
-    @property
-    def planner(self):
-        """The configured :class:`~bamboo.agents.exploration_planner.ExplorationPlanner`, or ``None``."""
-        return self._planner
 
     def _filtered_tools(self) -> list[McpTool]:
         """Return tools from the client, excluding interactive tools when not on a tty."""
@@ -154,12 +164,12 @@ class ContextEnricher:
         review_issues: list[str],
         doc_hints: dict[str, str] | None = None,
         skip_gap_analysis: bool = False,
-        plan=None,
     ) -> ExplorationResult:
         """Single select-and-fetch pass.
 
         1. List available tools from the MCP client.
-        2. One LLM call to select which tools to invoke.
+        2. One LLM call to select which tools to invoke (or generate
+           orchestration code, or build a static plan, depending on path).
         3. Execute selected tools concurrently with ``asyncio.gather``.
         4. Merge results into an :class:`ExplorationResult`.
 
@@ -168,48 +178,22 @@ class ContextEnricher:
         internal error occurs (fail-open).
 
         Args:
-            task_data:     Structured task fields from PanDA.
-            review_issues: Issue strings from the previous
-                           :class:`~bamboo.agents.knowledge_reviewer.ReviewResult`.
-            plan:          Optional pre-built :class:`~bamboo.agents.exploration_planner.ExplorationPlan`.
-                           When provided, skips all planning phases and executes the
-                           plan steps directly.  ``review_issues`` is ignored.
+            task_data:         Structured task fields from PanDA.
+            review_issues:     Issue strings from the previous
+                               :class:`~bamboo.agents.knowledge_reviewer.ReviewResult`.
+            doc_hints:         Domain documentation passed to the planner.
+            skip_gap_analysis: When True, treats ``review_issues`` as concrete
+                               procedure instructions and uses the static
+                               plan path. Otherwise uses the orchestration-code
+                               path which natively supports dependent chains.
         """
-        if (not review_issues and plan is None) or not task_data:
+        if not review_issues or not task_data:
             return ExplorationResult()
 
         await self._client.connect()
         try:
             tools = self._filtered_tools()
             task_data_tool_names = self._client.task_data_tools()
-
-            # ── Pre-built plan: skip all planning, execute steps directly ──────────────
-            if plan is not None:
-                out = ExplorationResult()
-                if plan.steps:
-                    all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
-                    logger.info(
-                        "ContextEnricher: executing pre-built plan — %d step(s), %d tool call(s)",
-                        len(plan.steps),
-                        len(all_tool_calls),
-                    )
-                    out.tool_calls.extend(all_tool_calls)
-                    for i, step in enumerate(plan.steps, 1):
-                        say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
-                        coros = [
-                            self._tool_coro(tc, task_data, task_data_tool_names)
-                            for tc in step.tool_calls
-                        ]
-                        results = await asyncio.gather(*coros, return_exceptions=True)
-                        for tc, result in zip(step.tool_calls, results):
-                            if isinstance(result, BaseException):
-                                say(f"    {tc['tool']}: failed — {result}")
-                            else:
-                                say(f"    {tc['tool']}: done.")
-                                if isinstance(result, str) and result:
-                                    show_block(tc["tool"], result)
-                            self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
-                return out
 
             # ── Hard-route: "No investigation procedure captured" → request_human_input ──
             # Deterministic code routing — the LLM planner consistently mis-routes this
@@ -247,62 +231,29 @@ class ContextEnricher:
             if not other_issues:
                 return out
 
-            # ── Primary path: planner ────
-            if self._planner is not None:
-                if not skip_gap_analysis:
-                    # Exploratory path: LLM generates Python orchestration code
-                    # that handles sequential dependent tool calls natively.
-                    code = await self._planner.generate_orchestration_code(
-                        task_data, other_issues, tools, doc_hints=doc_hints
-                    )
-                    if code is not None:
-                        raw = await self._run_orchestration_code(
-                            code, task_data, task_data_tool_names
-                        )
-                        for key, value in raw.items():
-                            label = f"orchestration:{key}"
-                            out.external_data[label] = value
-                            if isinstance(value, str) and value:
-                                show_block(label, value[:2000])
-                        return out
-                    say("Explorer: code generation failed — falling back to direct tool selection.")
-                else:
-                    # Procedure-driven path: static JSON plan from procedure instructions.
-                    plan = await self._planner.plan(
-                        task_data, other_issues, tools,
-                        doc_hints=doc_hints, skip_gap_analysis=True,
-                    )
-                    if plan is not None and plan.steps:
-                        all_tool_calls = [tc for step in plan.steps for tc in step.tool_calls]
-                        logger.info(
-                            "ContextEnricher: executing plan — %d step(s), %d tool call(s)",
-                            len(plan.steps),
-                            len(all_tool_calls),
-                        )
-                        out.tool_calls.extend(all_tool_calls)
-                        for i, step in enumerate(plan.steps, 1):
-                            say(f"  [step {i}/{len(plan.steps)}] {step.reason}")
-                            coros = [
-                                self._tool_coro(tc, task_data, task_data_tool_names)
-                                for tc in step.tool_calls
-                            ]
-                            results = await asyncio.gather(*coros, return_exceptions=True)
-                            for tc, result in zip(step.tool_calls, results):
-                                if isinstance(result, BaseException):
-                                    say(f"    {tc['tool']}: failed — {result}")
-                                else:
-                                    say(f"    {tc['tool']}: done.")
-                                    if isinstance(result, str) and result:
-                                        show_block(tc["tool"], result)
-                                self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
-                        return out
-                    if plan is not None and not plan.steps:
-                        logger.info(
-                            "ContextEnricher: planner found no steps — falling back to _select_tools"
-                        )
-                        say("Explorer: planner found no steps — falling back to direct tool selection.")
+            # ── Primary path: orchestration code (handles both exploratory and
+            #     procedure-driven flows; the mode parameter switches prompts).
+            result = await self._generate_orchestration_code(
+                task_data, other_issues, tools,
+                doc_hints=doc_hints,
+                mode="procedure" if skip_gap_analysis else "exploratory",
+                skip_gap_analysis=skip_gap_analysis,
+            )
+            if result is not None:
+                code, capability_gaps = result
+                out.capability_gaps = capability_gaps
+                raw = await self._run_orchestration_code(
+                    code, task_data, task_data_tool_names
+                )
+                for key, value in raw.items():
+                    label = f"orchestration:{key}"
+                    out.external_data[label] = value
+                    if isinstance(value, str) and value:
+                        show_block(label, value[:2000])
+                return out
+            say("Explorer: code generation failed — falling back to direct tool selection.")
 
-            # ── Fallback: single-wave concurrent path (no planner / plan=None) ─
+            # ── Fallback: single-wave concurrent path ─
             tool_calls = await self._select_tools(task_data, other_issues, tools)
             if not tool_calls:
                 logger.info("ContextEnricher: LLM selected no tools — nothing to explore")
@@ -333,6 +284,115 @@ class ContextEnricher:
             return out
         finally:
             await self._client.close()
+
+    # ------------------------------------------------------------------
+    # Private: planning (gap analysis + orchestration-code generation)
+    # ------------------------------------------------------------------
+
+    async def _analyse_gaps(
+        self,
+        task_data: dict[str, Any],
+        review_issues: list[str],
+        tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
+    ) -> list[str]:
+        """LLM call 1: convert reviewer issues into structured gap descriptions.
+
+        Returns a list of plain-English gap strings (the ``"gap"`` field from
+        each JSON object), filtering to only those marked ``"resolvable": true``.
+        Returns ``[]`` on parse error.
+        """
+        task_summary = _build_task_summary(task_data)
+        tools_description = _build_tools_description(tools)
+        issues_text = "\n".join(f"- {i}" for i in review_issues)
+
+        prompt = EXPLORATION_GAP_ANALYSIS_PROMPT.format(
+            review_issues=issues_text,
+            task_summary=task_summary,
+            tools_description=tools_description,
+            domain_hints=_join_doc_hints(doc_hints),
+        )
+
+        say("Analysing information gaps...")
+        with thinking("Analysing gaps"):
+            response = await self.llm.ainvoke(prompt)
+
+        gaps = _parse_gaps(response.content)
+        if gaps:
+            show_block(
+                "planner: gap analysis",
+                "\n".join(f"• {g}" for g in gaps),
+            )
+        return gaps
+
+    async def _generate_orchestration_code(
+        self,
+        task_data: dict[str, Any],
+        review_issues: list[str],
+        tools: list[McpTool],
+        doc_hints: dict[str, str] | None = None,
+        *,
+        mode: str = "exploratory",
+        skip_gap_analysis: bool = False,
+    ) -> tuple[str, list[dict]] | None:
+        """Generate orchestration code plus capability_gaps.
+
+        When ``skip_gap_analysis`` is False (exploratory path), phase 1 runs
+        gap analysis. When True (procedure-driven path), ``review_issues`` are
+        treated as the gaps directly. Phase 2 asks the LLM to emit a JSON
+        object with ``orchestration_code`` and ``capability_gaps``. The prompt
+        template differs by ``mode``: ``"exploratory"`` uses
+        :data:`TOOL_ORCHESTRATION_CODE_PROMPT` (creative investigation);
+        ``"procedure"`` uses :data:`PROCEDURE_ORCHESTRATION_CODE_PROMPT`
+        (execute procedure verbatim, no speculation).
+
+        Returns ``(code, capability_gaps)`` on success, or ``None`` on any
+        failure (fail-open — caller falls back to :meth:`_select_tools`).
+        """
+        if not review_issues or not tools:
+            return None
+        try:
+            if skip_gap_analysis:
+                gaps = list(review_issues)
+            else:
+                gaps = await self._analyse_gaps(task_data, review_issues, tools, doc_hints)
+            if not gaps:
+                say("Planner found no actionable gaps.")
+                return None
+
+            template = (
+                PROCEDURE_ORCHESTRATION_CODE_PROMPT if mode == "procedure"
+                else TOOL_ORCHESTRATION_CODE_PROMPT
+            )
+            prompt = template.format(
+                gaps="\n".join(f"- {g}" for g in gaps),
+                task_summary=_build_task_summary(task_data),
+                tools_description=_build_tools_description(tools),
+            )
+            say(
+                f"Generating {'procedure-driven' if mode == 'procedure' else 'exploratory'} "
+                "orchestration code..."
+            )
+            with thinking("Generating code"):
+                response = await self.llm.ainvoke(prompt)
+
+            code, capability_gaps = _parse_orchestration_response(response.content)
+            if not code:
+                return None
+            show_block("planner: orchestration code", code)
+            if capability_gaps:
+                show_block(
+                    "planner: capability gaps",
+                    "\n".join(
+                        f"• {g.get('investigation', '')} "
+                        f"[needs: {g.get('suggested_tool_capability', '')}]"
+                        for g in capability_gaps
+                    ),
+                )
+            return code, capability_gaps
+        except Exception as exc:
+            logger.warning("ContextEnricher._generate_orchestration_code: failed (%s)", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -527,11 +587,7 @@ def _build_tools_description(tools: list[McpTool]) -> str:
 
 def _parse_tool_calls(response: str) -> list[dict[str, Any]]:
     """Parse the LLM's JSON tool-selection response, failing open on any error."""
-    text = response.strip()
-    if "```json" in text:
-        text = text[text.find("```json") + 7 : text.rfind("```")].strip()
-    elif "```" in text:
-        text = text[text.find("```") + 3 : text.rfind("```")].strip()
+    text = _strip_fences(response)
     try:
         data = json.loads(text)
         if not isinstance(data, list):
@@ -545,3 +601,56 @@ def _parse_tool_calls(response: str) -> list[dict[str, Any]]:
     except (json.JSONDecodeError, TypeError) as exc:
         logger.warning("ContextEnricher: failed to parse tool-selection response: %s", exc)
         return []
+
+
+def _strip_fences(text: str) -> str:
+    """Remove optional markdown code fences from an LLM response."""
+    text = text.strip()
+    if "```json" in text:
+        text = text[text.find("```json") + 7: text.rfind("```")].strip()
+    elif "```" in text:
+        text = text[text.find("```") + 3: text.rfind("```")].strip()
+    return text
+
+
+def _parse_gaps(response: str) -> list[str]:
+    """Parse the gap-analysis JSON response; return gap strings for resolvable gaps."""
+    text = _strip_fences(response)
+    try:
+        data = json.loads(text)
+        if not isinstance(data, list):
+            logger.warning("ContextEnricher: gap-analysis response is not a list — ignored")
+            return []
+        return [
+            str(item["gap"])
+            for item in data
+            if isinstance(item, dict) and item.get("resolvable", True) and item.get("gap")
+        ]
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        logger.warning("ContextEnricher: failed to parse gap-analysis response: %s", exc)
+        return []
+
+
+def _parse_orchestration_response(response: str) -> tuple[str, list[dict]]:
+    """Parse the orchestration-code response (works for both prompt variants).
+
+    Expects a JSON object with ``"orchestration_code"`` (string) and
+    ``"capability_gaps"`` (list of dicts). Returns ``(code, capability_gaps)``;
+    on parse error returns ``("", [])`` so the caller can fail open.
+    """
+    text = _strip_fences(response).strip()
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            logger.warning("ContextEnricher: orchestration response is not a dict — ignored")
+            return "", []
+        code = str(data.get("orchestration_code", "") or "")
+        raw_gaps = data.get("capability_gaps", []) or []
+        capability_gaps = [
+            g for g in raw_gaps
+            if isinstance(g, dict) and g.get("investigation")
+        ]
+        return code, capability_gaps
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("ContextEnricher: failed to parse orchestration response: %s", exc)
+        return "", []
