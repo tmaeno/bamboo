@@ -419,7 +419,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
         Returns:
             List of dicts with keys ``cause_name``, ``procedure_name``,
-            ``strategy_type``, ``parameters``, ``frequency``.
+            ``strategy_type``, ``description``, ``parameters``, ``frequency``.
         """
         async with self.driver.session(
             database=self.settings.neo4j_database

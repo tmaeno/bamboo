@@ -242,9 +242,11 @@ class ContextEnricher:
             if result is not None:
                 code, capability_gaps = result
                 out.capability_gaps = capability_gaps
-                raw = await self._run_orchestration_code(
+                raw, called = await self._run_orchestration_code(
                     code, task_data, task_data_tool_names
                 )
+                for name in called:
+                    out.tool_calls.append({"tool": name, "via": "orchestration"})
                 for key, value in raw.items():
                     label = f"orchestration:{key}"
                     out.external_data[label] = value
@@ -350,6 +352,7 @@ class ContextEnricher:
         failure (fail-open — caller falls back to :meth:`_select_tools`).
         """
         if not review_issues or not tools:
+            say("Explorer: no review issues or no tools available — skipping orchestration.")
             return None
         try:
             if skip_gap_analysis:
@@ -392,6 +395,7 @@ class ContextEnricher:
             return code, capability_gaps
         except Exception as exc:
             logger.warning("ContextEnricher._generate_orchestration_code: failed (%s)", exc)
+            say(f"Explorer: code generation raised {type(exc).__name__}: {exc}")
             return None
 
     # ------------------------------------------------------------------
@@ -403,12 +407,19 @@ class ContextEnricher:
         code: str,
         task_data: dict[str, Any],
         task_data_tool_names: frozenset[str],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[str]]:
         """Execute LLM-generated orchestration code in a sandboxed namespace.
 
         The code runs as the body of ``async def _fn(tools, asyncio)`` with
         only :data:`_SAFE_BUILTINS` available.  Any exception (syntax, runtime,
-        or timeout) is logged and an empty dict is returned (fail-open).
+        or timeout) is logged and an empty result is returned (fail-open).
+
+        Returns:
+            Tuple ``(result, call_log)`` where ``result`` is the dict the
+            orchestration code returned (or ``{}`` on any failure) and
+            ``call_log`` is the list of tool names that were invoked through
+            the proxy. ``call_log`` may be partially populated if a runtime
+            exception interrupted execution after some calls succeeded.
         """
         call_log: list[str] = []
         proxy = ToolProxy(self._client, task_data, task_data_tool_names, call_log)
@@ -419,15 +430,15 @@ class ContextEnricher:
             exec(full_code, namespace)  # noqa: S102
         except SyntaxError as exc:
             logger.warning("ContextEnricher: orchestration code has syntax error: %s", exc)
-            return {}
+            return {}, call_log
         try:
             result = await asyncio.wait_for(namespace["_fn"](proxy, asyncio), timeout=600)
         except asyncio.TimeoutError:
             logger.warning("ContextEnricher: orchestration code timed out after 600 s")
-            return {}
+            return {}, call_log
         except Exception as exc:
             logger.warning("ContextEnricher: orchestration code raised: %s", exc)
-            return {}
+            return {}, call_log
         if call_log:
             say(f"  orchestration called: {', '.join(call_log)}")
         if not isinstance(result, dict):
@@ -435,8 +446,8 @@ class ContextEnricher:
                 "ContextEnricher: orchestration code returned %r — expected dict",
                 type(result).__name__,
             )
-            return {}
-        return result
+            return {}, call_log
+        return result, call_log
 
     async def _select_tools(
         self,
@@ -639,18 +650,84 @@ def _parse_orchestration_response(response: str) -> tuple[str, list[dict]]:
     on parse error returns ``("", [])`` so the caller can fail open.
     """
     text = _strip_fences(response).strip()
+    preview = text[:300] + ("…" if len(text) > 300 else "")
     try:
         data = json.loads(text)
         if not isinstance(data, dict):
-            logger.warning("ContextEnricher: orchestration response is not a dict — ignored")
+            logger.warning(
+                "ContextEnricher: orchestration response is not a dict — got %s. Raw: %r",
+                type(data).__name__, preview,
+            )
+            say(
+                f"Explorer: orchestration response is not a JSON object "
+                f"(got {type(data).__name__})."
+            )
             return "", []
-        code = str(data.get("orchestration_code", "") or "")
+        # Accept the canonical key plus known LLM-hallucinated abbreviations.
+        # The first alias found wins. When a non-canonical alias is used we
+        # warn but still honor the value, so a single hallucinated key name
+        # doesn't burn the whole code-generation pass.
+        _CODE_KEY_ALIASES = ("orchestration_code", "orchest_code", "code")
+        code_field = None
+        used_key = None
+        for k in _CODE_KEY_ALIASES:
+            if k in data:
+                code_field = data[k]
+                used_key = k
+                break
+        if used_key and used_key != "orchestration_code":
+            logger.warning(
+                "ContextEnricher: LLM used alias %r instead of 'orchestration_code' — accepting",
+                used_key,
+            )
+            say(
+                f"Explorer: LLM used alias {used_key!r} instead of "
+                f"'orchestration_code' — accepting."
+            )
         raw_gaps = data.get("capability_gaps", []) or []
         capability_gaps = [
             g for g in raw_gaps
             if isinstance(g, dict) and g.get("investigation")
         ]
+        code = code_field if isinstance(code_field, str) else ""
+
+        if not code:
+            if used_key is None:
+                reason = f"field omitted (looked for any of {list(_CODE_KEY_ALIASES)})"
+            elif code_field is None:
+                reason = f"field {used_key!r} is null"
+            elif isinstance(code_field, str):
+                reason = f"field {used_key!r} is empty string"
+            else:
+                reason = f"field {used_key!r} is {type(code_field).__name__}"
+            keys = sorted(data.keys())
+            logger.warning(
+                "ContextEnricher: orchestration_code empty (%s). keys=%s gaps=%d raw=%r",
+                reason, keys, len(capability_gaps), preview,
+            )
+            say(
+                f"Explorer: orchestration_code empty ({reason}). "
+                f"keys={keys}, capability_gaps={len(capability_gaps)}, "
+                f"raw: {preview!r}"
+            )
+            if capability_gaps:
+                show_block(
+                    "planner: capability gaps (no code generated)",
+                    "\n".join(
+                        f"• {g.get('investigation', '')} "
+                        f"[needs: {g.get('suggested_tool_capability', '')}]"
+                        for g in capability_gaps
+                    ),
+                )
+
         return code, capability_gaps
     except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning("ContextEnricher: failed to parse orchestration response: %s", exc)
+        logger.warning(
+            "ContextEnricher: failed to parse orchestration response: %s. Raw: %r",
+            exc, preview,
+        )
+        say(
+            f"Explorer: orchestration JSON parse failed ({exc}); "
+            f"first 300 chars: {preview!r}"
+        )
         return "", []

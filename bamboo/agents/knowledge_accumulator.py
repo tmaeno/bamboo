@@ -634,27 +634,36 @@ class KnowledgeAccumulator:
             if n.node_type.value == "Procedure" and n.metadata.get("parameters")
         }
 
+        from bamboo.models.graph_element import GraphRelationship  # noqa: PLC0415
+
         graph_id = graph.metadata.get("graph_id", "")
+        stored_ids = set(node_ids.values())
         for rel in graph.relationships:
-            rel.source_id = node_ids.get(rel.source_id, rel.source_id)
-            rel.target_id = node_ids.get(rel.target_id, rel.target_id)
-            # Skip relationships whose endpoints were not stored (vector-only nodes)
-            if rel.source_id in node_ids.values() and rel.target_id in node_ids.values():
-                # Stamp the graph_id so Neo4j can track per-edge provenance and
-                # compute frequency across tasks via find_common_pattern.
-                rel.properties["graph_id"] = graph_id
-                # For investigated_by edges, carry the procedure's parameters on
-                # the edge so they accumulate as a list per incident in Neo4j.
-                if rel.relation_type.value == "investigated_by":
-                    params = rel.properties.pop("parameters", None)
-                    if params is None:
-                        for proc_name, proc_params in proc_params_by_name.items():
-                            if node_ids.get(proc_name) == rel.target_id:
-                                params = proc_params
-                                break
-                    if params is not None:
-                        rel.properties["parameters"] = params
-                await self.graph_db.create_relationship(rel)
+            # Resolve endpoints to stored node IDs *without* mutating the
+            # in-memory relationship — downstream consumers (display, summary
+            # generation, debug_trace) expect name-based endpoints.
+            src_id = node_ids.get(rel.source_id, rel.source_id)
+            tgt_id = node_ids.get(rel.target_id, rel.target_id)
+            if src_id not in stored_ids or tgt_id not in stored_ids:
+                continue
+            db_props = {**rel.properties, "graph_id": graph_id}
+            if rel.relation_type.value == "investigated_by":
+                params = rel.properties.get("parameters")
+                if params is None:
+                    for proc_name, proc_params in proc_params_by_name.items():
+                        if node_ids.get(proc_name) == tgt_id:
+                            params = proc_params
+                            break
+                if params is not None:
+                    db_props["parameters"] = params
+            db_rel = GraphRelationship(
+                source_id=src_id,
+                target_id=tgt_id,
+                relation_type=rel.relation_type,
+                confidence=rel.confidence,
+                properties=db_props,
+            )
+            await self.graph_db.create_relationship(db_rel)
 
         logger.info("KnowledgeAccumulator: graph stored successfully")
 

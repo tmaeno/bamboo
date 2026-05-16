@@ -773,8 +773,11 @@ class ReasoningNavigator:
         issues = []
         for p in procedures:
             params_str = json.dumps(p.get("parameters") or [], default=str)
+            description = (p.get("description") or "").strip() or "(no description)"
             issues.append(
-                f"Investigate '{p['cause_name']}': {p['strategy_type']}. "
+                f"Procedure '{p['procedure_name']}' "
+                f"(strategy: {p['strategy_type']}, "
+                f"for cause: '{p['cause_name']}'): {description}. "
                 f"Historical parameters: {params_str}"
             )
 

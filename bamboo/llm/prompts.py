@@ -856,7 +856,9 @@ Output a JSON array only — no markdown, no explanation outside the JSON:
 PROCEDURE_ORCHESTRATION_CODE_PROMPT = """You are writing orchestration logic for executing historical PanDA investigation procedures.
 
 Each gap below is a HISTORICAL PROCEDURE instruction from a prior incident
-(e.g. "Investigate 'X': curl_check. Historical parameters: [...]").
+(e.g. "Procedure 'X in log analysis' (strategy: log_analysis, for cause: 'X'):
+check failed job log and compare with a similar successful task.
+Historical parameters: [...]").
 
 PROCEDURES TO EXECUTE:
 {gaps}
@@ -873,6 +875,13 @@ Produce TWO outputs:
      async def orchestrate(tools, asyncio):
 
    Rules for the function body:
+   - The description text after the colon IS the procedure — pick the tool
+     whose capability matches what the description asks for; do not substitute
+     a generic alternative just because it is available.
+   - The procedure description may contain MULTIPLE actions (e.g.
+     "check X and compare with Y"). You MUST address every action; do not
+     stop after the first. If you cannot map one action to a tool, list it
+     in `capability_gaps` rather than silently omitting it.
    - For each procedure, choose the tool whose description matches what the
      procedure asks to collect, and embed the historical parameter values as
      literal Python values in the call args.
@@ -903,8 +912,10 @@ Produce TWO outputs:
    If every procedure has a matching tool, leave the list empty.
 
 Return ONLY a single JSON object with these two keys (no markdown fences,
-no commentary). Use the JSON-escaped string form for `orchestration_code`
-(literal `\\n` for newlines):
+no commentary). The JSON key MUST be the literal string `orchestration_code` —
+do not abbreviate it to `orchest_code`, `code`, or any other variant; doing so
+will cause your output to be discarded. Use the JSON-escaped string form for
+`orchestration_code` (literal `\\n` for newlines):
 
 {{
   "orchestration_code": "    log = await tools.fetch_linked_log_files(urls=[...])\\n    return {{\\"log\\": log}}",
@@ -1251,8 +1262,10 @@ Produce TWO outputs:
    If every gap has a matching tool, leave the list empty.
 
 Return ONLY a single JSON object with these two keys (no markdown fences,
-no commentary). Use the JSON-escaped string form for `orchestration_code`
-(literal `\\n` for newlines):
+no commentary). The JSON key MUST be the literal string `orchestration_code` —
+do not abbreviate it to `orchest_code`, `code`, or any other variant; doing so
+will cause your output to be discarded. Use the JSON-escaped string form for
+`orchestration_code` (literal `\\n` for newlines):
 
 {{
   "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    ...",

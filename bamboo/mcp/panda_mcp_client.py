@@ -312,10 +312,12 @@ class PandaMcpClient(McpClient):
             McpTool(
                 name="fetch_linked_log_files",
                 description=(
-                    "Extracts all log file URLs from a task's errorDialog HTML and downloads "
-                    "their content.  Use this when the reviewer reports that Symptom nodes are "
-                    "too vague (e.g. 'UnknownError' instead of a specific error code), that log "
-                    "evidence is absent, or that error messages are incomplete.  Requires the "
+                    "Downloads task-level log files linked from the task's errorDialog HTML "
+                    "(typically brokerage/dispatch logs from PanDA's site-selection layer). "
+                    "NOT for fetching job execution logs — for that use get_failed_job_logs. "
+                    "Use this when the reviewer reports that Symptom nodes are too vague "
+                    "(e.g. 'UnknownError' instead of a specific error code), that log "
+                    "evidence is absent, or that error messages are incomplete. Requires the "
                     "errorDialog field to be non-empty and contain at least one <a href> link."
                 ),
                 parameters_schema={
@@ -370,11 +372,12 @@ class PandaMcpClient(McpClient):
             McpTool(
                 name="get_task_jobs_summary",
                 description=(
-                    "Fetches and aggregates per-job status and error information for a task.  "
-                    "Returns status counts, the top error diagnostics, and a sample of failed "
-                    "job IDs.  Use this when the reviewer notes that job-level failure "
-                    "distribution is missing, that it is unclear whether failures are systematic "
-                    "or sporadic, or that job diagnostic messages have not been captured."
+                    "Returns AGGREGATE STATISTICS only (status counts, top error diagnostics, "
+                    "and a sample of failed job IDs) — does NOT include actual log content. "
+                    "For raw job output use get_failed_job_logs. "
+                    "Use this when the reviewer notes that job-level failure distribution is "
+                    "missing, that it is unclear whether failures are systematic or sporadic, "
+                    "or that job diagnostic messages have not been captured."
                 ),
                 parameters_schema={
                     "type": "object",
