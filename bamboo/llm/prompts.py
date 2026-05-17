@@ -307,25 +307,18 @@ Node types to extract:
   e.g. observations, background, constraints, timeline notes.
   name = a short snake_case key summarising the topic (e.g. "observed_behavior", "timeline").
   description = the verbatim or lightly paraphrased prose from the email.
-- Procedure: An investigation action taken in response to a cause — describes how the
-  incident was investigated (e.g. "we looked at finished jobs with high CPU time",
-  "we checked the parent task for data corruption").
-  Extract a Procedure ONLY when the email explicitly describes what was investigated
-  and how, not just that an investigation took place.
-  name = "{{strategy_type}}:{{cause_name}}" — a stable merge key combining the strategy
-         and the canonical cause name.
-  strategy_type = concise natural-language description of the investigation.
-                  Must be specific enough to guide tool selection.
-  description = full prose from the email describing what was investigated and why.
-  parameters = structured filter and metric details as a dict, e.g.:
-               {{"filter": {{"status": "finished", "jobType": "normal"}},
-                "metrics": ["cpuConsumptionTime", "wallTime"]}}
-               Omit keys that are not mentioned in the email.
+- Procedures are NOT emitted as nodes in the ``nodes`` array. Instead,
+  list each atomic investigation action separately in the top-level
+  ``atomic_actions`` field (see output schema below). Procedure nodes
+  and their relationships are constructed in code from this list — the
+  list-shaped output ensures that distinct actions stay distinct.
 
 Relationships to emit (between extracted nodes only):
 - Cause -[solved_by]-> Resolution
-- Cause -[investigated_by]-> Procedure  (link each Procedure to its Cause)
 - Task_Context -[contribute_to]-> Cause  (only when the context directly supports a cause)
+(Note: ``investigated_by`` and ``depends_on`` edges for Procedures are
+constructed in code from ``atomic_actions`` and ``action_dependencies``
+— do NOT emit them here.)
 
 Canonicalization:
 - If the same cause or resolution is mentioned multiple times, emit it only once.
@@ -342,24 +335,65 @@ Output ONLY a valid JSON object — no explanation, no markdown fences:
 {{
   "nodes": [
     {{
-      "node_type": "Cause|Resolution|Task_Context|Procedure",
+      "node_type": "Cause|Resolution|Task_Context",
       "name": "...",
       "description": "...",
       "metadata": {{}},
-      "steps": [],
-      "strategy_type": "",
-      "parameters": {{}}
+      "steps": []
     }}
   ],
   "relationships": [
     {{
       "source_name": "...",
       "target_name": "...",
-      "relation_type": "solved_by|contribute_to|investigated_by",
+      "relation_type": "solved_by|contribute_to",
       "confidence": 0.0
+    }}
+  ],
+  "atomic_actions": [
+    {{
+      "id": "a1",
+      "summary": "short snake_case label uniquely identifying this single action",
+      "description": "prose from the email describing this action",
+      "parameters": {{}},
+      "cause_name": "<canonical cause name this action investigates>"
+    }}
+  ],
+  "action_dependencies": [
+    {{
+      "from": "a1",
+      "to": "a2",
+      "type": "explicit | implicit",
+      "reason": "short justification — quote or paraphrase the email text that establishes the dependency"
     }}
   ]
 }}
+
+Rules for ``atomic_actions``:
+- Each action in the email's procedure section becomes ONE entry. Do
+  NOT merge multiple actions into a single entry.
+- ``summary`` MUST differ between entries — it is used to make each
+  Procedure node uniquely identifiable.
+- ``cause_name`` MUST be the ``name`` of one of the Cause nodes you
+  emitted in ``nodes``.
+- ``action_dependencies`` lists pairs where the action with id ``to``
+  needs the output of the action with id ``from`` (e.g. "find X, then
+  look up Y in X"). Only emit when the email explicitly chains the
+  actions; leave empty if all actions can run independently.
+- Each dependency MUST include a ``reason`` field articulating the
+  rationale (e.g. an email chaining word, a data hand-off the second
+  action requires from the first). The reason makes the dependency
+  reviewable.
+- Each dependency MUST also include a ``type`` field. Mark it
+  ``explicit`` ONLY when (a) the email uses an explicit chaining word
+  between the two actions ("then", "after", "next", "using the result
+  of") OR (b) the second action literally references an identifier
+  produced by the first (a task ID, PandaID, file path). Mark
+  everything else ``implicit`` — including order-of-listing
+  inferences, "first investigate then verify"-style procedural common
+  sense, and topic-relatedness reasoning. When in doubt, prefer
+  ``implicit``. Code consumes only ``explicit`` dependencies; implicit
+  ones are logged but not materialised as edges.
 """
 
 EMAIL_INVESTIGATION_SUMMARY_PROMPT = """You are reading an incident email thread.

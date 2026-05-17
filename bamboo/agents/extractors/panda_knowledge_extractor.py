@@ -1561,6 +1561,10 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             response = await llm.ainvoke(
                 EMAIL_EXTRACTION_PROMPT.format(email_text=email_text, doc_hints=hints_text)
             )
+        show_block(
+            "LLM response: email extraction (raw)",
+            response.content,
+        )
         raw = self._parse_email_response(response.content)
 
         _store_for_type = {
@@ -1616,6 +1620,107 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     target_id=raw_name_to_node[tgt].name,
                     relation_type=rel_type,
                     confidence=float(rel_data.get("confidence", 1.0)),
+                )
+            )
+
+        # Atomic-action-based Procedure synthesis. The LLM emits each
+        # investigation action as a separate entry in `atomic_actions`
+        # rather than as a Procedure node. We construct Procedure nodes
+        # (and their investigated_by / depends_on edges) deterministically
+        # from that list so distinct actions can never get merged.
+        action_id_to_node: dict[str, Any] = {}
+        for action in raw.get("atomic_actions", []) or []:
+            summary = (action.get("summary") or "").strip()
+            cause_raw = action.get("cause_name")
+            if not summary or not cause_raw:
+                logger.warning(
+                    "PandaKnowledgeExtractor: atomic_action missing summary or "
+                    "cause_name — skipped (data: %s)",
+                    action,
+                )
+                continue
+            cause_node = raw_name_to_node.get(cause_raw)
+            if cause_node is None:
+                logger.warning(
+                    "PandaKnowledgeExtractor: atomic_action cause_name=%r not "
+                    "found among extracted Cause nodes (known: %s) — skipped",
+                    cause_raw,
+                    list(raw_name_to_node.keys()),
+                )
+                continue
+            raw_proc_name = f"{summary}:{cause_raw}"
+            canonical, _, _ = await self._procedure_store.find_or_create(
+                raw_proc_name
+            )
+            metadata: dict[str, Any] = {}
+            params = action.get("parameters")
+            if params:
+                metadata["parameters"] = params
+            proc_node = ProcedureNode(
+                name=canonical,
+                description=action.get("description") or "",
+                metadata=metadata,
+                strategy_type=summary,
+            )
+            nodes.append(proc_node)
+            if action.get("id"):
+                action_id_to_node[action["id"]] = proc_node
+            relationships.append(
+                GraphRelationship(
+                    source_id=cause_node.name,
+                    target_id=proc_node.name,
+                    relation_type=RelationType.INVESTIGATED_BY,
+                    confidence=1.0,
+                )
+            )
+
+        # action_dependencies → depends_on edges between Procedures.
+        # Direction: {"from": A, "to": B} means B depends on A's output,
+        # so we emit Procedure(B) -[depends_on]-> Procedure(A).
+        # Only ``explicit`` dependencies become edges; ``implicit`` ones
+        # (order-of-listing inferences, procedural common sense) are
+        # logged for visibility but suppressed structurally.
+        for dep in raw.get("action_dependencies", []) or []:
+            from_id = dep.get("from")
+            to_id = dep.get("to")
+            reason = dep.get("reason") or ""
+            dep_type = (dep.get("type") or "implicit").strip().lower()
+            src = action_id_to_node.get(to_id)
+            tgt = action_id_to_node.get(from_id)
+            if src is None or tgt is None:
+                logger.warning(
+                    "PandaKnowledgeExtractor: action_dependency dropped — "
+                    "from=%r or to=%r not in atomic_actions",
+                    from_id,
+                    to_id,
+                )
+                continue
+            if dep_type != "explicit":
+                logger.info(
+                    "PandaKnowledgeExtractor: depends_on %s -> %s SUPPRESSED "
+                    "(type=%r) | reason: %s",
+                    to_id,
+                    from_id,
+                    dep_type,
+                    reason or "(no reason given)",
+                )
+                continue
+            logger.info(
+                "PandaKnowledgeExtractor: depends_on %s -> %s (explicit) | reason: %s",
+                to_id,
+                from_id,
+                reason or "(no reason given)",
+            )
+            properties: dict[str, Any] = {}
+            if reason:
+                properties["reason"] = reason
+            relationships.append(
+                GraphRelationship(
+                    source_id=src.name,
+                    target_id=tgt.name,
+                    relation_type=RelationType.DEPENDS_ON,
+                    confidence=1.0,
+                    properties=properties,
                 )
             )
 
