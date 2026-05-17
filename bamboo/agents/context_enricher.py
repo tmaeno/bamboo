@@ -468,7 +468,7 @@ class ContextEnricher:
 
         try:
             say("Selecting additional data sources to fetch...")
-            with thinking("Working"):
+            with thinking("Selecting tools"):
                 response = await self.llm.ainvoke(prompt)
             return _parse_tool_calls(response.content)
         except Exception:

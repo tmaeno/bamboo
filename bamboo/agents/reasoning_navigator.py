@@ -595,23 +595,59 @@ class ReasoningNavigator:
         """
         logger.info("ReasoningNavigator: identifying root cause with LLM")
 
+        task_info_str = json.dumps(
+            sanitize_for_llm(task_data), indent=2, default=str
+        )
+        sanitized_external = sanitize_for_llm(external_data) or {}
+        external_info_str = json.dumps(
+            sanitized_external, indent=2, default=str
+        )
+        graph_results_str = json.dumps(graph_results, indent=2, default=str)
+        vector_results_str = json.dumps(
+            [
+                {
+                    "score": r["score"],
+                    "entry": r["entry"],
+                    "content": r["content"][:500],
+                }
+                for r in vector_results
+            ],
+            indent=2,
+            default=str,
+        )
+        say(
+            f"root-cause prompt size breakdown: "
+            f"task_info={len(task_info_str):,}, "
+            f"external_info={len(external_info_str):,}, "
+            f"domain_hints={len(domain_hints):,}, "
+            f"graph_results={len(graph_results_str):,}, "
+            f"vector_results={len(vector_results_str):,} chars"
+        )
+        if (
+            len(external_info_str) > 50_000
+            and isinstance(sanitized_external, dict)
+            and sanitized_external
+        ):
+            per_key = sorted(
+                (
+                    (k, len(json.dumps(v, indent=2, default=str)))
+                    for k, v in sanitized_external.items()
+                ),
+                key=lambda kv: kv[1],
+                reverse=True,
+            )
+            shown = per_key[:10]
+            summary = ", ".join(f"{k}={n:,}" for k, n in shown)
+            say(
+                f"external_data per-key sizes "
+                f"(top {len(shown)} of {len(per_key)}): {summary}"
+            )
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
-            task_info=json.dumps(sanitize_for_llm(task_data), indent=2, default=str),
-            external_info=json.dumps(sanitize_for_llm(external_data) or {}, indent=2, default=str),
+            task_info=task_info_str,
+            external_info=external_info_str,
             domain_hints=domain_hints,
-            graph_results=json.dumps(graph_results, indent=2, default=str),
-            vector_results=json.dumps(
-                [
-                    {
-                        "score": r["score"],
-                        "entry": r["entry"],
-                        "content": r["content"][:500],
-                    }
-                    for r in vector_results
-                ],
-                indent=2,
-                default=str,
-            ),
+            graph_results=graph_results_str,
+            vector_results=vector_results_str,
         )
 
         messages = [
@@ -620,7 +656,12 @@ class ReasoningNavigator:
             ),
             HumanMessage(content=prompt),
         ]
-        with thinking("Working"):
+        show_block(
+            f"LLM prompt: reasoning_navigator: root cause "
+            f"({len(prompt):,} chars)",
+            prompt,
+        )
+        with thinking("Identifying root cause"):
             response = await self.llm.ainvoke(messages)
 
         text = response.content.strip()

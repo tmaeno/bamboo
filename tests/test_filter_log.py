@@ -2,11 +2,13 @@
 
 from bamboo.utils.log_filters import (
     SOURCE_FILTER_REGISTRY,
+    compare_job_logs,
     filter_analysis_job_brokerage_log,
     filter_log,
     filter_log_auto,
     filter_prod_job_brokerage_log,
     parse_brokerage_summary,
+    summarize_log_content,
 )
 
 # ---------------------------------------------------------------------------
@@ -651,3 +653,345 @@ class TestParseBrokerageSummary:
         )
         assert result["sites_of_interest"] == ["SITE_NOT_PRESENT"]
         assert result["sites_of_interest_fates"] == []
+
+
+# ---------------------------------------------------------------------------
+# compare_job_logs — structural alignment of failed vs successful job logs
+# ---------------------------------------------------------------------------
+
+
+class TestCompareJobLogs:
+    def test_truncated_failed_log_with_failed_side_banner(self):
+        """Failed log emits a step-start banner then is killed mid-step."""
+        failed = "\n".join([
+            "2026-05-16 10:00:00 init",
+            "2026-05-16 10:00:01 setup done",
+            "2026-05-16 10:00:02 starting slow_step",
+            "2026-05-16 10:00:03 processing batch 1",
+            "2026-05-16 10:00:04 processing batch 2",
+        ])
+        successful = "\n".join([
+            "2026-05-16 09:00:00 init",
+            "2026-05-16 09:00:01 setup done",
+            "2026-05-16 09:00:02 starting slow_step",
+            "2026-05-16 09:00:03 processing batch 1",
+            "2026-05-16 09:00:04 processing batch 2",
+            "2026-05-16 09:02:15 slow_step completed",
+            "2026-05-16 09:02:16 cleanup",
+            "2026-05-16 09:02:17 done",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is True
+        assert r["aligned_until_failed_line"] == 5
+        assert "slow_step" in (r["candidate_problem_step_from_alignment"] or "")
+        # Duration is computed when both timestamps parse.
+        assert r["candidate_step_duration_in_successful_run"] is not None
+        assert "slow_step completed" in r["successful_run_next_lines_after_failure_point"]
+
+    def test_truncated_failed_log_with_successful_side_banner(self):
+        """Failed log killed BEFORE emitting the step-start banner."""
+        failed = "\n".join([
+            "2026-05-16 10:00:00 init",
+            "2026-05-16 10:00:01 setup done",
+            "2026-05-16 10:00:02 step1 ok",
+        ])
+        successful = "\n".join([
+            "2026-05-16 09:00:00 init",
+            "2026-05-16 09:00:01 setup done",
+            "2026-05-16 09:00:02 step1 ok",
+            "2026-05-16 09:00:03 starting heavy_step",
+            "2026-05-16 09:01:30 heavy_step done",
+            "2026-05-16 09:01:31 finalize",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is True
+        # candidate found in successful log's continuation
+        assert "heavy_step" in (r["candidate_problem_step_from_alignment"] or "")
+        assert "heavy_step done" in r["successful_run_next_lines_after_failure_point"]
+
+    def test_mid_divergence_not_truncation(self):
+        """Failed log diverges with an error; not a truncation case."""
+        failed = "\n".join([
+            "2026-05-16 10:00:00 init",
+            "2026-05-16 10:00:01 setup done",
+            "2026-05-16 10:00:02 ERROR something blew up",
+            "2026-05-16 10:00:03 Traceback (most recent call last):",
+            "2026-05-16 10:00:04 RuntimeError",
+        ])
+        successful = "\n".join([
+            "2026-05-16 09:00:00 init",
+            "2026-05-16 09:00:01 setup done",
+            "2026-05-16 09:00:02 foo done",
+            "2026-05-16 09:00:03 bar done",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is False
+        assert "ERROR" in r["failed_log_tail_raw"]
+        assert "Traceback" in r["failed_log_tail_raw"]
+
+    def test_identical_logs(self):
+        """Identical content end-to-end yields no truncation and empty continuation."""
+        log = "\n".join([
+            "init",
+            "step1 ok",
+            "step2 ok",
+            "done",
+        ])
+        r = compare_job_logs(log, log)
+        assert r["failed_log_appears_truncated_mid_execution"] is False
+        assert r["aligned_until_failed_line"] == 4
+        assert r["aligned_until_successful_line"] == 4
+        assert r["successful_run_next_lines_after_failure_point"] == ""
+
+    def test_empty_failed_log(self):
+        r = compare_job_logs("", "a\nb\n")
+        assert r["failed_log_appears_truncated_mid_execution"] is False
+        assert r["failed_log_total_lines"] == 0
+        assert r["successful_log_total_lines"] == 2
+
+    def test_empty_successful_log(self):
+        r = compare_job_logs("a\nb\n", "")
+        assert r["failed_log_appears_truncated_mid_execution"] is False
+        assert r["successful_log_total_lines"] == 0
+        assert "a\nb" in r["failed_log_tail_raw"]
+
+    def test_continuation_lines_cap(self):
+        """continuation_lines limits how many post-alignment lines we surface."""
+        failed = "a\nb\n"
+        good = "a\nb\n" + "\n".join(f"line{i}" for i in range(200)) + "\n"
+        r = compare_job_logs(failed, good, continuation_lines=5)
+        cont = r["successful_run_next_lines_after_failure_point"].splitlines()
+        assert len(cont) == 5
+        assert cont[0] == "line0"
+        assert cont[-1] == "line4"
+
+    def test_keys_in_documented_order(self):
+        """Dict insertion order is the documented schema order — actionable first."""
+        r = compare_job_logs("a\n", "a\nb\n")
+        keys = list(r.keys())
+        assert keys[0] == "failed_log_appears_truncated_mid_execution"
+        assert keys[1] == "candidate_problem_step_from_alignment"
+        assert keys[2] == "candidate_step_duration_in_successful_run"
+        assert keys[3] == "successful_run_next_lines_after_failure_point"
+
+    def test_long_lines_in_failed_tail_are_capped(self):
+        """Pathologically long single lines in the failed tail get truncated."""
+        failed = "short\n" + ("X" * 50_000) + "\n"
+        successful = "short\n"
+        r = compare_job_logs(failed, successful, max_line_chars=100)
+        tail_lines = r["failed_log_tail_raw"].splitlines()
+        # No line in the output exceeds the cap + the marker overhead.
+        assert max(len(l) for l in tail_lines) < 200
+        assert "chars omitted" in r["failed_log_tail_raw"]
+
+    def test_long_lines_in_continuation_are_capped(self):
+        """Pathologically long single lines in the successful continuation get truncated."""
+        failed = "shared\n"
+        successful = "shared\n" + ("Y" * 50_000) + "\nnext\n"
+        r = compare_job_logs(failed, successful, max_line_chars=100)
+        cont_lines = r["successful_run_next_lines_after_failure_point"].splitlines()
+        assert max(len(l) for l in cont_lines) < 200
+        assert "chars omitted" in r["successful_run_next_lines_after_failure_point"]
+
+    def test_short_lines_unchanged_with_cap(self):
+        """Lines under the cap pass through unchanged."""
+        failed = "alpha\nbeta\n"
+        successful = "alpha\nbeta\ngamma\n"
+        r = compare_job_logs(failed, successful, max_line_chars=100)
+        assert "alpha\nbeta" == r["failed_log_tail_raw"]
+        assert "chars omitted" not in r["failed_log_tail_raw"]
+        assert "chars omitted" not in r["successful_run_next_lines_after_failure_point"]
+
+    def test_bottom_anchor_disambiguates_repeated_tail_phrase(self):
+        """When a tail-marker phrase recurs at two points in successful (e.g.
+        'Stopping legacy file validation' in BOTH input AND output validation
+        phases), bottom-up anchor must pick the EARLIER occurrence so the
+        continuation surfaces the in-between content (e.g. preExecute).
+        Models the user's real-world PanDA case.
+        """
+        # Failed: 30 validation steps + a marker line (31 lines, ≥ tail_k=30).
+        failed_lines = [f"validation step {k}" for k in range(30)]
+        failed_lines.append("Stopping legacy file validation")
+        failed = "\n".join(failed_lines)
+        # Successful: same prefix, then preExecute + execute output, then a
+        # SECOND occurrence of the same 'Stopping legacy' line (output
+        # validation done).
+        successful_lines = [f"validation step {k}" for k in range(30)]
+        successful_lines.append("Stopping legacy file validation")
+        successful_lines.append("preExecute Will execute AtlCopyBSEvent")
+        successful_lines.append("execute output line 1")
+        successful_lines.append("execute output line 2")
+        successful_lines.append("Stopping legacy file validation")
+        successful_lines.append("trf stopped")
+        successful = "\n".join(successful_lines)
+
+        r = compare_job_logs(failed, successful)
+        cont = r["successful_run_next_lines_after_failure_point"]
+        assert "preExecute Will execute AtlCopyBSEvent" in cont, (
+            "bottom-up anchor should land on the FIRST 'Stopping legacy' so "
+            f"the continuation includes preExecute; got: {cont[:300]!r}"
+        )
+        assert r["failed_log_appears_truncated_mid_execution"] is True
+
+    def test_compresses_repeating_lines(self):
+        """A loop of similar lines with different lengths in failed vs
+        successful should collapse to one compressed entry on each side so
+        alignment can bridge it — models the PanDA MetaReader/file-iteration
+        case where failed reads many input files and successful reads few.
+        """
+        failed = "\n".join([
+            "header",
+            "Reading file '/path/A.data'",
+            "Reading file '/path/B.data'",
+            "Reading file '/path/C.data'",
+            "Reading file '/path/D.data'",
+            "Reading file '/path/E.data'",
+            "footer",
+        ])
+        successful = "\n".join([
+            "header",
+            "Reading file '/path/X.data'",
+            "Reading file '/path/Y.data'",
+            "footer",
+            "next phase line",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is True
+        assert "next phase line" in r["successful_run_next_lines_after_failure_point"]
+
+    def test_section_marker_bridges_divergent_block(self):
+        """A long divergent block between two matching `=== marker ===` lines
+        should NOT stop alignment — the marker anchors re-sync.
+
+        Mimics the PoolFileCatalog case: failed and successful share the
+        prefix, then have a 40-line divergent middle (different file
+        lists), then resume with a common section marker and shared
+        content.
+        """
+        failed = "\n".join([
+            "init",
+            "=== setup ===",
+            "common-A",
+            *[f"failed unique line {k}" for k in range(40)],
+            "=== execute ===",
+            "common-B",
+        ])
+        successful = "\n".join([
+            "init",
+            "=== setup ===",
+            "common-A",
+            *[f"successful unique line {k}" for k in range(40)],
+            "=== execute ===",
+            "common-B",
+            "common-C",
+            "common-D",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is True, (
+            "alignment should have made it through the divergent block via "
+            "the marker anchor and concluded truncated=True"
+        )
+        cont = r["successful_run_next_lines_after_failure_point"]
+        assert "common-C" in cont
+
+    def test_repeating_phrase_does_not_seduce_forward(self):
+        """A phrase that recurs late in successful must not pull alignment past
+        intermediate content. Models the user's real case: a generic line
+        ('Stopping legacy file validation') appears in BOTH the INPUT and
+        OUTPUT validation phases of the successful log, but only once in the
+        failed log (at the end of INPUT validation, where the job was killed).
+        """
+        failed = "\n".join([
+            "init",
+            "phase A start",
+            "common marker",
+        ])
+        successful = "\n".join([
+            "init",
+            "phase A start",
+            "common marker",     # first occurrence — should anchor here
+            "phase B start",     # the actually-killed-during step
+            "phase B work 1",
+            "phase B end",
+            "phase C start",
+            "common marker",     # later occurrence — must NOT pull alignment here
+            "phase C end",
+        ])
+        r = compare_job_logs(failed, successful)
+        assert r["failed_log_appears_truncated_mid_execution"] is True
+        cont = r["successful_run_next_lines_after_failure_point"]
+        assert "phase B start" in cont, (
+            "alignment should have stopped at the first 'common marker' so the "
+            f"continuation starts with phase B; got: {cont[:500]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# summarize_log_content — heuristic per-log signal extraction
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizeLogContent:
+    def test_silent_kill_no_errors(self):
+        """Log ends mid-validation with no error trail (the user's canonical
+        case): summary captures the last meaningful action + last section
+        marker without inventing errors."""
+        log = "\n".join([
+            "init",
+            "=== pre jobO ===",
+            "setting up",
+            "=== execute ===",
+            "2026-05-05 09:50:00 starting validation",
+            "validation iter 1",
+            "validation iter 2",
+            "2026-05-05 09:52:25 Stopping legacy (serial) file validation",
+        ])
+        s = summarize_log_content(log)
+        assert s["total_lines"] == 8
+        assert s["last_section_marker"] == "execute"
+        assert s["sections_seen"] == ["pre jobO", "execute"]
+        assert s["last_timestamp"] == "2026-05-05 09:52:25"
+        assert "Stopping legacy" in s["last_meaningful_action"]
+        assert s["error_lines"] == []
+        assert "Stopping legacy" in s["tail_raw"]
+
+    def test_error_trail(self):
+        """Log with errors: error_lines is populated with the matching lines."""
+        log = "\n".join([
+            "init",
+            "running",
+            "ERROR: something blew up",
+            "Traceback (most recent call last):",
+            '  File "x.py", line 10',
+            "RuntimeError: bad thing",
+        ])
+        s = summarize_log_content(log)
+        assert len(s["error_lines"]) >= 3
+        assert any("ERROR" in line for line in s["error_lines"])
+        assert any("Traceback" in line for line in s["error_lines"])
+
+    def test_empty_log(self):
+        s = summarize_log_content("")
+        assert s["total_lines"] == 0
+        assert s["total_chars"] == 0
+        assert s["last_section_marker"] is None
+        assert s["sections_seen"] == []
+        assert s["last_timestamp"] is None
+        assert s["last_meaningful_action"] is None
+        assert s["error_lines"] == []
+        assert s["tail_raw"] == ""
+
+    def test_max_error_lines_cap(self):
+        """error_lines is capped at max_error_lines."""
+        log = "\n".join(f"ERROR line {k}" for k in range(50))
+        s = summarize_log_content(log, max_error_lines=5)
+        assert len(s["error_lines"]) == 5
+
+    def test_long_line_truncation(self):
+        """Pathologically long lines in tail/error_lines get truncated."""
+        long_err = "ERROR " + ("X" * 50_000)
+        log = "init\n" + long_err + "\n"
+        s = summarize_log_content(log, max_line_chars=200)
+        assert len(s["error_lines"]) == 1
+        assert len(s["error_lines"][0]) < 300
+        assert "truncated" in s["error_lines"][0]

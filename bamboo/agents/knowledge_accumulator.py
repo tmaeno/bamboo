@@ -704,17 +704,29 @@ class KnowledgeAccumulator:
             "\n".join(f"{k}:\n{v}" for k, v in (doc_hints or {}).items())
             or "(none)"
         )
+        graph_data_str = json.dumps(graph_data, indent=2)
+        say(
+            f"graph-summary prompt size breakdown: "
+            f"graph_data={len(graph_data_str):,}, "
+            f"doc_hints={len(hints_text):,}, "
+            f"email_text={len(email_text or ''):,} chars"
+        )
         prompt = SUMMARIZATION_PROMPT.format(
-            graph_data=json.dumps(graph_data, indent=2),
+            graph_data=graph_data_str,
             doc_hints=hints_text,
             email_text=email_text or "(none)",
+        )
+        show_block(
+            f"LLM prompt: knowledge_accumulator: graph summary "
+            f"({len(prompt):,} chars)",
+            prompt,
         )
         messages = [
             SystemMessage(content="You are an expert at creating technical summaries."),
             HumanMessage(content=prompt),
         ]
 
-        with thinking("Working"):
+        with thinking("Generating graph summary"):
             response = await self.llm.ainvoke(messages)
         return response.content
 

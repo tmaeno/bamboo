@@ -918,7 +918,7 @@ will cause your output to be discarded. Use the JSON-escaped string form for
 `orchestration_code` (literal `\\n` for newlines):
 
 {{
-  "orchestration_code": "    log = await tools.fetch_linked_log_files(urls=[...])\\n    return {{\\"log\\": log}}",
+  "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    if not similar:\\n        return {{\\"similar\\": []}}\\n    comparison = await tools.compare_failed_vs_successful_job_logs(reference_task_id=similar[0][\\"jediTaskID\\"])\\n    return {{\\"similar\\": similar, \\"comparison\\": comparison}}",
   "capability_gaps": [
     {{"investigation": "...", "suggested_tool_capability": "..."}}
   ]

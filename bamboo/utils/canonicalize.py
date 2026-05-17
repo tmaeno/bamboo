@@ -93,7 +93,7 @@ async def canonicalize_descriptions(
             n=len(batch),
         )
         try:
-            with thinking("Working"):
+            with thinking("Canonicalizing descriptions"):
                 response = await llm.ainvoke([HumanMessage(content=prompt)])
             raw = response.content.strip()
             if raw.startswith("```"):

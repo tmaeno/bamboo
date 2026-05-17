@@ -752,7 +752,7 @@ async def _generate_category_label(error_message: str) -> str:
         f"Classifying error message: \"{preview}{'...' if len(error_message) > 60 else ''}\""
     )
     llm = get_extraction_llm()
-    with thinking("Working"):
+    with thinking("Classifying error message"):
         response = await llm.ainvoke(
             TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
         )
@@ -778,7 +778,7 @@ def _make_cause_resolution_label_fn(node_type: str):
             raw_name=raw_name,
         )
         say(f'Canonicalizing {node_type}: "{raw_name[:60]}"')
-        with thinking("Working"):
+        with thinking("Canonicalizing node name"):
             response = await llm.ainvoke(prompt)
         canonical = response.content.strip().strip('"').strip("'")
         if not canonical:
@@ -1414,7 +1414,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             else LOG_EXTRACTION_PROMPT
         )
         llm = get_extraction_llm()
-        with thinking(f"Working"):
+        with thinking("Extracting knowledge from log"):
             response = await llm.ainvoke(base_prompt.format(log_text=filtered_log))
         raw = self._parse_log_response(response.content)
 
@@ -1557,7 +1557,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         say("Extracting causes, resolutions, and procedures from email thread...")
         hints_text = "\n\n".join(v for v in (doc_hints or {}).values() if v) or "(none)"
         llm = get_extraction_llm()
-        with thinking("Working"):
+        with thinking("Extracting from email thread"):
             response = await llm.ainvoke(
                 EMAIL_EXTRACTION_PROMPT.format(email_text=email_text, doc_hints=hints_text)
             )

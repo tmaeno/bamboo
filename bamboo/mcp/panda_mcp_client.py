@@ -4,41 +4,6 @@ All tools delegate to :mod:`bamboo.utils.panda_client` helpers.  They are
 designed to fill the gaps in the standard first-pass knowledge extraction:
 log files embedded in ``errorDialog``, retry-chain context, aggregated
 job-level failure statistics, and per-job failure details.
-
-Tool catalogue
---------------
-``fetch_linked_log_files``
-    Extracts and downloads log files linked in a task's ``errorDialog`` HTML.
-
-``get_parent_task``
-    Fetches full task data for the parent task identified by ``retryID``.
-
-``get_retry_chain``
-    Follows the ``retryID`` chain upward and returns a compact summary of
-    each ancestor task.
-
-``get_task_jobs_summary``
-    Aggregates per-job status and error information for a task.
-    Falls back gracefully if the pandaclient bulk-jobs endpoint is unavailable.
-
-``get_scout_job_details``
-    Fetches scout jobs (all statuses) plus a sample of failed non-scout jobs.
-    Returns cpuConsumptionTime, wallTime, jobDuration alongside pilot error fields.
-
-``get_task_input_datasets``
-    Fetches input and pseudo-input dataset descriptions (file counts,
-    availability) via ``get_files_in_datasets``.
-
-``search_panda_server_source``
-    Searches the locally installed panda-server source code for functions
-    or logic matching a keyword.  Used for resource estimation analysis
-    (scout → ramCount algorithm) and error message tracing.
-
-``search_panda_docs``
-    Searches the official PanDA WMS documentation (readthedocs) using the
-    Sphinx client-side search index.  Returns matching page titles, URLs,
-    and text snippets.  Used to retrieve domain-level context about task
-    statuses, error patterns, and configuration parameters.
 """
 
 from __future__ import annotations
@@ -314,7 +279,7 @@ class PandaMcpClient(McpClient):
                 description=(
                     "Downloads task-level log files linked from the task's errorDialog HTML "
                     "(typically brokerage/dispatch logs from PanDA's site-selection layer). "
-                    "NOT for fetching job execution logs — for that use get_failed_job_logs. "
+                    "NOT for fetching job execution logs — for that use get_failed_job_log_summary. "
                     "Use this when the reviewer reports that Symptom nodes are too vague "
                     "(e.g. 'UnknownError' instead of a specific error code), that log "
                     "evidence is absent, or that error messages are incomplete. Requires the "
@@ -374,7 +339,7 @@ class PandaMcpClient(McpClient):
                 description=(
                     "Returns AGGREGATE STATISTICS only (status counts, top error diagnostics, "
                     "and a sample of failed job IDs) — does NOT include actual log content. "
-                    "For raw job output use get_failed_job_logs. "
+                    "For per-job log signal extraction use get_failed_job_log_summary. "
                     "Use this when the reviewer notes that job-level failure distribution is "
                     "missing, that it is unclear whether failures are systematic or sporadic, "
                     "or that job diagnostic messages have not been captured."
@@ -559,8 +524,9 @@ class PandaMcpClient(McpClient):
                     "config error, transient infrastructure issue, etc.) — a similar successful "
                     "task confirms the workflow itself works and isolates the failure to this "
                     "task's specific inputs or environment.  Returns a ranked list of candidate "
-                    "task dicts; pass the jediTaskID of the best match to get_successful_job_logs "
-                    "to fetch its payload.stdout for comparison."
+                    "task dicts; pass the jediTaskID of the best match to "
+                    "compare_failed_vs_successful_job_logs to obtain a compact "
+                    "structured comparison."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -580,13 +546,17 @@ class PandaMcpClient(McpClient):
                 },
             ),
             McpTool(
-                name="get_failed_job_logs",
+                name="get_failed_job_log_summary",
                 description=(
-                    "Downloads payload.stdout from one representative failed job of the "
-                    "current task — the primary tool for inspecting crash output, error "
-                    "messages, stack traces, and other diagnostic content from a failure. "
-                    "No reference task required. Optionally pair with get_successful_job_logs "
-                    "to compare against a reference run when divergence analysis is needed."
+                    "Returns a compact heuristic summary (~3-10 KB) of the "
+                    "current task's representative failed-job payload.stdout: "
+                    "section markers seen, last meaningful action, last "
+                    "timestamp, error lines (ERROR/FATAL/Traceback/etc.), and "
+                    "the last ~50 raw tail lines. The primary tool for "
+                    "inspecting WHY the failed job died — preferred for any "
+                    "procedure that says 'check the failed log'. Resolves "
+                    "the failed PandaID internally from task_data; no "
+                    "parameters needed."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -595,22 +565,61 @@ class PandaMcpClient(McpClient):
                 },
             ),
             McpTool(
-                name="get_successful_job_logs",
+                name="compare_failed_vs_successful_job_logs",
                 description=(
-                    "Downloads payload.stdout for one finished job from a reference "
-                    "successful task.  Pass the jediTaskID returned by "
-                    "find_similar_successful_tasks.  Compare the output against "
-                    "get_failed_job_logs to identify the divergence point."
+                    "Fetches payload.stdout from a representative failed job of the "
+                    "CURRENT task and a representative finished job of the REFERENCE "
+                    "successful task, then runs structural alignment to identify "
+                    "where the failed job diverged or was truncated. Returns a "
+                    "structured comparison: whether the failed log appears truncated "
+                    "mid-execution, a candidate problem step name, its duration in "
+                    "the successful run, the next ~150 raw lines of the successful "
+                    "log past the divergence point, and the last ~50 raw lines of "
+                    "the failed log. Use this when the procedure says to 'compare "
+                    "with a similar successful task' or to diagnose silent kills "
+                    "(no error/traceback). Pass the jediTaskID returned by "
+                    "find_similar_successful_tasks."
                 ),
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
+                        "reference_task_id": {
                             "type": ["integer", "string"],
-                            "description": "jediTaskID of the reference successful task",
+                            "description": (
+                                "jediTaskID of the reference successful task — "
+                                "typically from find_similar_successful_tasks()[0]"
+                                "['jediTaskID']."
+                            ),
                         },
                     },
-                    "required": ["task_id"],
+                    "required": ["reference_task_id"],
+                },
+            ),
+            McpTool(
+                name="summarize_job_log",
+                description=(
+                    "Returns a compact heuristic summary (~3-10 KB) of a "
+                    "job's payload.stdout for a specific PandaID: total "
+                    "lines/chars, section markers seen, last timestamp, "
+                    "last meaningful action, error lines, and the last "
+                    "~50 raw tail lines. Use this when you have a specific "
+                    "PandaID (e.g. from get_scout_job_details). For the "
+                    "current task's representative failed job, prefer the "
+                    "convenience tool `get_failed_job_log_summary()`. For "
+                    "differential diagnosis against a similar successful "
+                    "task, use `compare_failed_vs_successful_job_logs`."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "panda_id": {
+                            "type": ["integer", "string"],
+                            "description": (
+                                "PandaID of the job whose log to summarize."
+                            ),
+                        },
+                    },
+                    "required": ["panda_id"],
                 },
             ),
         ]
@@ -626,8 +635,9 @@ class PandaMcpClient(McpClient):
             "fetch_brokerage_context": self._fetch_brokerage_context,
             "fetch_cli_options": self._fetch_cli_options,
             "find_similar_successful_tasks": self._find_similar_successful_tasks,
-            "get_failed_job_logs": self._get_failed_job_logs,
-            "get_successful_job_logs": self._get_successful_job_logs,
+            "get_failed_job_log_summary": self._get_failed_job_log_summary,
+            "compare_failed_vs_successful_job_logs": self._compare_failed_vs_successful_job_logs,
+            "summarize_job_log": self._summarize_job_log,
         }
 
     def list_tools(self) -> list[McpTool]:
@@ -925,7 +935,7 @@ class PandaMcpClient(McpClient):
         """
         task_id_int = int(task_data["jediTaskID"])
         try:
-            datasets = await get_datasets_and_files(task_id_int)
+            datasets = await get_datasets_and_files(task_id_int, dataset_only=True)
             logger.info(
                 "PandaMcpClient.get_task_input_datasets: fetched %d dataset(s) for task_id=%s",
                 len(datasets),
@@ -958,49 +968,110 @@ class PandaMcpClient(McpClient):
             logger.warning("PandaMcpClient.find_similar_successful_tasks: failed: %s", exc)
             return {"error": str(exc)}
 
-    async def _get_failed_job_logs(
+    async def _get_failed_job_log_summary(
         self,
         task_data: dict[str, Any],
     ) -> dict[str, Any]:
-        """Download payload.stdout for one representative failed job."""
+        """Heuristic summary of the current task's representative failed-job log."""
+        from bamboo.utils.log_filters import summarize_log_content  # noqa: PLC0415
+
         task_id = int(task_data["jediTaskID"])
         try:
             jobs = await get_job_descriptions(task_id, unsuccessful_only=True)
             if not jobs:
                 return {"error": "no failed jobs found"}
             panda_id = jobs[0].get("PandaID") or jobs[0].get("jobID")
-            content = await get_job_log(panda_id)
+            content = await get_job_log(panda_id) or ""
+            summary = summarize_log_content(content)
+            summary["pandaID"] = panda_id
+            summary["filename"] = "payload.stdout"
             logger.info(
-                "PandaMcpClient.get_failed_job_logs: fetched log for PandaID=%s", panda_id
+                "PandaMcpClient.get_failed_job_log_summary: PandaID=%s, "
+                "%d lines, %d error line(s), last_section=%r",
+                panda_id,
+                summary["total_lines"],
+                len(summary["error_lines"]),
+                summary["last_section_marker"],
             )
-            return {"pandaID": panda_id, "filename": "payload.stdout", "content": content or ""}
+            return summary
         except Exception as exc:
             logger.warning(
-                "PandaMcpClient.get_failed_job_logs: failed for task_id=%s: %s", task_id, exc
+                "PandaMcpClient.get_failed_job_log_summary: failed for task_id=%s: %s",
+                task_id,
+                exc,
             )
             return {"error": str(exc)}
 
-    async def _get_successful_job_logs(
+    async def _compare_failed_vs_successful_job_logs(
         self,
-        task_id: int | str,
+        task_data: dict[str, Any],
+        reference_task_id: int | str,
     ) -> dict[str, Any]:
-        """Download payload.stdout for one finished job of a reference task."""
-        task_id_int = int(task_id)
+        """Fetch failed + reference-successful job logs and return alignment."""
+        from bamboo.utils.log_filters import compare_job_logs  # noqa: PLC0415
+
+        task_id = int(task_data["jediTaskID"])
+        ref_id = int(reference_task_id)
         try:
-            jobs = await get_job_descriptions(task_id_int)
-            finished = [j for j in jobs if j.get("jobStatus") == "finished"]
+            failed_jobs = await get_job_descriptions(task_id, unsuccessful_only=True)
+            if not failed_jobs:
+                return {"error": "no failed jobs found for current task"}
+            failed_pid = failed_jobs[0].get("PandaID") or failed_jobs[0].get("jobID")
+            failed_log = await get_job_log(failed_pid)
+
+            ref_jobs = await get_job_descriptions(ref_id)
+            finished = [j for j in ref_jobs if j.get("jobStatus") == "finished"]
             if not finished:
-                return {"error": "no finished jobs found"}
-            panda_id = finished[0].get("PandaID") or finished[0].get("jobID")
-            content = await get_job_log(panda_id)
+                return {"error": f"no finished jobs found for reference task {ref_id}"}
+            succ_pid = finished[0].get("PandaID") or finished[0].get("jobID")
+            successful_log = await get_job_log(succ_pid)
+
+            result = compare_job_logs(failed_log or "", successful_log or "")
+            result["failed_panda_id"] = failed_pid
+            result["successful_panda_id"] = succ_pid
+            result["reference_task_id"] = ref_id
             logger.info(
-                "PandaMcpClient.get_successful_job_logs: fetched log for PandaID=%s", panda_id
+                "PandaMcpClient.compare_failed_vs_successful_job_logs: "
+                "failed=%s successful=%s ref_task=%s truncated=%s step=%r",
+                failed_pid, succ_pid, ref_id,
+                result["failed_log_appears_truncated_mid_execution"],
+                result["candidate_problem_step_from_alignment"],
             )
-            return {"pandaID": panda_id, "filename": "payload.stdout", "content": content or ""}
+            return result
         except Exception as exc:
             logger.warning(
-                "PandaMcpClient.get_successful_job_logs: failed for task_id=%s: %s",
-                task_id_int,
+                "PandaMcpClient.compare_failed_vs_successful_job_logs: "
+                "failed (task_id=%s, ref=%s): %s",
+                task_id, ref_id, exc,
+            )
+            return {"error": str(exc)}
+
+    async def _summarize_job_log(
+        self,
+        panda_id: int | str,
+    ) -> dict[str, Any]:
+        """Fetch and heuristically summarise a job log by PandaID."""
+        from bamboo.utils.log_filters import summarize_log_content  # noqa: PLC0415
+
+        pid = int(panda_id)
+        try:
+            content = await get_job_log(pid) or ""
+            summary = summarize_log_content(content)
+            summary["pandaID"] = pid
+            summary["filename"] = "payload.stdout"
+            logger.info(
+                "PandaMcpClient.summarize_job_log: PandaID=%s, %d lines, "
+                "%d error line(s), last_section=%r",
+                pid,
+                summary["total_lines"],
+                len(summary["error_lines"]),
+                summary["last_section_marker"],
+            )
+            return summary
+        except Exception as exc:
+            logger.warning(
+                "PandaMcpClient.summarize_job_log: failed for PandaID=%s: %s",
+                pid,
                 exc,
             )
             return {"error": str(exc)}
@@ -1155,27 +1226,38 @@ class PandaMcpClient(McpClient):
     async def _fetch_cli_options(self, component: str) -> dict[str, Any]:
         """Return the --help output for prun or pathena."""
         import io  # noqa: PLC0415
+        import sys  # noqa: PLC0415
         from contextlib import redirect_stdout  # noqa: PLC0415
 
         buf = io.StringIO()
+        # Isolate panda-client from the parent process's sys.argv —
+        # PrunScript.main reads sys.argv directly for its deprecated-option
+        # scan, so any unrelated flags from the bamboo CLI (e.g. --task-id)
+        # surface as "unrecognized argument" log errors.
+        saved_argv = sys.argv[:]
         try:
-            if component == "prun":
-                from pandaclient import PrunScript  # noqa: PLC0415
-                try:
-                    with redirect_stdout(buf):
-                        PrunScript.main(ext_args=["--help"])
-                except SystemExit:
-                    pass
-            elif component == "pathena":
-                # PathenaScript defines optP at module level; use print_help directly.
-                from pandaclient import PathenaScript  # noqa: PLC0415
-                PathenaScript.optP.print_help(buf)
-            else:
-                return {"error": f"Unknown component: {component}"}
-        except ImportError as exc:
-            return {"error": f"pandaclient not available: {exc}"}
-        except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
+            sys.argv = [component, "--help"]
+            try:
+                if component == "prun":
+                    from pandaclient import PrunScript  # noqa: PLC0415
+                    try:
+                        with redirect_stdout(buf):
+                            PrunScript.main(ext_args=["--help"])
+                    except SystemExit:
+                        pass
+                elif component == "pathena":
+                    # PathenaScript defines optP at module level; use
+                    # print_help directly.
+                    from pandaclient import PathenaScript  # noqa: PLC0415
+                    PathenaScript.optP.print_help(buf)
+                else:
+                    return {"error": f"Unknown component: {component}"}
+            except ImportError as exc:
+                return {"error": f"pandaclient not available: {exc}"}
+            except Exception as exc:  # noqa: BLE001
+                return {"error": str(exc)}
+        finally:
+            sys.argv = saved_argv
         return {component: buf.getvalue()}
 
     async def _fetch_brokerage_doc(self) -> tuple[str, str]:

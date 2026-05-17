@@ -177,7 +177,7 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
 
     logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
 
-    with thinking("Working"):
+    with thinking("Fetching task data from PanDA"):
         try:
             data = await asyncio.to_thread(
                 _call_api, "get", "task/get_detailed_info", {"task_id": task_id_int}
@@ -225,6 +225,7 @@ async def get_job_descriptions(
 async def get_datasets_and_files(
     task_id: int,
     dataset_types: list[str] | None = None,
+    dataset_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return dataset and file information for *task_id*.
 
@@ -233,6 +234,7 @@ async def get_datasets_and_files(
     Args:
         task_id: The PanDA ``jediTaskID``.
         dataset_types: Dataset type filter (default: ``["input", "pseudo_input"]``).
+        dataset_only: When ``True``, only return dataset information without associated files.
 
     Returns:
         List of dataset dicts.  Empty list on any error.
@@ -240,6 +242,8 @@ async def get_datasets_and_files(
     params: dict[str, Any] = {"task_id": task_id}
     if dataset_types:
         params["dataset_types"] = dataset_types
+    if dataset_only:
+        params["dataset_only"] = True
     try:
         data = await asyncio.to_thread(
             _call_api, "get", "task/get_datasets_and_files", params

@@ -134,7 +134,7 @@ class KnowledgeReviewer:
         try:
             llm = get_extraction_llm()
             say(f"Analysing graph for incident gaps and node relevance ({len(graph.nodes)} nodes)...")
-            with thinking("Working"):
+            with thinking("Reviewing extracted knowledge graph"):
                 response = await llm.ainvoke(
                     KNOWLEDGE_REVIEW_PROMPT.format(
                         graph_summary=graph_summary,
