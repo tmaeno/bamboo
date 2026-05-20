@@ -945,17 +945,36 @@ Produce TWO outputs:
        "suggested_tool_capability": "<the capability a future tool would need>"}}
    If every procedure has a matching tool, leave the list empty.
 
-Return ONLY a single JSON object with these two keys (no markdown fences,
-no commentary). The JSON key MUST be the literal string `orchestration_code` —
-do not abbreviate it to `orchest_code`, `code`, or any other variant; doing so
-will cause your output to be discarded. Use the JSON-escaped string form for
-`orchestration_code` (literal `\\n` for newlines):
+3) An ``explanation`` string narrating how the code was generated.
+   For each tool call in your ``orchestration_code``, briefly state:
+     (a) why this tool was picked for the procedure
+     (b) for each keyword argument, the SOURCE of its value, marked
+         exactly as one of:
+           - ``procedure parameters`` (value taken from the procedure's
+             parameters dict)
+           - ``procedure description`` (value mentioned literally in the
+             procedure description)
+           - ``inferred default`` (you chose the value yourself
+             because neither the procedure parameters nor the
+             description specified it)
+     (c) if any argument is marked ``inferred default``, state plainly
+         why you didn't simply omit the argument and let the tool's
+         own default apply.
+   Keep the explanation short — one or two sentences per tool call.
+
+Return ONLY a single JSON object with these three keys (no markdown
+fences, no commentary). The JSON key MUST be the literal string
+`orchestration_code` — do not abbreviate it to `orchest_code`, `code`,
+or any other variant; doing so will cause your output to be discarded.
+Use the JSON-escaped string form for `orchestration_code` (literal `\\n`
+for newlines):
 
 {{
   "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    if not similar:\\n        return {{\\"similar\\": []}}\\n    comparison = await tools.compare_failed_vs_successful_job_logs(reference_task_id=similar[0][\\"jediTaskID\\"])\\n    return {{\\"similar\\": similar, \\"comparison\\": comparison}}",
   "capability_gaps": [
     {{"investigation": "...", "suggested_tool_capability": "..."}}
-  ]
+  ],
+  "explanation": "per-tool-call rationale — see rule (3) above"
 }}
 """
 

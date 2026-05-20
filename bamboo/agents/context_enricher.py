@@ -720,6 +720,18 @@ def _parse_orchestration_response(response: str) -> tuple[str, list[dict]]:
                     ),
                 )
 
+        if code:
+            explanation = data.get("explanation")
+            if isinstance(explanation, str) and explanation.strip():
+                show_block(
+                    "orchestration: argument-source explanation",
+                    explanation,
+                )
+                logger.info(
+                    "ContextEnricher: orchestration explanation: %s",
+                    explanation,
+                )
+
         return code, capability_gaps
     except (json.JSONDecodeError, TypeError) as exc:
         logger.warning(

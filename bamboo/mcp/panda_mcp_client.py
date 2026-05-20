@@ -1227,7 +1227,7 @@ class PandaMcpClient(McpClient):
         """Return the --help output for prun or pathena."""
         import io  # noqa: PLC0415
         import sys  # noqa: PLC0415
-        from contextlib import redirect_stdout  # noqa: PLC0415
+        from contextlib import redirect_stderr, redirect_stdout  # noqa: PLC0415
 
         buf = io.StringIO()
         # Isolate panda-client from the parent process's sys.argv —
@@ -1241,15 +1241,24 @@ class PandaMcpClient(McpClient):
                 if component == "prun":
                     from pandaclient import PrunScript  # noqa: PLC0415
                     try:
-                        with redirect_stdout(buf):
+                        with redirect_stdout(buf), redirect_stderr(buf):
                             PrunScript.main(ext_args=["--help"])
                     except SystemExit:
                         pass
                 elif component == "pathena":
-                    # PathenaScript defines optP at module level; use
-                    # print_help directly.
-                    from pandaclient import PathenaScript  # noqa: PLC0415
-                    PathenaScript.optP.print_help(buf)
+                    # PathenaScript defines optP at module level; importing
+                    # it may itself trigger argparse (which sees the
+                    # injected "--help" and raises SystemExit). The
+                    # try/except must wrap the import too, not just the
+                    # print_help call — SystemExit is a BaseException so it
+                    # would otherwise propagate past the outer
+                    # `except Exception` and kill the process.
+                    try:
+                        with redirect_stdout(buf), redirect_stderr(buf):
+                            from pandaclient import PathenaScript  # noqa: PLC0415
+                            PathenaScript.optP.print_help(buf)
+                    except SystemExit:
+                        pass
                 else:
                     return {"error": f"Unknown component: {component}"}
             except ImportError as exc:
