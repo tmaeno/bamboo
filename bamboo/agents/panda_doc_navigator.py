@@ -30,14 +30,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.config import get_settings
 from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm
 from bamboo.llm.prompts import (
-    PANDA_DOC_SUMMARIZE_PROMPT as _SUMMARIZE_PROMPT,
-    PANDA_DOC_TRAVERSAL_PAGE_PROMPT as _TRAVERSAL_PAGE_PROMPT,
-    PANDA_DOC_TRAVERSAL_SECTION_PROMPT as _TRAVERSAL_SECTION_PROMPT,
+    PANDA_DOC_SUMMARIZE_SYSTEM as _SUMMARIZE_SYSTEM,
+    PANDA_DOC_SUMMARIZE_USER as _SUMMARIZE_USER,
+    PANDA_DOC_TRAVERSAL_PAGE_SYSTEM as _TRAVERSAL_PAGE_SYSTEM,
+    PANDA_DOC_TRAVERSAL_PAGE_USER as _TRAVERSAL_PAGE_USER,
+    PANDA_DOC_TRAVERSAL_SECTION_SYSTEM as _TRAVERSAL_SECTION_SYSTEM,
+    PANDA_DOC_TRAVERSAL_SECTION_USER as _TRAVERSAL_SECTION_USER,
 )
 from bamboo.utils.narrator import counting, say, thinking
 
@@ -368,7 +371,7 @@ class PandaDocNavigator:
 
     async def _generate_system_summary(self, nodes: list[DocNode]) -> str:
         """Generate a system knowledge summary from top-level + concept pages."""
-        from bamboo.llm import PANDA_SYSTEM_SUMMARY_PROMPT  # noqa: PLC0415
+        from bamboo.llm import PANDA_SYSTEM_SUMMARY_SYSTEM, PANDA_SYSTEM_SUMMARY_USER  # noqa: PLC0415
 
         candidates = [
             n for n in nodes
@@ -393,9 +396,12 @@ class PandaDocNavigator:
         try:
             with thinking("Summarising PanDA system knowledge"):
                 resp = await self._summary_llm.ainvoke(
-                    [HumanMessage(content=PANDA_SYSTEM_SUMMARY_PROMPT.format(
-                        concept_docs=concept_docs
-                    ))]
+                    [
+                        SystemMessage(content=PANDA_SYSTEM_SUMMARY_SYSTEM),
+                        HumanMessage(content=PANDA_SYSTEM_SUMMARY_USER.format(
+                            concept_docs=concept_docs
+                        )),
+                    ]
                 )
             summary = resp.content.strip()
             if summary:
@@ -770,14 +776,19 @@ class PandaDocNavigator:
                         node.doc_type = "other"
                     cache_hits += 1
                     return
-                prompt = _SUMMARIZE_PROMPT.format(
+                user_content = _SUMMARIZE_USER.format(
                     page_title=page_title,
                     title=node.title,
                     content=node.content[:3000],
                 )
                 async with semaphore:
                     try:
-                        resp = await self._extraction_llm.ainvoke([HumanMessage(content=prompt)])
+                        resp = await self._extraction_llm.ainvoke(
+                            [
+                                SystemMessage(content=_SUMMARIZE_SYSTEM),
+                                HumanMessage(content=user_content),
+                            ]
+                        )
                         raw = resp.content.strip()
                         if raw.startswith("```"):
                             raw = "\n".join(
@@ -988,7 +999,8 @@ class PandaDocNavigator:
             for pid, node in page_items
         )
         chosen_page_ids = await self._llm_select(
-            _TRAVERSAL_PAGE_PROMPT.format(query=query, pages_text=pages_text),
+            system_content=_TRAVERSAL_PAGE_SYSTEM,
+            user_content=_TRAVERSAL_PAGE_USER.format(query=query, pages_text=pages_text),
             candidates=[pid for pid, _ in page_items],
         )
         say(f"LLM selected {len(chosen_page_ids)} relevant doc page(s)")
@@ -1004,7 +1016,8 @@ class PandaDocNavigator:
                 for cid, child in child_items
             )
             chosen_ids = await self._llm_select(
-                _TRAVERSAL_SECTION_PROMPT.format(
+                system_content=_TRAVERSAL_SECTION_SYSTEM,
+                user_content=_TRAVERSAL_SECTION_USER.format(
                     query=query,
                     page_title=node.title,
                     page_summary=node.summary,
@@ -1035,10 +1048,20 @@ class PandaDocNavigator:
         say(f"LLM traversal: {len(results)} section(s) found")
         return results
 
-    async def _llm_select(self, prompt: str, candidates: list[str]) -> list[str]:
+    async def _llm_select(
+        self,
+        system_content: str,
+        user_content: str,
+        candidates: list[str],
+    ) -> list[str]:
         """Prompt the LLM to select relevant IDs from *candidates*. Returns a filtered subset."""
         try:
-            response = await self._extraction_llm.ainvoke([HumanMessage(content=prompt)])
+            response = await self._extraction_llm.ainvoke(
+                [
+                    SystemMessage(content=system_content),
+                    HumanMessage(content=user_content),
+                ]
+            )
             text = response.content.strip()
             match = re.search(r"\[.*?\]", text, re.DOTALL)
             if not match:

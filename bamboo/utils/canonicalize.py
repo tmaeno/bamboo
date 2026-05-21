@@ -51,9 +51,9 @@ async def canonicalize_descriptions(
                 Pass ``self._desc_cache`` from :class:`KnowledgeGraphExtractor`
                 to share the cache across all retry passes within one run.
     """
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-    from bamboo.llm import DESCRIPTION_CANONICALIZE_PROMPT, get_extraction_llm
+    from bamboo.llm import DESCRIPTION_CANONICALIZE_SYSTEM, DESCRIPTION_CANONICALIZE_USER, get_extraction_llm
     from bamboo.utils.narrator import say
 
     nodes_with_desc = [n for n in nodes if n.description]
@@ -88,13 +88,18 @@ async def canonicalize_descriptions(
     for batch_start in range(0, len(to_canonicalize), _BATCH_SIZE):
         batch = to_canonicalize[batch_start : batch_start + _BATCH_SIZE]
         original_descs = [n.description for n in batch]
-        prompt = DESCRIPTION_CANONICALIZE_PROMPT.format(
+        user_content = DESCRIPTION_CANONICALIZE_USER.format(
             descriptions_json=json.dumps(original_descs, ensure_ascii=False),
             n=len(batch),
         )
         try:
             with thinking("Canonicalizing descriptions"):
-                response = await llm.ainvoke([HumanMessage(content=prompt)])
+                response = await llm.ainvoke(
+                    [
+                        SystemMessage(content=DESCRIPTION_CANONICALIZE_SYSTEM),
+                        HumanMessage(content=user_content),
+                    ]
+                )
             raw = response.content.strip()
             if raw.startswith("```"):
                 raw = "\n".join(

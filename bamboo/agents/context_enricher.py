@@ -19,6 +19,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 _SAFE_BUILTINS = {
     name: getattr(_builtins_module, name)
     for name in (
@@ -34,10 +36,14 @@ _SAFE_BUILTINS = {
 
 from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints
 from bamboo.llm import (
-    EXPLORATION_GAP_ANALYSIS_PROMPT,
-    EXPLORER_TOOL_SELECTION_PROMPT,
-    PROCEDURE_ORCHESTRATION_CODE_PROMPT,
-    TOOL_ORCHESTRATION_CODE_PROMPT,
+    EXPLORATION_GAP_ANALYSIS_SYSTEM,
+    EXPLORATION_GAP_ANALYSIS_USER,
+    EXPLORER_TOOL_SELECTION_SYSTEM,
+    EXPLORER_TOOL_SELECTION_USER,
+    PROCEDURE_ORCHESTRATION_CODE_SYSTEM,
+    PROCEDURE_ORCHESTRATION_CODE_USER,
+    TOOL_ORCHESTRATION_CODE_SYSTEM,
+    TOOL_ORCHESTRATION_CODE_USER,
     get_extraction_llm,
 )
 from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in type hints)
@@ -308,16 +314,20 @@ class ContextEnricher:
         tools_description = _build_tools_description(tools)
         issues_text = "\n".join(f"- {i}" for i in review_issues)
 
-        prompt = EXPLORATION_GAP_ANALYSIS_PROMPT.format(
+        user_content = EXPLORATION_GAP_ANALYSIS_USER.format(
             review_issues=issues_text,
             task_summary=task_summary,
             tools_description=tools_description,
             domain_hints=_join_doc_hints(doc_hints),
         )
+        messages = [
+            SystemMessage(content=EXPLORATION_GAP_ANALYSIS_SYSTEM),
+            HumanMessage(content=user_content),
+        ]
 
         say("Analysing information gaps...")
         with thinking("Analysing gaps"):
-            response = await self.llm.ainvoke(prompt)
+            response = await self.llm.ainvoke(messages)
 
         gaps = _parse_gaps(response.content)
         if gaps:
@@ -344,8 +354,8 @@ class ContextEnricher:
         treated as the gaps directly. Phase 2 asks the LLM to emit a JSON
         object with ``orchestration_code`` and ``capability_gaps``. The prompt
         template differs by ``mode``: ``"exploratory"`` uses
-        :data:`TOOL_ORCHESTRATION_CODE_PROMPT` (creative investigation);
-        ``"procedure"`` uses :data:`PROCEDURE_ORCHESTRATION_CODE_PROMPT`
+        :data:`TOOL_ORCHESTRATION_CODE_SYSTEM` (creative investigation);
+        ``"procedure"`` uses :data:`PROCEDURE_ORCHESTRATION_CODE_SYSTEM`
         (execute procedure verbatim, no speculation).
 
         Returns ``(code, capability_gaps)`` on success, or ``None`` on any
@@ -363,21 +373,27 @@ class ContextEnricher:
                 say("Planner found no actionable gaps.")
                 return None
 
-            template = (
-                PROCEDURE_ORCHESTRATION_CODE_PROMPT if mode == "procedure"
-                else TOOL_ORCHESTRATION_CODE_PROMPT
-            )
-            prompt = template.format(
+            if mode == "procedure":
+                system_content = PROCEDURE_ORCHESTRATION_CODE_SYSTEM
+                user_template = PROCEDURE_ORCHESTRATION_CODE_USER
+            else:
+                system_content = TOOL_ORCHESTRATION_CODE_SYSTEM
+                user_template = TOOL_ORCHESTRATION_CODE_USER
+            user_content = user_template.format(
                 gaps="\n".join(f"- {g}" for g in gaps),
                 task_summary=_build_task_summary(task_data),
                 tools_description=_build_tools_description(tools),
             )
+            messages = [
+                SystemMessage(content=system_content),
+                HumanMessage(content=user_content),
+            ]
             say(
                 f"Generating {'procedure-driven' if mode == 'procedure' else 'exploratory'} "
                 "orchestration code..."
             )
             with thinking("Generating code"):
-                response = await self.llm.ainvoke(prompt)
+                response = await self.llm.ainvoke(messages)
 
             code, capability_gaps = _parse_orchestration_response(response.content)
             if not code:
@@ -460,16 +476,20 @@ class ContextEnricher:
         tools_description = _build_tools_description(tools)
         issues_text = "\n".join(f"- {i}" for i in review_issues)
 
-        prompt = EXPLORER_TOOL_SELECTION_PROMPT.format(
+        user_content = EXPLORER_TOOL_SELECTION_USER.format(
             review_issues=issues_text,
             task_summary=task_summary,
             tools_description=tools_description,
         )
+        messages = [
+            SystemMessage(content=EXPLORER_TOOL_SELECTION_SYSTEM),
+            HumanMessage(content=user_content),
+        ]
 
         try:
             say("Selecting additional data sources to fetch...")
             with thinking("Selecting tools"):
-                response = await self.llm.ainvoke(prompt)
+                response = await self.llm.ainvoke(messages)
             return _parse_tool_calls(response.content)
         except Exception:
             logger.exception("ContextEnricher: LLM tool-selection call failed — failing open")

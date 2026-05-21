@@ -60,16 +60,21 @@ async def prefetch_panda_docs(
     keyword_query_str = ""
     if plain_error or email_text:
         try:
-            from bamboo.llm import DOC_SEARCH_KEYWORDS_PROMPT, get_extraction_llm  # noqa: PLC0415
-            from langchain_core.messages import HumanMessage  # noqa: PLC0415
+            from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm  # noqa: PLC0415
+            from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
 
             llm = get_extraction_llm()
-            prompt = DOC_SEARCH_KEYWORDS_PROMPT.format(
+            user_content = DOC_SEARCH_KEYWORDS_USER.format(
                 error_dialog=plain_error.rsplit(None, 1)[0] if plain_error else "(none)",
                 email_text=email_text.rsplit(None, 1)[0] if email_text else "(none)",
             )
             with thinking("Extracting doc search queries"):
-                response = await llm.ainvoke([HumanMessage(content=prompt)])
+                response = await llm.ainvoke(
+                    [
+                        SystemMessage(content=DOC_SEARCH_KEYWORDS_SYSTEM),
+                        HumanMessage(content=user_content),
+                    ]
+                )
             raw = response.content.strip()
             if raw.startswith("```"):
                 raw = "\n".join(

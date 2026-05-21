@@ -87,9 +87,9 @@ async def _canonicalize(raw_error: str) -> str:
 
 async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
     """Return a short block of relevant PanDA doc snippets for the given task."""
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-    from bamboo.llm import DOC_SEARCH_KEYWORDS_PROMPT, get_extraction_llm
+    from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm
     from bamboo.mcp.panda_mcp_client import PandaMcpClient
 
     error_dialog = task_data.get("errorDialog", "") or ""
@@ -102,11 +102,16 @@ async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
     keywords: list[str] = [plain[:120]]
     try:
         llm = get_extraction_llm()
-        prompt = DOC_SEARCH_KEYWORDS_PROMPT.format(
+        user_content = DOC_SEARCH_KEYWORDS_USER.format(
             error_dialog=plain[:500],
             email_text="(none)",
         )
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        response = await llm.ainvoke(
+            [
+                SystemMessage(content=DOC_SEARCH_KEYWORDS_SYSTEM),
+                HumanMessage(content=user_content),
+            ]
+        )
         raw = response.content.strip()
         if raw.startswith("```"):
             raw = "\n".join(ln for ln in raw.splitlines() if not ln.startswith("```")).strip()

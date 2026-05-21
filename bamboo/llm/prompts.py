@@ -9,11 +9,11 @@ Prompt constants
     General-purpose knowledge-graph extraction from raw text.
     Used by ``LLMExtractionStrategy``.
 
-``EMAIL_EXTRACTION_PROMPT``
+``EMAIL_EXTRACTION_SYSTEM`` + ``EMAIL_EXTRACTION_USER``
     Extracts ``Cause``, ``Resolution``, ``Task_Context``, and ``Procedure`` nodes
     from an email thread.  Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`.
 
-``LOG_EXTRACTION_PROMPT``
+``LOG_EXTRACTION_SYSTEM`` + ``LOG_EXTRACTION_USER``
     Extracts ``Symptom``, ``Component``, and ``Task_Context`` nodes from raw
     log text.  Cause and Resolution are intentionally excluded — logs record
     what happened, not why or how to fix it; those come from the email thread
@@ -21,22 +21,22 @@ Prompt constants
     same error, captures the components named in stack traces or log prefixes,
     and stores the surrounding prose as Task_Context for vector search.
 
-``BROKERAGE_LOG_EXTRACTION_PROMPT``
+``BROKERAGE_LOG_EXTRACTION_SYSTEM`` + ``BROKERAGE_LOG_EXTRACTION_USER``
     Extracts a ``Symptom`` (placement outcome: ``BrokerageNoCandidates`` /
     ``BrokerageCandidateFound``), ``Task_Feature`` nodes for the structured
     task constraints visible in the log (memory requirement, IO intensity,
     data locality, etc.), and ``Task_Context`` nodes for the dominant filter
     stages.  Reuses existing node types; no brokerage-specific types needed.
 
-``CAUSE_RESOLUTION_CANONICALIZE_PROMPT``
+``CAUSE_RESOLUTION_CANONICALIZE_SYSTEM`` + ``CAUSE_RESOLUTION_CANONICALIZE_USER``
     Normalises a raw Cause/Resolution name into a stable canonical phrase,
     optionally matching against existing names from the vector DB.
 
-``TASK_ERROR_CATEGORY_LABEL_PROMPT``
+``TASK_ERROR_CATEGORY_LABEL_SYSTEM`` + ``TASK_ERROR_CATEGORY_LABEL_USER``
     Converts a raw error message into a short CamelCase error-category label.
     Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.ErrorCategoryStore`.
 
-``SUMMARIZATION_PROMPT``
+``SUMMARIZATION_SYSTEM`` + ``SUMMARIZATION_USER``
     Produces a narrative summary of a knowledge graph for vector indexing.
     Used by :class:`~bamboo.agents.knowledge_accumulator.KnowledgeAccumulator`.
 
@@ -69,18 +69,18 @@ Prompt constants
     Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
     before storing job error diagnostics as ``TaskContextNode``.
 
-``EXPLORER_TOOL_SELECTION_PROMPT``
+``EXPLORER_TOOL_SELECTION_SYSTEM`` + ``EXPLORER_TOOL_SELECTION_USER``
     Given a reviewer's issue list and available MCP tools, selects which
     tools to call to fill data gaps before a re-extraction attempt.
     Used by :class:`~bamboo.agents.context_enricher.ContextEnricher`.
 
-``KNOWLEDGE_REVIEW_PROMPT``
+``KNOWLEDGE_REVIEW_SYSTEM`` + ``KNOWLEDGE_REVIEW_USER``
     Reviews an extracted knowledge graph for completeness, accuracy, and
     consistency against the original sources.  Returns a structured JSON
     verdict with issues and corrective feedback.
     Used by :class:`~bamboo.agents.knowledge_reviewer.KnowledgeReviewer`.
 
-``DOC_SEARCH_KEYWORDS_PROMPT``
+``DOC_SEARCH_KEYWORDS_SYSTEM`` + ``DOC_SEARCH_KEYWORDS_USER``
     Extracts 2-5 focused search terms from a task's errorDialog and operator
     email so that ``search_panda_docs`` retrieves the most relevant sections.
     Used by :class:`~bamboo.agents.knowledge_accumulator.KnowledgeAccumulator`.
@@ -154,18 +154,9 @@ Output your response as a valid JSON with the following structure:
 """
 
 
-SUMMARIZATION_PROMPT = """You are a technical documentation expert. Create a concise summary of the following knowledge graph and email thread.
+SUMMARIZATION_SYSTEM = """You are a technical documentation expert. Create a concise summary of the following knowledge graph and email thread.
 
-Knowledge Graph:
-{graph_data}
-
-Email Thread (if available):
-{email_text}
-
-TERMINOLOGY REFERENCE (use only to interpret technical terms already present in the graph or email — do NOT introduce new causes, resolutions, procedures, or commands from this section):
-{doc_hints}
-
-STRICT RULE: Only use information explicitly present in either the Knowledge Graph or the Email Thread above.
+STRICT RULE: Only use information explicitly present in either the Knowledge Graph or the Email Thread provided in the user message.
 Do NOT invent, infer, or supplement with domain knowledge — not extra causes, not example commands, not additional context.
 
 Create a summary that:
@@ -178,6 +169,16 @@ The summary should be:
 - Clear and technical
 - Faithful to the graph and email — no hallucinated content
 - Actionable (highlight what matters for troubleshooting)
+"""
+
+SUMMARIZATION_USER = """Knowledge Graph:
+{graph_data}
+
+Email Thread (if available):
+{email_text}
+
+TERMINOLOGY REFERENCE (use only to interpret technical terms already present in the graph or email — do NOT introduce new causes, resolutions, procedures, or commands from this section):
+{doc_hints}
 
 Summary:
 """
@@ -291,7 +292,7 @@ Respond with a JSON object:
 }}
 """
 
-EMAIL_EXTRACTION_PROMPT = """You are a root-cause analysis expert reading an operational incident email thread.
+EMAIL_EXTRACTION_SYSTEM = """You are a root-cause analysis expert reading an operational incident email thread.
 
 Extract ONLY the following node types from the email — do NOT emit Symptom, Environment, Task_Feature, or Component nodes (those are populated from structured data elsewhere):
 
@@ -324,50 +325,47 @@ Canonicalization:
 - If the same cause or resolution is mentioned multiple times, emit it only once.
 - Keep names concise and general (no incident-specific IDs, paths, or dataset names).
 
-Domain knowledge (PanDA system — for context and filling in MISSING details only;
-do NOT replace or override terminology that is already present in the source text):
-{doc_hints}
-
-Email thread:
-{email_text}
+Domain knowledge is provided in the user message under "Domain knowledge" — use it for
+context and filling in MISSING details only; do NOT replace or override terminology that
+is already present in the source text.
 
 Output ONLY a valid JSON object — no explanation, no markdown fences:
-{{
+{
   "nodes": [
-    {{
+    {
       "node_type": "Cause|Resolution|Task_Context",
       "name": "...",
       "description": "...",
-      "metadata": {{}},
+      "metadata": {},
       "steps": []
-    }}
+    }
   ],
   "relationships": [
-    {{
+    {
       "source_name": "...",
       "target_name": "...",
       "relation_type": "solved_by|contribute_to",
       "confidence": 0.0
-    }}
+    }
   ],
   "atomic_actions": [
-    {{
+    {
       "id": "a1",
       "summary": "short snake_case label uniquely identifying this single action",
       "description": "prose from the email describing this action",
-      "parameters": {{}},
+      "parameters": {},
       "cause_name": "<canonical cause name this action investigates>"
-    }}
+    }
   ],
   "action_dependencies": [
-    {{
+    {
       "from": "a1",
       "to": "a2",
       "type": "explicit | implicit",
       "reason": "short justification — quote or paraphrase the email text that establishes the dependency"
-    }}
+    }
   ]
-}}
+}
 
 Rules for ``atomic_actions``:
 - Each action in the email's procedure section becomes ONE entry. Do
@@ -396,20 +394,29 @@ Rules for ``atomic_actions``:
   ones are logged but not materialised as edges.
 """
 
-EMAIL_INVESTIGATION_SUMMARY_PROMPT = """You are reading an incident email thread.
+EMAIL_EXTRACTION_USER = """Domain knowledge (PanDA system — for context and filling in MISSING details only;
+do NOT replace or override terminology that is already present in the source text):
+{doc_hints}
+
+Email thread:
+{email_text}
+"""
+
+EMAIL_INVESTIGATION_SUMMARY_SYSTEM = """You are reading an incident email thread.
 Identify any investigation steps that were explicitly described — what was examined,
 checked, or queried, and what was found or concluded.
 
 List each step briefly (one line each).  Only report steps that are explicitly stated
 in the email — do NOT infer or speculate.  If no investigation steps are described,
 respond with exactly: none
+"""
 
-Email thread:
+EMAIL_INVESTIGATION_SUMMARY_USER = """Email thread:
 {email_text}
 
 Investigation steps:"""
 
-CAUSE_RESOLUTION_CANONICALIZE_PROMPT = """You are a knowledge-graph canonicalization expert.
+CAUSE_RESOLUTION_CANONICALIZE_SYSTEM = """You are a knowledge-graph canonicalization expert.
 
 You will be given a short name for a Cause or Resolution node extracted from an incident report,
 together with the list of names that already exist in the knowledge graph for that node type.
@@ -426,11 +433,6 @@ Rules for a new canonical name:
 - Use lowercase with spaces. 3–8 words is ideal.
 - Do NOT add punctuation at the end.
 - Do NOT wrap the answer in quotes or add any explanation — output the canonical name only.
-
-Node type: {node_type}
-
-Existing names in the graph ({node_type}):
-{existing_names}
 
 Examples for Cause:
   raw: "input dataset mc20_13TeV contains too many files (>200000)"
@@ -449,12 +451,18 @@ Examples for Resolution:
   raw: "patch libssl to version 3.1.2"
   existing: ["split dataset into smaller subsets", "restart service"]
   → update ssl library version                ← no match, new name coined
+"""
+
+CAUSE_RESOLUTION_CANONICALIZE_USER = """Node type: {node_type}
+
+Existing names in the graph ({node_type}):
+{existing_names}
 
 Raw name: {raw_name}
 
 Canonical name:"""
 
-TASK_ERROR_CATEGORY_LABEL_PROMPT = """You are an error classification expert.
+TASK_ERROR_CATEGORY_LABEL_SYSTEM = """You are an error classification expert.
 
 Given a raw error message from an operational system, produce a short, canonical error-category label.
 
@@ -477,23 +485,27 @@ Examples:
 
   "java.lang.OutOfMemoryError: Java heap space at com.example.Processor.run(Processor.java:42)"
   → OutOfMemoryError
+"""
 
-Raw error message:
+TASK_ERROR_CATEGORY_LABEL_USER = """Raw error message:
 {error_message}
 
 Category label:"""
 
-ERROR_CATEGORY_MATCH_PROMPT = """You are an error classification expert.
+ERROR_CATEGORY_MATCH_SYSTEM = """You are an error classification expert.
 
-Does the following error message fit the error category "{category}"?
+You will be given an error category and an error message. Answer with exactly "yes" or "no" — does the error message fit the category? No explanation.
+"""
+
+ERROR_CATEGORY_MATCH_USER = """Error category: "{category}"
 
 Error message:
 {error_message}
 
-Answer with exactly "yes" or "no". No explanation."""
+Answer (yes/no):"""
 
 
-LOG_EXTRACTION_PROMPT = """You are a log analysis expert reading raw operational log output from a distributed computing job.
+LOG_EXTRACTION_SYSTEM = """You are a log analysis expert reading raw operational log output from a distributed computing job.
 
 Your goal is to extract reusable, incident-agnostic knowledge from the log — the kind that helps identify recurring failure patterns across many jobs.
 
@@ -505,7 +517,7 @@ Node types to extract:
   name = a short CamelCase label describing the error pattern, stripped of all
          incident-specific tokens (dataset names, file paths, job IDs, timestamps,
          hostnames, numeric IDs).  Use the same canonicalisation rules as
-         TASK_ERROR_CATEGORY_LABEL_PROMPT — the same structural error in two different
+         TASK_ERROR_CATEGORY_LABEL — the same structural error in two different
          jobs must produce the same Symptom name.
   description = one representative log line that best illustrates the error,
                 lightly redacted to remove incident-specific tokens.
@@ -541,35 +553,36 @@ Canonicalization:
 - Strip ALL incident-specific tokens from names: no dataset names, file paths,
   usernames, job IDs, PIDs, timestamps, IP addresses, or hostnames.
 
-Log text:
-{log_text}
-
 Output ONLY a valid JSON object — no explanation, no markdown fences:
-{{
+{
   "nodes": [
-    {{
+    {
       "node_type": "Symptom|Component|Task_Context",
       "name": "...",
       "description": "...",
       "severity": "critical|error|warning|info|null",
       "system": "...|null",
-      "metadata": {{
+      "metadata": {
         "occurrence_count": 1
-      }}
-    }}
+      }
+    }
   ],
   "relationships": [
-    {{
+    {
       "source_name": "...",
       "target_name": "...",
       "relation_type": "originated_from|contribute_to",
       "confidence": 0.0
-    }}
+    }
   ]
-}}
+}
 """
 
-BROKERAGE_LOG_EXTRACTION_PROMPT = """You are an expert in distributed computing and grid job scheduling reading a pre-filtered PanDA job-brokerage log.
+LOG_EXTRACTION_USER = """Log text:
+{log_text}
+"""
+
+BROKERAGE_LOG_EXTRACTION_SYSTEM = """You are an expert in distributed computing and grid job scheduling reading a pre-filtered PanDA job-brokerage log.
 
 The log shows the result of a site-selection (brokerage) run.  The broker itself ran correctly.
 Your goal is to extract reusable, task-agnostic knowledge so that recurring placement patterns
@@ -610,36 +623,37 @@ Canonicalization:
 - Strip ALL incident-specific tokens from names: no dataset names, site names, job IDs,
   numeric thresholds, or timestamps.
 
-Brokerage log:
-{log_text}
-
 Output ONLY a valid JSON object — no explanation, no markdown fences:
-{{
+{
   "nodes": [
-    {{
+    {
       "node_type": "Symptom|Task_Feature|Task_Context",
       "name": "...",
       "description": "...",
       "severity": "critical|warning|info|null",
       "attribute": "...|null",
       "value": "...|null",
-      "metadata": {{}}
-    }}
+      "metadata": {}
+    }
   ],
   "relationships": [
-    {{
+    {
       "source_name": "...",
       "target_name": "...",
       "relation_type": "contribute_to",
       "confidence": 0.0
-    }}
+    }
   ]
-}}
+}
 """
 
-DESCRIPTION_CANONICALIZE_PROMPT = """You are a knowledge-graph canonicalization expert.
+BROKERAGE_LOG_EXTRACTION_USER = """Brokerage log:
+{log_text}
+"""
 
-Below is a JSON array of node descriptions extracted from an operational incident report.
+DESCRIPTION_CANONICALIZE_SYSTEM = """You are a knowledge-graph canonicalization expert.
+
+You will be given a JSON array of node descriptions extracted from an operational incident report.
 Each description may contain task-instance-specific tokens that make it non-reusable across incidents.
 
 Rewrite EACH description to be task-agnostic while preserving its semantic meaning:
@@ -664,8 +678,6 @@ Keep:
 
 If a description is already generic (no instance-specific data), return it unchanged.
 
-Input: {descriptions_json}
-
 Return the rewritten descriptions as plain text, one description per line,
 in the SAME ORDER as the input.
 Rules for the output:
@@ -675,21 +687,15 @@ Rules for the output:
 - For complex command-line strings or structured data, write a brief English phrase
   (e.g. "panda job submission command with source archive and output files")
   rather than a templated version of the command.
-- Output exactly {n} lines — one per input description.
+- The number of output lines MUST equal the number of input descriptions.
 """
 
-EXPLORER_TOOL_SELECTION_PROMPT = """You are a diagnostic data-collection agent for a PanDA computing task.
+DESCRIPTION_CANONICALIZE_USER = """Input: {descriptions_json}
 
-A knowledge reviewer has found the following issues with the extracted knowledge graph:
+Output exactly {n} lines — one per input description.
+"""
 
-REVIEWER ISSUES:
-{review_issues}
-
-TASK CONTEXT (key fields only):
-{task_summary}
-
-AVAILABLE TOOLS:
-{tools_description}
+EXPLORER_TOOL_SELECTION_SYSTEM = """You are a diagnostic data-collection agent for a PanDA computing task.
 
 Your job is to select the minimal set of tools whose results are most likely to resolve the reviewer's issues.
 
@@ -707,17 +713,29 @@ Output a JSON array. Each element has exactly three keys:
 
 Output ONLY the JSON array — no markdown, no explanation outside the JSON.
 
-Example (do not copy literally — populate args from the actual task context above):
+Example (do not copy literally — populate args from the actual task context):
 [
-  {{
+  {
     "tool": "fetch_linked_log_files",
-    "args": {{"task_id": 12345, "error_dialog": "<a href=\\"http://...\\">log</a>"}},
+    "args": {"task_id": 12345, "error_dialog": "<a href=\\"http://...\\">log</a>"},
     "reason": "Reviewer noted Symptom nodes are too vague; log content will provide specific error codes."
-  }}
+  }
 ]
 """
 
-KNOWLEDGE_REVIEW_PROMPT = """You are an incident knowledge graph gap analyzer for PanDA computing tasks.
+EXPLORER_TOOL_SELECTION_USER = """A knowledge reviewer has found the following issues with the extracted knowledge graph:
+
+REVIEWER ISSUES:
+{review_issues}
+
+TASK CONTEXT (key fields only):
+{task_summary}
+
+AVAILABLE TOOLS:
+{tools_description}
+"""
+
+KNOWLEDGE_REVIEW_SYSTEM = """You are an incident knowledge graph gap analyzer for PanDA computing tasks.
 
 Your job is to identify information that is MISSING from the graph — information that would be
 needed to fully understand the incident.
@@ -760,19 +778,10 @@ noted in issues but should not cause rejection — set approved=true.
 
 When approved, set issues to an empty list.
 
-SOURCE EXCERPTS (if present): use as hints only to identify specific extractable details
-missing from the graph. Their absence does not affect the verdict.
+SOURCE EXCERPTS (if present in the user message): use as hints only to identify specific
+extractable details missing from the graph. Their absence does not affect the verdict.
 
-EXTRACTED GRAPH:
-{graph_summary}
-
-TASK CONTEXT:
-{task_summary}
-
-DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
-{domain_hints}
-
-Use the domain documentation to:
+Use the domain documentation (provided in the user message) to:
 - Understand what a given task status (e.g. exhausted, broken, aborted) means and what
   conditions trigger it.
 - Check whether the graph reflects the documented causes for that status.
@@ -783,15 +792,9 @@ Use the domain documentation to:
   Do NOT flag gaps for other dimensions the docs mention — those are alternative causes that
   did NOT trigger this particular incident.
 
-SOURCE EXCERPTS (optional):
-{sources_summary}
-
-AVAILABLE DATA SOURCES (tool catalogue the explorer can invoke to fill gaps):
-{available_tools}
-
-When a gap in "issues" could be resolved by one of the above tools, append a note such as
-"→ resolvable with <tool_name>" to that issue string.
-Do NOT invent tool names — only reference tools listed above.
+When a gap in "issues" could be resolved by one of the available tools (provided in the user message),
+append a note such as "→ resolvable with <tool_name>" to that issue string.
+Do NOT invent tool names — only reference tools listed in the user message.
 If no tools are listed, assess gaps exactly as before.
 
 FAILURE DIMENSION: Identify the resource dimension(s) that caused this failure
@@ -835,21 +838,17 @@ Verify that each Procedure node's strategy_type is consistent with its linked Ca
 Flag as a specificity gap if the strategy_type is too vague or contradicts the cause.
 
 Respond with a JSON object only — no markdown, no explanation outside the JSON:
-{{
+{
   "approved": true | false,
   "confidence": <float 0.0-1.0>,
   "issues": ["<concise gap description>"],
   "feedback": "<actionable extractor instruction addressing the gaps, or empty string if approved>",
   "failure_dimension": ["cpu" | "memory" | "walltime" | "disk" | "site" | "job_size"]
-}}
+}
 """
 
-EXPLORATION_GAP_ANALYSIS_PROMPT = """You are a diagnostic gap analyst for a PanDA computing task review.
-
-A knowledge reviewer identified these issues with an extracted knowledge graph:
-
-REVIEWER ISSUES:
-{review_issues}
+KNOWLEDGE_REVIEW_USER = """EXTRACTED GRAPH:
+{graph_summary}
 
 TASK CONTEXT:
 {task_summary}
@@ -857,11 +856,14 @@ TASK CONTEXT:
 DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
 {domain_hints}
 
-Use the domain documentation to understand what the task status and error conditions mean,
-and to refine the gap descriptions with domain-specific terminology and expected data.
+SOURCE EXCERPTS (optional):
+{sources_summary}
 
-AVAILABLE TOOLS (read-only catalogue — do not plan tool calls yet):
-{tools_description}
+AVAILABLE DATA SOURCES (tool catalogue the explorer can invoke to fill gaps):
+{available_tools}
+"""
+
+EXPLORATION_GAP_ANALYSIS_SYSTEM = """You are a diagnostic gap analyst for a PanDA computing task review.
 
 Your task: for each reviewer issue, produce a precise description of the SPECIFIC
 INFORMATION that is missing from the graph and why it matters for understanding the
@@ -879,29 +881,38 @@ Rules:
 
 Output a JSON array only — no markdown, no explanation outside the JSON:
 [
-  {{
+  {
     "gap": "<concise description of the specific missing information>",
     "impact": "<one sentence: why this gap impairs incident understanding>",
     "resolvable": true
-  }}
+  }
 ]
 """
 
-PROCEDURE_ORCHESTRATION_CODE_PROMPT = """You are writing orchestration logic for executing historical PanDA investigation procedures.
+EXPLORATION_GAP_ANALYSIS_USER = """A knowledge reviewer identified these issues with an extracted knowledge graph.
+
+REVIEWER ISSUES:
+{review_issues}
+
+TASK CONTEXT:
+{task_summary}
+
+DOMAIN DOCUMENTATION (authoritative PanDA system knowledge — treat as ground truth):
+{domain_hints}
+
+Use the domain documentation to understand what the task status and error conditions mean,
+and to refine the gap descriptions with domain-specific terminology and expected data.
+
+AVAILABLE TOOLS (read-only catalogue — do not plan tool calls yet):
+{tools_description}
+"""
+
+PROCEDURE_ORCHESTRATION_CODE_SYSTEM = """You are writing orchestration logic for executing historical PanDA investigation procedures.
 
 Each gap below is a HISTORICAL PROCEDURE instruction from a prior incident
 (e.g. "Procedure 'X in log analysis' (strategy: log_analysis, for cause: 'X'):
 check failed job log and compare with a similar successful task.
 Historical parameters: [...]").
-
-PROCEDURES TO EXECUTE:
-{gaps}
-
-TASK CONTEXT:
-{task_summary}
-
-AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
-{tools_description}
 
 Produce TWO outputs:
 
@@ -941,8 +952,8 @@ Produce TWO outputs:
 
 2) A list of capability gaps — procedures that no available tool can satisfy.
    Each entry:
-     {{"investigation": "<the procedure that has no matching tool>",
-       "suggested_tool_capability": "<the capability a future tool would need>"}}
+     {"investigation": "<the procedure that has no matching tool>",
+       "suggested_tool_capability": "<the capability a future tool would need>"}
    If every procedure has a matching tool, leave the list empty.
 
 3) An ``explanation`` string narrating how the code was generated.
@@ -969,13 +980,23 @@ or any other variant; doing so will cause your output to be discarded.
 Use the JSON-escaped string form for `orchestration_code` (literal `\\n`
 for newlines):
 
-{{
-  "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    if not similar:\\n        return {{\\"similar\\": []}}\\n    comparison = await tools.compare_failed_vs_successful_job_logs(reference_task_id=similar[0][\\"jediTaskID\\"])\\n    return {{\\"similar\\": similar, \\"comparison\\": comparison}}",
+{
+  "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    if not similar:\\n        return {\\"similar\\": []}\\n    comparison = await tools.compare_failed_vs_successful_job_logs(reference_task_id=similar[0][\\"jediTaskID\\"])\\n    return {\\"similar\\": similar, \\"comparison\\": comparison}",
   "capability_gaps": [
-    {{"investigation": "...", "suggested_tool_capability": "..."}}
+    {"investigation": "...", "suggested_tool_capability": "..."}
   ],
   "explanation": "per-tool-call rationale — see rule (3) above"
-}}
+}
+"""
+
+PROCEDURE_ORCHESTRATION_CODE_USER = """PROCEDURES TO EXECUTE:
+{gaps}
+
+TASK CONTEXT:
+{task_summary}
+
+AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
+{tools_description}
 """
 
 
@@ -1008,9 +1029,10 @@ Return ONLY the normalised string — no JSON, no explanation, no punctuation
 beyond what is part of the message itself.  Maximum 120 characters.
 """
 
-PROCEDURE_DESC_MERGE_PROMPT = """Merge the two descriptions of the same investigation procedure into the best single description. Keep all distinct information from both; prefer the more specific and complete phrasing. Return ONLY the merged description string, no explanation.
+PROCEDURE_DESC_MERGE_SYSTEM = """Merge the two descriptions of the same investigation procedure into the best single description. Keep all distinct information from both; prefer the more specific and complete phrasing. Return ONLY the merged description string, no explanation.
+"""
 
-Procedure name: {name}
+PROCEDURE_DESC_MERGE_USER = """Procedure name: {name}
 
 Description A:
 {desc_a}
@@ -1020,7 +1042,7 @@ Description B:
 
 Merged description:"""
 
-DOC_SEARCH_KEYWORDS_PROMPT = """You are helping to query system documentation.
+DOC_SEARCH_KEYWORDS_SYSTEM = """You are helping to query system documentation.
 
 Given the following error information from a task, return a JSON object with:
 - "nl_query": a concise natural-language description of the problem (1 sentence, no identifiers)
@@ -1041,8 +1063,9 @@ Rules for keywords:
 - Each term must be at least 4 characters.
 - Omit generic words (job, task, log, error, failed, timeout).
 - Only use terms derivable from the provided text — do not invent terms.
+"""
 
-Error dialog:
+DOC_SEARCH_KEYWORDS_USER = """Error dialog:
 {error_dialog}
 
 Email / operator notes (may be empty):
@@ -1220,8 +1243,8 @@ JSON array:"""
 # PandaDocNavigator prompts
 # ---------------------------------------------------------------------------
 
-PANDA_DOC_SUMMARIZE_PROMPT = (
-    "Summarize the following PanDA WMS documentation section in 2-3 sentences.\n"
+PANDA_DOC_SUMMARIZE_SYSTEM = (
+    "Summarize the PanDA WMS documentation section in the user message in 2-3 sentences.\n"
     "Preserve verbatim: all parameter names, option flags (e.g. --nFilesPerJob), "
     "error codes, class names, and any text that appeared in code formatting.\n"
     "Keep it concise and factual.\n\n"
@@ -1236,48 +1259,48 @@ PANDA_DOC_SUMMARIZE_PROMPT = (
     "examples, CLI option tables, API references, parameter/configuration tables, "
     "troubleshooting procedures, and any section that describes HOW something "
     'works or is used. When in doubt, use "other".\n\n'
-    "Page: {page_title}\n"
-    "Section: {title}\n\n"
-    "Content:\n{content}\n\n"
-    'Return ONLY a JSON object: {{"summary": "...", "doc_type": "concept|other"}}'
+    'Return ONLY a JSON object: {"summary": "...", "doc_type": "concept|other"}'
 )
 
-PANDA_DOC_TRAVERSAL_PAGE_PROMPT = (
-    "Search query: {query}\n\n"
-    "Review these PanDA WMS documentation page summaries. "
-    "Return a JSON array of IDs for pages whose content is relevant to the query — "
+PANDA_DOC_SUMMARIZE_USER = (
+    "Page: {page_title}\n"
+    "Section: {title}\n\n"
+    "Content:\n{content}\n"
+)
+
+PANDA_DOC_TRAVERSAL_PAGE_SYSTEM = (
+    "Review the PanDA WMS documentation page summaries in the user message. "
+    "Return a JSON array of IDs for pages whose content is relevant to the search query — "
     "including pages that explain the concept, describe the status/error, "
     "list the parameters involved, or provide context needed to understand it. "
     "Exclude pages that are only about unrelated workflows or unrelated system components. "
     "Return an empty array [] if none apply.\n\n"
-    "Pages:\n{pages_text}\n\n"
     "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
 )
 
-PANDA_DOC_TRAVERSAL_SECTION_PROMPT = (
+PANDA_DOC_TRAVERSAL_PAGE_USER = (
     "Search query: {query}\n\n"
-    "You are exploring page: \"{page_title}\"\n"
-    "Page context: {page_summary}\n\n"
-    "Review these section summaries. "
+    "Pages:\n{pages_text}\n"
+)
+
+PANDA_DOC_TRAVERSAL_SECTION_SYSTEM = (
+    "Review the section summaries in the user message. "
     "Return a JSON array of IDs for sections that answer, explain, or provide relevant "
-    "context for the query — including sections that describe the relevant status, "
+    "context for the search query — including sections that describe the relevant status, "
     "error cause, or parameter. "
     "Exclude sections that are only about unrelated actions or unrelated system components. "
     "Return an empty array [] if none apply.\n\n"
-    "Sections:\n{sections_text}\n\n"
     "Return ONLY a JSON array of IDs, e.g.: [\"id1\", \"id2\"]"
 )
 
-TOOL_ORCHESTRATION_CODE_PROMPT = """You are writing orchestration logic for PanDA task diagnosis.
+PANDA_DOC_TRAVERSAL_SECTION_USER = (
+    "Search query: {query}\n\n"
+    "You are exploring page: \"{page_title}\"\n"
+    "Page context: {page_summary}\n\n"
+    "Sections:\n{sections_text}\n"
+)
 
-GAPS TO RESOLVE:
-{gaps}
-
-TASK CONTEXT:
-{task_summary}
-
-AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
-{tools_description}
+TOOL_ORCHESTRATION_CODE_SYSTEM = """You are writing orchestration logic for PanDA task diagnosis.
 
 Produce TWO outputs:
 
@@ -1305,13 +1328,13 @@ Produce TWO outputs:
      the dependent ones.
    - Check for empty / error results before passing them to downstream calls.
    - Return a dict mapping descriptive labels to fetched values:
-       return {{"failed_job_log": failed, "successful_job_log": successful}}
+       return {"failed_job_log": failed, "successful_job_log": successful}
    - Only call tools in AVAILABLE TOOLS. No imports, no open(), no exec().
 
 2) A list of capability gaps — investigation directions that no available tool
    addresses. Each entry:
-     {{"investigation": "what we need to investigate",
-       "suggested_tool_capability": "the capability a future tool would need"}}
+     {"investigation": "what we need to investigate",
+       "suggested_tool_capability": "the capability a future tool would need"}
    If every gap has a matching tool, leave the list empty.
 
 Return ONLY a single JSON object with these two keys (no markdown fences,
@@ -1320,20 +1343,27 @@ do not abbreviate it to `orchest_code`, `code`, or any other variant; doing so
 will cause your output to be discarded. Use the JSON-escaped string form for
 `orchestration_code` (literal `\\n` for newlines):
 
-{{
+{
   "orchestration_code": "    similar = await tools.find_similar_successful_tasks()\\n    ...",
   "capability_gaps": [
-    {{"investigation": "...", "suggested_tool_capability": "..."}}
+    {"investigation": "...", "suggested_tool_capability": "..."}
   ]
-}}
+}
 """
 
-PANDA_SYSTEM_SUMMARY_PROMPT = """You are reviewing PanDA ATLAS computing system
+TOOL_ORCHESTRATION_CODE_USER = """GAPS TO RESOLVE:
+{gaps}
+
+TASK CONTEXT:
+{task_summary}
+
+AVAILABLE TOOLS (callable as `await tools.<name>(keyword=value)` — keyword args only):
+{tools_description}
+"""
+
+PANDA_SYSTEM_SUMMARY_SYSTEM = """You are reviewing PanDA ATLAS computing system
 documentation to create a concise system knowledge summary for use as background
 context by an AI that diagnoses task failures.
-
-Documentation (overview and concept pages from PanDA docs):
-{concept_docs}
 
 Write a 400-600 word factual summary of PanDA system behavior. Cover:
 
@@ -1363,6 +1393,10 @@ Style:
   it does not need to be told what to advise.
 
 Out of scope (fetched dynamically by doc search when relevant — do NOT cover):
-- Specific task status meanings (surfaced via "task status {{status}}" query)
+- Specific task status meanings (surfaced via "task status {status}" query)
 - Specific brokerage filter stages (surfaced when errorDialog mentions brokerage)
+"""
+
+PANDA_SYSTEM_SUMMARY_USER = """Documentation (overview and concept pages from PanDA docs):
+{concept_docs}
 """

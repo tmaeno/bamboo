@@ -67,10 +67,10 @@ def main(url: str, title_filter: str | None, show_prompt: bool) -> None:
 async def _run(url: str, title_filter: str | None, show_prompt: bool) -> None:
     import httpx
     from bs4 import BeautifulSoup
-    from langchain_core.messages import HumanMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     from bamboo.agents.panda_doc_navigator import PandaDocNavigator
-    from bamboo.llm import PANDA_DOC_SUMMARIZE_PROMPT, get_extraction_llm
+    from bamboo.llm import PANDA_DOC_SUMMARIZE_SYSTEM, PANDA_DOC_SUMMARIZE_USER, get_extraction_llm
 
     click.echo(f"Fetching {url}")
     async with httpx.AsyncClient(timeout=30) as client:
@@ -113,16 +113,21 @@ async def _run(url: str, title_filter: str | None, show_prompt: bool) -> None:
             click.echo("[empty content — skipping LLM call]")
             continue
 
-        prompt = PANDA_DOC_SUMMARIZE_PROMPT.format(
+        user_content = PANDA_DOC_SUMMARIZE_USER.format(
             page_title=page_title,
             title=node.title,
             content=node.content[:3000],
         )
 
         if show_prompt:
-            click.echo(f"\n--- PROMPT ---\n{prompt}\n--- END PROMPT ---")
+            click.echo(f"\n--- SYSTEM ---\n{PANDA_DOC_SUMMARIZE_SYSTEM}\n--- USER ---\n{user_content}\n--- END PROMPT ---")
 
-        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        resp = await llm.ainvoke(
+            [
+                SystemMessage(content=PANDA_DOC_SUMMARIZE_SYSTEM),
+                HumanMessage(content=user_content),
+            ]
+        )
         raw = resp.content.strip()
         click.echo(f"\nRaw LLM response:\n{raw}")
 

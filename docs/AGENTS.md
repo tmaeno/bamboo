@@ -165,7 +165,7 @@ expressed natively.
 
 **Two LLM calls per run:**
 
-**Call 1 — Gap analysis** (`EXPLORATION_GAP_ANALYSIS_PROMPT`):  
+**Call 1 — Gap analysis** (`EXPLORATION_GAP_ANALYSIS_SYSTEM` + `EXPLORATION_GAP_ANALYSIS_USER`):  
 Given reviewer issues (or, in procedure mode, historical procedure strings) plus
 the available tool catalogue, produce precise, tool-neutral gap descriptions —
 *what* specific information is missing and *why* it matters. Shown as a
@@ -181,8 +181,8 @@ switches by `mode`:
 
 | Mode | Prompt | Used when |
 |---|---|---|
-| `"exploratory"` *(default)* | `TOOL_ORCHESTRATION_CODE_PROMPT` | Reviewer-issue exploration; ReasoningNavigator low-confidence path |
-| `"procedure"` | `PROCEDURE_ORCHESTRATION_CODE_PROMPT` | Procedure-driven path (`skip_gap_analysis=True`); embeds historical parameters as literal values, forbids speculative tool calls |
+| `"exploratory"` *(default)* | `TOOL_ORCHESTRATION_CODE_SYSTEM` + `TOOL_ORCHESTRATION_CODE_USER` | Reviewer-issue exploration; ReasoningNavigator low-confidence path |
+| `"procedure"` | `PROCEDURE_ORCHESTRATION_CODE_SYSTEM` + `PROCEDURE_ORCHESTRATION_CODE_USER` | Procedure-driven path (`skip_gap_analysis=True`); embeds historical parameters as literal values, forbids speculative tool calls |
 
 **Sandboxed execution** (`_run_orchestration_code`):  
 The generated function body runs as `async def _fn(tools, asyncio)` in a
@@ -204,7 +204,7 @@ exception, or timeout is logged and the call returns `{}` — fail-open.
 **Fallback (`_select_tools`):**  
 If `_generate_orchestration_code` returns `None` (parse error, empty code, or
 LLM exception), `explore()` falls back to a single LLM call
-(`EXPLORER_TOOL_SELECTION_PROMPT`) that picks a flat list of tools to call
+(`EXPLORER_TOOL_SELECTION_SYSTEM` + `EXPLORER_TOOL_SELECTION_USER`) that picks a flat list of tools to call
 concurrently. No chaining; no capability_gaps. Used as a safety net only.
 
 **Hard-routed branches:**  

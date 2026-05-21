@@ -56,17 +56,24 @@ import re
 import uuid
 from typing import Any, Optional
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from bamboo.agents.extractors.base import ExtractionStrategy
 from bamboo.llm import (
-    BROKERAGE_LOG_EXTRACTION_PROMPT,
-    EMAIL_EXTRACTION_PROMPT,
-    LOG_EXTRACTION_PROMPT,
+    BROKERAGE_LOG_EXTRACTION_SYSTEM,
+    BROKERAGE_LOG_EXTRACTION_USER,
+    EMAIL_EXTRACTION_SYSTEM,
+    EMAIL_EXTRACTION_USER,
+    LOG_EXTRACTION_SYSTEM,
+    LOG_EXTRACTION_USER,
     get_embeddings,
     get_extraction_llm,
 )
 from bamboo.llm.prompts import (
-    CAUSE_RESOLUTION_CANONICALIZE_PROMPT,
-    TASK_ERROR_CATEGORY_LABEL_PROMPT,
+    CAUSE_RESOLUTION_CANONICALIZE_SYSTEM,
+    CAUSE_RESOLUTION_CANONICALIZE_USER,
+    TASK_ERROR_CATEGORY_LABEL_SYSTEM,
+    TASK_ERROR_CATEGORY_LABEL_USER,
 )
 from bamboo.models.graph_element import (
     CauseNode,
@@ -754,7 +761,10 @@ async def _generate_category_label(error_message: str) -> str:
     llm = get_extraction_llm()
     with thinking("Classifying error message"):
         response = await llm.ainvoke(
-            TASK_ERROR_CATEGORY_LABEL_PROMPT.format(error_message=error_message)
+            [
+                SystemMessage(content=TASK_ERROR_CATEGORY_LABEL_SYSTEM),
+                HumanMessage(content=TASK_ERROR_CATEGORY_LABEL_USER.format(error_message=error_message)),
+            ]
         )
     label = re.sub(r"[^A-Za-z]", "", response.content.strip())
     if not label:
@@ -772,14 +782,19 @@ def _make_cause_resolution_label_fn(node_type: str):
         llm = get_extraction_llm()
         # Pass an empty existing-names block — the VectorDB handles matching;
         # the LLM's only job here is stripping incident-specific tokens.
-        prompt = CAUSE_RESOLUTION_CANONICALIZE_PROMPT.format(
+        user_content = CAUSE_RESOLUTION_CANONICALIZE_USER.format(
             node_type=node_type,
             existing_names="(handled by vector search — normalise wording only)",
             raw_name=raw_name,
         )
         say(f'Canonicalizing {node_type}: "{raw_name[:60]}"')
         with thinking("Canonicalizing node name"):
-            response = await llm.ainvoke(prompt)
+            response = await llm.ainvoke(
+                [
+                    SystemMessage(content=CAUSE_RESOLUTION_CANONICALIZE_SYSTEM),
+                    HumanMessage(content=user_content),
+                ]
+            )
         canonical = response.content.strip().strip('"').strip("'")
         if not canonical:
             raise ValueError(
@@ -796,16 +811,21 @@ async def _validate_error_category_match(error_message: str, category: str) -> b
     Returns True (accept match) or False (reject — store a new category instead).
     Defaults to True on any LLM failure so classification is never blocked.
     """
-    from bamboo.llm import ERROR_CATEGORY_MATCH_PROMPT, get_extraction_llm  # noqa: PLC0415
+    from bamboo.llm import ERROR_CATEGORY_MATCH_SYSTEM, ERROR_CATEGORY_MATCH_USER, get_extraction_llm  # noqa: PLC0415
 
     try:
         llm = get_extraction_llm()
-        prompt = ERROR_CATEGORY_MATCH_PROMPT.format(
+        user_content = ERROR_CATEGORY_MATCH_USER.format(
             category=category,
             error_message=error_message[:500],
         )
         with thinking("Validating category match"):
-            response = await llm.ainvoke(prompt)
+            response = await llm.ainvoke(
+                [
+                    SystemMessage(content=ERROR_CATEGORY_MATCH_SYSTEM),
+                    HumanMessage(content=user_content),
+                ]
+            )
         answer = response.content.strip().lower()
         match = answer.startswith("yes")
         if not match:
@@ -1408,14 +1428,20 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             f"Analyzing {source_name}..."
         )
         show_block(f"{source_name} (filtered)", filtered_log)
-        base_prompt = (
-            BROKERAGE_LOG_EXTRACTION_PROMPT
-            if "brokerage" in source_name
-            else LOG_EXTRACTION_PROMPT
-        )
+        if "brokerage" in source_name:
+            system_content = BROKERAGE_LOG_EXTRACTION_SYSTEM
+            user_template = BROKERAGE_LOG_EXTRACTION_USER
+        else:
+            system_content = LOG_EXTRACTION_SYSTEM
+            user_template = LOG_EXTRACTION_USER
         llm = get_extraction_llm()
         with thinking("Extracting knowledge from log"):
-            response = await llm.ainvoke(base_prompt.format(log_text=filtered_log))
+            response = await llm.ainvoke(
+                [
+                    SystemMessage(content=system_content),
+                    HumanMessage(content=user_template.format(log_text=filtered_log)),
+                ]
+            )
         raw = self._parse_log_response(response.content)
 
         nodes = []
@@ -1559,7 +1585,12 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         llm = get_extraction_llm()
         with thinking("Extracting from email thread"):
             response = await llm.ainvoke(
-                EMAIL_EXTRACTION_PROMPT.format(email_text=email_text, doc_hints=hints_text)
+                [
+                    SystemMessage(content=EMAIL_EXTRACTION_SYSTEM),
+                    HumanMessage(content=EMAIL_EXTRACTION_USER.format(
+                        email_text=email_text, doc_hints=hints_text
+                    )),
+                ]
             )
         show_block(
             "LLM response: email extraction (raw)",

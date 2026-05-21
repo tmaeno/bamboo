@@ -25,8 +25,10 @@ from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.llm import (
-    PROCEDURE_DESC_MERGE_PROMPT,
-    SUMMARIZATION_PROMPT,
+    PROCEDURE_DESC_MERGE_SYSTEM,
+    PROCEDURE_DESC_MERGE_USER,
+    SUMMARIZATION_SYSTEM,
+    SUMMARIZATION_USER,
     get_embeddings,
     get_llm,
     get_summary_llm,
@@ -557,11 +559,16 @@ class KnowledgeAccumulator:
         self, name: str, existing: str, new: str
     ) -> str:
         """Ask the LLM to merge two Procedure descriptions into one."""
-        prompt = PROCEDURE_DESC_MERGE_PROMPT.format(
+        user_content = PROCEDURE_DESC_MERGE_USER.format(
             name=name, desc_a=existing, desc_b=new
         )
         llm = get_llm()
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        response = await llm.ainvoke(
+            [
+                SystemMessage(content=PROCEDURE_DESC_MERGE_SYSTEM),
+                HumanMessage(content=user_content),
+            ]
+        )
         merged = response.content.strip()
         logger.info(
             "KnowledgeAccumulator: merged description for procedure '%s'", name
@@ -711,19 +718,19 @@ class KnowledgeAccumulator:
             f"doc_hints={len(hints_text):,}, "
             f"email_text={len(email_text or ''):,} chars"
         )
-        prompt = SUMMARIZATION_PROMPT.format(
+        user_content = SUMMARIZATION_USER.format(
             graph_data=graph_data_str,
             doc_hints=hints_text,
             email_text=email_text or "(none)",
         )
         show_block(
             f"LLM prompt: knowledge_accumulator: graph summary "
-            f"({len(prompt):,} chars)",
-            prompt,
+            f"({len(SUMMARIZATION_SYSTEM) + len(user_content):,} chars)",
+            user_content,
         )
         messages = [
-            SystemMessage(content="You are an expert at creating technical summaries."),
-            HumanMessage(content=prompt),
+            SystemMessage(content=SUMMARIZATION_SYSTEM),
+            HumanMessage(content=user_content),
         ]
 
         with thinking("Generating graph summary"):

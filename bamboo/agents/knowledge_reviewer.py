@@ -20,8 +20,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_core.messages import HumanMessage, SystemMessage
+
 from bamboo.agents.extractors.panda_knowledge_extractor import _node_concepts
-from bamboo.llm import EMAIL_INVESTIGATION_SUMMARY_PROMPT, KNOWLEDGE_REVIEW_PROMPT, get_extraction_llm
+from bamboo.llm import (
+    EMAIL_INVESTIGATION_SUMMARY_SYSTEM,
+    EMAIL_INVESTIGATION_SUMMARY_USER,
+    KNOWLEDGE_REVIEW_SYSTEM,
+    KNOWLEDGE_REVIEW_USER,
+    get_extraction_llm,
+)
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.narrator import say, show_block, thinking
 
@@ -135,14 +143,18 @@ class KnowledgeReviewer:
             llm = get_extraction_llm()
             say(f"Analysing graph for incident gaps and node relevance ({len(graph.nodes)} nodes)...")
             with thinking("Reviewing extracted knowledge graph"):
+                user_content = KNOWLEDGE_REVIEW_USER.format(
+                    graph_summary=graph_summary,
+                    task_summary=task_summary,
+                    sources_summary=sources_summary,
+                    domain_hints=domain_hints,
+                    available_tools=_format_available_tools(available_tools),
+                )
                 response = await llm.ainvoke(
-                    KNOWLEDGE_REVIEW_PROMPT.format(
-                        graph_summary=graph_summary,
-                        task_summary=task_summary,
-                        sources_summary=sources_summary,
-                        domain_hints=domain_hints,
-                        available_tools=_format_available_tools(available_tools),
-                    )
+                    [
+                        SystemMessage(content=KNOWLEDGE_REVIEW_SYSTEM),
+                        HumanMessage(content=user_content),
+                    ]
                 )
             result = _parse_review_response(response.content)
             if result.approved:
@@ -244,7 +256,7 @@ def build_sources_summary(
 async def summarise_email_investigations(email_text: str) -> str:
     """Summarise investigation steps described in an email thread.
 
-    Calls the LLM with :data:`~bamboo.llm.EMAIL_INVESTIGATION_SUMMARY_PROMPT`
+    Calls the LLM with :data:`~bamboo.llm.EMAIL_INVESTIGATION_SUMMARY_SYSTEM`
     to extract a compact, length-independent description of any investigation
     actions explicitly mentioned in the email.  The result is passed to
     :func:`build_sources_summary` as ``email_investigation`` so the reviewer
@@ -256,7 +268,10 @@ async def summarise_email_investigations(email_text: str) -> str:
     try:
         llm = get_extraction_llm()
         response = await llm.ainvoke(
-            EMAIL_INVESTIGATION_SUMMARY_PROMPT.format(email_text=email_text)
+            [
+                SystemMessage(content=EMAIL_INVESTIGATION_SUMMARY_SYSTEM),
+                HumanMessage(content=EMAIL_INVESTIGATION_SUMMARY_USER.format(email_text=email_text)),
+            ]
         )
         return response.content.strip()
     except Exception:
