@@ -176,6 +176,23 @@ class ReasoningNavigator:
         task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
         logger.info("ReasoningNavigator: analysing task '%s'", task_id)
 
+        try:
+            snapshot = await self.graph_db.summary()
+            nodes_str = (
+                ", ".join(f"{k}={v}" for k, v in snapshot["nodes"].items())
+                or "(no nodes)"
+            )
+            edges_str = (
+                ", ".join(f"{k}={v}" for k, v in snapshot["edges"].items())
+                or "(no edges)"
+            )
+            show_block(
+                "graph DB snapshot",
+                f"nodes:  {nodes_str}\nedges:  {edges_str}",
+            )
+        except Exception as exc:
+            logger.warning("ReasoningNavigator: graph DB summary failed: %s", exc)
+
         if doc_hints is None:
             doc_hints = await self.extractor.prefetch_hints(task_data or {}, email_text="")
 
@@ -378,6 +395,21 @@ class ReasoningNavigator:
             and are forwarded to the exploratory planner as novel leads.
         """
         logger.info("ReasoningNavigator: querying graph database")
+        show_block(
+            "graph DB query inputs",
+            "\n".join(
+                f"{k}: {', '.join(v) if v else '(none)'}"
+                for k, v in [
+                    ("symptoms", extracted_clues.get("symptoms") or []),
+                    ("task_features", extracted_clues.get("task_features") or []),
+                    (
+                        "environment_factors",
+                        extracted_clues.get("environment_factors") or [],
+                    ),
+                    ("components", extracted_clues.get("components") or []),
+                ]
+            ),
+        )
         symptoms = extracted_clues.get("symptoms") or []
         unmatched_symptoms: list[str] = []
         per_symptom: dict[str, Any] = {} if debug_trace is not None else {}
@@ -412,6 +444,22 @@ class ReasoningNavigator:
             limit=10,
         )
         logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
+
+        if results:
+            lines = []
+            for r in results:
+                resolutions = r.get("resolutions") or []
+                res_names = [
+                    x.get("name") for x in resolutions
+                    if isinstance(x, dict) and x.get("name")
+                ]
+                res_str = ", ".join(res_names) if res_names else "(none)"
+                lines.append(
+                    f"• {r.get('cause_name')!r} "
+                    f"[score={r.get('match_score')}, freq={r.get('frequency')}] "
+                    f"→ resolutions: {res_str}"
+                )
+            show_block("graph DB matched causes", "\n".join(lines))
 
         if debug_trace is not None:
             debug_trace["full_query_result"] = results

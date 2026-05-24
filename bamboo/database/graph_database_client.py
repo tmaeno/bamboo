@@ -115,3 +115,7 @@ class GraphDatabaseClient:
     ) -> None:
         """Set the description field on an existing node."""
         await self._backend.update_node_description(node_type, name, description)
+
+    async def summary(self) -> dict[str, dict[str, int]]:
+        """Return per-type counts of nodes and relationships in the graph DB."""
+        return await self._backend.summary()

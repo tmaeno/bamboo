@@ -495,3 +495,32 @@ class Neo4jBackend(GraphDatabaseBackend):
                 name=name,
                 desc=description,
             )
+
+    async def summary(self) -> dict[str, dict[str, int]]:
+        """Return per-type counts of nodes and relationships in the database."""
+        node_counts: dict[str, int] = {}
+        edge_counts: dict[str, int] = {}
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            node_result = await session.run(
+                "MATCH (n) UNWIND labels(n) AS lbl "
+                "WITH lbl, count(*) AS cnt "
+                "RETURN lbl, cnt ORDER BY cnt DESC"
+            )
+            async for record in node_result:
+                node_counts[record["lbl"]] = record["cnt"]
+
+            edge_result = await session.run(
+                "MATCH ()-[r]->() "
+                "WITH type(r) AS rtype, count(r) AS cnt "
+                "RETURN rtype, cnt ORDER BY cnt DESC"
+            )
+            async for record in edge_result:
+                edge_counts[record["rtype"]] = record["cnt"]
+
+        logger.debug(
+            "Neo4jBackend.summary: nodes=%r edges=%r",
+            node_counts, edge_counts,
+        )
+        return {"nodes": node_counts, "edges": edge_counts}

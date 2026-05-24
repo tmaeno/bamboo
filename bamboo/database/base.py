@@ -217,6 +217,17 @@ class GraphDatabaseBackend(ABC):
         """
         pass
 
+    @abstractmethod
+    async def summary(self) -> dict[str, dict[str, int]]:
+        """Return per-type counts of nodes and relationships.
+
+        Returns:
+            ``{"nodes": {"Cause": 12, "Resolution": 8, ...},
+               "edges": {"solved_by": 9, "indicate": 14, ...}}``
+            Empty inner dicts when no data of that kind exists.
+        """
+        pass
+
 
 class VectorDatabaseBackend(ABC):
     """Interface for vector database implementations."""

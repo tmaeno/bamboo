@@ -254,6 +254,37 @@ async def get_datasets_and_files(
         return []
 
 
+def _parse_panda_datetime(value: Any) -> datetime | None:
+    """Normalize a PanDA modificationTime-like value to a ``datetime``.
+
+    Accepts a ``datetime`` (passthrough), a ``{"__datetime__": "<iso>"}`` wrapper
+    dict (the encoding PanDA's wire protocol uses for datetime values when the
+    receiving side has not applied ``pandaclient.Client.decode_special_cases``),
+    or a string in either ISO 8601 form or the legacy ``YYYY-MM-DD HH:MM:SS``
+    form. Returns ``None`` for anything else.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, dict):
+        iso = value.get("__datetime__")
+        if isinstance(iso, str):
+            try:
+                return datetime.fromisoformat(iso)
+            except ValueError:
+                return None
+        return None
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        try:
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    return None
+
+
 async def get_similar_successful_tasks(
     task_data: dict[str, Any],
     n_tasks: int = 50,
@@ -289,18 +320,15 @@ async def get_similar_successful_tasks(
     earliest_allowed = now - timedelta(days=SERVER_LIMIT_DAYS)
 
     raw_mtime = task_data.get("modificationTime")
-    anchor: datetime | None = None
-    if raw_mtime:
-        try:
-            anchor = datetime.strptime(str(raw_mtime), "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            logger.warning(
-                "get_similar_successful_tasks: cannot parse modificationTime=%r — "
-                "falling back to now-anchored search (returned tasks may not be "
-                "temporally comparable)",
-                raw_mtime,
-            )
-    else:
+    anchor = _parse_panda_datetime(raw_mtime)
+    if raw_mtime and anchor is None:
+        logger.warning(
+            "get_similar_successful_tasks: cannot parse modificationTime=%r — "
+            "falling back to now-anchored search (returned tasks may not be "
+            "temporally comparable)",
+            raw_mtime,
+        )
+    elif not raw_mtime:
         logger.warning(
             "get_similar_successful_tasks: task_data has no modificationTime — "
             "falling back to now-anchored search (returned tasks may not be "
@@ -343,7 +371,9 @@ async def get_similar_successful_tasks(
         )
         tasks = data if isinstance(data, list) else []
         return sorted(
-            tasks, key=lambda t: str(t.get("modificationTime", "")), reverse=True
+            tasks,
+            key=lambda t: _parse_panda_datetime(t.get("modificationTime")) or datetime.min,
+            reverse=True,
         )
     except RuntimeError as exc:
         logger.warning("get_similar_successful_tasks: failed: %s", exc)

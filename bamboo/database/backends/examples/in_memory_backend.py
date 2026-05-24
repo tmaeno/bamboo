@@ -308,3 +308,17 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             if node.node_type.value == node_type and node.name == name:
                 node.description = description
                 return
+
+    async def summary(self) -> dict[str, dict[str, int]]:
+        """Return per-type counts of nodes and relationships in the store."""
+        node_counts: dict[str, int] = {}
+        for node in self.nodes.values():
+            key = node.node_type.value
+            node_counts[key] = node_counts.get(key, 0) + 1
+        edge_counts: dict[str, int] = {}
+        for rel in self.relationships.values():
+            key = rel.relation_type.value
+            edge_counts[key] = edge_counts.get(key, 0) + 1
+        node_counts = dict(sorted(node_counts.items(), key=lambda kv: -kv[1]))
+        edge_counts = dict(sorted(edge_counts.items(), key=lambda kv: -kv[1]))
+        return {"nodes": node_counts, "edges": edge_counts}
