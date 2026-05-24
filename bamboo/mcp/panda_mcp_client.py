@@ -526,16 +526,14 @@ class PandaMcpClient(McpClient):
                     "task's specific inputs or environment.  Returns a ranked list of candidate "
                     "task dicts; pass the jediTaskID of the best match to "
                     "compare_failed_vs_successful_job_logs to obtain a compact "
-                    "structured comparison."
+                    "structured comparison.  The search time window is auto-anchored on the "
+                    "failing task's modificationTime so the candidates are temporally "
+                    "comparable (same software release, queue conditions); no time-window "
+                    "parameter is exposed."
                 ),
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "days_back": {
-                            "type": "integer",
-                            "default": 30,
-                            "description": "How many days back to search (max 30)",
-                        },
                         "n_tasks": {
                             "type": "integer",
                             "default": 50,
@@ -953,12 +951,11 @@ class PandaMcpClient(McpClient):
     async def _find_similar_successful_tasks(
         self,
         task_data: dict[str, Any],
-        days_back: int = 30,
         n_tasks: int = 50,
     ) -> list[dict[str, Any]] | dict[str, Any]:
         """Return recently-finished tasks similar to the failing task."""
         try:
-            results = await get_similar_successful_tasks(task_data, days_back, n_tasks)
+            results = await get_similar_successful_tasks(task_data, n_tasks)
             logger.info(
                 "PandaMcpClient.find_similar_successful_tasks: found %d candidate(s)",
                 len(results),

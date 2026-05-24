@@ -256,7 +256,6 @@ async def get_datasets_and_files(
 
 async def get_similar_successful_tasks(
     task_data: dict[str, Any],
-    days_back: int = 30,
     n_tasks: int = 50,
 ) -> list[dict[str, Any]]:
     """Find recently finished tasks similar to the failing task.
@@ -266,18 +265,64 @@ async def get_similar_successful_tasks(
     ``architecture``) are pushed to SQL.  ``"finished|done"`` is applied via
     ``re.search`` server-side.
 
+    Time window: the ``since`` cutoff is anchored on the failing task's
+    ``modificationTime`` (``modificationTime - 14 days``) so the returned
+    successful tasks are temporally comparable to the failure (same software
+    release, queue conditions, etc.). If ``modificationTime`` is far enough
+    in the past that the anchored cutoff would exceed the server's
+    30-day-from-now hard limit, or if ``modificationTime`` is
+    missing/unparseable, the function falls back to ``now - 30 days`` and
+    logs a warning — the result in that case may not be temporally
+    comparable.
+
     Args:
         task_data: The failing task's data dict.
-        days_back: How many days back to search (max 30 per server limit).
         n_tasks: Maximum number of task IDs to retrieve before filtering.
 
     Returns:
         List of matching task detail dicts sorted by ``modificationTime`` descending.
         Empty list on any error.
     """
-    since = (datetime.now() - timedelta(days=min(days_back, 30))).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    WINDOW_DAYS = 14
+    SERVER_LIMIT_DAYS = 30
+    now = datetime.now()
+    earliest_allowed = now - timedelta(days=SERVER_LIMIT_DAYS)
+
+    raw_mtime = task_data.get("modificationTime")
+    anchor: datetime | None = None
+    if raw_mtime:
+        try:
+            anchor = datetime.strptime(str(raw_mtime), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            logger.warning(
+                "get_similar_successful_tasks: cannot parse modificationTime=%r — "
+                "falling back to now-anchored search (returned tasks may not be "
+                "temporally comparable)",
+                raw_mtime,
+            )
+    else:
+        logger.warning(
+            "get_similar_successful_tasks: task_data has no modificationTime — "
+            "falling back to now-anchored search (returned tasks may not be "
+            "temporally comparable)"
+        )
+
+    if anchor is None:
+        since_dt = earliest_allowed
+    else:
+        desired = anchor - timedelta(days=WINDOW_DAYS)
+        if desired < earliest_allowed:
+            logger.warning(
+                "get_similar_successful_tasks: failure modificationTime=%s is older "
+                "than the server's %d-day window; falling back to now-anchored search "
+                "(returned tasks may not be temporally comparable)",
+                raw_mtime,
+                SERVER_LIMIT_DAYS,
+            )
+            since_dt = earliest_allowed
+        else:
+            since_dt = desired
+    since = since_dt.strftime("%Y-%m-%d %H:%M:%S")
     filters = {
         k: v
         for k, v in {
