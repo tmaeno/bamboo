@@ -86,7 +86,7 @@ It's important not to conflate the two credentials involved:
 | Token | Issued by | Purpose | Where it comes from |
 |-------|-----------|---------|---------------------|
 | **Mattermost bot token** | Mattermost | Lets the bot talk to Mattermost | `MATTERMOST_TOKEN` (created above) |
-| **PanDA OIDC token** | **CERN IAM** (not Mattermost) | Lets bamboo act on PanDA | Service identity *or* per-user `login` (below) |
+| **PanDA OIDC token** | **IAM** (not Mattermost) | Lets bamboo act on PanDA | Service identity *or* per-user `login` (below) |
 
 ### PanDA identity: service vs. per-user
 
@@ -96,14 +96,14 @@ It's important not to conflate the two credentials involved:
   single identity. This is the default fallback when a user hasn't logged in.
 
 - **Per-user identity** — an operator runs **`login`** in a channel and the bot
-  walks them through a CERN IAM device-login. Afterwards *their* PanDA actions
+  walks them through an IAM device-login. Afterwards *their* PanDA actions
   run under *their* identity. Set `MATTERMOST_REQUIRE_USER_LOGIN=true` to require
   this (no silent service-identity fallback).
 
-  **Device-flow trust model.** The bot process talks to CERN IAM directly to get
+  **Device-flow trust model.** The bot process talks to IAM directly to get
   the device code and to poll for the token; the bot posts a verification URL +
   code into the thread; the operator opens that URL in **their own browser** and
-  signs in with CERN IAM. Mattermost only relays the URL/code message — neither
+  signs in with IAM. Mattermost only relays the URL/code message — neither
   Mattermost nor the bot ever sees the user's IAM credentials, only the issued
   token. The token (incl. refresh token) is stored **on the bot host** under
   `MATTERMOST_TOKEN_DIR` (default `~/.bamboo/mattermost_tokens/<user>/`, dir
@@ -164,7 +164,7 @@ All commands are posted in an **allow-listed** channel. A leading `@bamboo` or
 |---------|--------------|
 | `investigate <taskID>` | Start a live co-investigation rooted at this message. Reply in the thread for each turn. |
 | `capture [<taskID>]` | After a discussion, ingest the thread as knowledge. |
-| `login` | Authenticate as yourself via CERN IAM (per-user PanDA identity). |
+| `login` | Authenticate as yourself via IAM (per-user PanDA identity). |
 | `logout` | Forget your stored token (revert to the service identity). |
 
 **Investigate.** Reply in the thread to drive each turn. Meta-commands (as
@@ -213,7 +213,7 @@ confirmation in the thread.
   is in `MATTERMOST_ALLOWED_CHANNELS`, and `MATTERMOST_TOKEN`/`MATTERMOST_URL`
   are correct. Run with `-v` to see WebSocket events.
 - **`login` fails** — ensure `PANDA_AUTH_VO` and `PANDA_API_URL_SSL` are set so
-  the IAM auth config can be resolved; check the bot host can reach CERN IAM; the
+  the IAM auth config can be resolved; check the bot host can reach IAM; the
   device code expires after a few minutes, so finish the browser sign-in
   promptly.
 - **Commit diff shows raw `mermaid` code** — the Mattermost instance doesn't have
