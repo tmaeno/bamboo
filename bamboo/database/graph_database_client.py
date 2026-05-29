@@ -75,10 +75,20 @@ class GraphDatabaseClient:
         )
 
     async def find_procedures_for_causes(
-        self, cause_names: list[str]
+        self,
+        cause_names: list[str],
+        include_tentative: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return Procedure nodes linked to the given causes via investigated_by edges."""
-        return await self._backend.find_procedures_for_causes(cause_names)
+        """Return Procedure nodes linked to the given causes via investigated_by edges.
+
+        ``include_tentative`` defaults to False so abandoned-investigate-session
+        procedures (tagged ``metadata.status="tentative"``) are filtered out of
+        analyze's default surface area. Pass True for cleanup tooling that needs
+        to see them.
+        """
+        return await self._backend.find_procedures_for_causes(
+            cause_names, include_tentative=include_tentative
+        )
 
     async def find_common_pattern(
         self,

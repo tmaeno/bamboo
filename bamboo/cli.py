@@ -199,59 +199,25 @@ def _strip_markup(text: str) -> str:
     return _RICH_MARKUP_RE.sub("", text)
 
 
+# _ask and _confirm now live in bamboo.utils.prompts so the investigate
+# orchestrator can reuse them without importing from bamboo.cli (which itself
+# pulls in many heavy modules). Kept as thin wrappers here for back-compat —
+# all existing call sites in this file (and downstream importers) keep working.
+
+from bamboo.utils.prompts import ask as _shared_ask, confirm as _shared_confirm
+
+
 def _ask(
     prompt: str,
     *,
     default: "str | None" = None,
     choices: "list[str] | None" = None,
 ) -> str:
-    """Readline-compatible replacement for rich.prompt.Prompt.ask.
-
-    Calls input(prompt) directly so readline knows the cursor position and
-    up/down arrow history recall works without garbling the prompt.
-    """
-    plain = _strip_markup(prompt)
-    if choices:
-        plain += f" [{'/'.join(choices)}]"
-    if default is not None:
-        plain += f" ({default})"
-    plain += ": "
-    while True:
-        try:
-            answer = input(plain).strip()
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit(0)
-        if not answer:
-            if default is not None:
-                return default
-            continue
-        if choices and answer not in choices:
-            console.print(
-                f"[yellow]  Please select one of: {', '.join(choices)}[/yellow]"
-            )
-            continue
-        return answer
+    return _shared_ask(prompt, default=default, choices=choices, console=console)
 
 
 def _confirm(prompt: str, *, default: "bool | None" = None) -> bool:
-    """Readline-compatible replacement for rich.prompt.Confirm.ask."""
-    plain = _strip_markup(prompt)
-    hint = "[Y/n]" if default is True else "[y/N]" if default is False else "[y/n]"
-    full = f"{plain} {hint}: "
-    while True:
-        try:
-            answer = input(full).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            raise SystemExit(0)
-        if not answer:
-            if default is not None:
-                return default
-            continue
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("n", "no"):
-            return False
-        console.print("[yellow]  Please enter y or n.[/yellow]")
+    return _shared_confirm(prompt, default=default, console=console)
 
 
 @cli.command()
@@ -936,6 +902,9 @@ cli.add_command(_populate_main, "populate")
 
 from bamboo.scripts.analyze_task import main as _analyze_main
 cli.add_command(_analyze_main, "analyze")
+
+from bamboo.scripts.investigate import main as _investigate_main
+cli.add_command(_investigate_main, "investigate")
 
 from bamboo.scripts.seed_drafts import main as _seed_drafts_main
 cli.add_command(_seed_drafts_main, "seed-drafts")

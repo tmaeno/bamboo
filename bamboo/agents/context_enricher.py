@@ -13,7 +13,6 @@ the pipeline never stalls.
 """
 
 import asyncio
-import builtins as _builtins_module
 import json
 import logging
 from dataclasses import dataclass, field
@@ -21,20 +20,12 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-_SAFE_BUILTINS = {
-    name: getattr(_builtins_module, name)
-    for name in (
-        "len", "isinstance", "issubclass", "type",
-        "dict", "list", "tuple", "set", "str", "int", "float", "bool",
-        "range", "enumerate", "zip", "map", "filter", "sorted", "reversed",
-        "any", "all", "min", "max", "sum", "abs", "round",
-        "Exception", "ValueError", "TypeError", "KeyError", "IndexError",
-        "None", "True", "False", "repr",
-    )
-    if hasattr(_builtins_module, name)
-}
-
 from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints
+from bamboo.agents.orchestration import (
+    SAFE_BUILTINS as _SAFE_BUILTINS,  # noqa: F401  (re-exported for any back-compat callers)
+    ToolProxy as _SharedToolProxy,
+    run_orchestration_code as _shared_run_orchestration_code,
+)
 from bamboo.llm import (
     EXPLORATION_GAP_ANALYSIS_SYSTEM,
     EXPLORATION_GAP_ANALYSIS_USER,
@@ -78,34 +69,9 @@ class ExplorationResult:
     capability_gaps: list[dict] = field(default_factory=list)
 
 
-class ToolProxy:
-    """Exposes MCP tools as async methods for LLM-generated orchestration code.
-
-    ``task_data`` is pre-injected for tools that accept it, so the generated
-    code never handles it directly.  Any tool name the LLM produces is
-    forwarded to the MCP client; unknown names fail at runtime (caught by
-    :meth:`ContextEnricher._run_orchestration_code`).
-    """
-
-    def __init__(
-        self,
-        client,
-        task_data: dict[str, Any],
-        task_data_tool_names: frozenset[str],
-        call_log: list[str],
-    ) -> None:
-        self._client = client
-        self._task_data = task_data
-        self._td_names = task_data_tool_names
-        self._log = call_log
-
-    def __getattr__(self, name: str):
-        async def call(**kwargs):
-            self._log.append(name)
-            if name in self._td_names:
-                kwargs["task_data"] = self._task_data
-            return await self._client.execute(name, **kwargs)
-        return call
+# Re-export the shared ToolProxy under the historical name so any external
+# importer of ``bamboo.agents.context_enricher.ToolProxy`` keeps working.
+ToolProxy = _SharedToolProxy
 
 
 class ContextEnricher:
@@ -163,6 +129,27 @@ class ContextEnricher:
         ``"→ resolvable with <tool_name>"``.
         """
         return self._filtered_tools()
+
+    async def run_stored_code(
+        self,
+        code: str,
+        task_data: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Execute a pre-existing orchestration code block (no LLM regeneration).
+
+        Used by ``ReasoningNavigator._run_investigation_via_procedures`` to
+        prefer ``orchestration_code`` stored on Procedure nodes (captured by
+        ``bamboo investigate``) over the explorer's regenerate-from-description
+        path. Reuses the same sandbox / proxy / timeout as
+        :meth:`_run_orchestration_code`.
+
+        Returns:
+            ``(result, call_log)`` — the dict the code returned (or ``{}`` on
+            any failure) and the list of tool names invoked through the proxy.
+        """
+        await self._client.connect()
+        task_data_tool_names = self._client.task_data_tools()
+        return await self._run_orchestration_code(code, task_data, task_data_tool_names)
 
     async def explore(
         self,
@@ -426,44 +413,21 @@ class ContextEnricher:
     ) -> tuple[dict[str, Any], list[str]]:
         """Execute LLM-generated orchestration code in a sandboxed namespace.
 
-        The code runs as the body of ``async def _fn(tools, asyncio)`` with
-        only :data:`_SAFE_BUILTINS` available.  Any exception (syntax, runtime,
-        or timeout) is logged and an empty result is returned (fail-open).
-
-        Returns:
-            Tuple ``(result, call_log)`` where ``result`` is the dict the
-            orchestration code returned (or ``{}`` on any failure) and
-            ``call_log`` is the list of tool names that were invoked through
-            the proxy. ``call_log`` may be partially populated if a runtime
-            exception interrupted execution after some calls succeeded.
+        Thin delegate to
+        :func:`bamboo.agents.orchestration.run_orchestration_code` so the
+        sandbox/proxy/exec mechanics are shared with ``bamboo investigate``.
+        Behavior preserved exactly (same 600 s timeout, same fail-open
+        semantics, same ``call_log`` semantics, same narrator message).
         """
-        call_log: list[str] = []
-        proxy = ToolProxy(self._client, task_data, task_data_tool_names, call_log)
-        namespace: dict[str, Any] = {"asyncio": asyncio, "__builtins__": _SAFE_BUILTINS}
-        indented = "\n".join(f"    {line}" for line in code.splitlines())
-        full_code = f"async def _fn(tools, asyncio):\n{indented}"
-        try:
-            exec(full_code, namespace)  # noqa: S102
-        except SyntaxError as exc:
-            logger.warning("ContextEnricher: orchestration code has syntax error: %s", exc)
-            return {}, call_log
-        try:
-            result = await asyncio.wait_for(namespace["_fn"](proxy, asyncio), timeout=600)
-        except asyncio.TimeoutError:
-            logger.warning("ContextEnricher: orchestration code timed out after 600 s")
-            return {}, call_log
-        except Exception as exc:
-            logger.warning("ContextEnricher: orchestration code raised: %s", exc)
-            return {}, call_log
-        if call_log:
-            say(f"  orchestration called: {', '.join(call_log)}")
-        if not isinstance(result, dict):
-            logger.warning(
-                "ContextEnricher: orchestration code returned %r — expected dict",
-                type(result).__name__,
-            )
-            return {}, call_log
-        return result, call_log
+        return await _shared_run_orchestration_code(
+            code,
+            client=self._client,
+            task_data=task_data,
+            task_data_tool_names=task_data_tool_names,
+            internal_tools=None,  # ContextEnricher has no internal-tool registry
+            timeout=600.0,
+            log_prefix="orchestration",
+        )
 
     async def _select_tools(
         self,
@@ -503,18 +467,20 @@ class ContextEnricher:
     ):
         """Return the coroutine for one planned tool call.
 
-        Routes ``search_panda_server_source`` to :attr:`_source_navigator` when
-        one is configured, otherwise falls through to the MCP client.
+        Thin delegate to :func:`bamboo.agents.tool_dispatch.dispatch_tool_call`
+        so the routing logic (source-navigator special-case, ``task_data`` arg
+        injection, fall-through to ``client.execute``) lives in one place
+        shared with ``bamboo investigate``.
         """
-        if tc["tool"] == "search_panda_server_source" and self._source_navigator is not None:
-            query = tc.get("args", {}).get("query", "")
-            return self._source_navigator.navigate(query)
-        args = (
-            {**tc.get("args", {}), "task_data": task_data}
-            if tc["tool"] in task_data_tool_names
-            else tc.get("args", {})
+        from bamboo.agents.tool_dispatch import dispatch_tool_call  # noqa: PLC0415
+
+        return dispatch_tool_call(
+            tc,
+            client=self._client,
+            source_navigator=self._source_navigator,
+            task_data=task_data,
+            task_data_tool_names=task_data_tool_names,
         )
-        return self._client.execute(tc["tool"], **args)
 
     def _merge_tool_result(
         self,

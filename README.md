@@ -22,6 +22,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 ## Main Agents
 - **Knowledge Accumulation** - Learns from operational data, builds knowledge database
 - **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
+- **Co-Investigation** (`bamboo investigate`) - Live human-in-the-loop dialog for ongoing incidents; captures each MCP-tool invocation as executable orchestration code stored on Procedure nodes for deterministic replay on future similar incidents
 
 ## LLM-Driven Pipelines and Sub-Agents
 

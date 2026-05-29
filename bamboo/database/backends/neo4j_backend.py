@@ -28,6 +28,54 @@ from bamboo.models.graph_element import BaseNode, GraphRelationship, NodeType
 logger = logging.getLogger(__name__)
 
 
+def _parse_metadata_json(value: Any) -> dict[str, Any]:
+    """Deserialise a JSON-serialised metadata field (or pass through a dict).
+
+    Procedure / edge ``metadata`` is stored as a JSON string in Neo4j (see
+    :meth:`Neo4jBackend.create_node` line 99-106). On read it comes back as
+    either a string (the persisted form) or as a dict (when freshly created
+    in the same session and not yet round-tripped through the driver). Be
+    defensive about both.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+def _enrich_procedure_rows(
+    rows: list[dict[str, Any]],
+    *,
+    include_tentative: bool,
+) -> list[dict[str, Any]]:
+    """Parse JSON metadata + surface stored-code fields + filter tentative.
+
+    Module-level helper so it can be unit-tested without a live Neo4j instance
+    and so the Cypher-result shape stays a thin DTO.
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        proc_meta = _parse_metadata_json(row.pop("procedure_metadata_json", None))
+        edge_meta = _parse_metadata_json(row.pop("edge_metadata_json", None))
+        if not include_tentative and proc_meta.get("status") == "tentative":
+            continue
+        row["orchestration_code"] = proc_meta.get("orchestration_code", "")
+        row["code_summary"] = proc_meta.get("code_summary", "")
+        row["has_side_effects"] = proc_meta.get("has_side_effects")
+        triggers = edge_meta.get("trigger_signals", [])
+        row["trigger_signals"] = list(triggers) if isinstance(triggers, list) else []
+        row["result_summary"] = edge_meta.get("result_summary", "")
+        out.append(row)
+    return out
+
+
 class Neo4jBackend(GraphDatabaseBackend):
     """Async Neo4j implementation of :class:`GraphDatabaseBackend`.
 
@@ -403,23 +451,41 @@ class Neo4jBackend(GraphDatabaseBackend):
             ]
 
     async def find_procedures_for_causes(
-        self, cause_names: list[str]
+        self,
+        cause_names: list[str],
+        include_tentative: bool = False,
     ) -> list[dict[str, Any]]:
         """Return Procedure nodes linked to the given causes via investigated_by edges.
 
         Each result includes the procedure's strategy_type, the accumulated
         parameter sets from all contributing incidents, and the edge frequency
         (how many incidents confirmed this procedure for this cause).
+        For procedures captured by ``bamboo investigate`` the result also surfaces
+        the stored orchestration code + summary + side-effects flag (from the
+        Procedure node's JSON-serialised ``metadata``) and per-incident
+        ``trigger_signals``/``result_summary`` (from the edge ``metadata``).
+        These fields are empty for procedures captured by populate (no migration
+        needed — the JSON metadata simply doesn't contain those keys).
 
         Results are ordered by frequency descending so the most-evidenced
         procedures appear first.
 
         Args:
-            cause_names: Canonical cause names to look up.
+            cause_names:        Canonical cause names to look up.
+            include_tentative:  When False (the default), procedures whose node
+                                metadata sets ``status == "tentative"`` (committed
+                                by abandoned investigate sessions) are filtered
+                                out. Pass True to include them — useful for
+                                cleanup tooling.
 
         Returns:
             List of dicts with keys ``cause_name``, ``procedure_name``,
-            ``strategy_type``, ``description``, ``parameters``, ``frequency``.
+            ``strategy_type``, ``description``, ``parameters``, ``frequency``,
+            plus the new fields ``orchestration_code`` (str), ``code_summary``
+            (str), ``has_side_effects`` (bool|None), ``trigger_signals``
+            (list[str]), and ``result_summary`` (str). The new fields are
+            empty / None when the underlying Procedure / edge does not carry
+            them in its JSON metadata.
         """
         async with self.driver.session(
             database=self.settings.neo4j_database
@@ -432,13 +498,17 @@ class Neo4jBackend(GraphDatabaseBackend):
                        p.name             AS procedure_name,
                        p.strategy_type    AS strategy_type,
                        p.description      AS description,
+                       p.metadata         AS procedure_metadata_json,
+                       r.metadata         AS edge_metadata_json,
                        coalesce(r.parameters, []) AS parameters,
                        coalesce(r.frequency, 1)   AS frequency
                 ORDER BY frequency DESC
                 """,
                 cause_names=cause_names,
             )
-            return [dict(record) async for record in result]
+            raw_rows = [dict(record) async for record in result]
+
+        return _enrich_procedure_rows(raw_rows, include_tentative=include_tentative)
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

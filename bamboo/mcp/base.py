@@ -34,6 +34,15 @@ class McpTool:
                            LLM when running in an interactive terminal
                            (``sys.stdout.isatty()``).  Set this for tools
                            that prompt the human operator for input.
+        has_side_effects:  When ``True`` (the default), calling this tool has
+                           external side effects (PanDA server request,
+                           non-trivial cost, observable change). When
+                           ``False``, the tool is read-only against bamboo's
+                           own state (e.g. internal graph-DB queries) and
+                           ``bamboo investigate`` may auto-execute the call
+                           without prompting for confirmation. Default True
+                           is safe: any tool not explicitly tagged as
+                           side-effect-free will gate confirmation.
     """
 
     name: str
@@ -41,6 +50,7 @@ class McpTool:
     parameters_schema: dict[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
     requires_interaction: bool = field(default=False)
+    has_side_effects: bool = field(default=True)
 
 
 class McpClient(ABC):

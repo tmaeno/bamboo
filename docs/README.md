@@ -25,6 +25,11 @@ Two paths for populating the graph and vector databases: individual (`bamboo pop
 for live incidents, and batch (`seed-drafts → review-drafts → batch-populate`) for
 bulk commissioning.
 
+### 🔬 [Co-Investigation Mode](INVESTIGATE.md)
+`bamboo investigate` — live human-in-the-loop dialog for an ongoing incident. Each tool
+turn produces a sandboxed orchestration code block stored on the resulting Procedure
+node, so future analyze runs re-execute the exact code that worked last time.
+
 ### 🤖 [Agent Reference](AGENTS.md)
 All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ContextEnricher`, `ReasoningNavigator`, and their components.
 
@@ -43,6 +48,7 @@ Development setup, code style, extension points (agents, node types, relationshi
 1. [Quick Start Guide](QUICKSTART.md) — environment setup
 2. [PanDA Integration](PANDA_INTEGRATION.md) — fetch tasks directly from PanDA
 3. [Knowledge Population](KNOWLEDGE_POPULATION.md) — populate databases from live tasks or CSV batches
+4. [Co-Investigation Mode](INVESTIGATE.md) — live human-in-the-loop investigation; the captured procedures auto-replay on similar future incidents
 
 ### Developers
 1. [Quick Start Guide](QUICKSTART.md) — environment setup

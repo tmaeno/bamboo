@@ -114,16 +114,27 @@ class GraphDatabaseBackend(ABC):
 
     @abstractmethod
     async def find_procedures_for_causes(
-        self, cause_names: list[str]
+        self,
+        cause_names: list[str],
+        include_tentative: bool = False,
     ) -> list[dict[str, Any]]:
         """Return Procedure nodes linked to the given causes via investigated_by edges.
 
         Args:
-            cause_names: Canonical cause names to look up.
+            cause_names:        Canonical cause names to look up.
+            include_tentative:  When False (default), procedures whose node
+                                metadata tags ``status == "tentative"`` (committed
+                                by abandoned ``bamboo investigate`` sessions) are
+                                excluded. Pass True to include them.
 
         Returns:
             List of dicts with keys ``cause_name``, ``procedure_name``,
-            ``strategy_type``, ``description``, ``parameters``, ``frequency``.
+            ``strategy_type``, ``description``, ``parameters``, ``frequency``,
+            plus the v1 stored-code fields ``orchestration_code`` (str),
+            ``code_summary`` (str), ``has_side_effects`` (bool|None),
+            ``trigger_signals`` (list[str]), ``result_summary`` (str). The new
+            fields are empty / None when the underlying Procedure / edge does
+            not carry them in its metadata (populate-captured procedures).
             Ordered by ``frequency DESC``.
         """
         pass

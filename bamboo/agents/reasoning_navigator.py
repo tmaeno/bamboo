@@ -33,6 +33,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from bamboo.agents.context_enricher import ExplorationResult
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
@@ -857,21 +858,72 @@ class ReasoningNavigator:
             logger.info("ReasoningNavigator: investigation note: %s", note)
             return {"procedures": procedures, "investigation_note": note}
 
-        # Delegate to ContextEnricher — reuses its LLM tool selection,
-        # asyncio.gather execution, and _merge_tool_result routing.
+        # Prefer stored orchestration code (captured by `bamboo investigate`)
+        # over the explorer's regenerate-from-description path: re-execute the
+        # human-confirmed Python from the past session directly. Procedures
+        # without stored code (populate-captured) fall through to today's
+        # explorer-driven regeneration.
+        stored_code_procedures = [p for p in procedures if (p.get("orchestration_code") or "").strip()]
+        regen_procedures = [p for p in procedures if not (p.get("orchestration_code") or "").strip()]
+
+        stored_tool_calls: list[dict[str, Any]] = []
+        stored_external_data: dict[str, Any] = {}
+        for p in stored_code_procedures:
+            code = p["orchestration_code"].strip()
+            summary = (p.get("code_summary") or "").strip() or "(no summary)"
+            say(
+                f"Phase 2: re-executing stored procedure '{p['strategy_type']}' "
+                f"for cause '{p['cause_name']}' — {summary}"
+            )
+            try:
+                stored_result, stored_called = await self._explorer.run_stored_code(code, task_data)
+            except Exception as exc:  # noqa: BLE001 — fail-open, log and continue
+                logger.warning(
+                    "ReasoningNavigator: stored orchestration code for procedure '%s' raised %s: %s",
+                    p.get("procedure_name"),
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            for name in stored_called:
+                stored_tool_calls.append({"tool": name, "via": "stored_orchestration"})
+            for key, value in stored_result.items():
+                label = f"stored:{p['strategy_type']}:{key}"
+                stored_external_data[label] = value
+
+        # Delegate the remaining (no-stored-code) procedures to ContextEnricher
+        # — same regenerate-from-description path as today.
         issues = []
-        for p in procedures:
+        for p in regen_procedures:
             params_str = json.dumps(p.get("parameters") or [], default=str)
             description = (p.get("description") or "").strip() or "(no description)"
-            issues.append(
+            base = (
                 f"Procedure '{p['procedure_name']}' "
                 f"(strategy: {p['strategy_type']}, "
                 f"for cause: '{p['cause_name']}'): {description}. "
                 f"Historical parameters: {params_str}"
             )
+            extras: list[str] = []
+            triggers = p.get("trigger_signals") or []
+            if triggers:
+                extras.append("Trigger signals (past incidents): " + "; ".join(str(t) for t in triggers))
+            if extras:
+                base = base + "\n  " + "\n  ".join(extras)
+            issues.append(base)
 
-        say(f"Phase 2: running investigation via MCP ({len(issues)} procedure(s))...")
-        exploration = await self._explorer.explore(task_data, issues, skip_gap_analysis=True)
+        if not issues:
+            # All procedures had stored code; no explorer call needed.
+            exploration = ExplorationResult(
+                tool_calls=stored_tool_calls,
+                external_data=stored_external_data,
+            )
+        else:
+            say(f"Phase 2: running investigation via MCP ({len(issues)} procedure(s) without stored code)...")
+            exploration = await self._explorer.explore(task_data, issues, skip_gap_analysis=True)
+            # Fold the stored-code results in alongside the explorer's results.
+            exploration.tool_calls = list(stored_tool_calls) + list(exploration.tool_calls)
+            for key, value in stored_external_data.items():
+                exploration.external_data.setdefault(key, value)
 
         note = (
             f"Investigation ran {len(exploration.tool_calls)} tool call(s)."

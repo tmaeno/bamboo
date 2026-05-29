@@ -1080,15 +1080,86 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_logs: Optional[dict[str, str]] = None,
         doc_hints: Optional[dict[str, str]] = None,
     ) -> KnowledgeGraph:
-        nodes: list = []
-        relationships: list[GraphRelationship] = []
-
         task_id = (task_data or {}).get("jediTaskID")
         task_status = (task_data or {}).get("status")
         if task_id:
             say(
                 f"Starting extraction for task {task_id} (status: {task_status or 'unknown'})."
             )
+
+        # Field classification + errorDialog/status → Symptom; external_data → Task_Features.
+        # Shared with `bamboo investigate` via bootstrap_initial_graph in
+        # bamboo.agents.task_data_bootstrap. Populate keeps the embedded-log-link
+        # fetch path (extract_embedded_logs=True); investigate disables it.
+        nodes, relationships = await self._bootstrap_from_task_data(
+            task_data=task_data,
+            external_data=external_data,
+            extract_embedded_logs=True,
+        )
+
+        if email_text and email_text.strip():
+            say(
+                f"Processing email thread ({len(email_text):,} chars). Extracting causes, resolutions, and procedures..."
+            )
+            email_nodes, email_rels = await self._extract_from_email(email_text, doc_hints=doc_hints)
+            nodes.extend(email_nodes)
+            relationships.extend(email_rels)
+
+        # Task-level logs (orchestration services: JEDI, Harvester, …)
+        # Human-input entries (human_input:*) are routed through _extract_from_email
+        # so the email prompt — which extracts Procedure nodes — is used instead of
+        # the log prompt (which only extracts Symptom/Component/Task_Context).
+        for source_name, source_log in (task_logs or {}).items():
+            if not source_log or not source_log.strip():
+                continue
+            if source_name.startswith("human_input:"):
+                say(f"Processing human-provided input '{source_name}'...")
+                log_nodes, log_rels = await self._extract_from_email(source_log, doc_hints=doc_hints)
+            else:
+                say(
+                    f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
+                )
+                log_nodes, log_rels = await self._extract_from_log(source_name, source_log)
+            nodes.extend(log_nodes)
+            relationships.extend(log_rels)
+
+        graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
+        say(
+            f"Extraction complete: {len(nodes)} nodes, {len(relationships)} relationships."
+        )
+        logger.info(
+            "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
+            len(nodes),
+            len(relationships),
+        )
+        return graph
+
+    async def _bootstrap_from_task_data(
+        self,
+        task_data: Optional[dict[str, Any]] = None,
+        external_data: Optional[dict[str, Any]] = None,
+        *,
+        extract_embedded_logs: bool = True,
+    ) -> tuple[list, list[GraphRelationship]]:
+        """Deterministic field classification → initial graph skeleton.
+
+        Shared between populate (via :meth:`extract`) and investigate (via
+        :func:`bamboo.agents.task_data_bootstrap.bootstrap_initial_graph`).
+
+        Args:
+            task_data:              PanDA task fields (errorDialog → Symptom,
+                                    status → Symptom, discrete/continuous/split_rule/
+                                    cli_argument → Task_Features, unstructured →
+                                    Task_Context, sensitive → pseudonymised feature).
+            external_data:          Each k/v → Task_Feature node.
+            extract_embedded_logs:  When True (populate default), HTML log URLs found
+                                    in ``errorDialog`` are fetched and run through
+                                    LLM log extraction. When False (investigate),
+                                    the embedded-log path is skipped and the human
+                                    can request logs explicitly via the dialog loop.
+        """
+        nodes: list = []
+        relationships: list[GraphRelationship] = []
 
         for key, value in (external_data or {}).items():
             nodes.append(
@@ -1151,29 +1222,30 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     # <a href="http://aipanda059.cern.ch:25080/cache/jedilog/4003574">log</a>)
                     # fetch each linked file and extract knowledge from it just
                     # like an explicitly supplied brokerage log.
-                    for log_url in extract_log_urls(str_value):
-                        say(f"Found a link to a log. Downloading from {log_url} ...")
-                        log_content = await async_fetch_log_content(log_url)
-                        if log_content:
-                            source_name = source_name_for_task(
-                                (task_data or {}).get("prodSourceLabel", "") or ""
-                            )
-                            say(
-                                f"Downloaded {len(log_content):,} chars. "
-                                f"Analyzing as {source_name}..."
-                            )
-                            logger.info(
-                                "PandaKnowledgeExtractor: extracting from linked log "
-                                "'%s' (%d chars) fetched from %s",
-                                source_name,
-                                len(log_content),
-                                log_url,
-                            )
-                            log_nodes, log_rels = await self._extract_from_log(
-                                source_name, log_content
-                            )
-                            nodes.extend(log_nodes)
-                            relationships.extend(log_rels)
+                    if extract_embedded_logs:
+                        for log_url in extract_log_urls(str_value):
+                            say(f"Found a link to a log. Downloading from {log_url} ...")
+                            log_content = await async_fetch_log_content(log_url)
+                            if log_content:
+                                source_name = source_name_for_task(
+                                    (task_data or {}).get("prodSourceLabel", "") or ""
+                                )
+                                say(
+                                    f"Downloaded {len(log_content):,} chars. "
+                                    f"Analyzing as {source_name}..."
+                                )
+                                logger.info(
+                                    "PandaKnowledgeExtractor: extracting from linked log "
+                                    "'%s' (%d chars) fetched from %s",
+                                    source_name,
+                                    len(log_content),
+                                    log_url,
+                                )
+                                log_nodes, log_rels = await self._extract_from_log(
+                                    source_name, log_content
+                                )
+                                nodes.extend(log_nodes)
+                                relationships.extend(log_rels)
             elif key == "status":
                 # Task status (e.g. "failed", "broken", "exhausted") describes the
                 # failure state of the task, not a configuration attribute.  It is
@@ -1341,42 +1413,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                 # ignore unrecognised keys.
                 pass
 
-        if email_text and email_text.strip():
-            say(
-                f"Processing email thread ({len(email_text):,} chars). Extracting causes, resolutions, and procedures..."
-            )
-            email_nodes, email_rels = await self._extract_from_email(email_text, doc_hints=doc_hints)
-            nodes.extend(email_nodes)
-            relationships.extend(email_rels)
-
-        # Task-level logs (orchestration services: JEDI, Harvester, …)
-        # Human-input entries (human_input:*) are routed through _extract_from_email
-        # so the email prompt — which extracts Procedure nodes — is used instead of
-        # the log prompt (which only extracts Symptom/Component/Task_Context).
-        for source_name, source_log in (task_logs or {}).items():
-            if not source_log or not source_log.strip():
-                continue
-            if source_name.startswith("human_input:"):
-                say(f"Processing human-provided input '{source_name}'...")
-                log_nodes, log_rels = await self._extract_from_email(source_log, doc_hints=doc_hints)
-            else:
-                say(
-                    f"Processing task log '{source_name}' ({len(source_log.splitlines()):,} lines)..."
-                )
-                log_nodes, log_rels = await self._extract_from_log(source_name, source_log)
-            nodes.extend(log_nodes)
-            relationships.extend(log_rels)
-
-        graph = KnowledgeGraph(nodes=nodes, relationships=relationships)
-        say(
-            f"Extraction complete: {len(nodes)} nodes, {len(relationships)} relationships."
-        )
-        logger.info(
-            "PandaKnowledgeExtractor: extracted %d nodes, %d relationships",
-            len(nodes),
-            len(relationships),
-        )
-        return graph
+        return nodes, relationships
 
     # ------------------------------------------------------------------
     # Log extraction

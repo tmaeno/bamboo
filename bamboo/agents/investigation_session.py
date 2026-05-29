@@ -1,0 +1,1246 @@
+"""`bamboo investigate` — co-investigation session orchestrator.
+
+Lives between the human and the bamboo knowledge graph for one live-incident
+investigation session. See plan §C-§F for the design rationale:
+
+* Auto-fetches task_data at session start, builds the initial graph skeleton
+  via the §0.1 shared bootstrap helper, and calls
+  :meth:`bamboo.agents.reasoning_navigator.ReasoningNavigator.analyze_task` to
+  surface past similar causes (§B).
+* Per-turn dialog loop with a **binary intent classifier** (tool vs narration)
+  driven by a small LLM call. ``/tool`` prefix forces tool intent; ``/undo``
+  rolls back the last turn's mutation; ``/done`` and ``/abandon`` terminate
+  (§D).
+* The **tool branch** generates a sandboxed orchestration code block via the
+  ``INVESTIGATE_ORCHESTRATION`` prompt, statically detects whether it touches
+  any side-effecting tool, prompts the human ``[y/N/edit]`` only in that case,
+  and executes via the shared :func:`bamboo.agents.orchestration.run_orchestration_code`.
+  Each block becomes ONE atomic_action with stored code + summary + signals
+  on the Procedure (per the §G replayability schema).
+* The **narration branch** runs the parameterised email-extraction prompt
+  (per §0.3) on the utterance + recent turn history; merges the extracted
+  entities into ``partial_graph`` with canonical-name dedup.
+* End-of-session form (§E) shows the procedure list, asks the cause +
+  resolution, wires edges according to the node-vs-edge split in §G, and
+  commits via the existing :class:`KnowledgeAccumulator` storage methods
+  (§F).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+
+from bamboo.agents.orchestration import analyze_code_side_effects, run_orchestration_code
+from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
+from bamboo.llm import (
+    EMAIL_EXTRACTION_SYSTEM,
+    INVESTIGATE_INTENT_SYSTEM,
+    INVESTIGATE_INTENT_USER,
+    INVESTIGATE_KICKOFF_SYSTEM,
+    INVESTIGATE_KICKOFF_USER,
+    INVESTIGATE_NARRATION_USER,
+    INVESTIGATE_ORCHESTRATION_SYSTEM,
+    INVESTIGATE_ORCHESTRATION_USER,
+    get_extraction_llm,
+)
+from bamboo.models.graph_element import (
+    CauseNode,
+    GraphRelationship,
+    NodeType,
+    ProcedureNode,
+    RelationType,
+    ResolutionNode,
+    SymptomNode,
+    TaskContextNode,
+    TaskFeatureNode,
+)
+from bamboo.models.knowledge_entity import KnowledgeGraph
+from bamboo.utils.prompts import ask as _ask, confirm as _confirm
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+
+class ToolGap(BaseModel):
+    human_request_text: str
+    llm_reason: str = ""
+    turn: int = 0
+
+
+class IntentGap(BaseModel):
+    utterance: str
+    classifier_guess: str = ""
+    classifier_confidence: float = 0.0
+    human_correction: str = ""
+    kind: str  # "disambiguation" | "undo" | "reject_code"
+    turn: int = 0
+
+
+class OrchestrationRun(BaseModel):
+    """One executed (or attempted) orchestration block — the unit of capture."""
+
+    strategy_type: str
+    code: str
+    code_summary: str = ""
+    trigger_signals: list[str] = Field(default_factory=list)
+    has_side_effects: bool = True
+    call_log: list[str] = Field(default_factory=list)
+    result_summary: str = ""
+    atomic_action_id: str = ""
+    error: Optional[str] = None
+    executed_at: str = ""
+
+
+class Turn(BaseModel):
+    role: str  # "human" | "system"
+    kind: str  # "narration" | "tool" | "meta" | "disambiguation" | ...
+    text: str = ""
+    orchestration: Optional[OrchestrationRun] = None
+
+
+class InvestigationSession(BaseModel):
+    """Pydantic-serialisable session state. Persisted to ``--save`` each turn."""
+
+    session_id: str
+    turn: int = 0
+    max_turns: int = 30
+    initial_inputs: dict[str, Any] = Field(default_factory=dict)
+    doc_hints: dict[str, str] = Field(default_factory=dict)
+    turn_history: list[Turn] = Field(default_factory=list)
+    partial_graph: KnowledgeGraph = Field(default_factory=KnowledgeGraph)
+    last_turn_snapshot: Optional[KnowledgeGraph] = None
+    similar_past: list[dict[str, Any]] = Field(default_factory=list)
+    tool_gap_log: list[ToolGap] = Field(default_factory=list)
+    intent_gap_log: list[IntentGap] = Field(default_factory=list)
+    status: str = "ongoing"  # "ongoing" | "resolved" | "abandoned"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+
+def _parse_json_response(text: str) -> dict[str, Any]:
+    """Tolerantly parse a JSON object from an LLM response, stripping fences."""
+    s = (text or "").strip()
+    match = _JSON_FENCE_RE.search(s)
+    if match:
+        s = match.group(1).strip()
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("investigate: failed to parse JSON LLM response: %s", exc)
+        return {}
+
+
+def _format_doc_hints(doc_hints: dict[str, str]) -> str:
+    return "\n\n".join(v for v in (doc_hints or {}).values() if v) or "(none)"
+
+
+def _format_available_tools(tools: list[dict[str, Any]]) -> str:
+    """Render a unified-tool descriptor list for the orchestration prompt."""
+    if not tools:
+        return "(none)"
+    lines = []
+    for t in tools:
+        side = "side-effects=True" if t.get("has_side_effects") else "side-effects=False"
+        schema = json.dumps(t.get("parameters_schema") or {}, indent=None)
+        lines.append(
+            f"- {t['name']} [{side}]: {t.get('description', '').strip()}\n"
+            f"    args schema: {schema}"
+        )
+    return "\n".join(lines)
+
+
+def _format_initial_signals(task_data: dict[str, Any]) -> str:
+    if not task_data:
+        return "(no task_data)"
+    keys = ("status", "taskType", "processingType", "site", "gshare", "ramCount", "coreCount")
+    parts = []
+    for k in keys:
+        v = task_data.get(k)
+        if v:
+            parts.append(f"  {k}: {v}")
+    if not parts:
+        return "(no recognised signals)"
+    return "\n".join(parts)
+
+
+def _format_running_graph_summary(graph: KnowledgeGraph) -> str:
+    if not graph.nodes:
+        return "(empty)"
+    by_type: dict[str, list[str]] = {}
+    for n in graph.nodes:
+        by_type.setdefault(str(getattr(n, "node_type", "Node")), []).append(n.name)
+    parts = []
+    for k, names in by_type.items():
+        preview = ", ".join(names[:5]) + ("..." if len(names) > 5 else "")
+        parts.append(f"  {k} ({len(names)}): {preview}")
+    return "\n".join(parts)
+
+
+def _format_turn_history_tail(turns: list[Turn], tail: int = 5) -> str:
+    if not turns:
+        return "(none)"
+    parts = []
+    for t in turns[-tail:]:
+        text = (t.text or "")[:200]
+        parts.append(f"  ({t.role}/{t.kind}) {text}")
+    return "\n".join(parts)
+
+
+def _format_prior_results(turns: list[Turn], limit: int = 5) -> str:
+    """Render the recent OrchestrationRun results so the planner can chain on them."""
+    runs = [t.orchestration for t in turns if t.orchestration is not None]
+    if not runs:
+        return "(no prior orchestration results in this session)"
+    parts = []
+    for r in runs[-limit:]:
+        called = ", ".join(r.call_log) or "(no calls logged)"
+        parts.append(
+            f"  - strategy='{r.strategy_type}' summary='{r.code_summary}' "
+            f"called=[{called}] result_summary='{r.result_summary}'"
+        )
+    return "\n".join(parts)
+
+
+def _summarise_result(result: Any, max_len: int = 200) -> str:
+    """Cheap deterministic one-line gist of a tool result for storage."""
+    try:
+        s = repr(result)
+    except Exception:  # noqa: BLE001
+        s = "<unrepr-able result>"
+    s = re.sub(r"\s+", " ", s)
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_editor_buffer(
+    text: str,
+    *,
+    fallback_strategy: str,
+    fallback_summary: str,
+    fallback_triggers: list[str],
+) -> tuple[str, str, str, list[str]]:
+    """Parse the editor temp-file format back into (strategy, code, summary, triggers).
+
+    Header lines are ``# <key>: <value>`` (and ``#   - <item>`` for list items).
+    Lines starting with ``## `` are treated as literal code comments and stay
+    in the code body. The first non-header line terminates the header.
+    """
+    strategy = fallback_strategy
+    summary = fallback_summary
+    triggers: list[str] = []
+    triggers_started = False
+    body_lines: list[str] = []
+    in_body = False
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not in_body:
+            stripped = line.lstrip()
+            # `## ` is a literal code comment: treat as body start signal.
+            if stripped.startswith("## "):
+                in_body = True
+                body_lines.append(line)
+                continue
+            # Header lines start with a single '#' (but not '##').
+            if stripped.startswith("#") and not stripped.startswith("##"):
+                payload = stripped.lstrip("#").lstrip()
+                if not payload:
+                    # blank comment — keep parsing headers
+                    continue
+                if payload.startswith("strategy_type:"):
+                    strategy = payload.split(":", 1)[1].strip() or fallback_strategy
+                    triggers_started = False
+                elif payload.startswith("code_summary:"):
+                    summary = payload.split(":", 1)[1].strip()
+                    triggers_started = False
+                elif payload.startswith("trigger_signals"):
+                    triggers_started = True
+                elif payload.startswith("---"):
+                    # Separator comment — keep skipping headers.
+                    triggers_started = False
+                elif payload.startswith("- ") and triggers_started:
+                    item = payload[2:].strip()
+                    if item:
+                        triggers.append(item)
+                # Unknown header — ignore.
+                continue
+            # First non-header, non-blank line → body.
+            if line.strip() == "":
+                # Blank lines before body are skipped.
+                continue
+            in_body = True
+            body_lines.append(line)
+        else:
+            body_lines.append(line)
+
+    code = "\n".join(body_lines).strip()
+    if not triggers:
+        triggers = list(fallback_triggers)
+    return strategy, code, summary, triggers
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Deps:
+    """Bundle of collaborator objects the orchestrator needs.
+
+    Grouped into one dataclass so callers (CLI / tests) pass a single
+    structure and don't have to thread many arguments.
+    """
+
+    mcp_client: Any  # PandaMcpClient
+    graph_db: Any  # GraphDatabaseClient
+    vector_db: Optional[Any] = None
+    extractor: Any = None  # PandaKnowledgeExtractor (for prefetch_hints)
+    reasoning_navigator: Optional[Any] = None
+    knowledge_accumulator: Optional[Any] = None  # for commit
+    error_classifier: Any = None
+    console: Optional[Console] = None
+
+
+class InvestigationOrchestrator:
+    """Drives one live-incident investigation session end-to-end."""
+
+    def __init__(
+        self,
+        deps: _Deps,
+        *,
+        session_id: Optional[str] = None,
+        max_turns: int = 30,
+        save_path: Optional[Path] = None,
+        dry_run: bool = False,
+    ) -> None:
+        self.deps = deps
+        self.console = deps.console or Console()
+        self.save_path = save_path
+        self.dry_run = dry_run
+        sid = session_id or uuid.uuid4().hex[:12]
+        self.session = InvestigationSession(session_id=sid, max_turns=max_turns)
+        self._llm = None  # lazy
+        self._internal_tools_descriptors: dict = {}
+        self._internal_tools_callables: dict = {}
+        self._mcp_tool_descriptors: list = []
+        self._task_data_tool_names: frozenset[str] = frozenset()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(
+        self,
+        *,
+        task_id: Optional[int] = None,
+        task_data: Optional[dict[str, Any]] = None,
+        symptom: Optional[str] = None,
+    ) -> None:
+        """Plan §B — auto-prefetch + proactive hypothesis."""
+        self.console.print(
+            Panel.fit(
+                f"[bold blue]bamboo investigate[/bold blue] — session {self.session.session_id}",
+                border_style="blue",
+            )
+        )
+
+        # 1) Fetch task_data if a task_id was supplied.
+        if task_id is not None and task_data is None:
+            await self.deps.mcp_client.connect()
+            try:
+                task_data = await self.deps.mcp_client.execute("get_task_data", task_id=task_id)
+            except Exception as exc:  # noqa: BLE001
+                self.console.print(f"[yellow]Failed to fetch task_data: {exc}[/yellow]")
+                task_data = None
+
+        self.session.initial_inputs = {
+            "task_id": task_id,
+            "task_data": task_data,
+            "symptom": symptom,
+        }
+
+        # 2) Prefetch domain hints.
+        if self.deps.extractor is not None:
+            try:
+                error_dialog = (task_data or {}).get("errorDialog") or symptom or ""
+                self.session.doc_hints = await self.deps.extractor.prefetch_hints(
+                    task_data or {}, email_text=error_dialog
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("prefetch_hints failed: %s", exc)
+                self.session.doc_hints = {}
+
+        # 3) Build initial graph skeleton.
+        if task_data:
+            try:
+                nodes, rels = await bootstrap_initial_graph(
+                    task_data=task_data,
+                    external_data=None,
+                    error_classifier=self.deps.error_classifier,
+                    extract_embedded_logs=False,
+                )
+                self._merge_into_partial_graph(nodes, rels)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("bootstrap_initial_graph failed: %s", exc)
+                self.console.print(f"[yellow]bootstrap failed: {exc}[/yellow]")
+
+        # 4) Display signals.
+        self._display_kickoff_panel(task_data, symptom)
+
+        # 5) Proactive hypothesis from past graph (analyze_task).
+        await self._show_past_similar(task_data, symptom)
+
+        # 6) Build the unified tool registry (PanDA MCP + internal).
+        await self._build_tool_registry()
+
+        # 7) Persist initial state.
+        self._persist()
+
+    async def run(self) -> None:
+        """Plan §D — per-turn dialog loop until /done /abandon or max_turns."""
+        self.console.print(
+            "[dim]Type your request or finding. Slash commands: /done /abandon /undo /tool /show-graph /show-tools[/dim]"
+        )
+        while self.session.turn < self.session.max_turns and self.session.status == "ongoing":
+            try:
+                utterance = _ask("[bold cyan]>[/bold cyan]", console=self.console)
+            except SystemExit:
+                self.session.status = "abandoned"
+                break
+
+            # Snapshot for /undo (deep copy — shallow would silently share node lists).
+            self.session.last_turn_snapshot = self.session.partial_graph.model_copy(deep=True)
+
+            # Meta-commands first (no LLM).
+            meta_handled = await self._handle_meta_command(utterance)
+            if meta_handled is True:
+                self._persist()
+                continue
+            if meta_handled == "terminate":
+                break
+
+            # /tool prefix forces tool intent.
+            forced_intent: Optional[str] = None
+            text = utterance
+            if utterance.startswith("/tool "):
+                forced_intent = "tool"
+                text = utterance[len("/tool ") :].strip()
+
+            self.session.turn_history.append(Turn(role="human", kind="raw", text=text))
+
+            if forced_intent == "tool":
+                intent = "tool"
+            else:
+                intent = await self._classify_intent(text)
+
+            if intent == "tool":
+                await self._tool_turn(text)
+            else:
+                await self._narration_turn(text)
+
+            self.session.turn += 1
+            self._persist()
+
+        if self.session.status == "ongoing" and self.session.turn >= self.session.max_turns:
+            self.console.print(f"[yellow]Reached max_turns={self.session.max_turns}; ending.[/yellow]")
+            self.session.status = "abandoned"
+
+    async def finalize(self) -> None:
+        """Plan §E — end-of-session form: list → cause → resolution → wire edges."""
+        if self.session.status == "abandoned" and not self._has_any_atomic_actions():
+            self.console.print("[dim]Nothing to commit (abandoned with no captured actions).[/dim]")
+            return
+
+        self._display_procedure_list()
+
+        if self.session.status == "abandoned":
+            self.console.print("[dim]Abandoned session — committing Symptom + Procedures as tentative.[/dim]")
+            cause_text = None
+            resolution_text = None
+        else:
+            cause_text = _ask("[bold]What was the cause?[/bold]", console=self.console)
+            resolution_text = _ask(
+                "[bold]What was the resolution? (optional, blank to skip)[/bold]",
+                default="",
+                console=self.console,
+            )
+            resolution_text = resolution_text or None
+
+        self._wire_finalization_edges(cause_text, resolution_text)
+        await self._show_diff_and_commit()
+
+    # ------------------------------------------------------------------
+    # Turn-level handlers
+    # ------------------------------------------------------------------
+
+    async def _handle_meta_command(self, utterance: str) -> bool | str:
+        """Return True if handled (continue loop), 'terminate' to break, False otherwise."""
+        cmd = utterance.strip()
+        if cmd == "/done":
+            self.session.status = "resolved"
+            return "terminate"
+        if cmd == "/abandon":
+            self.session.status = "abandoned"
+            return "terminate"
+        if cmd == "/undo":
+            if self.session.last_turn_snapshot is not None:
+                self.session.partial_graph = self.session.last_turn_snapshot
+                self.session.intent_gap_log.append(
+                    IntentGap(utterance="(prior turn)", kind="undo", turn=self.session.turn)
+                )
+                self.console.print("[yellow]Reverted last turn.[/yellow]")
+            else:
+                self.console.print("[dim]Nothing to undo.[/dim]")
+            return True
+        if cmd == "/show-graph":
+            self.console.print(Panel(_format_running_graph_summary(self.session.partial_graph), title="partial_graph"))
+            return True
+        if cmd == "/show-tools":
+            tool_list = self._unified_tool_descriptors()
+            self.console.print(_format_available_tools(tool_list))
+            return True
+        if cmd == "/paste":
+            self.console.print("[dim]Use the request_human_input tool by phrasing your request to bamboo.[/dim]")
+            return True
+        if cmd == "/skip":
+            # Drops the prior turn's snapshot and treats this turn as a no-op —
+            # used after a failed/rejected tool call when the human wants to
+            # move on without recording anything for this turn.
+            self.console.print("[dim]Skipped this turn (no action recorded).[/dim]")
+            return True
+        return False
+
+    async def _classify_intent(self, utterance: str) -> str:
+        """Plan §D step 4 — binary classifier with disambiguation gate."""
+        prompt_user = INVESTIGATE_INTENT_USER.format(
+            domain_hints=_format_doc_hints(self.session.doc_hints),
+            running_graph_summary=_format_running_graph_summary(self.session.partial_graph),
+            utterance=utterance,
+        )
+        try:
+            response = await self._invoke_llm(INVESTIGATE_INTENT_SYSTEM, prompt_user)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("intent classifier failed: %s", exc)
+            return "narration"  # safe default — won't trigger external tools
+        parsed = _parse_json_response(response)
+        intent = str(parsed.get("intent", "narration")).strip().lower()
+        confidence = float(parsed.get("confidence", 0.0))
+        is_close = bool(parsed.get("is_close_call", False))
+        if intent not in ("tool", "narration"):
+            intent = "narration"
+
+        if confidence < 0.7 or is_close:
+            chosen = _ask(
+                "[dim]I'm not sure — did you want me to[/dim] [bold](t)[/bold]ool [dim]or are you[/dim] [bold](s)[/bold]haring a finding?",
+                choices=["t", "s"],
+                console=self.console,
+            )
+            self.session.intent_gap_log.append(
+                IntentGap(
+                    utterance=utterance,
+                    classifier_guess=intent,
+                    classifier_confidence=confidence,
+                    human_correction=chosen,
+                    kind="disambiguation",
+                    turn=self.session.turn,
+                )
+            )
+            intent = "tool" if chosen == "t" else "narration"
+        return intent
+
+    async def _tool_turn(self, utterance: str) -> None:
+        """Plan §D tool branch — generate code, confirm if side-effects, execute, record."""
+        task_id = (self.session.initial_inputs.get("task_id"))
+        task_data = self.session.initial_inputs.get("task_data") or {}
+        error_dialog = (task_data.get("errorDialog") if task_data else None) or self.session.initial_inputs.get("symptom") or ""
+
+        tool_descriptors_full = self._unified_tool_descriptors()
+        user_msg = INVESTIGATE_ORCHESTRATION_USER.format(
+            domain_hints=_format_doc_hints(self.session.doc_hints),
+            task_id=task_id or "(none)",
+            error_dialog=error_dialog or "(none)",
+            initial_signals=_format_initial_signals(task_data),
+            prior_turn_results=_format_prior_results(self.session.turn_history),
+            available_tools=_format_available_tools(tool_descriptors_full),
+            utterance=utterance,
+        )
+        try:
+            response = await self._invoke_llm(INVESTIGATE_ORCHESTRATION_SYSTEM, user_msg)
+        except Exception as exc:  # noqa: BLE001
+            self.console.print(f"[red]Orchestration LLM call failed: {exc}[/red]")
+            return
+        plan = _parse_json_response(response)
+
+        code = plan.get("code")
+        if not code or not str(code).strip():
+            reason = plan.get("reason", "(no reason returned)")
+            self.console.print(f"[yellow]No tool fits this request: {reason}[/yellow]")
+            self.console.print("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
+            self.session.tool_gap_log.append(
+                ToolGap(human_request_text=utterance, llm_reason=str(reason), turn=self.session.turn)
+            )
+            self.session.turn_history.append(Turn(role="system", kind="tool_gap", text=str(reason)))
+            return
+
+        strategy_type = str(plan.get("strategy_type") or "unnamed_strategy").strip()
+        code_summary = str(plan.get("code_summary") or "").strip()
+        trigger_signals = list(plan.get("trigger_signals") or [])
+
+        # Static side-effects analysis is the ground truth (not the LLM's self-report).
+        side_effect_names = {t["name"] for t in tool_descriptors_full if t.get("has_side_effects")}
+        has_side_effects = analyze_code_side_effects(code, side_effect_names)
+
+        if has_side_effects:
+            self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
+            choice = _ask(
+                "[bold]Proceed?[/bold]",
+                default="N",
+                choices=["y", "N", "edit"],
+                console=self.console,
+            )
+            if choice == "N":
+                self.session.intent_gap_log.append(
+                    IntentGap(
+                        utterance=utterance,
+                        classifier_guess="tool",
+                        kind="reject_code",
+                        turn=self.session.turn,
+                    )
+                )
+                self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
+                self.console.print("[dim]Aborted. Re-prompt to try a different request.[/dim]")
+                return
+            if choice == "edit":
+                strategy_type, code, code_summary, trigger_signals = self._edit_in_editor(
+                    strategy_type=strategy_type,
+                    code=code,
+                    summary=code_summary,
+                    triggers=trigger_signals,
+                )
+                # Re-analyse side-effects after edit (defensive — edit might have added/removed external calls).
+                has_side_effects = analyze_code_side_effects(code, side_effect_names)
+                # Re-display the now-edited block and re-prompt.
+                self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
+                second = _ask(
+                    "[bold]Proceed with edited code?[/bold]",
+                    default="N",
+                    choices=["y", "N"],
+                    console=self.console,
+                )
+                if second == "N":
+                    self.session.intent_gap_log.append(
+                        IntentGap(
+                            utterance=utterance,
+                            classifier_guess="tool",
+                            kind="reject_code",
+                            turn=self.session.turn,
+                        )
+                    )
+                    self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
+                    self.console.print("[dim]Aborted after edit.[/dim]")
+                    return
+
+        # Execute.
+        result, call_log, error = await self._execute_orchestration(code, task_id, task_data)
+
+        # Build an OrchestrationRun + ProcedureNode (tentative — no Cause yet).
+        atomic_action_id = uuid.uuid4().hex[:12]
+        run = OrchestrationRun(
+            strategy_type=strategy_type,
+            code=code,
+            code_summary=code_summary,
+            trigger_signals=trigger_signals,
+            has_side_effects=has_side_effects,
+            call_log=call_log,
+            result_summary=_summarise_result(result),
+            atomic_action_id=atomic_action_id,
+            error=error,
+            executed_at=_now_iso(),
+        )
+        self._record_atomic_action(run, raw_result=result)
+        self.session.turn_history.append(Turn(role="system", kind="tool", text=strategy_type, orchestration=run))
+        if error:
+            self.console.print(f"[red]Tool execution error: {error}[/red]")
+        else:
+            self.console.print(Panel(_summarise_result(result, max_len=1000), title=f"result · {strategy_type}"))
+
+    async def _narration_turn(self, utterance: str) -> None:
+        """Plan §D narration branch — extract entities, merge into partial_graph."""
+        user_msg = INVESTIGATE_NARRATION_USER.format(
+            domain_hints=_format_doc_hints(self.session.doc_hints),
+            running_graph_summary=_format_running_graph_summary(self.session.partial_graph),
+            turn_history_tail=_format_turn_history_tail(self.session.turn_history),
+            utterance=utterance,
+        )
+        try:
+            response = await self._invoke_llm(EMAIL_EXTRACTION_SYSTEM, user_msg)
+        except Exception as exc:  # noqa: BLE001
+            self.console.print(f"[red]Narration extraction failed: {exc}[/red]")
+            return
+        parsed = _parse_json_response(response)
+        added = self._merge_narration_extraction(parsed)
+        self.session.turn_history.append(Turn(role="system", kind="narration", text=f"extracted {added} entities"))
+        if added == 0:
+            self.console.print("[dim]Noted (no new graph entities extracted).[/dim]")
+        else:
+            self.console.print(f"[dim]Extracted {added} graph entit(y/ies) from your statement.[/dim]")
+
+    # ------------------------------------------------------------------
+    # Tool registry + execution
+    # ------------------------------------------------------------------
+
+    async def _build_tool_registry(self) -> None:
+        """Build the unified registry (PanDA MCP + internal-tools)."""
+        await self.deps.mcp_client.connect()
+        mcp_tools = self.deps.mcp_client.list_tools()
+        self._mcp_tool_descriptors = mcp_tools
+        self._task_data_tool_names = self.deps.mcp_client.task_data_tools()
+
+        from bamboo.agents.internal_tools import build_internal_tools_registry  # noqa: PLC0415
+
+        descs, calls = build_internal_tools_registry(
+            graph_db=self.deps.graph_db,
+            reasoning_navigator=self.deps.reasoning_navigator,
+        )
+        self._internal_tools_descriptors = descs
+        self._internal_tools_callables = calls
+
+    def _unified_tool_descriptors(self) -> list[dict[str, Any]]:
+        """Render unified descriptors for the orchestration prompt."""
+        out: list[dict[str, Any]] = []
+        for t in self._mcp_tool_descriptors:
+            out.append(
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters_schema": t.parameters_schema,
+                    "has_side_effects": getattr(t, "has_side_effects", True),
+                }
+            )
+        for name, t in self._internal_tools_descriptors.items():
+            out.append(
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters_schema": t.parameters_schema,
+                    "has_side_effects": getattr(t, "has_side_effects", False),
+                }
+            )
+        return out
+
+    async def _execute_orchestration(
+        self,
+        code: str,
+        task_id: Optional[int],
+        task_data: dict[str, Any],
+    ) -> tuple[Any, list[str], Optional[str]]:
+        """Run code via the shared run_orchestration_code with task_id/task_data in scope.
+
+        The ORCHESTRATION prompt promises the LLM that ``task_id`` and
+        ``task_data`` are in scope. Pass them through ``extra_globals`` so they
+        become real local names inside the sandboxed function — safer than
+        embedding ``repr(task_data)`` into the source (which would fail or
+        silently corrupt on values whose repr isn't a valid Python literal).
+        """
+        try:
+            result, call_log = await run_orchestration_code(
+                code,
+                client=self.deps.mcp_client,
+                task_data=task_data,
+                task_data_tool_names=self._task_data_tool_names,
+                internal_tools=self._internal_tools_callables,
+                extra_globals={"task_id": task_id, "task_data": task_data},
+                timeout=600.0,
+                log_prefix=f"investigate:turn{self.session.turn}",
+            )
+            return result, call_log, None
+        except Exception as exc:  # noqa: BLE001
+            return {}, [], f"{type(exc).__name__}: {exc}"
+
+    # ------------------------------------------------------------------
+    # Display
+    # ------------------------------------------------------------------
+
+    def _display_kickoff_panel(self, task_data: Optional[dict[str, Any]], symptom: Optional[str]) -> None:
+        lines: list[str] = []
+        if task_data:
+            status = task_data.get("status")
+            err = task_data.get("errorDialog")
+            if status:
+                lines.append(f"[bold]status:[/bold] {status}")
+            if err:
+                short = re.sub(r"\s+", " ", str(err))[:300]
+                lines.append(f"[bold]errorDialog:[/bold] {short}{'…' if len(str(err)) > 300 else ''}")
+            top = _format_initial_signals(task_data)
+            if top and top != "(no task_data)" and top != "(no recognised signals)":
+                lines.append(f"[bold]signals:[/bold]\n{top}")
+        if symptom:
+            lines.append(f"[bold]symptom:[/bold] {symptom}")
+        body = "\n".join(lines) if lines else "(no task_data or symptom)"
+        self.console.print(Panel(body, title="task under investigation", border_style="cyan"))
+
+    async def _show_past_similar(self, task_data: Optional[dict[str, Any]], symptom: Optional[str]) -> None:
+        if self.deps.reasoning_navigator is None:
+            return
+        if not task_data:
+            return
+        try:
+            result = await self.deps.reasoning_navigator.analyze_task(task_data)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("analyze_task in session-start failed: %s", exc)
+            return
+        if result is None:
+            return
+        root_cause = getattr(result, "root_cause", None)
+        confidence = getattr(result, "confidence", 0.0)
+        if root_cause:
+            self.console.print(
+                Panel(
+                    f"[bold]most-similar past root cause:[/bold] {root_cause}\n"
+                    f"[bold]confidence:[/bold] {confidence:.2f}\n"
+                    f"[dim](this is a hypothesis from past incidents — confirm or chase a different lead.)[/dim]",
+                    title="past similar incidents",
+                    border_style="magenta",
+                )
+            )
+        self.session.similar_past = [
+            {"root_cause": root_cause, "confidence": confidence}
+        ] if root_cause else []
+
+    def _display_confirmation_panel(
+        self,
+        strategy_type: str,
+        summary: str,
+        triggers: list[str],
+        code: str,
+    ) -> None:
+        triggers_str = "\n  - ".join(triggers) if triggers else "(none)"
+        header = (
+            f"[bold]strategy:[/bold]  {strategy_type}\n"
+            f"[bold]summary:[/bold]  {summary or '(none)'}\n"
+            f"[bold]trigger:[/bold]\n  - {triggers_str}"
+        )
+        self.console.print(Panel(header, title="proposed orchestration", border_style="yellow"))
+        self.console.print(Syntax(code, "python", theme="monokai", line_numbers=False))
+
+    def _display_procedure_list(self) -> None:
+        runs = [t.orchestration for t in self.session.turn_history if t.orchestration is not None]
+        if not runs:
+            self.console.print("[dim]No tool calls were recorded this session.[/dim]")
+            return
+        table = Table(title=f"procedure list ({len(runs)} step(s))")
+        table.add_column("#", justify="right")
+        table.add_column("strategy")
+        table.add_column("summary")
+        table.add_column("called")
+        table.add_column("result")
+        table.add_column("side-fx?", justify="center")
+        for i, r in enumerate(runs, 1):
+            called = ", ".join(r.call_log) or "-"
+            res = r.result_summary[:60] + ("…" if len(r.result_summary) > 60 else "")
+            table.add_row(
+                str(i),
+                r.strategy_type,
+                r.code_summary or "-",
+                called,
+                res,
+                "y" if r.has_side_effects else "n",
+            )
+        self.console.print(table)
+
+    # ------------------------------------------------------------------
+    # Graph mutation
+    # ------------------------------------------------------------------
+
+    def _merge_into_partial_graph(self, nodes: list, rels: list) -> None:
+        """Append nodes/rels with canonical-name dedup against existing partial_graph."""
+        existing_keys = {(str(getattr(n, "node_type", "")), n.name) for n in self.session.partial_graph.nodes}
+        for n in nodes:
+            key = (str(getattr(n, "node_type", "")), n.name)
+            if key not in existing_keys:
+                self.session.partial_graph.nodes.append(n)
+                existing_keys.add(key)
+        for r in rels:
+            self.session.partial_graph.relationships.append(r)
+
+    def _record_atomic_action(self, run: OrchestrationRun, raw_result: Any) -> None:
+        """Append a tentative ProcedureNode + a Task_Context node for the result."""
+        proc_metadata: dict[str, Any] = {
+            "orchestration_code": run.code,
+            "code_summary": run.code_summary,
+            "has_side_effects": run.has_side_effects,
+            "atomic_action_id": run.atomic_action_id,
+            # The per-edge fields (trigger_signals, result_summary, executed_at)
+            # are kept here too during the session; finalize splits them onto the
+            # eventual investigated_by edge per §G.
+            "_pending_edge": {
+                "trigger_signals": list(run.trigger_signals),
+                "result_summary": run.result_summary,
+                "executed_at": run.executed_at,
+            },
+        }
+        if run.error:
+            proc_metadata["error"] = run.error
+        proc = ProcedureNode(
+            name=f"{run.strategy_type}:tentative:{run.atomic_action_id}",
+            description=run.code_summary or run.strategy_type,
+            strategy_type=run.strategy_type,
+            metadata=proc_metadata,
+        )
+        # Task_Context node carrying the raw result for downstream review.
+        try:
+            ctx_text = json.dumps(raw_result, default=str)[:4000]
+        except (TypeError, ValueError):
+            ctx_text = str(raw_result)[:4000]
+        ctx = TaskContextNode(
+            name=f"result:{run.atomic_action_id}",
+            description=ctx_text,
+            metadata={"source": "investigate:tool_result", "atomic_action_id": run.atomic_action_id},
+        )
+        self._merge_into_partial_graph([proc, ctx], [])
+
+    def _merge_narration_extraction(self, parsed: dict[str, Any]) -> int:
+        """Convert EMAIL_EXTRACTION JSON into nodes/edges; return count added."""
+        if not parsed:
+            return 0
+        nodes_data = parsed.get("nodes") or []
+        rels_data = parsed.get("relationships") or []
+        nodes: list[Any] = []
+        for nd in nodes_data:
+            ntype = nd.get("node_type", "")
+            base = {
+                "name": nd.get("name", ""),
+                "description": nd.get("description"),
+                "metadata": nd.get("metadata") or {},
+            }
+            if not base["name"]:
+                continue
+            if ntype == "Cause":
+                nodes.append(CauseNode(**base))
+            elif ntype == "Resolution":
+                nodes.append(ResolutionNode(**base, steps=nd.get("steps") or []))
+            elif ntype == "Task_Context":
+                nodes.append(TaskContextNode(**base))
+        # Build relationships only when both endpoints are present in nodes (or partial_graph).
+        existing_names = {n.name for n in self.session.partial_graph.nodes} | {n.name for n in nodes}
+        rels: list[GraphRelationship] = []
+        for rd in rels_data:
+            src = rd.get("source_name")
+            tgt = rd.get("target_name")
+            if not src or not tgt or src not in existing_names or tgt not in existing_names:
+                continue
+            try:
+                rtype = RelationType(rd.get("relation_type", ""))
+            except ValueError:
+                continue
+            rels.append(
+                GraphRelationship(
+                    source_id=src,
+                    target_id=tgt,
+                    relation_type=rtype,
+                    confidence=float(rd.get("confidence", 1.0)),
+                )
+            )
+        self._merge_into_partial_graph(nodes, rels)
+        return len(nodes) + len(rels)
+
+    def _wire_finalization_edges(self, cause_text: Optional[str], resolution_text: Optional[str]) -> None:
+        """Plan §E step 5 — promote tentative Procedures into Cause-attached edges."""
+        # Promote / create Cause node when provided.
+        cause_node: Optional[CauseNode] = None
+        if cause_text:
+            cause_node = CauseNode(
+                name=cause_text.strip(),
+                description=cause_text.strip(),
+                metadata={"source": "investigate:final_form", "confirmed": True},
+            )
+            self._merge_into_partial_graph([cause_node], [])
+        resolution_node: Optional[ResolutionNode] = None
+        if resolution_text:
+            resolution_node = ResolutionNode(
+                name=resolution_text.strip(),
+                description=resolution_text.strip(),
+                metadata={"source": "investigate:final_form"},
+            )
+            self._merge_into_partial_graph([resolution_node], [])
+
+        # Cause -[solved_by]-> Resolution.
+        if cause_node is not None and resolution_node is not None:
+            self.session.partial_graph.relationships.append(
+                GraphRelationship(
+                    source_id=cause_node.name,
+                    target_id=resolution_node.name,
+                    relation_type=RelationType.SOLVED_BY,
+                    confidence=1.0,
+                )
+            )
+
+        # Promote tentative Procedures: canonicalise name to strategy_type:<cause>
+        # (per existing schema) and create investigated_by edge carrying per-edge fields.
+        is_abandoned = cause_node is None
+        for n in list(self.session.partial_graph.nodes):
+            if not isinstance(n, ProcedureNode):
+                continue
+            if not n.name.startswith("") or "tentative" not in n.name:
+                continue  # already finalised
+            pending = (n.metadata or {}).pop("_pending_edge", {}) or {}
+            if is_abandoned:
+                n.metadata.setdefault("status", "tentative")
+                n.metadata.setdefault("session_status", "ongoing")
+                # Without a Cause we can't materialise the investigated_by edge.
+                continue
+            # Strip the per-session uniquifier and re-canonicalise.
+            canonical_name = f"{n.strategy_type}:{cause_node.name}"
+            n.name = canonical_name
+            self.session.partial_graph.relationships.append(
+                GraphRelationship(
+                    source_id=cause_node.name,
+                    target_id=canonical_name,
+                    relation_type=RelationType.INVESTIGATED_BY,
+                    confidence=1.0,
+                    properties={
+                        "metadata": {
+                            "trigger_signals": pending.get("trigger_signals", []),
+                            "result_summary": pending.get("result_summary", ""),
+                            "executed_at": pending.get("executed_at", ""),
+                        },
+                    },
+                )
+            )
+
+        # Wire Symptom -[indicate]-> Cause, Task_Features -[contribute_to]-> Cause.
+        if cause_node is not None:
+            for n in self.session.partial_graph.nodes:
+                if isinstance(n, SymptomNode):
+                    self.session.partial_graph.relationships.append(
+                        GraphRelationship(
+                            source_id=n.name,
+                            target_id=cause_node.name,
+                            relation_type=RelationType.INDICATE,
+                            confidence=1.0,
+                        )
+                    )
+                elif isinstance(n, TaskFeatureNode):
+                    self.session.partial_graph.relationships.append(
+                        GraphRelationship(
+                            source_id=n.name,
+                            target_id=cause_node.name,
+                            relation_type=RelationType.CONTRIBUTE_TO,
+                            confidence=0.5,
+                        )
+                    )
+
+    async def _show_diff_and_commit(self) -> None:
+        graph = self.session.partial_graph
+        rows = await self._classify_nodes_for_diff(graph)
+
+        # Render the per-node diff as a table grouped by node type.
+        table = Table(title=f"commit diff ({len(graph.nodes)} node(s), {len(graph.relationships)} relationship(s))")
+        table.add_column("type")
+        table.add_column("name")
+        table.add_column("action", justify="center")
+        new_count = 0
+        merge_count = 0
+        for ntype, name, action in rows:
+            if action == "new":
+                new_count += 1
+                table.add_row(ntype, name, "[green]new[/green]")
+            else:
+                merge_count += 1
+                table.add_row(ntype, name, "[dim]merge[/dim]")
+        self.console.print(table)
+        self.console.print(
+            f"[bold]summary:[/bold] {new_count} new, {merge_count} will merge — "
+            f"{len(graph.relationships)} edge(s) to write."
+        )
+
+        if self.dry_run:
+            self.console.print("[yellow]--dry-run set; not committing.[/yellow]")
+            return
+
+        if not _confirm("commit this investigation?", default=True, console=self.console):
+            self.console.print("[yellow]Commit cancelled.[/yellow]")
+            return
+
+        await self._commit()
+
+    async def _classify_nodes_for_diff(
+        self, graph: KnowledgeGraph
+    ) -> list[tuple[str, str, str]]:
+        """Return per-node ``(node_type_label, name, "new"|"merge")`` for the diff display.
+
+        Looks up each node by its canonical ``NodeType`` value (the same string
+        used as the Neo4j label, e.g. ``"Symptom"``) — earlier drafts used
+        ``str(NodeType.SYMPTOM)`` which produces ``"NodeType.SYMPTOM"`` (wrong
+        format) and made every node look new. Errors per node are non-fatal
+        (treated as "new"); a broken graph_db connection doesn't abort the
+        whole commit flow.
+        """
+        rows: list[tuple[str, str, str]] = []
+        for n in graph.nodes:
+            nt = getattr(n, "node_type", None)
+            label = nt.value if hasattr(nt, "value") else str(nt or "Node")
+            try:
+                existing = await self.deps.graph_db.get_node_description(label, n.name)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_node_description(%s, %s) failed: %s", label, n.name, exc)
+                existing = None
+            rows.append((label, n.name, "merge" if existing is not None else "new"))
+        return rows
+
+    async def _commit(self) -> None:
+        """Plan §F — delegate to KnowledgeAccumulator's existing storage methods."""
+        if self.deps.knowledge_accumulator is None:
+            self.console.print("[red]No KnowledgeAccumulator wired; cannot commit.[/red]")
+            return
+
+        graph = self.session.partial_graph
+        graph.metadata = dict(getattr(graph, "metadata", {}) or {})
+        graph.metadata["graph_id"] = f"investigate:{self.session.session_id}"
+
+        agent = self.deps.knowledge_accumulator
+        try:
+            await agent._store_graph(graph)
+            transcript = self._render_transcript()
+            summary = await agent._generate_summary(graph, doc_hints=self.session.doc_hints, email_text=transcript)
+            insights = await agent._extract_key_insights(graph)
+            await agent._store_in_vector_db(graph, summary, insights)
+            self.console.print("[green]Committed.[/green]")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("investigate commit failed")
+            self.console.print(f"[red]Commit failed: {exc}[/red]")
+
+        # Persist tool_gap_log to disk for developer mining.
+        try:
+            gap_path = Path.home() / ".bamboo" / "investigations" / "gaps.jsonl"
+            gap_path.parent.mkdir(parents=True, exist_ok=True)
+            with gap_path.open("a") as fh:
+                for gap in self.session.tool_gap_log:
+                    fh.write(json.dumps(gap.model_dump()) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not persist tool_gap_log: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _has_any_atomic_actions(self) -> bool:
+        return any(t.orchestration is not None for t in self.session.turn_history)
+
+    def _render_transcript(self) -> str:
+        parts = []
+        for i, t in enumerate(self.session.turn_history, 1):
+            parts.append(f"Turn {i} ({t.role}/{t.kind}): {t.text}")
+        return "\n".join(parts)
+
+    def _persist(self) -> None:
+        if not self.save_path:
+            return
+        try:
+            self.save_path.parent.mkdir(parents=True, exist_ok=True)
+            self.save_path.write_text(self.session.model_dump_json(indent=2))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not persist session to %s: %s", self.save_path, exc)
+
+    def _edit_in_editor(
+        self,
+        *,
+        strategy_type: str,
+        code: str,
+        summary: str,
+        triggers: list[str],
+    ) -> tuple[str, str, str, list[str]]:
+        """Open all five replayability fields in $EDITOR; return the edited values.
+
+        Format of the temp file::
+
+            # strategy_type: <slug>
+            # code_summary: <one-line summary>
+            # trigger_signals:
+            #   - <signal 1>
+            #   - <signal 2>
+            # --- code below (lines starting with `#` are header metadata; `## ` is a literal comment) ---
+
+            <python source>
+
+        Header lines (starting with ``#`` but not ``## ``) are parsed back into
+        the three structured fields; the remaining lines are the code body.
+        This lets the human edit ``code_summary`` and ``trigger_signals``
+        without re-running the LLM — important when the LLM's rationale is
+        slightly off but the code itself is fine.
+
+        Returns ``(strategy_type, code, code_summary, trigger_signals)``.
+        Fields not present in the edited file fall back to the original
+        values passed in.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        editor = os.environ.get("EDITOR", "vi")
+        trigger_lines = "\n".join(f"#   - {t}" for t in triggers) or "#   - "
+        header = (
+            f"# strategy_type: {strategy_type}\n"
+            f"# code_summary: {summary}\n"
+            f"# trigger_signals:\n"
+            f"{trigger_lines}\n"
+            "# --- code below (lines starting with `#` are header metadata; `## ` is a literal comment) ---\n\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".py", mode="w+", delete=False) as f:
+            f.write(header + code)
+            path = f.name
+        try:
+            subprocess.call([editor, path])
+            with open(path) as f:
+                edited = f.read()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+        return _parse_editor_buffer(
+            edited,
+            fallback_strategy=strategy_type,
+            fallback_summary=summary,
+            fallback_triggers=triggers,
+        )
+
+    async def _invoke_llm(self, system_message: str, user_message: str) -> str:
+        """Single LLM round-trip helper; returns the raw content string."""
+        if self._llm is None:
+            self._llm = get_extraction_llm()
+        response = await self._llm.ainvoke(
+            [SystemMessage(content=system_message), HumanMessage(content=user_message)]
+        )
+        return getattr(response, "content", "") or ""

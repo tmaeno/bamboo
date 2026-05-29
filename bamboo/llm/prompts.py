@@ -402,6 +402,28 @@ Email thread:
 {email_text}
 """
 
+
+# Investigate-mode user template — same output schema as EMAIL_EXTRACTION_USER, reuses
+# EMAIL_EXTRACTION_SYSTEM verbatim. Source-text input is the latest dialog turn (a
+# single human utterance) plus running graph and recent-turn context, instead of a
+# full email thread. Per plan §0.3, this lets populate and investigate share one
+# extraction code path parameterised by which user template is rendered. If the
+# system message ever needs to fork to handle multi-turn cleanly, swap to a paired
+# INVESTIGATE_NARRATION_SYSTEM/_USER as documented in the plan.
+INVESTIGATE_NARRATION_USER = """Domain knowledge (PanDA system — for context and filling in MISSING details only;
+do NOT replace or override terminology that is already present in the source text):
+{domain_hints}
+
+Running graph summary (entities captured so far in this investigation session):
+{running_graph_summary}
+
+Recent turn history (most recent dialog turns, oldest first):
+{turn_history_tail}
+
+Latest human utterance to extract from:
+{utterance}
+"""
+
 EMAIL_INVESTIGATION_SUMMARY_SYSTEM = """You are reading an incident email thread.
 Identify any investigation steps that were explicitly described — what was examined,
 checked, or queried, and what was found or concluded.
@@ -1400,3 +1422,212 @@ Out of scope (fetched dynamically by doc search when relevant — do NOT cover):
 PANDA_SYSTEM_SUMMARY_USER = """Documentation (overview and concept pages from PanDA docs):
 {concept_docs}
 """
+
+
+# ===========================================================================
+# `bamboo investigate` — co-investigation mode prompts (plan §H).
+# ===========================================================================
+
+INVESTIGATE_INTENT_SYSTEM = """You classify a single dialog utterance from a live incident-investigation session into one of two categories:
+
+  - "tool"      = the human wants bamboo to do something on their behalf
+                  (fetch data from PanDA, look up past incidents, run a query,
+                  compare two things, etc.). Typical phrasings include
+                  imperatives like "show", "fetch", "check", "find", "compare",
+                  "look up", "give me".
+
+  - "narration" = the human is talking — reporting an observation, stating a
+                  hypothesis, declaring a cause or resolution, summarising what
+                  they noticed, or thinking out loud. Typical phrasings start
+                  with "the X is", "I see", "looks like", "it seems", "the
+                  cause was", "I think", "we should", or a bare statement of
+                  fact.
+
+Return a single JSON object with exactly these fields:
+  - "intent":         "tool" or "narration"
+  - "confidence":     a float in [0.0, 1.0] reflecting how sure you are
+  - "is_close_call":  true if the utterance plausibly fits both categories
+                      (e.g. "what about the scout jobs?" — could be a tool
+                      request OR a hypothesis); false when one category is
+                      clearly correct
+  - "rationale":      one short sentence explaining the choice
+
+When in doubt between the two, prefer "tool" if the utterance contains a
+clear action verb requesting work from bamboo; otherwise prefer "narration".
+
+Output ONLY the JSON object — no markdown fences, no commentary.
+"""
+
+INVESTIGATE_INTENT_USER = """Domain knowledge (PanDA system — for context and recognising domain-specific phrasings):
+{domain_hints}
+
+Running graph summary (entities captured so far in this session):
+{running_graph_summary}
+
+Latest human utterance to classify:
+{utterance}
+"""
+
+
+INVESTIGATE_ORCHESTRATION_SYSTEM = """You generate a short async-Python orchestration block that uses MCP tools to satisfy one turn of a human-driven incident-investigation dialog.
+
+Your output is a JSON object with these fields:
+  - "strategy_type":    a short snake_case slug that uniquely identifies
+                        what this orchestration does (e.g.
+                        "inspect_failed_scout_jobs",
+                        "compare_failed_vs_successful_logs"). This becomes the
+                        canonical Procedure node name when committed, so keep
+                        it concise and reusable.
+  - "code":             the Python source for the body of an async function
+                        `_fn(tools, asyncio)`. Use `await tools.<name>(...)`
+                        to invoke any tool from the unified registry below.
+                        Must end with `return <dict>` so the caller can store
+                        the structured result. Single-step intents emit a
+                        one-liner; multi-step intents may use loops,
+                        conditionals, intermediate variables.
+  - "code_summary":     ONE paragraph (1-3 sentences) in plain language
+                        describing what the code does and why — this is the
+                        primary human-readable handle for the Procedure when
+                        bamboo analyze surfaces it on a future similar
+                        incident. Avoid restating the code; explain intent.
+  - "trigger_signals":  a list of short natural-language predicates capturing
+                        the facts in the current context that justified
+                        running this orchestration. Examples:
+                        ["symptom mentions set_exhausted/low_efficiency",
+                         "scout phase status=failed",
+                         "no prior scout-job inspection in this session"].
+                        These will be evaluated against a different task's
+                        context during future replay, so phrase them
+                        generically (no task IDs, no literal incident-only
+                        values).
+  - "reason":           ONLY include this field instead of all of the above
+                        when no tool in the registry can satisfy the request
+                        — set `code` to null and explain why no tool fits.
+
+The unified tool registry is enumerated in the user message. Each entry has
+``name``, ``description``, ``args_schema``, and ``has_side_effects``. Tools
+with ``has_side_effects: True`` perform external (PanDA server) calls and
+will trigger a pre-execution confirmation prompt to the human; tools with
+``has_side_effects: False`` are internal read-only graph queries that
+auto-execute. You do not need to think about confirmation — just write the
+code that does what the human asked.
+
+Sandbox notes:
+- The code body runs inside ``async def _fn(tools, asyncio, task_id, task_data):``
+  with a restricted set of builtins (``len``, ``isinstance``, ``dict``,
+  ``list``, ``str``, ``int``, ``float``, ``bool``, ``range``, ``enumerate``,
+  ``zip``, ``map``, ``filter``, ``sorted``, ``reversed``, ``any``, ``all``,
+  ``min``, ``max``, ``sum``, ``abs``, ``round``, common exception types).
+  NO file I/O, NO network outside the tools, NO module imports.
+- ``task_id`` and ``task_data`` are passed in as named parameters — reference
+  them directly (no need to repr or quote anything).
+- ``asyncio`` is available for ``asyncio.gather`` if you need to parallelise
+  independent tool calls (do this when steps are genuinely independent).
+- The function MUST return a dict. Non-dict returns are treated as failure.
+
+Few-shot examples
+-----------------
+
+Example 1 — single external tool (the most common shape):
+
+  human utterance: "show me the failed scout jobs"
+  output:
+  {
+    "strategy_type": "inspect_failed_scout_jobs",
+    "code": "jobs = await tools.get_scout_job_details(task_id=task_id)\\nreturn {\\"jobs\\": jobs}",
+    "code_summary": "Fetch the scout-job details for the failing task so the human can inspect which scout jobs failed and why.",
+    "trigger_signals": [
+      "symptom indicates scout phase failed",
+      "scout-job inspection not yet performed in this session"
+    ]
+  }
+
+Example 2 — multi-tool composition with intermediate variables:
+
+  human utterance: "compare failed jobs with successful ones"
+  output:
+  {
+    "strategy_type": "compare_failed_vs_successful_jobs",
+    "code": "similar = await tools.find_similar_successful_tasks(task_id=task_id)\\nfailed_summary = await tools.get_failed_job_log_summary(task_id=task_id)\\nsuccess_task_ids = [t[\\"task_id\\"] for t in similar.get(\\"tasks\\", [])][:3]\\ncompare = await tools.compare_failed_vs_successful_job_logs(failed_task_id=task_id, success_task_ids=success_task_ids)\\nreturn {\\"similar\\": similar, \\"failed_summary\\": failed_summary, \\"comparison\\": compare}",
+    "code_summary": "Find similar successful tasks, summarise the failing task's logs, then diff them — surfaces the field that diverges between healthy and failing runs.",
+    "trigger_signals": [
+      "no comparison performed yet",
+      "task has known similar successful peers in history"
+    ]
+  }
+
+Example 3 — purely-internal lookup against bamboo's own graph (read-only,
+no PanDA call). Use these when the human asks about past incidents
+themselves rather than the live task:
+
+  human utterance: "what did past incidents do for this kind of error?"
+  output:
+  {
+    "strategy_type": "lookup_past_procedures_for_symptom",
+    "code": "symptom_name = task_data.get(\\"errorDialog\\", \\"\\")\\npast = await tools.query_past_causes_for_symptom(symptom=symptom_name)\\nout = {\\"past_causes\\": past, \\"procedures_per_cause\\": {}}\\nfor c in past.get(\\"causes\\", [])[:3]:\\n    name = c.get(\\"cause_name\\")\\n    if name:\\n        out[\\"procedures_per_cause\\"][name] = await tools.query_past_procedures_for_cause(cause_name=name)\\nreturn out",
+    "code_summary": "Look up past Causes matching the current Symptom in bamboo's knowledge graph, then fetch the recorded investigation Procedures for each cause so the human can see what was done before.",
+    "trigger_signals": [
+      "human is asking about past investigation history",
+      "errorDialog has a Symptom that may match prior incidents"
+    ]
+  }
+
+Example 4 — no tool fits (when the human asks for something none of the
+registered tools can do):
+
+  human utterance: "open the GitLab MR for this task"
+  output:
+  {
+    "code": null,
+    "reason": "No registered tool can open external links or query GitLab; suggest the human use request_human_input or rephrase."
+  }
+
+Output ONLY the JSON object — no markdown fences, no commentary.
+"""
+
+INVESTIGATE_ORCHESTRATION_USER = """Domain knowledge (PanDA system — for context and filling in MISSING details only;
+do NOT replace or override terminology that is already present in the source text):
+{domain_hints}
+
+Task under investigation:
+  task_id:     {task_id}
+  errorDialog: {error_dialog}
+
+Initial signals from task_data (read-only context):
+{initial_signals}
+
+Recent turn outputs (orchestration results from prior turns this session,
+oldest first — use these when the current intent depends on them):
+{prior_turn_results}
+
+Unified available tools (use these names verbatim in ``tools.<name>(...)``):
+{available_tools}
+
+Human's utterance this turn:
+{utterance}
+"""
+
+
+INVESTIGATE_KICKOFF_SYSTEM = """You read the errorDialog field of a failing PanDA task and produce a tight initial Symptom name + a short human-readable description for display.
+
+The Symptom name should be the canonical error category — short (1-4 words),
+PascalCase or hyphenated, reusable across incidents with the same kind of
+failure. Examples: "LowCPUEfficiency", "ScoutJobTimeout", "BrokerNoSite".
+
+The description should be ONE sentence summarising what the errorDialog says
+in plain language — for human display at session start, not for storage.
+
+Output a JSON object:
+  - "symptom_name":  short canonical category (string)
+  - "description":   one-sentence plain-language summary (string)
+
+Output ONLY the JSON object — no markdown fences, no commentary.
+"""
+
+INVESTIGATE_KICKOFF_USER = """Domain knowledge (PanDA system — for recognising error patterns):
+{domain_hints}
+
+errorDialog (raw text from PanDA):
+{error_dialog}
+"""
+
