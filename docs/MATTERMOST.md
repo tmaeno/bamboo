@@ -27,10 +27,10 @@ or container and that *connects out to* Mattermost:
   │  channels,    │◀──────────────▶│ bamboo             │──────────▶│ Neo4j     │
   │  bot account  │   + REST API   │ serve-mattermost   │           │ Qdrant    │
   └───────────────┘                │  (reads env/.env)  │──────────▶│ LLM API   │
-                                    └─────────┬──────────┘           │ PanDA     │
-                                              │ device-flow (OIDC)   └───────────┘
-                                              ▼
-                                        CERN IAM
+                                   └─────────┬──────────┘           │ PanDA     │
+                                             │ device-flow (OIDC)   └───────────┘
+                                             ▼
+                                            IAM
 ```
 
 **Configuration is read by the bot process — never sent to Mattermost.** The bot
