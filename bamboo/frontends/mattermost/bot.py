@@ -1,0 +1,224 @@
+"""Mattermost bot daemon — WebSocket event loop + thread↔session registry.
+
+One outbound connection (REST for posting, WebSocket for ``posted`` events).
+Each investigation/capture runs in its own thread: the thread root message starts
+a session, replies in that thread are turns.  The bot is decoupled from bamboo's
+agents via an injected ``run_session`` callback, so the routing/registry logic is
+unit-testable with a fake driver.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
+
+from bamboo.frontends.mattermost.io import ThreadTransport
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Command:
+    """A parsed start command from a thread-root message."""
+
+    kind: str  # "investigate" | "capture"
+    task_id: Optional[int] = None
+    user_id: Optional[str] = None  # Mattermost user who issued the command
+
+
+def parse_command(message: str) -> Optional[Command]:
+    """Parse a start command from a message, tolerating a leading @mention.
+
+    Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``, ``login``,
+    and ``logout``.  Returns ``None`` when the message is not a start command.
+    """
+    text = (message or "").strip()
+    # Drop a leading @mention token if present.
+    if text.startswith("@"):
+        parts = text.split(None, 1)
+        text = parts[1] if len(parts) > 1 else ""
+    # Tolerate a leading slash command form ("/bamboo investigate 123").
+    low = text.lower()
+    for prefix in ("/bamboo ", "bamboo "):
+        if low.startswith(prefix):
+            text = text[len(prefix):]
+            low = text.lower()
+            break
+    tokens = text.split()
+    if not tokens:
+        return None
+    verb = tokens[0].lower()
+    if verb in ("investigate", "capture"):
+        task_id = None
+        for tok in tokens[1:]:
+            if tok.isdigit():
+                task_id = int(tok)
+                break
+        return Command(kind=verb, task_id=task_id)
+    if verb in ("login", "logout"):
+        return Command(kind=verb)
+    return None
+
+
+# A session runner: given a transport + command, drive the flow to completion.
+RunSession = Callable[[ThreadTransport, Command], Awaitable[None]]
+
+
+class _ThreadSession(ThreadTransport):
+    """Per-thread transport: FIFO outbox (sequential sender) + inbound replies."""
+
+    def __init__(self, bot: "MattermostBot", channel_id: str, root_id: str) -> None:
+        self._bot = bot
+        self.channel_id = channel_id
+        self.root_id = root_id
+        self._outbox: asyncio.Queue = asyncio.Queue()
+        self._inbox: asyncio.Queue = asyncio.Queue()
+        self._sender_task: Optional[asyncio.Task] = None
+
+    # --- ThreadTransport ---
+    def send(self, text: str, *, props: Optional[dict[str, Any]] = None) -> None:
+        self._outbox.put_nowait((text, props))
+
+    async def next_reply(self) -> str:
+        return await self._inbox.get()
+
+    async def thread_messages(self) -> list[str]:
+        return await self._bot.get_thread_messages(self.root_id)
+
+    # --- driven by the bot ---
+    def deliver(self, text: str) -> None:
+        self._inbox.put_nowait(text)
+
+    async def _sender_loop(self) -> None:
+        while True:
+            text, props = await self._outbox.get()
+            try:
+                await self._bot.create_post(
+                    self.channel_id, text, root_id=self.root_id, props=props
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to post to thread %s", self.root_id)
+            finally:
+                self._outbox.task_done()
+
+
+class MattermostBot:
+    """Routes Mattermost ``posted`` events to per-thread investigation sessions."""
+
+    def __init__(
+        self,
+        driver: Any,
+        *,
+        allowed_channels: set[str],
+        run_session: RunSession,
+    ) -> None:
+        self.driver = driver
+        self.allowed_channels = set(allowed_channels)
+        self.run_session = run_session
+        self._sessions: dict[str, _ThreadSession] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
+        self.bot_user_id: Optional[str] = None
+
+    async def create_post(
+        self,
+        channel_id: str,
+        message: str,
+        *,
+        root_id: str = "",
+        props: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        options: dict[str, Any] = {"channel_id": channel_id, "message": message}
+        if root_id:
+            options["root_id"] = root_id
+        if props:
+            options["props"] = props
+        return await self.driver.posts.create_post(options)
+
+    async def get_thread_messages(self, root_id: str) -> list[str]:
+        """Return human (non-bot) messages in a thread, oldest first."""
+        thread = await self.driver.posts.get_post_thread(root_id)
+        posts = (thread or {}).get("posts", {}) or {}
+        ordered = sorted(posts.values(), key=lambda p: p.get("create_at", 0))
+        out: list[str] = []
+        for p in ordered:
+            if p.get("user_id") and p.get("user_id") == self.bot_user_id:
+                continue  # skip bamboo's own posts
+            text = (p.get("message") or "").strip()
+            if text:
+                out.append(text)
+        return out
+
+    async def run(self) -> None:
+        """Login, learn our own user id, then run the WebSocket event loop."""
+        await self.driver.login()
+        me = await self.driver.users.get_user("me")
+        self.bot_user_id = me.get("id") if isinstance(me, dict) else None
+        logger.info("Mattermost bot connected as user %s", self.bot_user_id)
+        await self.driver.init_websocket(self.handle_event)
+
+    async def handle_event(self, event: Any) -> None:
+        """Handle one WebSocket event. Tolerates str or dict payloads."""
+        if isinstance(event, (str, bytes)):
+            try:
+                event = json.loads(event)
+            except (ValueError, TypeError):
+                return
+        if not isinstance(event, dict) or event.get("event") != "posted":
+            return
+        data = event.get("data") or {}
+        post_raw = data.get("post")
+        try:
+            post = json.loads(post_raw) if isinstance(post_raw, str) else (post_raw or {})
+        except (ValueError, TypeError):
+            return
+
+        channel_id = post.get("channel_id")
+        user_id = post.get("user_id")
+        message = post.get("message", "")
+        if not channel_id or channel_id not in self.allowed_channels:
+            return  # channel allow-list (Layer 1 auth)
+        if user_id and user_id == self.bot_user_id:
+            return  # never react to our own posts
+
+        # A reply within an existing session thread → feed it as the next turn.
+        root_id = post.get("root_id") or post.get("id")
+        sess = self._sessions.get(root_id)
+        if sess is not None:
+            sess.deliver(message)
+            return
+
+        # Otherwise, maybe a start command (rooted at this message).
+        command = parse_command(message)
+        if command is None:
+            return
+        command.user_id = user_id  # attribute the session to the invoking user
+        await self._start_session(channel_id, root_id, command)
+
+    async def _start_session(self, channel_id: str, root_id: str, command: Command) -> None:
+        sess = _ThreadSession(self, channel_id, root_id)
+        self._sessions[root_id] = sess
+        sess._sender_task = asyncio.ensure_future(sess._sender_loop())
+        self._tasks[root_id] = asyncio.ensure_future(self._drive(sess, command))
+
+    async def _drive(self, sess: _ThreadSession, command: Command) -> None:
+        try:
+            await self.run_session(sess, command)
+        except Exception:  # noqa: BLE001
+            logger.exception("session for thread %s failed", sess.root_id)
+            sess.send("⚠️ bamboo hit an error in this session; see server logs.")
+        finally:
+            await self._drain_and_cleanup(sess)
+
+    async def _drain_and_cleanup(self, sess: _ThreadSession) -> None:
+        # Let queued outbound messages flush before tearing the sender down.
+        try:
+            await asyncio.wait_for(sess._outbox.join(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+            pass
+        self._sessions.pop(sess.root_id, None)
+        self._tasks.pop(sess.root_id, None)
+        if sess._sender_task is not None:
+            sess._sender_task.cancel()

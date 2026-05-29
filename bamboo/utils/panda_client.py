@@ -17,13 +17,16 @@ different PanDA instance (e.g. a development server).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import gzip
 import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 from bamboo.utils.narrator import thinking
 
 import warnings
@@ -32,6 +35,64 @@ from urllib3.exceptions import InsecureRequestWarning
 warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-user PanDA identity (OIDC)
+# ---------------------------------------------------------------------------
+#
+# By default ``HttpClient`` authenticates from process-global environment
+# variables (PANDA_AUTH/PANDA_AUTH_ID_TOKEN/...). To let a multi-user frontend
+# (e.g. the Mattermost bot) act as the *invoking* user, a per-call OIDC token can
+# be bound for the duration of a request via :func:`panda_credentials`. It is
+# stored in a ContextVar, which propagates across ``asyncio.to_thread`` (the
+# context is copied), so the blocking ``HttpClient`` call running in a worker
+# thread still sees the right token. When unset, behavior is unchanged (the
+# client reads the environment as before).
+
+
+@dataclass(frozen=True)
+class PandaCredentials:
+    """An OIDC token (and VO) to act as a specific PanDA user."""
+
+    id_token: str
+    auth_vo: str = ""
+
+
+_panda_credentials: contextvars.ContextVar[Optional[PandaCredentials]] = contextvars.ContextVar(
+    "panda_credentials", default=None
+)
+
+
+@contextlib.contextmanager
+def panda_credentials(creds: Optional[PandaCredentials]):
+    """Bind per-user PanDA OIDC credentials for the duration of the block.
+
+    ``with panda_credentials(creds): await fetch_task_data(...)`` makes every
+    PanDA API call inside act as that user. Passing ``None`` is a no-op (keeps
+    the process-default identity).
+    """
+    token = _panda_credentials.set(creds)
+    try:
+        yield
+    finally:
+        _panda_credentials.reset(token)
+
+
+def _apply_credentials(client: Any) -> None:
+    """Apply the bound per-user OIDC credentials to *client*, if any.
+
+    Uses ``HttpClient.override_oidc(oidc, id_token, auth_vo)`` to switch identity
+    after construction. No-op when no credentials are bound.
+    """
+    creds = _panda_credentials.get()
+    if creds is None:
+        return
+    override = getattr(client, "override_oidc", None)
+    if override is None:  # pragma: no cover - older client without override
+        logger.warning("HttpClient has no override_oidc; per-user identity ignored.")
+        return
+    override(True, creds.id_token, creds.auth_vo)
 
 # Matches <a href="URL">...</a> in HTML fragments (e.g. errorDialog values).
 _HREF_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>', re.IGNORECASE)
@@ -129,6 +190,7 @@ def _call_api(method: str, endpoint: str, data: dict) -> Any:
     from pandaserver.api.v1.http_client import HttpClient, api_url_ssl  # noqa: PLC0415
 
     client = HttpClient()
+    _apply_credentials(client)  # per-user OIDC override when bound (else env default)
     url = f"{api_url_ssl}/{endpoint}"
     if method == "get":
         status, response = client.get(url, data)

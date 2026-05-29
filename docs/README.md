@@ -30,6 +30,12 @@ bulk commissioning.
 turn produces a sandboxed orchestration code block stored on the resulting Procedure
 node, so future analyze runs re-execute the exact code that worked last time.
 
+### 💬 [Mattermost Integration](MATTERMOST.md)
+The ops-facing chat frontend: a bot (`bamboo serve-mattermost`) that runs
+`investigate`, `capture`, and analysis posting from Mattermost. Covers deployment
+topology, bot setup, the two tokens (Mattermost vs. CERN-IAM PanDA OIDC),
+per-user `login`, authorization, and troubleshooting.
+
 ### 🤖 [Agent Reference](AGENTS.md)
 All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ContextEnricher`, `ReasoningNavigator`, and their components.
 
@@ -49,6 +55,15 @@ Development setup, code style, extension points (agents, node types, relationshi
 2. [PanDA Integration](PANDA_INTEGRATION.md) — fetch tasks directly from PanDA
 3. [Knowledge Population](KNOWLEDGE_POPULATION.md) — populate databases from live tasks or CSV batches
 4. [Co-Investigation Mode](INVESTIGATE.md) — live human-in-the-loop investigation; the captured procedures auto-replay on similar future incidents
+
+### Ops users (Mattermost)
+1. [Mattermost Integration](MATTERMOST.md) — use bamboo from chat: `investigate`,
+   `capture`, and per-user `login` (no local install required)
+
+### Bot operators (deploying the Mattermost bot)
+1. [Quick Start Guide](QUICKSTART.md) — base environment (LLM, Neo4j, Qdrant)
+2. [PanDA Integration](PANDA_INTEGRATION.md) — PanDA/OIDC setup
+3. [Mattermost Integration](MATTERMOST.md) — create the bot, configure, and run `bamboo serve-mattermost`
 
 ### Developers
 1. [Quick Start Guide](QUICKSTART.md) — environment setup

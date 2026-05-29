@@ -114,6 +114,10 @@ class Settings(BaseSettings):
         "log_level",
         "embedding_model",
         "mcp_servers_config",
+        "mattermost_url",
+        "mattermost_token",
+        "mattermost_allowed_channels",
+        "mattermost_token_dir",
         mode="before",
     )
     @classmethod
@@ -188,6 +192,23 @@ class Settings(BaseSettings):
     # The 'mcp' package is included in the main dependencies.
     # Example: MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
     mcp_servers_config: str = ""
+
+    # Mattermost frontend (optional — requires the ``bamboo[mattermost]`` extra).
+    # Core bamboo never imports the Mattermost client; these are only read when
+    # the chat frontend is used.
+    #   MATTERMOST_URL: base URL of the instance, e.g. https://mattermost.cern.ch
+    #   MATTERMOST_TOKEN: bot-account personal access token
+    #   MATTERMOST_ALLOWED_CHANNELS: comma-separated channel IDs the bot will
+    #     act in (empty = none; the bot ignores everything else).
+    mattermost_url: str = ""
+    mattermost_token: str = ""
+    mattermost_allowed_channels: str = ""
+    # When True, investigate/capture require a per-user PanDA OIDC login (no
+    # silent fallback to the bot's service identity). See `bamboo[mattermost]`.
+    mattermost_require_user_login: bool = False
+    # Root directory for per-user OIDC token stores (one sub-dir per Mattermost
+    # user). Empty → ``~/.bamboo/mattermost_tokens``.
+    mattermost_token_dir: str = ""
 
 
     @property

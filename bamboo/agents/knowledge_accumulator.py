@@ -378,6 +378,34 @@ class KnowledgeAccumulator:
             },
         )
 
+    async def store_extracted(
+        self,
+        graph: "KnowledgeGraph",
+        *,
+        summary: str | None = None,
+        key_insights: list[dict[str, Any]] | None = None,
+        doc_hints: dict[str, str] | None = None,
+        email_text: str = "",
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Persist an already-extracted graph to the graph + vector databases.
+
+        The shared commit path used by both ``bamboo investigate``'s finalize
+        step and the Mattermost capture-from-thread flow.  When *summary* /
+        *key_insights* are not supplied they are generated here; pass them to
+        store the exact preview the user reviewed (avoids re-generating).
+
+        Returns the ``(summary, key_insights)`` that were stored.
+        """
+        await self._store_graph(graph)
+        if summary is None:
+            summary = await self._generate_summary(
+                graph, doc_hints=doc_hints or {}, email_text=email_text
+            )
+        if key_insights is None:
+            key_insights = await self._extract_key_insights(graph)
+        await self._store_in_vector_db(graph, summary, key_insights)
+        return summary, key_insights
+
     def _reconcile_cross_extractor_links(self, graph: KnowledgeGraph) -> None:
         """Create schema-defined edges that span extractor boundaries.
 

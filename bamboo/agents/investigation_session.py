@@ -41,12 +41,11 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
-from rich.panel import Panel
-from rich.syntax import Syntax
-from rich.table import Table
 
 from bamboo.agents.orchestration import analyze_code_side_effects, run_orchestration_code
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
+from bamboo.frontends.base import Column, InteractionIO
+from bamboo.frontends.cli import CliInteractionIO
 from bamboo.llm import (
     EMAIL_EXTRACTION_SYSTEM,
     INVESTIGATE_INTENT_SYSTEM,
@@ -70,7 +69,6 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
-from bamboo.utils.prompts import ask as _ask, confirm as _confirm
 
 logger = logging.getLogger(__name__)
 
@@ -241,73 +239,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_editor_buffer(
-    text: str,
-    *,
-    fallback_strategy: str,
-    fallback_summary: str,
-    fallback_triggers: list[str],
-) -> tuple[str, str, str, list[str]]:
-    """Parse the editor temp-file format back into (strategy, code, summary, triggers).
-
-    Header lines are ``# <key>: <value>`` (and ``#   - <item>`` for list items).
-    Lines starting with ``## `` are treated as literal code comments and stay
-    in the code body. The first non-header line terminates the header.
-    """
-    strategy = fallback_strategy
-    summary = fallback_summary
-    triggers: list[str] = []
-    triggers_started = False
-    body_lines: list[str] = []
-    in_body = False
-
-    for raw in text.splitlines():
-        line = raw.rstrip()
-        if not in_body:
-            stripped = line.lstrip()
-            # `## ` is a literal code comment: treat as body start signal.
-            if stripped.startswith("## "):
-                in_body = True
-                body_lines.append(line)
-                continue
-            # Header lines start with a single '#' (but not '##').
-            if stripped.startswith("#") and not stripped.startswith("##"):
-                payload = stripped.lstrip("#").lstrip()
-                if not payload:
-                    # blank comment — keep parsing headers
-                    continue
-                if payload.startswith("strategy_type:"):
-                    strategy = payload.split(":", 1)[1].strip() or fallback_strategy
-                    triggers_started = False
-                elif payload.startswith("code_summary:"):
-                    summary = payload.split(":", 1)[1].strip()
-                    triggers_started = False
-                elif payload.startswith("trigger_signals"):
-                    triggers_started = True
-                elif payload.startswith("---"):
-                    # Separator comment — keep skipping headers.
-                    triggers_started = False
-                elif payload.startswith("- ") and triggers_started:
-                    item = payload[2:].strip()
-                    if item:
-                        triggers.append(item)
-                # Unknown header — ignore.
-                continue
-            # First non-header, non-blank line → body.
-            if line.strip() == "":
-                # Blank lines before body are skipped.
-                continue
-            in_body = True
-            body_lines.append(line)
-        else:
-            body_lines.append(line)
-
-    code = "\n".join(body_lines).strip()
-    if not triggers:
-        triggers = list(fallback_triggers)
-    return strategy, code, summary, triggers
-
-
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -329,6 +260,7 @@ class _Deps:
     knowledge_accumulator: Optional[Any] = None  # for commit
     error_classifier: Any = None
     console: Optional[Console] = None
+    io: Optional[InteractionIO] = None  # frontend; defaults to the Rich terminal
 
 
 class InvestigationOrchestrator:
@@ -345,6 +277,9 @@ class InvestigationOrchestrator:
     ) -> None:
         self.deps = deps
         self.console = deps.console or Console()
+        # Frontend interaction surface. Defaults to the Rich terminal so the CLI
+        # and tests that don't supply one keep working unchanged.
+        self.io: InteractionIO = deps.io or CliInteractionIO(self.console)
         self.save_path = save_path
         self.dry_run = dry_run
         sid = session_id or uuid.uuid4().hex[:12]
@@ -367,11 +302,10 @@ class InvestigationOrchestrator:
         symptom: Optional[str] = None,
     ) -> None:
         """Plan §B — auto-prefetch + proactive hypothesis."""
-        self.console.print(
-            Panel.fit(
-                f"[bold blue]bamboo investigate[/bold blue] — session {self.session.session_id}",
-                border_style="blue",
-            )
+        self.io.panel(
+            f"[bold blue]bamboo investigate[/bold blue] — session {self.session.session_id}",
+            style="blue",
+            fit=True,
         )
 
         # 1) Fetch task_data if a task_id was supplied.
@@ -380,7 +314,7 @@ class InvestigationOrchestrator:
             try:
                 task_data = await self.deps.mcp_client.execute("get_task_data", task_id=task_id)
             except Exception as exc:  # noqa: BLE001
-                self.console.print(f"[yellow]Failed to fetch task_data: {exc}[/yellow]")
+                self.io.notice(f"[yellow]Failed to fetch task_data: {exc}[/yellow]")
                 task_data = None
 
         self.session.initial_inputs = {
@@ -412,7 +346,7 @@ class InvestigationOrchestrator:
                 self._merge_into_partial_graph(nodes, rels)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("bootstrap_initial_graph failed: %s", exc)
-                self.console.print(f"[yellow]bootstrap failed: {exc}[/yellow]")
+                self.io.notice(f"[yellow]bootstrap failed: {exc}[/yellow]")
 
         # 4) Display signals.
         self._display_kickoff_panel(task_data, symptom)
@@ -428,12 +362,12 @@ class InvestigationOrchestrator:
 
     async def run(self) -> None:
         """Plan §D — per-turn dialog loop until /done /abandon or max_turns."""
-        self.console.print(
+        self.io.notice(
             "[dim]Type your request or finding. Slash commands: /done /abandon /undo /tool /show-graph /show-tools[/dim]"
         )
         while self.session.turn < self.session.max_turns and self.session.status == "ongoing":
             try:
-                utterance = _ask("[bold cyan]>[/bold cyan]", console=self.console)
+                utterance = await self.io.ask("[bold cyan]>[/bold cyan]")
             except SystemExit:
                 self.session.status = "abandoned"
                 break
@@ -472,27 +406,26 @@ class InvestigationOrchestrator:
             self._persist()
 
         if self.session.status == "ongoing" and self.session.turn >= self.session.max_turns:
-            self.console.print(f"[yellow]Reached max_turns={self.session.max_turns}; ending.[/yellow]")
+            self.io.notice(f"[yellow]Reached max_turns={self.session.max_turns}; ending.[/yellow]")
             self.session.status = "abandoned"
 
     async def finalize(self) -> None:
         """Plan §E — end-of-session form: list → cause → resolution → wire edges."""
         if self.session.status == "abandoned" and not self._has_any_atomic_actions():
-            self.console.print("[dim]Nothing to commit (abandoned with no captured actions).[/dim]")
+            self.io.notice("[dim]Nothing to commit (abandoned with no captured actions).[/dim]")
             return
 
         self._display_procedure_list()
 
         if self.session.status == "abandoned":
-            self.console.print("[dim]Abandoned session — committing Symptom + Procedures as tentative.[/dim]")
+            self.io.notice("[dim]Abandoned session — committing Symptom + Procedures as tentative.[/dim]")
             cause_text = None
             resolution_text = None
         else:
-            cause_text = _ask("[bold]What was the cause?[/bold]", console=self.console)
-            resolution_text = _ask(
+            cause_text = await self.io.ask("[bold]What was the cause?[/bold]")
+            resolution_text = await self.io.ask(
                 "[bold]What was the resolution? (optional, blank to skip)[/bold]",
                 default="",
-                console=self.console,
             )
             resolution_text = resolution_text or None
 
@@ -518,25 +451,25 @@ class InvestigationOrchestrator:
                 self.session.intent_gap_log.append(
                     IntentGap(utterance="(prior turn)", kind="undo", turn=self.session.turn)
                 )
-                self.console.print("[yellow]Reverted last turn.[/yellow]")
+                self.io.notice("[yellow]Reverted last turn.[/yellow]")
             else:
-                self.console.print("[dim]Nothing to undo.[/dim]")
+                self.io.notice("[dim]Nothing to undo.[/dim]")
             return True
         if cmd == "/show-graph":
-            self.console.print(Panel(_format_running_graph_summary(self.session.partial_graph), title="partial_graph"))
+            self.io.panel(_format_running_graph_summary(self.session.partial_graph), title="partial_graph")
             return True
         if cmd == "/show-tools":
             tool_list = self._unified_tool_descriptors()
-            self.console.print(_format_available_tools(tool_list))
+            self.io.notice(_format_available_tools(tool_list))
             return True
         if cmd == "/paste":
-            self.console.print("[dim]Use the request_human_input tool by phrasing your request to bamboo.[/dim]")
+            self.io.notice("[dim]Use the request_human_input tool by phrasing your request to bamboo.[/dim]")
             return True
         if cmd == "/skip":
             # Drops the prior turn's snapshot and treats this turn as a no-op —
             # used after a failed/rejected tool call when the human wants to
             # move on without recording anything for this turn.
-            self.console.print("[dim]Skipped this turn (no action recorded).[/dim]")
+            self.io.notice("[dim]Skipped this turn (no action recorded).[/dim]")
             return True
         return False
 
@@ -560,10 +493,9 @@ class InvestigationOrchestrator:
             intent = "narration"
 
         if confidence < 0.7 or is_close:
-            chosen = _ask(
+            chosen = await self.io.ask(
                 "[dim]I'm not sure — did you want me to[/dim] [bold](t)[/bold]ool [dim]or are you[/dim] [bold](s)[/bold]haring a finding?",
                 choices=["t", "s"],
-                console=self.console,
             )
             self.session.intent_gap_log.append(
                 IntentGap(
@@ -597,15 +529,15 @@ class InvestigationOrchestrator:
         try:
             response = await self._invoke_llm(INVESTIGATE_ORCHESTRATION_SYSTEM, user_msg)
         except Exception as exc:  # noqa: BLE001
-            self.console.print(f"[red]Orchestration LLM call failed: {exc}[/red]")
+            self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
             return
         plan = _parse_json_response(response)
 
         code = plan.get("code")
         if not code or not str(code).strip():
             reason = plan.get("reason", "(no reason returned)")
-            self.console.print(f"[yellow]No tool fits this request: {reason}[/yellow]")
-            self.console.print("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
+            self.io.notice(f"[yellow]No tool fits this request: {reason}[/yellow]")
+            self.io.notice("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
             self.session.tool_gap_log.append(
                 ToolGap(human_request_text=utterance, llm_reason=str(reason), turn=self.session.turn)
             )
@@ -622,11 +554,10 @@ class InvestigationOrchestrator:
 
         if has_side_effects:
             self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
-            choice = _ask(
+            choice = await self.io.ask(
                 "[bold]Proceed?[/bold]",
                 default="N",
                 choices=["y", "N", "edit"],
-                console=self.console,
             )
             if choice == "N":
                 self.session.intent_gap_log.append(
@@ -638,10 +569,10 @@ class InvestigationOrchestrator:
                     )
                 )
                 self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
-                self.console.print("[dim]Aborted. Re-prompt to try a different request.[/dim]")
+                self.io.notice("[dim]Aborted. Re-prompt to try a different request.[/dim]")
                 return
             if choice == "edit":
-                strategy_type, code, code_summary, trigger_signals = self._edit_in_editor(
+                strategy_type, code, code_summary, trigger_signals = await self.io.edit(
                     strategy_type=strategy_type,
                     code=code,
                     summary=code_summary,
@@ -651,11 +582,10 @@ class InvestigationOrchestrator:
                 has_side_effects = analyze_code_side_effects(code, side_effect_names)
                 # Re-display the now-edited block and re-prompt.
                 self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
-                second = _ask(
+                second = await self.io.ask(
                     "[bold]Proceed with edited code?[/bold]",
                     default="N",
                     choices=["y", "N"],
-                    console=self.console,
                 )
                 if second == "N":
                     self.session.intent_gap_log.append(
@@ -667,7 +597,7 @@ class InvestigationOrchestrator:
                         )
                     )
                     self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
-                    self.console.print("[dim]Aborted after edit.[/dim]")
+                    self.io.notice("[dim]Aborted after edit.[/dim]")
                     return
 
         # Execute.
@@ -690,9 +620,9 @@ class InvestigationOrchestrator:
         self._record_atomic_action(run, raw_result=result)
         self.session.turn_history.append(Turn(role="system", kind="tool", text=strategy_type, orchestration=run))
         if error:
-            self.console.print(f"[red]Tool execution error: {error}[/red]")
+            self.io.notice(f"[red]Tool execution error: {error}[/red]")
         else:
-            self.console.print(Panel(_summarise_result(result, max_len=1000), title=f"result · {strategy_type}"))
+            self.io.result(_summarise_result(result, max_len=1000), title=f"result · {strategy_type}")
 
     async def _narration_turn(self, utterance: str) -> None:
         """Plan §D narration branch — extract entities, merge into partial_graph."""
@@ -705,15 +635,15 @@ class InvestigationOrchestrator:
         try:
             response = await self._invoke_llm(EMAIL_EXTRACTION_SYSTEM, user_msg)
         except Exception as exc:  # noqa: BLE001
-            self.console.print(f"[red]Narration extraction failed: {exc}[/red]")
+            self.io.notice(f"[red]Narration extraction failed: {exc}[/red]")
             return
         parsed = _parse_json_response(response)
         added = self._merge_narration_extraction(parsed)
         self.session.turn_history.append(Turn(role="system", kind="narration", text=f"extracted {added} entities"))
         if added == 0:
-            self.console.print("[dim]Noted (no new graph entities extracted).[/dim]")
+            self.io.notice("[dim]Noted (no new graph entities extracted).[/dim]")
         else:
-            self.console.print(f"[dim]Extracted {added} graph entit(y/ies) from your statement.[/dim]")
+            self.io.notice(f"[dim]Extracted {added} graph entit(y/ies) from your statement.[/dim]")
 
     # ------------------------------------------------------------------
     # Tool registry + execution
@@ -807,7 +737,7 @@ class InvestigationOrchestrator:
         if symptom:
             lines.append(f"[bold]symptom:[/bold] {symptom}")
         body = "\n".join(lines) if lines else "(no task_data or symptom)"
-        self.console.print(Panel(body, title="task under investigation", border_style="cyan"))
+        self.io.panel(body, title="task under investigation", style="cyan")
 
     async def _show_past_similar(self, task_data: Optional[dict[str, Any]], symptom: Optional[str]) -> None:
         if self.deps.reasoning_navigator is None:
@@ -824,14 +754,12 @@ class InvestigationOrchestrator:
         root_cause = getattr(result, "root_cause", None)
         confidence = getattr(result, "confidence", 0.0)
         if root_cause:
-            self.console.print(
-                Panel(
-                    f"[bold]most-similar past root cause:[/bold] {root_cause}\n"
-                    f"[bold]confidence:[/bold] {confidence:.2f}\n"
-                    f"[dim](this is a hypothesis from past incidents — confirm or chase a different lead.)[/dim]",
-                    title="past similar incidents",
-                    border_style="magenta",
-                )
+            self.io.panel(
+                f"[bold]most-similar past root cause:[/bold] {root_cause}\n"
+                f"[bold]confidence:[/bold] {confidence:.2f}\n"
+                f"[dim](this is a hypothesis from past incidents — confirm or chase a different lead.)[/dim]",
+                title="past similar incidents",
+                style="magenta",
             )
         self.session.similar_past = [
             {"root_cause": root_cause, "confidence": confidence}
@@ -850,33 +778,40 @@ class InvestigationOrchestrator:
             f"[bold]summary:[/bold]  {summary or '(none)'}\n"
             f"[bold]trigger:[/bold]\n  - {triggers_str}"
         )
-        self.console.print(Panel(header, title="proposed orchestration", border_style="yellow"))
-        self.console.print(Syntax(code, "python", theme="monokai", line_numbers=False))
+        self.io.panel(header, title="proposed orchestration", style="yellow")
+        self.io.code(code, lang="python")
 
     def _display_procedure_list(self) -> None:
         runs = [t.orchestration for t in self.session.turn_history if t.orchestration is not None]
         if not runs:
-            self.console.print("[dim]No tool calls were recorded this session.[/dim]")
+            self.io.notice("[dim]No tool calls were recorded this session.[/dim]")
             return
-        table = Table(title=f"procedure list ({len(runs)} step(s))")
-        table.add_column("#", justify="right")
-        table.add_column("strategy")
-        table.add_column("summary")
-        table.add_column("called")
-        table.add_column("result")
-        table.add_column("side-fx?", justify="center")
+        rows: list[list[str]] = []
         for i, r in enumerate(runs, 1):
             called = ", ".join(r.call_log) or "-"
             res = r.result_summary[:60] + ("…" if len(r.result_summary) > 60 else "")
-            table.add_row(
-                str(i),
-                r.strategy_type,
-                r.code_summary or "-",
-                called,
-                res,
-                "y" if r.has_side_effects else "n",
+            rows.append(
+                [
+                    str(i),
+                    r.strategy_type,
+                    r.code_summary or "-",
+                    called,
+                    res,
+                    "y" if r.has_side_effects else "n",
+                ]
             )
-        self.console.print(table)
+        self.io.table(
+            title=f"procedure list ({len(runs)} step(s))",
+            columns=[
+                Column("#", justify="right"),
+                Column("strategy"),
+                Column("summary"),
+                Column("called"),
+                Column("result"),
+                Column("side-fx?", justify="center"),
+            ],
+            rows=rows,
+        )
 
     # ------------------------------------------------------------------
     # Graph mutation
@@ -1064,32 +999,23 @@ class InvestigationOrchestrator:
         graph = self.session.partial_graph
         rows = await self._classify_nodes_for_diff(graph)
 
-        # Render the per-node diff as a table grouped by node type.
-        table = Table(title=f"commit diff ({len(graph.nodes)} node(s), {len(graph.relationships)} relationship(s))")
-        table.add_column("type")
-        table.add_column("name")
-        table.add_column("action", justify="center")
-        new_count = 0
-        merge_count = 0
-        for ntype, name, action in rows:
-            if action == "new":
-                new_count += 1
-                table.add_row(ntype, name, "[green]new[/green]")
-            else:
-                merge_count += 1
-                table.add_row(ntype, name, "[dim]merge[/dim]")
-        self.console.print(table)
-        self.console.print(
-            f"[bold]summary:[/bold] {new_count} new, {merge_count} will merge — "
-            f"{len(graph.relationships)} edge(s) to write."
-        )
+        # Render the per-node diff (the frontend decides table vs. Mermaid etc.).
+        edges = [
+            (
+                r.source_id,
+                r.target_id,
+                r.relation_type.value if hasattr(r.relation_type, "value") else str(r.relation_type),
+            )
+            for r in graph.relationships
+        ]
+        self.io.diff(rows, edge_count=len(graph.relationships), edges=edges)
 
         if self.dry_run:
-            self.console.print("[yellow]--dry-run set; not committing.[/yellow]")
+            self.io.notice("[yellow]--dry-run set; not committing.[/yellow]")
             return
 
-        if not _confirm("commit this investigation?", default=True, console=self.console):
-            self.console.print("[yellow]Commit cancelled.[/yellow]")
+        if not await self.io.confirm("commit this investigation?", default=True):
+            self.io.notice("[yellow]Commit cancelled.[/yellow]")
             return
 
         await self._commit()
@@ -1121,7 +1047,7 @@ class InvestigationOrchestrator:
     async def _commit(self) -> None:
         """Plan §F — delegate to KnowledgeAccumulator's existing storage methods."""
         if self.deps.knowledge_accumulator is None:
-            self.console.print("[red]No KnowledgeAccumulator wired; cannot commit.[/red]")
+            self.io.notice("[red]No KnowledgeAccumulator wired; cannot commit.[/red]")
             return
 
         graph = self.session.partial_graph
@@ -1130,15 +1056,14 @@ class InvestigationOrchestrator:
 
         agent = self.deps.knowledge_accumulator
         try:
-            await agent._store_graph(graph)
             transcript = self._render_transcript()
-            summary = await agent._generate_summary(graph, doc_hints=self.session.doc_hints, email_text=transcript)
-            insights = await agent._extract_key_insights(graph)
-            await agent._store_in_vector_db(graph, summary, insights)
-            self.console.print("[green]Committed.[/green]")
+            await agent.store_extracted(
+                graph, doc_hints=self.session.doc_hints, email_text=transcript
+            )
+            self.io.notice("[green]Committed.[/green]")
         except Exception as exc:  # noqa: BLE001
             logger.exception("investigate commit failed")
-            self.console.print(f"[red]Commit failed: {exc}[/red]")
+            self.io.notice(f"[red]Commit failed: {exc}[/red]")
 
         # Persist tool_gap_log to disk for developer mining.
         try:
@@ -1171,70 +1096,6 @@ class InvestigationOrchestrator:
             self.save_path.write_text(self.session.model_dump_json(indent=2))
         except Exception as exc:  # noqa: BLE001
             logger.warning("could not persist session to %s: %s", self.save_path, exc)
-
-    def _edit_in_editor(
-        self,
-        *,
-        strategy_type: str,
-        code: str,
-        summary: str,
-        triggers: list[str],
-    ) -> tuple[str, str, str, list[str]]:
-        """Open all five replayability fields in $EDITOR; return the edited values.
-
-        Format of the temp file::
-
-            # strategy_type: <slug>
-            # code_summary: <one-line summary>
-            # trigger_signals:
-            #   - <signal 1>
-            #   - <signal 2>
-            # --- code below (lines starting with `#` are header metadata; `## ` is a literal comment) ---
-
-            <python source>
-
-        Header lines (starting with ``#`` but not ``## ``) are parsed back into
-        the three structured fields; the remaining lines are the code body.
-        This lets the human edit ``code_summary`` and ``trigger_signals``
-        without re-running the LLM — important when the LLM's rationale is
-        slightly off but the code itself is fine.
-
-        Returns ``(strategy_type, code, code_summary, trigger_signals)``.
-        Fields not present in the edited file fall back to the original
-        values passed in.
-        """
-        import os
-        import subprocess
-        import tempfile
-
-        editor = os.environ.get("EDITOR", "vi")
-        trigger_lines = "\n".join(f"#   - {t}" for t in triggers) or "#   - "
-        header = (
-            f"# strategy_type: {strategy_type}\n"
-            f"# code_summary: {summary}\n"
-            f"# trigger_signals:\n"
-            f"{trigger_lines}\n"
-            "# --- code below (lines starting with `#` are header metadata; `## ` is a literal comment) ---\n\n"
-        )
-        with tempfile.NamedTemporaryFile(suffix=".py", mode="w+", delete=False) as f:
-            f.write(header + code)
-            path = f.name
-        try:
-            subprocess.call([editor, path])
-            with open(path) as f:
-                edited = f.read()
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-        return _parse_editor_buffer(
-            edited,
-            fallback_strategy=strategy_type,
-            fallback_summary=summary,
-            fallback_triggers=triggers,
-        )
 
     async def _invoke_llm(self, system_message: str, user_message: str) -> str:
         """Single LLM round-trip helper; returns the raw content string."""

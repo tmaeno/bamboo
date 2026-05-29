@@ -115,7 +115,18 @@ async def _write_novel_draft(
     type=click.Path(),
     help="Directory to write seed draft JSON for novel incidents.",
 )
-def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir, rebuild_docs):
+@click.option(
+    "--post-to-mattermost",
+    "post_to_mattermost",
+    type=str,
+    default=None,
+    metavar="CHANNEL_ID",
+    help=(
+        "Also post the analysis result to the given Mattermost channel ID. "
+        "Requires the bamboo[mattermost] extra and MATTERMOST_URL/MATTERMOST_TOKEN."
+    ),
+)
+def main(task_data, task_id, external_data, output, compare_task_ids, min_occurrences, verbose, debug_report, drafts_dir, rebuild_docs, post_to_mattermost):
     """Analyze a problematic task and generate a resolution.
 
     Task data can be supplied either as a local JSON file (--task-data) or
@@ -213,6 +224,15 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
             result.email_content = email_content
         output_path.write_text(result.model_dump_json(indent=2))
         click.echo(f"\n✓ Results saved to {output}")
+
+    if post_to_mattermost:
+        from bamboo.frontends.mattermost.poster import post_analysis  # noqa: PLC0415
+
+        try:
+            asyncio.run(post_analysis(post_to_mattermost, result))
+            click.echo(f"\n✓ Analysis posted to Mattermost channel {post_to_mattermost}")
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"\n✗ Failed to post to Mattermost: {exc}", err=True)
 
     os._exit(0)
 

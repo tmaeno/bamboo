@@ -57,6 +57,11 @@ local = [
     "langchain-huggingface>=0.0.3",
     "langchain-ollama>=0.1.0",
 ]
+# Mattermost frontend (ops-facing chat bot + result posting).
+# Core bamboo never imports these; install with `pip install bamboo[mattermost]`.
+mattermost = [
+    "mattermostautodriver>=2.0.0",
+]
 dev = [
     "pytest>=7.4.3",
     "pytest-asyncio>=0.21.1",

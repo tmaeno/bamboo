@@ -918,6 +918,9 @@ cli.add_command(_batch_populate_main, "batch-populate")
 from bamboo.scripts.verify import cmd as _verify_cmd
 cli.add_command(_verify_cmd, "verify")
 
+from bamboo.scripts.serve_mattermost import main as _serve_mattermost_main
+cli.add_command(_serve_mattermost_main, "serve-mattermost")
+
 
 if __name__ == "__main__":
     cli()

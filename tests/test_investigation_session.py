@@ -26,6 +26,7 @@ from bamboo.agents.investigation_session import (
     _format_running_graph_summary,
     _parse_json_response,
 )
+from bamboo.frontends.base import InteractionIO
 from bamboo.mcp.base import McpTool
 from bamboo.models.graph_element import (
     CauseNode,
@@ -42,6 +43,52 @@ from bamboo.models.knowledge_entity import KnowledgeGraph
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _ScriptedIO(InteractionIO):
+    """Headless :class:`InteractionIO` for tests.
+
+    ``ask`` answers context-appropriately (cause/resolution text for the
+    finalize form, ``"y"`` otherwise); ``confirm`` returns ``True``.  All render
+    methods are no-ops.  Replaces the old practice of monkeypatching the
+    module-level ``_ask``/``_confirm`` globals, which no longer exist.
+    """
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    async def ask(self, prompt, *, default=None, choices=None) -> str:
+        self.asked.append(prompt)
+        plow = (prompt or "").lower()
+        if "cause" in plow and "what" in plow:
+            return "memory pressure"
+        if "resolution" in plow and "what" in plow:
+            return "use larger queue"
+        return "y"
+
+    async def confirm(self, prompt, *, default=None) -> bool:
+        return True
+
+    async def edit(self, *, strategy_type, code, summary, triggers):
+        return strategy_type, code, summary, triggers
+
+    def notice(self, text) -> None:  # noqa: D401
+        pass
+
+    def panel(self, body, *, title=None, style=None, fit=False) -> None:
+        pass
+
+    def code(self, code, *, lang="python") -> None:
+        pass
+
+    def table(self, *, title, columns, rows) -> None:
+        pass
+
+    def result(self, summary, *, title=None) -> None:
+        pass
+
+    def diff(self, rows, *, edge_count, edges=None) -> None:
+        pass
 
 
 def _make_mcp_client(tools: list[McpTool] | None = None) -> Any:
@@ -61,7 +108,9 @@ def _make_graph_db() -> Any:
     return db
 
 
-def _build_orch(*, mcp_tools: list[McpTool] | None = None, console=None) -> InvestigationOrchestrator:
+def _build_orch(
+    *, mcp_tools: list[McpTool] | None = None, console=None, io: InteractionIO | None = None
+) -> InvestigationOrchestrator:
     deps = _Deps(
         mcp_client=_make_mcp_client(mcp_tools),
         graph_db=_make_graph_db(),
@@ -71,6 +120,7 @@ def _build_orch(*, mcp_tools: list[McpTool] | None = None, console=None) -> Inve
         knowledge_accumulator=None,
         error_classifier=None,
         console=MagicMock() if console is None else console,
+        io=io if io is not None else _ScriptedIO(),
     )
     return InvestigationOrchestrator(deps=deps, session_id="t-session", max_turns=10)
 
@@ -524,7 +574,7 @@ async def test_classify_nodes_for_diff_treats_db_error_as_new():
 
 
 def test_parse_editor_buffer_round_trips_all_fields():
-    from bamboo.agents.investigation_session import _parse_editor_buffer
+    from bamboo.frontends.cli import _parse_editor_buffer
 
     text = """\
 # strategy_type: inspect_failed_scout_jobs
@@ -559,7 +609,7 @@ return {"jobs": jobs}
 
 
 def test_parse_editor_buffer_falls_back_when_fields_missing():
-    from bamboo.agents.investigation_session import _parse_editor_buffer
+    from bamboo.frontends.cli import _parse_editor_buffer
 
     text = """\
 # only a separator
@@ -579,7 +629,7 @@ return {}
 
 
 def test_parse_editor_buffer_handles_empty_trigger_block():
-    from bamboo.agents.investigation_session import _parse_editor_buffer
+    from bamboo.frontends.cli import _parse_editor_buffer
 
     text = """\
 # strategy_type: x
@@ -666,10 +716,7 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
     graph_db.get_node_description = AsyncMock(return_value=None)  # all nodes are "new"
 
     accumulator = MagicMock()
-    accumulator._store_graph = AsyncMock()
-    accumulator._generate_summary = AsyncMock(return_value="summary text")
-    accumulator._extract_key_insights = AsyncMock(return_value=["insight 1"])
-    accumulator._store_in_vector_db = AsyncMock()
+    accumulator.store_extracted = AsyncMock(return_value=("summary text", ["insight 1"]))
 
     deps = _Deps(
         mcp_client=mcp_client,
@@ -680,6 +727,7 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
         knowledge_accumulator=accumulator,
         error_classifier=None,
         console=MagicMock(),
+        io=_ScriptedIO(),
     )
     orch = InvestigationOrchestrator(deps=deps, session_id="integ-test", max_turns=10)
     orch.session.initial_inputs = {"task_id": 12345, "task_data": {"status": "exhausted"}, "symptom": None}
@@ -705,21 +753,8 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
         return llm_queue.pop(0)
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", scripted_invoke, raising=True)
-    # Stub _ask so it returns context-appropriate values: "y" for confirmations,
-    # the cause/resolution text when the form asks for them.
-    def fake_ask(prompt, *, default=None, choices=None, console=None):  # noqa: ARG001
-        plow = (prompt or "").lower()
-        if "cause" in plow and "what" in plow:
-            return "memory pressure"
-        if "resolution" in plow and "what" in plow:
-            return "use larger queue"
-        return "y"
-
-    monkeypatch.setattr("bamboo.agents.investigation_session._ask", fake_ask)
-    monkeypatch.setattr(
-        "bamboo.agents.investigation_session._confirm",
-        lambda *a, **kw: True,
-    )
+    # The injected _ScriptedIO answers the confirmation prompts ("y") and the
+    # finalize form (cause/resolution text) — no module-global monkeypatching.
 
     # --- Turn 1: tool ---
     await orch._tool_turn("show me the failed scout jobs")
@@ -760,12 +795,9 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
     rel_types = {r.relation_type for r in orch.session.partial_graph.relationships}
     assert RelationType.INVESTIGATED_BY in rel_types
 
-    # Commit fanned out to all four KnowledgeAccumulator storage methods.
-    accumulator._store_graph.assert_called_once()
-    accumulator._generate_summary.assert_called_once()
-    accumulator._extract_key_insights.assert_called_once()
-    accumulator._store_in_vector_db.assert_called_once()
+    # Commit delegated to the shared KnowledgeAccumulator.store_extracted path.
+    accumulator.store_extracted.assert_called_once()
 
     # graph_id was set on the graph for resume idempotency.
-    stored_graph = accumulator._store_graph.call_args.args[0]
+    stored_graph = accumulator.store_extracted.call_args.args[0]
     assert stored_graph.metadata.get("graph_id") == "investigate:integ-test"
