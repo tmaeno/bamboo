@@ -120,8 +120,28 @@ async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settin
     io.notice(f"✓ Logged in as **{who}**. Your PanDA actions now run under your identity.")
 
 
+def _format_uptime(seconds: Optional[float]) -> str:
+    """Render an uptime in seconds as a compact ``"2h 5m"`` string."""
+    if seconds is None:
+        return "unknown"
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:  # under a minute
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 async def _run_session(transport: ThreadTransport, command: Command) -> None:
-    """Drive one session (investigate/capture/login/logout) over a Mattermost thread."""
+    """Drive one session (investigate/capture/login/logout/status) over a thread."""
     from bamboo.agents.investigation_session import InvestigationOrchestrator
     from bamboo.frontends.mattermost import oidc
     from bamboo.frontends.mattermost.capture import run_capture
@@ -136,6 +156,18 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     if command.kind == "logout":
         await asyncio.to_thread(oidc.logout, command.user_id or "", settings)
         io.notice("✓ Logged out; the bot will use its service identity for you.")
+        return
+    if command.kind == "status":
+        s = await transport.bot_status()
+        health = "✓ functional" if s.functional else f"⚠️ degraded — {s.detail}"
+        io.notice(
+            "**bamboo bot status**\n"
+            f"- Health: {health}\n"
+            f"- Connected as: `{s.bot_user_id or 'unknown'}`\n"
+            f"- Active sessions: {s.active_sessions}\n"
+            f"- Allowed channels: {s.allowed_channels}\n"
+            f"- Uptime: {_format_uptime(s.uptime_seconds)}"
+        )
         return
 
     deps = _build_deps(io)

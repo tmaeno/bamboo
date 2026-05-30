@@ -106,6 +106,12 @@ def test_parse_command_returns_none_for_chatter():
     assert parse_command("") is None
 
 
+def test_parse_command_status():
+    assert parse_command("status") == Command(kind="status")
+    assert parse_command("@bamboo status").kind == "status"
+    assert parse_command("/bamboo status").kind == "status"
+
+
 # ---------------------------------------------------------------------------
 # to_markdown
 # ---------------------------------------------------------------------------
@@ -291,3 +297,69 @@ async def test_real_orchestrator_runs_and_commits_over_mattermost_io():
     names = {n.name for n in orch.session.partial_graph.nodes}
     assert "the cause" in names
     assert "the resolution" in names
+
+
+# ---------------------------------------------------------------------------
+# status command
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_status_snapshot_reports_functional():
+    bot = _make_bot(lambda *a: None)
+    bot.bot_user_id = "bot-user"
+    bot._started_at = 100.0
+    bot._sessions = {"p1": object(), "p2": object()}  # type: ignore[dict-item]
+
+    snap = await bot.status_snapshot()
+
+    assert snap.functional is True
+    assert snap.detail == ""
+    assert snap.bot_user_id == "bot-user"
+    assert snap.active_sessions == 2
+    assert snap.allowed_channels == 1
+    assert snap.uptime_seconds is not None and snap.uptime_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_status_snapshot_degraded_when_driver_fails():
+    bot = _make_bot(lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    async def boom(_id):
+        raise RuntimeError("server unreachable")
+
+    bot.driver.users.get_user = boom
+
+    snap = await bot.status_snapshot()
+
+    assert snap.functional is False
+    assert "server unreachable" in snap.detail
+    assert snap.uptime_seconds is None  # never started
+
+
+@pytest.mark.asyncio
+async def test_run_session_status_posts_summary():
+    from bamboo.frontends.mattermost import serve
+    from bamboo.frontends.mattermost.bot import BotStatus
+
+    class _StatusTransport(FakeTransport):
+        async def bot_status(self):
+            return BotStatus(
+                functional=True,
+                bot_user_id="bot-user",
+                active_sessions=3,
+                allowed_channels=2,
+                uptime_seconds=3725.0,  # 1h 2m 5s
+            )
+
+    t = _StatusTransport()
+    await serve._run_session(t, Command(kind="status"))
+
+    blob = "\n".join(t.sent)
+    assert "bamboo bot status" in blob
+    assert "✓ functional" in blob
+    assert "bot-user" in blob
+    assert "Active sessions: 3" in blob
+    assert "Allowed channels: 2" in blob
+    assert "1h 2m" in blob

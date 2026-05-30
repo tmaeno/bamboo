@@ -64,6 +64,24 @@ class ThreadTransport(ABC):
         """
         return []
 
+    async def bot_status(self) -> Any:
+        """Return a snapshot of the bot's runtime health.
+
+        Used by the ``status`` command.  Defaults to an "unknown" snapshot for
+        transports detached from a running bot; the bot's per-thread transport
+        overrides it to delegate to :meth:`MattermostBot.status_snapshot`.
+        """
+        from bamboo.frontends.mattermost.bot import BotStatus
+
+        return BotStatus(
+            functional=False,
+            bot_user_id=None,
+            active_sessions=0,
+            allowed_channels=0,
+            uptime_seconds=None,
+            detail="no bot attached to this transport",
+        )
+
 
 class MattermostInteractionIO(InteractionIO):
     """Chat adapter bound to one :class:`ThreadTransport`."""

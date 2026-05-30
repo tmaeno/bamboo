@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
@@ -24,16 +25,29 @@ logger = logging.getLogger(__name__)
 class Command:
     """A parsed start command from a thread-root message."""
 
-    kind: str  # "investigate" | "capture"
+    kind: str  # "investigate" | "capture" | "login" | "logout" | "status"
     task_id: Optional[int] = None
     user_id: Optional[str] = None  # Mattermost user who issued the command
+
+
+@dataclass
+class BotStatus:
+    """A snapshot of the bot's runtime health, reported by the ``status`` command."""
+
+    functional: bool  # passed a live round-trip to Mattermost
+    bot_user_id: Optional[str]
+    active_sessions: int
+    allowed_channels: int
+    uptime_seconds: Optional[float]
+    detail: str = ""  # populated with the error text when not functional
 
 
 def parse_command(message: str) -> Optional[Command]:
     """Parse a start command from a message, tolerating a leading @mention.
 
     Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``, ``login``,
-    and ``logout``.  Returns ``None`` when the message is not a start command.
+    ``logout``, and ``status``.  Returns ``None`` when the message is not a start
+    command.
     """
     text = (message or "").strip()
     # Drop a leading @mention token if present.
@@ -58,7 +72,7 @@ def parse_command(message: str) -> Optional[Command]:
                 task_id = int(tok)
                 break
         return Command(kind=verb, task_id=task_id)
-    if verb in ("login", "logout"):
+    if verb in ("login", "logout", "status"):
         return Command(kind=verb)
     return None
 
@@ -87,6 +101,9 @@ class _ThreadSession(ThreadTransport):
 
     async def thread_messages(self) -> list[str]:
         return await self._bot.get_thread_messages(self.root_id)
+
+    async def bot_status(self) -> "BotStatus":
+        return await self._bot.status_snapshot()
 
     # --- driven by the bot ---
     def deliver(self, text: str) -> None:
@@ -121,6 +138,7 @@ class MattermostBot:
         self._sessions: dict[str, _ThreadSession] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self.bot_user_id: Optional[str] = None
+        self._started_at: Optional[float] = None
 
     async def create_post(
         self,
@@ -156,8 +174,33 @@ class MattermostBot:
         await self.driver.login()
         me = await self.driver.users.get_user("me")
         self.bot_user_id = me.get("id") if isinstance(me, dict) else None
+        self._started_at = time.monotonic()
         logger.info("Mattermost bot connected as user %s", self.bot_user_id)
         await self.driver.init_websocket(self.handle_event)
+
+    async def status_snapshot(self) -> BotStatus:
+        """Report runtime health, with a live round-trip to verify functionality.
+
+        Re-fetching ``me`` over REST proves the bot can still reach and
+        authenticate against Mattermost.  The WebSocket loop is already proven
+        live by the fact that the ``status`` command itself was received.
+        """
+        functional = True
+        detail = ""
+        try:
+            await self.driver.users.get_user("me")
+        except Exception as exc:  # noqa: BLE001
+            functional = False
+            detail = str(exc) or exc.__class__.__name__
+        uptime = (time.monotonic() - self._started_at) if self._started_at else None
+        return BotStatus(
+            functional=functional,
+            bot_user_id=self.bot_user_id,
+            active_sessions=len(self._sessions),
+            allowed_channels=len(self.allowed_channels),
+            uptime_seconds=uptime,
+            detail=detail,
+        )
 
     async def handle_event(self, event: Any) -> None:
         """Handle one WebSocket event. Tolerates str or dict payloads."""

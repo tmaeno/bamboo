@@ -166,6 +166,7 @@ All commands are posted in an **allow-listed** channel. A leading `@bamboo` or
 | `capture [<taskID>]` | After a discussion, ingest the thread as knowledge. |
 | `login` | Authenticate as yourself via IAM (per-user PanDA identity). |
 | `logout` | Forget your stored token (revert to the service identity). |
+| `status` | Check the bot is alive and functional (connection, active sessions, uptime). |
 
 **Investigate.** Reply in the thread to drive each turn. Meta-commands (as
 replies): `/done`, `/abandon`, `/undo`, `/tool <request>`, `/show-graph`,
