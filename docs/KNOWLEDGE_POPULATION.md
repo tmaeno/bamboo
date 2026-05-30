@@ -1,4 +1,4 @@
-# Knowledge Population
+# Knowledge Population Mode
 
 Bamboo supports two population paths — choose based on your operational context:
 

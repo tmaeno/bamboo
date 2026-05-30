@@ -1,4 +1,4 @@
-# `bamboo investigate` — Co-Investigation Mode
+# Co-Investigation Mode
 
 Live, human-driven dialog for investigating an ongoing incident. Where `bamboo populate` ingests a *retrospective* (the investigation already happened, captured as an email), `bamboo investigate` co-drives a *live* investigation turn-by-turn with a human, capturing each step as executable orchestration code that future analyze runs can re-execute deterministically.
 

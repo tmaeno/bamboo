@@ -25,6 +25,12 @@ Two paths for populating the graph and vector databases: individual (`bamboo pop
 for live incidents, and batch (`seed-drafts → review-drafts → batch-populate`) for
 bulk commissioning.
 
+### 🔎 [Task Analysis](ANALYZE.md)
+`bamboo analyze` — diagnose a failing task against the accumulated knowledge base:
+retrieve matching causes + similar past incidents, synthesize a root cause /
+confidence / resolution, re-run stored procedures, and route novel incidents to
+the draft pipeline. Includes pattern mode (common subgraph across tasks).
+
 ### 🔬 [Co-Investigation Mode](INVESTIGATE.md)
 `bamboo investigate` — live human-in-the-loop dialog for an ongoing incident. Each tool
 turn produces a sandboxed orchestration code block stored on the resulting Procedure
@@ -55,6 +61,7 @@ Development setup, code style, extension points (agents, node types, relationshi
 2. [PanDA Integration](PANDA_INTEGRATION.md) — fetch tasks directly from PanDA
 3. [Knowledge Population](KNOWLEDGE_POPULATION.md) — populate databases from live tasks or CSV batches
 4. [Co-Investigation Mode](INVESTIGATE.md) — live human-in-the-loop investigation; the captured procedures auto-replay on similar future incidents
+5. [Task Analysis](ANALYZE.md) — diagnose a failing task against the populated knowledge base
 
 ### Ops users (Mattermost)
 1. [Mattermost Integration](MATTERMOST.md) — use bamboo from chat: `investigate`,
