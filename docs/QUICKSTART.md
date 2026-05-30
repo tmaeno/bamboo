@@ -32,7 +32,7 @@ pip install ".[dev]"
 bamboo verify
 ```
 
-This checks that all modules import correctly, CLI entry points are registered, and all dependencies are present.
+This checks that all modules import correctly, CLI entry points are registered, all dependencies are present, and that Python has a working CA trust store (auto-installing the bundled `certifi` roots into your `.env` if it is empty — this is what makes HTTPS, including `@bamboo login`, verify correctly).
 
 `bamboo verify` prints the exact path to the installed `.env.example`. Copy it and fill in your keys:
 

@@ -163,7 +163,6 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
         io.notice(
             "**bamboo bot status**\n"
             f"- Health: {health}\n"
-            f"- Connected as: `{s.bot_user_id or 'unknown'}`\n"
             f"- Active sessions: {s.active_sessions}\n"
             f"- Allowed channels: {s.allowed_channels}\n"
             f"- Uptime: {_format_uptime(s.uptime_seconds)}"

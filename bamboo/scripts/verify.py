@@ -395,6 +395,81 @@ def check_database_connections() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# TLS trust store
+# ---------------------------------------------------------------------------
+
+
+def _ca_cert_count() -> int:
+    """Number of CA roots Python's default SSL context can load (0 = no trust store)."""
+    import ssl
+
+    return len(ssl.create_default_context().get_ca_certs())
+
+
+def check_tls_trust_store() -> bool:
+    """Ensure stdlib SSL has a CA trust store, installing ``certifi`` if it is empty.
+
+    python.org framework builds on macOS ship with empty default CA paths (the
+    "Install Certificates.command" was never run), so stdlib ``urllib`` — used by
+    ``pandaclient.openidc_utils.get_device_code`` during ``@bamboo login`` — rejects
+    every certificate, even valid public ones. We repair this by pointing
+    ``SSL_CERT_FILE``/``SSL_CERT_DIR`` at the bundled ``certifi`` roots and persisting
+    them to the active ``.env`` (loaded on startup by ``bamboo.config``), leaving TLS
+    verification on.
+    """
+    import os
+    from pathlib import Path
+
+    print("TLS trust store")
+
+    n = _ca_cert_count()
+    if n > 0:
+        return _ok(f"TLS trust store OK ({n} CA roots loaded)")
+
+    # Empty trust store — try to install the certifi bundle.
+    try:
+        import certifi
+    except ImportError:
+        return _fail(
+            "no CA trust store and certifi is not installed",
+            "Run: pip install certifi",
+        )
+
+    bundle = certifi.where()
+
+    from bamboo.config import _find_env_file
+
+    env_path = _find_env_file()
+    if not env_path:
+        return _fail(
+            f"no CA trust store (0 CA roots) and no .env found to persist the fix; "
+            f"certifi bundle is at {bundle}",
+            "Add this line to your .env (or export it before starting the bot):\n"
+            f"    SSL_CERT_FILE={bundle}\n"
+            "    On macOS framework Python you can instead run:\n"
+            "    /Applications/Python\\ 3.x/Install\\ Certificates.command",
+        )
+
+    from dotenv import set_key
+
+    set_key(env_path, "SSL_CERT_FILE", bundle)
+    set_key(env_path, "SSL_CERT_DIR", str(Path(bundle).parent))
+    # Apply to the current process so we can confirm the fix worked right now.
+    os.environ["SSL_CERT_FILE"] = bundle
+    os.environ["SSL_CERT_DIR"] = str(Path(bundle).parent)
+    n2 = _ca_cert_count()
+    if n2 <= 0:
+        return _fail(
+            f"installed certifi bundle into {env_path} but the trust store is still empty",
+            f"Verify the bundle exists: {bundle}",
+        )
+    return _ok(
+        f"installed CA bundle → set SSL_CERT_FILE in {env_path} ({n2} roots). "
+        "Restart the bot to apply."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Completion scripts
 # ---------------------------------------------------------------------------
 
@@ -448,6 +523,7 @@ def main() -> int:
         check_completion_scripts,
         check_cli_entry_points,
         check_key_dependencies,
+        check_tls_trust_store,
         check_api_keys,
         check_database_connections,
     ]

@@ -217,6 +217,11 @@ confirmation in the thread.
   the IAM auth config can be resolved; check the bot host can reach IAM; the
   device code expires after a few minutes, so finish the browser sign-in
   promptly.
+- **`login` fails with "certificate verify failed: unable to get local issuer
+  certificate"** — the bot's Python has no CA trust store (common on python.org
+  framework builds). Run `bamboo verify`: it sets `SSL_CERT_FILE` to the bundled
+  `certifi` roots in your `.env`, then restart the bot. Note `PANDA_VERIFY_HOST`
+  does **not** affect login — it only applies to PanDA data-plane calls.
 - **Commit diff shows raw `mermaid` code** — the Mattermost instance doesn't have
   Mermaid rendering enabled; the diagram still reads as a code block. Enable
   Mermaid on the instance, or rely on the textual summary line.
