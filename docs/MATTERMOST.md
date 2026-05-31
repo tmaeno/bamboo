@@ -96,7 +96,7 @@ It's important not to conflate the two credentials involved:
   single identity. This is the default fallback when a user hasn't logged in.
 
 - **Per-user identity** — an operator runs **`login`** in a channel and the bot
-  walks them through an IAM device-login. Afterwards *their* PanDA actions
+  walks them through an OIDC device-code flow. Afterwards *their* PanDA actions
   run under *their* identity. Set `MATTERMOST_REQUIRE_USER_LOGIN=true` to require
   this (no silent service-identity fallback).
 
