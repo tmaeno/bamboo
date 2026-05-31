@@ -111,6 +111,14 @@ def test_parse_command_investigate_without_task_id():
     assert cmd.kind == "investigate" and cmd.task_id is None
 
 
+def test_parse_command_analyze():
+    assert parse_command("analyze 12345") == Command(kind="analyze", task_id=12345)
+    assert parse_command("@bamboo analyze 7").task_id == 7
+    assert parse_command("/bamboo analyze 9") == Command(kind="analyze", task_id=9)
+    cmd = parse_command("analyze")
+    assert cmd.kind == "analyze" and cmd.task_id is None
+
+
 def test_parse_command_returns_none_for_chatter():
     assert parse_command("hello team, any updates?") is None
     assert parse_command("") is None

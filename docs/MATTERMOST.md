@@ -6,8 +6,9 @@ from chat. It supports three things:
 
 - **`investigate`** — live, turn-by-turn co-investigation of an incident.
 - **`capture`** — turn an incident discussion thread into curated knowledge.
-- **`analyze --post-to-mattermost`** — (CLI/automation) post an analysis result
-  to a channel.
+- **`analyze`** — run a one-shot root-cause analysis on a task and post the
+  result card in the thread. (The CLI flag `analyze --post-to-mattermost` is the
+  automation/bulk sibling — see [Batch/automation posting](#batchautomation-analysis-posting).)
 
 Interaction is **reply-based**: the bot asks, you reply in the thread. **One
 thread = one session.**
@@ -169,6 +170,7 @@ All commands are posted in an **allow-listed** channel. A leading `@bamboo` or
 |---------|--------------|
 | `investigate <taskID>` | Start a live co-investigation rooted at this message. Reply in the thread for each turn. |
 | `capture [<taskID>]` | After a discussion, ingest the thread as knowledge. |
+| `analyze <taskID>` | One-shot root-cause analysis of a task; posts the result card in the thread. |
 | `login` | Authenticate as yourself via IAM (per-user PanDA identity). |
 | `logout` | Forget your stored token (revert to the service identity). |
 | `status` | Check the bot is alive and functional (connection, active sessions, uptime). |
@@ -184,11 +186,22 @@ it), and asks you to confirm before writing to the knowledge base.
 resolution, extracts the knowledge, shows the commit diff for review, and stores
 it on your confirmation.
 
-**Analysis posting (CLI / automation, not in-chat):**
+**Analyze.** `analyze <taskID>` fetches the task from PanDA, runs the reasoning
+engine, and posts a result card (root cause, confidence, suggested resolution,
+plus any novel symptoms / capability gaps) back into the thread. It is read-only
+— it queries the knowledge base and PanDA but writes nothing.
+
+### Batch/automation analysis posting
+
+For **scripted/bulk** posting (e.g. a cron job analysing many tasks and pushing
+cards to a channel), the CLI exposes the same renderer via `--post-to-mattermost`:
 
 ```bash
 bamboo analyze --task-id 12345 --post-to-mattermost <channelID>
 ```
+
+Interactive, single-task analysis does **not** need the CLI — use the in-chat
+`analyze <taskID>` command above.
 
 ---
 

@@ -85,10 +85,10 @@ def test_analysis_message_wraps_attachment():
 def test_login_attachment_links_to_verification_uri():
     url = "https://idp/device?code=ABC"
     att = render.login_attachment(url, "ABC-123")
+    # The clickable title links straight to the device-code URL.
     assert att["title_link"] == url
-    assert url in att["text"]
-    assert "ABC-123" in att["text"]
-    # Fallback (attachment-less clients) carries the URL and code.
+    # The URL + code live in the fallback (attachment-less clients); the body
+    # text is a short prompt pointing at the title link.
     assert url in att["fallback"]
     assert "ABC-123" in att["fallback"]
 

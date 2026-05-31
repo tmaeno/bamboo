@@ -267,12 +267,15 @@ async def test_serve_login_flow_posts_url_then_success(monkeypatch):
     await serve._run_session(t, Command(kind="login", user_id="u1"))
 
     blob = "\n".join(t.sent)
-    assert "https://idp/device?code=ABC" in blob
-    assert "ABC-123" in blob
     assert "Logged in as" in blob and "ops@cern.ch" in blob
 
-    # The device-code prompt carries the Authenticate link-card attachment.
+    # The device-code prompt is delivered as the login link-card attachment; the
+    # URL (title_link) and code live in the card, not the message body.
     attachments = [
         p["attachments"][0] for p in t.props if isinstance(p, dict) and "attachments" in p
     ]
-    assert any(a.get("title_link") == "https://idp/device?code=ABC" for a in attachments)
+    assert len(attachments) == 1
+    att = attachments[0]
+    assert att["title_link"] == "https://idp/device?code=ABC"
+    assert "https://idp/device?code=ABC" in att["fallback"]
+    assert "ABC-123" in att["fallback"]

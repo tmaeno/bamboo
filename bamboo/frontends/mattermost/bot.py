@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class Command:
     """A parsed start command from a thread-root message."""
 
-    kind: str  # "investigate" | "capture" | "login" | "logout" | "status"
+    kind: str  # "investigate" | "capture" | "analyze" | "login" | "logout" | "status"
     task_id: Optional[int] = None
     user_id: Optional[str] = None  # Mattermost user who issued the command
 
@@ -45,9 +45,9 @@ class BotStatus:
 def parse_command(message: str) -> Optional[Command]:
     """Parse a start command from a message, tolerating a leading @mention.
 
-    Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``, ``login``,
-    ``logout``, and ``status``.  Returns ``None`` when the message is not a start
-    command.
+    Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``,
+    ``analyze [<task_id>]``, ``login``, ``logout``, and ``status``.  Returns
+    ``None`` when the message is not a start command.
     """
     text = (message or "").strip()
     # Drop a leading @mention token if present.
@@ -65,7 +65,7 @@ def parse_command(message: str) -> Optional[Command]:
     if not tokens:
         return None
     verb = tokens[0].lower()
-    if verb in ("investigate", "capture"):
+    if verb in ("investigate", "capture", "analyze"):
         task_id = None
         for tok in tokens[1:]:
             if tok.isdigit():

@@ -108,12 +108,9 @@ async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settin
         return
     from bamboo.frontends.mattermost import render  # local: Mattermost-only render
 
-    code_hint = f" (code: `{login.user_code}`)" if login.user_code else ""
-    # Send an attachment card with a clickable Authenticate link; keep the URL and
-    # code in the message text as a fallback for attachment-less clients.
+    # The login prompt is delivered entirely as the attachment card (clickable
+    # title link + fallback carry the URL/code); the message body is left empty.
     io.transport.send(
-#        f"To log in as yourself, open {login.verification_uri_complete} and sign "
-#        f"in with IAM{code_hint}. Waiting for you to finish…",
         "",
         props=render.login_message(login.verification_uri_complete, login.user_code),
     )
@@ -150,6 +147,7 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     """Drive one session (investigate/capture/login/logout/status) over a thread."""
     from bamboo.agents.investigation_session import InvestigationOrchestrator
     from bamboo.frontends.mattermost import oidc
+    from bamboo.frontends.mattermost.analyze import run_analyze
     from bamboo.frontends.mattermost.capture import run_capture
     from bamboo.utils.panda_client import panda_credentials
 
@@ -199,6 +197,8 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
                 graph_db=deps.graph_db,
                 mcp_client=deps.mcp_client,
             )
+        elif command.kind == "analyze":
+            await run_analyze(io, task_id=command.task_id, deps=deps)
         else:  # pragma: no cover - parse_command only emits the above
             transport.send(f"Unknown command: {command.kind}")
 
