@@ -32,7 +32,12 @@ class TestJobDataSensitiveFields:
         assert result["prodUserName"] != "atlas_prod"
         assert result["prodUserID"] != "42"
         assert "atlas_prod" not in str(list(result.values()))
-        assert "42" not in str([result["prodUserName"], result["prodUserID"]])
+        # Both sensitive fields are replaced by a "produser-<hash>" pseudonym.
+        # (We don't assert the raw "42" is absent as a substring: the hex digest
+        # can coincidentally contain those digits — the value-changed checks above
+        # are the meaningful guarantee.)
+        assert result["prodUserName"].startswith("produser-")
+        assert result["prodUserID"].startswith("produser-")
 
 
 class TestPseudonymise:

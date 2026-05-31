@@ -91,7 +91,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "  TooManyFilesInDataset  "
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -104,7 +104,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "TooManyFilesInDataset"
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -120,7 +120,7 @@ class TestHelpers:
     @pytest.mark.asyncio
     async def test_generate_category_label_raises_on_llm_failure(self):
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_get_llm.side_effect = RuntimeError("no API key")
             with pytest.raises(RuntimeError, match="no API key"):
@@ -131,7 +131,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "123 !@#"
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -144,7 +144,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = "input dataset exceeds file limit"
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -158,7 +158,7 @@ class TestHelpers:
         mock_response = MagicMock()
         mock_response.content = ""
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             mock_llm = MagicMock()
             mock_llm.ainvoke = AsyncMock(return_value=mock_response)
@@ -400,10 +400,10 @@ class TestPandaKnowledgeExtractor:
     @pytest.mark.asyncio
     async def test_discrete_task_field_becomes_feature_node(self):
         ext = self._extractor()
-        graph = await ext.extract(task_data={"coreCount": "8", "cmtConfig": "x86_64"})
+        graph = await ext.extract(task_data={"coreCount": "8", "architecture": "x86_64"})
         names = {n.name for n in graph.nodes}
         assert "coreCount=8" in names
-        assert "cmtConfig=x86_64" in names
+        assert "architecture=x86_64" in names
 
     @pytest.mark.asyncio
     async def test_unstructured_task_field_becomes_context_node(self):
@@ -448,13 +448,17 @@ class TestPandaKnowledgeExtractor:
 
     @pytest.mark.asyncio
     async def test_status_produces_symptom_node(self):
-        """task_data['status'] must produce a SymptomNode, not a TaskFeatureNode."""
-        ext = self._extractor(category="TaskFailed", confidence=0.90)
+        """task_data['status'] must produce a SymptomNode, not a TaskFeatureNode.
+
+        The status path builds a deterministic ``TaskStatus<Capitalized>`` name
+        (it does not consult the error-category classifier).
+        """
+        ext = self._extractor()
         graph = await ext.extract(task_data={"status": "failed"})
         assert len(graph.nodes) == 1
         node = graph.nodes[0]
         assert node.node_type == NodeType.SYMPTOM
-        assert node.name == "TaskFailed"
+        assert node.name == "TaskStatusFailed"
         assert node.description == "failed"
         assert node.metadata["source"] == "task_status"
 
@@ -467,15 +471,13 @@ class TestPandaKnowledgeExtractor:
 
     @pytest.mark.asyncio
     async def test_split_rule_produces_multiple_feature_nodes(self):
-        """splitRule pipe-separated string must produce one TaskFeatureNode per sub-rule."""
+        """splitRule (comma-separated) produces one namespaced TaskFeatureNode per sub-rule."""
         ext = self._extractor()
-        graph = await ext.extract(
-            task_data={"splitRule": "nGBPerJob=10|nFilesPerJob=5|nMaxFilesPerJob=100"}
-        )
+        graph = await ext.extract(task_data={"splitRule": "AT=1,NG=10,TW=5"})
         names = {n.name for n in graph.nodes}
-        assert "nGBPerJob=10" in names
-        assert "nFilesPerJob=5" in names
-        assert "nMaxFilesPerJob=100" in names
+        assert "splitRule:AT=1" in names
+        assert "splitRule:NG=10" in names
+        assert "splitRule:TW=5" in names
         assert len(graph.nodes) == 3
         for node in graph.nodes:
             assert node.node_type == NodeType.TASK_FEATURE
@@ -484,13 +486,11 @@ class TestPandaKnowledgeExtractor:
     async def test_split_rule_invalid_sub_rule_skipped(self):
         """splitRule sub-rules without '=' are skipped with a warning."""
         ext = self._extractor()
-        graph = await ext.extract(
-            task_data={"splitRule": "nGBPerJob=10|badentry|nFilesPerJob=5"}
-        )
+        graph = await ext.extract(task_data={"splitRule": "AT=1,badentry,NG=10"})
         assert len(graph.nodes) == 2
         names = {n.name for n in graph.nodes}
-        assert "nGBPerJob=10" in names
-        assert "nFilesPerJob=5" in names
+        assert "splitRule:AT=1" in names
+        assert "splitRule:NG=10" in names
 
     @pytest.mark.asyncio
     async def test_split_rule_not_in_discrete_keys(self):
@@ -511,7 +511,7 @@ class TestPandaKnowledgeExtractor:
         assert len(graph.nodes) == 1
         node = graph.nodes[0]
         assert node.node_type == NodeType.TASK_FEATURE
-        assert node.name == "ramCount=512MB-2GB"
+        assert node.name == "ramCount=1-2GB"
         assert node.metadata["raw_value"] == "1024"
 
     @pytest.mark.asyncio
@@ -553,66 +553,9 @@ class TestPandaKnowledgeExtractor:
 
         assert CONTINUOUS_TASK_KEYS.isdisjoint(DISCRETE_TASK_KEYS)
 
-    @pytest.mark.asyncio
-    async def test_job_parameters_key_value_form(self):
-        """--key=value pairs in jobParameters become individual TaskFeatureNodes."""
-        ext = self._extractor()
-        graph = await ext.extract(
-            task_data={"jobParameters": "--nEventsPerJob=500 --maxWalltime=3600"}
-        )
-        names = {n.name for n in graph.nodes}
-        assert "nEventsPerJob=500" in names
-        assert "maxWalltime=3600" in names
-        assert len(graph.nodes) == 2
-        for node in graph.nodes:
-            assert node.node_type == NodeType.TASK_FEATURE
-
-    @pytest.mark.asyncio
-    async def test_job_parameters_space_separated_value(self):
-        """--key value (space-separated) pairs are parsed correctly."""
-        ext = self._extractor()
-        graph = await ext.extract(
-            task_data={"jobParameters": "--par1 val1 --par2 val2"}
-        )
-        names = {n.name for n in graph.nodes}
-        assert "par1=val1" in names
-        assert "par2=val2" in names
-
-    @pytest.mark.asyncio
-    async def test_job_parameters_boolean_flag(self):
-        """--flag (no value) becomes flag=true."""
-        ext = self._extractor()
-        graph = await ext.extract(task_data={"jobParameters": "--verbose"})
-        names = {n.name for n in graph.nodes}
-        assert "verbose=true" in names
-
-    @pytest.mark.asyncio
-    async def test_job_parameters_positional_args_become_context_node(self):
-        """Positional arguments (no --) become a TaskContextNode."""
-        ext = self._extractor()
-        graph = await ext.extract(
-            task_data={"jobParameters": "--par1=val1 posarg1 posarg2"}
-        )
-        feature_names = {
-            n.name for n in graph.nodes if n.node_type == NodeType.TASK_FEATURE
-        }
-        context_nodes = [n for n in graph.nodes if n.node_type == NodeType.TASK_CONTEXT]
-        assert "par1=val1" in feature_names
-        assert len(context_nodes) == 1
-        assert context_nodes[0].name == "jobParameters:positional_args"
-        assert context_nodes[0].description == "posarg1 posarg2"
-
-    @pytest.mark.asyncio
-    async def test_job_parameters_order_independent(self):
-        """Same parameters in different order produce the same set of nodes."""
-        ext = self._extractor()
-        graph1 = await ext.extract(
-            task_data={"jobParameters": "--par1=val1 --par2=val2"}
-        )
-        graph2 = await ext.extract(
-            task_data={"jobParameters": "--par2=val2 --par1=val1"}
-        )
-        assert {n.name for n in graph1.nodes} == {n.name for n in graph2.nodes}
+    # NOTE: `jobParameters` parsing was removed from the extractor — the field is
+    # no longer classified into nodes, so the former job-parameter parsing tests
+    # were deleted. The negative guard below documents that it stays unstructured-free.
 
     @pytest.mark.asyncio
     async def test_job_parameters_not_in_unstructured_keys(self):
@@ -752,7 +695,7 @@ class TestPandaEmailExtraction:
     async def test_email_produces_cause_resolution_context_nodes(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -769,7 +712,7 @@ class TestPandaEmailExtraction:
             resolution_label="split dataset into smaller subsets",
         )
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -783,7 +726,7 @@ class TestPandaEmailExtraction:
     async def test_canonical_name_used_in_relationship(self):
         ext = self._extractor(resolution_label="split dataset into smaller subsets")
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -802,7 +745,7 @@ class TestPandaEmailExtraction:
             resolution_store=res_store,
         )
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             await ext.extract(email_text="... incident email ...")
@@ -817,7 +760,7 @@ class TestPandaEmailExtraction:
     async def test_email_resolution_steps_parsed(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -828,7 +771,7 @@ class TestPandaEmailExtraction:
     async def test_email_relationships_created(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(email_text="... incident email ...")
@@ -840,7 +783,7 @@ class TestPandaEmailExtraction:
     async def test_email_empty_text_skips_llm(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm"
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm"
         ) as mock_get_llm:
             graph = await ext.extract(email_text="   ")
         mock_get_llm.assert_not_called()
@@ -860,7 +803,7 @@ class TestPandaEmailExtraction:
         }"""
         ext = self._extractor(cause_label="real cause")
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(bad_response),
         ):
             graph = await ext.extract(email_text="some email")
@@ -871,7 +814,7 @@ class TestPandaEmailExtraction:
     async def test_email_malformed_json_returns_empty(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm("not json at all"),
         ):
             graph = await ext.extract(email_text="some email")
@@ -882,12 +825,12 @@ class TestPandaEmailExtraction:
     async def test_email_and_task_data_merged(self):
         ext = self._extractor()
         with patch(
-            "bamboo.agents.extractors.panda_knowledge_extractor.get_llm",
+            "bamboo.agents.extractors.panda_knowledge_extractor.get_extraction_llm",
             return_value=self._make_mock_llm(),
         ):
             graph = await ext.extract(
                 email_text="... incident email ...",
-                task_data={"priority": "high"},
+                task_data={"coreCount": "8"},
             )
         node_types = {n.node_type for n in graph.nodes}
         assert NodeType.TASK_FEATURE in node_types

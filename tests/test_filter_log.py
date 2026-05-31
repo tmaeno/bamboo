@@ -148,15 +148,15 @@ class TestBrokerageFilter:
         assert "SITE_A" in result
 
     def test_skip_lines_capped_per_section(self):
-        # VP section (50 % cut) is the 4th highest cut; include it with top_cuts=4.
-        # It has 20 skip lines; with cap=10 we expect ≤10 shown + an omitted note.
+        # VP section (50% cut) is the 4th-highest cut → included with top_cuts=4.
+        # Its candidate reduction (40→20 = 20) exceeds the cap (10), so its sites
+        # are summarised by a count note rather than listed individually.
         result = filter_analysis_job_brokerage_log(
-            _BROKERAGE_LOG, top_cuts=4, max_skip_lines_per_section=10
+            _BROKERAGE_LOG, top_cuts=4, max_skipped_sites=10
         )
-        # The section was included (first VP line must appear)
-        assert "SITE_VP1" in result
-        # And the cap note must appear (20 - 10 = 10 omitted)
-        assert "not shown" in result
+        assert "avoid VP queue check" in result  # stage header present
+        assert "too many to list individually" in result  # sites summarised
+        assert "SITE_VP1" not in result  # not listed individually
 
     def test_low_impact_stage_not_forced_in(self):
         # "avoid VP queue check" is 50 % cut — present in top_cuts=3.
@@ -312,12 +312,14 @@ class TestProdBrokerageNewFormat:
 
     def test_sw_hw_progress_line_sets_boundary(self):
         # Bug fix: "398 candidates (398 with AUTO, 0 with ANY) passed SW/HW check"
-        # must be recognised so the memory-check section slice is correct.
-        # The memory-check skip lines should be captured (not the whole body).
+        # must be recognised so the SW/HW and memory stages are sliced correctly.
+        # Correct boundaries (SW/HW 478→398, then memory 398→98) prove the
+        # parenthetical progress line was parsed.
         result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG_NEW_FORMAT)
-        assert (
-            "highmemory" in result or "wuppertal" in result or "SARA-MATRIX" in result
-        )
+        assert "SW/HW check" in result
+        assert "478→398 candidates" in result
+        assert "memory check" in result
+        assert "398→98 candidates" in result
 
     def test_no_candidates_in_final_selection(self):
         # Bug fix: "no candidates" appears after the summary header in the new
@@ -414,17 +416,23 @@ class TestProdBrokerageFilter:
     # --- skip-reason lines --------------------------------------------------
 
     def test_top_cut_skip_lines_included(self):
-        # final check (80% cut) and cpu core / io check (75% each) are top-3
+        # final (80%) and cpu core / io check (75% each) are the top-3 cuts → their
+        # skip sections are processed; cap_rt (50%) is below the cut-off and is
+        # marked as not among the highest-impact stages.
         result = filter_prod_job_brokerage_log(_PROD_BROKERAGE_LOG)
-        assert "SITE_CPU1" in result or "SITE_IO1" in result
+        assert "cpu core check" in result
+        assert "io check" in result
+        assert "not among the highest-impact stages" in result  # cap_rt excluded
 
     def test_skip_lines_capped_per_section(self):
-        # cpu core section has 12 skip lines; cap=5 → omitted note
+        # cpu core check's candidate reduction (1591→400) far exceeds the cap (5),
+        # so its sites are summarised by a count note rather than listed.
         result = filter_prod_job_brokerage_log(
-            _PROD_BROKERAGE_LOG, top_cuts=4, max_skip_lines_per_section=5
+            _PROD_BROKERAGE_LOG, top_cuts=4, max_skipped_sites=5
         )
-        assert "SITE_CPU1" in result
-        assert "not shown" in result
+        assert "cpu core check" in result
+        assert "too many to list individually" in result
+        assert "SITE_CPU1" not in result
 
     # --- problematic sites and final outcome --------------------------------
 
