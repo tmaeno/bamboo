@@ -100,6 +100,11 @@ It's important not to conflate the two credentials involved:
   run under *their* identity. Set `MATTERMOST_REQUIRE_USER_LOGIN=true` to require
   this (no silent service-identity fallback).
 
+  The `login` exchange is sent as a **direct message** from the bot — the
+  verification prompt (an "🔐 bamboo login" attachment card with a clickable
+  **Authenticate** link to the device-code URL) and the success/failure replies
+  go to a private DM with the operator who ran `login`, not the public channel.
+
   **Device-flow trust model.** The bot process talks to IAM directly to get
   the device code and to poll for the token; the bot posts a verification URL +
   code into the thread; the operator opens that URL in **their own browser** and

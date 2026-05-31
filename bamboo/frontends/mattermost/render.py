@@ -93,3 +93,36 @@ def analysis_attachment(result: Any) -> dict[str, Any]:
 def analysis_message(result: Any) -> dict[str, Any]:
     """Return the ``props`` payload (``{"attachments": [...]}``) for a post."""
     return {"attachments": [analysis_attachment(result)]}
+
+
+# Attachment bar color for the login prompt (neutral blue).
+_COLOR_LOGIN = "#1e6fd9"
+
+
+def login_attachment(verification_uri: str, user_code: str = "") -> dict[str, Any]:
+    """Render the per-user OIDC login prompt as a Mattermost message attachment.
+
+    The card title and a bold markdown link both point at *verification_uri* so the
+    user can click straight through to IdP. Mattermost has no native
+    "open URL" button, so a clickable link/title is the closest affordance.
+    """
+    text = (
+        "Click the above login link and sign in with IdP."
+        "\n_This message is only visible to you._"
+    )
+    fallback = f"bamboo login: open {verification_uri} to sign in with IdP"
+    if user_code:
+        fallback += f" (code: {user_code})"
+    return {
+        "fallback": fallback,
+        "color": _COLOR_LOGIN,
+        "title": "🔐 bamboo login",
+        "title_link": verification_uri,
+        "text": text,
+        "footer": "bamboo",
+    }
+
+
+def login_message(verification_uri: str, user_code: str = "") -> dict[str, Any]:
+    """Return the ``props`` payload (``{"attachments": [...]}``) for the login prompt."""
+    return {"attachments": [login_attachment(verification_uri, user_code)]}

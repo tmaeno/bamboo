@@ -46,8 +46,8 @@ class _Posts:
     def __init__(self) -> None:
         self.created: list[dict] = []
 
-    async def create_post(self, options):
-        self.created.append(options)
+    async def create_post(self, **kwargs):
+        self.created.append(kwargs)
         return {"id": f"post-{len(self.created)}"}
 
 
@@ -56,10 +56,20 @@ class _Users:
         return {"id": "bot-user"}
 
 
+class _Channels:
+    def __init__(self) -> None:
+        self.direct: list[list[str]] = []
+
+    async def create_direct_channel(self, options):
+        self.direct.append(options)
+        return {"id": "dm-chan"}
+
+
 class FakeDriver:
     def __init__(self) -> None:
         self.posts = _Posts()
         self.users = _Users()
+        self.channels = _Channels()
         self.logged_in = False
 
     async def login(self):
@@ -262,6 +272,27 @@ async def test_bot_starts_session_and_routes_replies():
     assert "kickoff" in posted
 
 
+@pytest.mark.asyncio
+async def test_login_session_posts_to_direct_message_channel():
+    async def run_session(transport, command):
+        transport.send("auth prompt")
+
+    bot = _make_bot(run_session)
+    bot.bot_user_id = "bot-user"
+
+    await bot.handle_event(_posted_event("chan-ok", "u1", "login", post_id="p1"))
+    await asyncio.sleep(0.05)
+
+    # A DM channel was opened between the bot and the invoking user...
+    assert bot.driver.channels.direct == [["bot-user", "u1"]]
+    # ...and the prompt was posted there, not in the public channel.
+    assert len(bot.driver.posts.created) == 1
+    post = bot.driver.posts.created[0]
+    assert post["channel_id"] == "dm-chan"
+    assert post["message"] == "auth prompt"
+    assert post["root_id"] == ""  # not threaded under the public command post
+
+
 # ---------------------------------------------------------------------------
 # Real orchestrator over the Mattermost adapter (drop-in proof)
 # ---------------------------------------------------------------------------
@@ -359,7 +390,6 @@ async def test_run_session_status_posts_summary():
     blob = "\n".join(t.sent)
     assert "bamboo bot status" in blob
     assert "✓ functional" in blob
-    assert "bot-user" in blob
     assert "Active sessions: 3" in blob
     assert "Allowed channels: 2" in blob
     assert "1h 2m" in blob

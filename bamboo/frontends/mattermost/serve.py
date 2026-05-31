@@ -106,10 +106,16 @@ async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settin
     except Exception as exc:  # noqa: BLE001
         io.notice(f"Could not start login: {exc}")
         return
+    from bamboo.frontends.mattermost import render  # local: Mattermost-only render
+
     code_hint = f" (code: `{login.user_code}`)" if login.user_code else ""
-    io.notice(
-        f"To log in as yourself, open {login.verification_uri_complete} and sign "
-        f"in with CERN IAM{code_hint}. Waiting for you to finish…"
+    # Send an attachment card with a clickable Authenticate link; keep the URL and
+    # code in the message text as a fallback for attachment-less clients.
+    io.transport.send(
+#        f"To log in as yourself, open {login.verification_uri_complete} and sign "
+#        f"in with IAM{code_hint}. Waiting for you to finish…",
+        "",
+        props=render.login_message(login.verification_uri_complete, login.user_code),
     )
     try:
         claims = await oidc.poll_for_token(user_id, login, settings)

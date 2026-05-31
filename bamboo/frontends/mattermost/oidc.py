@@ -1,6 +1,6 @@
 """Per-user PanDA OIDC login for the Mattermost bot.
 
-Drives the CERN IAM OAuth2 **device flow** so an ops user can authenticate *as
+Drives the OAuth2 **device flow** so an ops user can authenticate *as
 themselves* through the bot; their PanDA actions then run under their identity
 via :func:`bamboo.utils.panda_client.panda_credentials`.
 

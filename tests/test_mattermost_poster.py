@@ -82,6 +82,25 @@ def test_analysis_message_wraps_attachment():
     assert len(msg["attachments"]) == 1
 
 
+def test_login_attachment_links_to_verification_uri():
+    url = "https://idp/device?code=ABC"
+    att = render.login_attachment(url, "ABC-123")
+    assert att["title_link"] == url
+    assert url in att["text"]
+    assert "ABC-123" in att["text"]
+    # Fallback (attachment-less clients) carries the URL and code.
+    assert url in att["fallback"]
+    assert "ABC-123" in att["fallback"]
+
+
+def test_login_message_wraps_attachment_and_omits_empty_code():
+    msg = render.login_message("https://idp/device?code=ABC")
+    assert len(msg["attachments"]) == 1
+    att = msg["attachments"][0]
+    assert att["title_link"] == "https://idp/device?code=ABC"
+    assert "Code:" not in att["text"]  # no code line when user_code is empty
+
+
 # ---------------------------------------------------------------------------
 # poster
 # ---------------------------------------------------------------------------

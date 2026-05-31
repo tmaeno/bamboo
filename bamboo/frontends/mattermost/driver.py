@@ -50,7 +50,10 @@ def _driver_options(settings: Settings) -> dict[str, Any]:
 
 
 def build_async_driver(settings: Optional[Settings] = None) -> Any:
-    """Construct an unconnected ``mattermostautodriver.AsyncDriver``.
+    """Construct an unconnected ``mattermostautodriver.AsyncTypedDriver``.
+
+    Uses the typed (non-deprecated) driver, whose grouped endpoints take expanded
+    keyword arguments rather than a single options dict.
 
     Raises:
         ImportError: If the ``bamboo[mattermost]`` extra is not installed.
@@ -59,10 +62,10 @@ def build_async_driver(settings: Optional[Settings] = None) -> Any:
     settings = settings or get_settings()
     options = _driver_options(settings)
     try:
-        from mattermostautodriver import AsyncDriver  # noqa: PLC0415
+        from mattermostautodriver import AsyncTypedDriver  # noqa: PLC0415
     except ImportError as exc:  # pragma: no cover - exercised only without extra
         raise ImportError(_MISSING_MSG) from exc
-    return AsyncDriver(options)
+    return AsyncTypedDriver(options)
 
 
 async def create_post(
@@ -73,18 +76,7 @@ async def create_post(
     root_id: str = "",
     props: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Create a post via the driver, tolerating both client API layouts.
-
-    mattermostautodriver groups endpoints (``driver.posts.create_post``); older
-    layouts expose a flat ``driver.create_post``.  We try the grouped form first.
-    """
-    options: dict[str, Any] = {"channel_id": channel_id, "message": message}
-    if root_id:
-        options["root_id"] = root_id
-    if props:
-        options["props"] = props
-
-    posts = getattr(driver, "posts", None)
-    if posts is not None and hasattr(posts, "create_post"):
-        return await posts.create_post(options)
-    return await driver.create_post(options)
+    """Create a post via the typed driver's grouped ``posts.create_post`` endpoint."""
+    return await driver.posts.create_post(
+        channel_id=channel_id, message=message, root_id=root_id, props=props
+    )

@@ -148,12 +148,16 @@ class MattermostBot:
         root_id: str = "",
         props: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        options: dict[str, Any] = {"channel_id": channel_id, "message": message}
-        if root_id:
-            options["root_id"] = root_id
-        if props:
-            options["props"] = props
-        return await self.driver.posts.create_post(options)
+        return await self.driver.posts.create_post(
+            channel_id=channel_id, message=message, root_id=root_id, props=props
+        )
+
+    async def open_direct_channel(self, user_id: str) -> str:
+        """Return the id of the bot↔user direct-message channel (created if absent)."""
+        channel = await self.driver.channels.create_direct_channel(
+            [self.bot_user_id, user_id]
+        )
+        return channel["id"]
 
     async def get_thread_messages(self, root_id: str) -> list[str]:
         """Return human (non-bot) messages in a thread, oldest first."""
@@ -242,6 +246,15 @@ class MattermostBot:
 
     async def _start_session(self, channel_id: str, root_id: str, command: Command) -> None:
         sess = _ThreadSession(self, channel_id, root_id)
+        # The login flow is a private exchange (auth prompt + result) that never
+        # reads chat replies, so redirect it to a DM with the invoking user
+        # instead of posting in the public channel.
+        if command.kind == "login" and command.user_id and self.bot_user_id:
+            try:
+                sess.channel_id = await self.open_direct_channel(command.user_id)
+                sess.root_id = ""  # DM is its own channel; don't thread under the public post
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to open DM for login; using original channel")
         self._sessions[root_id] = sess
         sess._sender_task = asyncio.ensure_future(sess._sender_loop())
         self._tasks[root_id] = asyncio.ensure_future(self._drive(sess, command))

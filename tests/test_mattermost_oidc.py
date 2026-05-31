@@ -233,9 +233,11 @@ def test_parse_command_login_logout():
 class _CaptureTransport:
     def __init__(self):
         self.sent = []
+        self.props = []
 
     def send(self, text, *, props=None):
         self.sent.append(text)
+        self.props.append(props)
 
     async def next_reply(self):  # pragma: no cover - not used in login flow
         return ""
@@ -268,3 +270,9 @@ async def test_serve_login_flow_posts_url_then_success(monkeypatch):
     assert "https://idp/device?code=ABC" in blob
     assert "ABC-123" in blob
     assert "Logged in as" in blob and "ops@cern.ch" in blob
+
+    # The device-code prompt carries the Authenticate link-card attachment.
+    attachments = [
+        p["attachments"][0] for p in t.props if isinstance(p, dict) and "attachments" in p
+    ]
+    assert any(a.get("title_link") == "https://idp/device?code=ABC" for a in attachments)
