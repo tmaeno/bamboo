@@ -324,6 +324,25 @@ async def test_unknown_command_replies_help_only_when_addressed():
 
 
 @pytest.mark.asyncio
+async def test_run_in_dm_opens_dm_and_runs_callback():
+    bot = _make_bot(lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    async def run(io):
+        io.notice("hello in dm")
+        return "ok"
+
+    result = await bot.run_in_dm("u1", run)
+
+    assert result == "ok"
+    # A DM channel was opened between bot and user...
+    assert bot.driver.channels.direct == [["bot-user", "u1"]]
+    # ...and the callback's output was posted there (not the public channel).
+    posted = bot.driver.posts.created
+    assert any(c.get("channel_id") == "dm-chan" and "hello in dm" in c.get("message", "") for c in posted)
+
+
+@pytest.mark.asyncio
 async def test_run_session_help_lists_commands():
     from bamboo.frontends.mattermost import serve
 

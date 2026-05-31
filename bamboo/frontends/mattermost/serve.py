@@ -67,17 +67,18 @@ async def resolve_user_credentials(user_id: Optional[str], settings: Settings):
         return None
 
 
-async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settings: Settings) -> None:
+async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settings: Settings) -> bool:
+    """Drive the device-flow login over *io*. Returns True iff the user signed in."""
     from bamboo.frontends.mattermost import oidc  # local: lazy pandaclient import
 
     if not user_id:
         io.notice("Could not determine your Mattermost user id; cannot log in.")
-        return
+        return False
     try:
         login = await asyncio.to_thread(oidc.begin_device_login, user_id, settings)
     except Exception as exc:  # noqa: BLE001
         io.notice(f"Could not start login: {exc}")
-        return
+        return False
     from bamboo.frontends.mattermost import render  # local: Mattermost-only render
 
     # The login prompt is delivered entirely as the attachment card (clickable
@@ -90,9 +91,10 @@ async def _run_login(io: MattermostInteractionIO, user_id: Optional[str], settin
         claims = await oidc.poll_for_token(user_id, login, settings)
     except Exception as exc:  # noqa: BLE001
         io.notice(f"Login failed: {exc}")
-        return
+        return False
     who = claims.get("email") or claims.get("sub") or "you"
     io.notice(f"✓ Logged in as **{who}**. Your PanDA actions now run under your identity.")
+    return True
 
 
 def _format_uptime(seconds: Optional[float]) -> str:
@@ -151,8 +153,27 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     deps = _build_deps(io)
     creds = await resolve_user_credentials(command.user_id, settings)
     if creds is None and settings.mattermost_require_user_login:
-        io.notice("Per-user login is required. Run `login` first to act as yourself.")
-        return
+        # Auto-start the device-flow login (privately, in the user's DM), wait for
+        # them to sign in, then continue the original operation under their identity.
+        if not command.user_id:
+            io.notice("Could not determine your Mattermost user id; cannot log in.")
+            return
+        io.notice("You're not logged in — I've sent a login link to your DM; I'll continue once you sign in.")
+        try:
+            ok = await transport.run_in_dm(
+                command.user_id,
+                lambda dm_io: _run_login(dm_io, command.user_id, settings),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("auto-login failed for user %s: %s", command.user_id, exc)
+            ok = False
+        if not ok:
+            io.notice("Login didn't complete — please run the command again.")
+            return
+        creds = await resolve_user_credentials(command.user_id, settings)
+        if creds is None:
+            io.notice("Still no valid credentials after login — please try again.")
+            return
     # Bind per-user PanDA identity for every API call in this session (no-op when
     # creds is None). ContextVars propagate across asyncio.to_thread.
     with panda_credentials(creds):

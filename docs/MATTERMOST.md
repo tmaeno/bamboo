@@ -222,7 +222,11 @@ Two layers:
 2. **Whose PanDA identity actions run as** — service identity by default, or
    per-user via `login` (see [above](#panda-identity-service-vs-per-user)). Use
    `MATTERMOST_REQUIRE_USER_LOGIN=true` for genuine per-user attribution of
-   side-effecting actions.
+   side-effecting actions. With this set, if a logged-out user runs
+   `investigate`/`capture`/`analyze`, the bot **auto-sends a login link to their
+   DM**, waits for them to sign in, then continues the original command under
+   their identity — no manual `login` + re-run. (Per-user tokens are checked and
+   auto-refreshed each time; expired/near-expiry tokens refresh transparently.)
 
 Side-effecting orchestration code is **never** executed without an explicit reply
 confirmation in the thread.

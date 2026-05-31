@@ -82,6 +82,16 @@ class ThreadTransport(ABC):
             detail="no bot attached to this transport",
         )
 
+    async def run_in_dm(self, user_id: str, run: Any) -> Any:
+        """Run *run* with an :class:`InteractionIO` bound to *user_id*'s DM.
+
+        Used to drive a private exchange (e.g. an auto-login prompt) from inside a
+        public-channel session.  *run* is an ``async (io) -> result`` callable; the
+        result is returned.  Defaults to unsupported; the bot's per-thread transport
+        overrides it.
+        """
+        raise NotImplementedError("this transport cannot open a direct-message channel")
+
 
 class MattermostInteractionIO(InteractionIO):
     """Chat adapter bound to one :class:`ThreadTransport`."""

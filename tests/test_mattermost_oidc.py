@@ -279,3 +279,107 @@ async def test_serve_login_flow_posts_url_then_success(monkeypatch):
     assert att["title_link"] == "https://idp/device?code=ABC"
     assert "https://idp/device?code=ABC" in att["fallback"]
     assert "ABC-123" in att["fallback"]
+
+
+@pytest.mark.asyncio
+async def test_run_login_returns_true_on_success(monkeypatch):
+    from bamboo.frontends.mattermost import serve
+    from bamboo.frontends.mattermost.io import MattermostInteractionIO
+
+    login = oidc.DeviceLogin(
+        verification_uri_complete="https://idp/device?code=ABC",
+        user_code="ABC-123", device_code="dc", interval=0, expires_in=5,
+        token_endpoint="https://idp/token", client_id="cid", client_secret="sec",
+    )
+    monkeypatch.setattr(oidc, "begin_device_login", lambda uid, s: login)
+
+    async def fake_poll(uid, dev, s):
+        return {"email": "ops@cern.ch"}
+
+    monkeypatch.setattr(oidc, "poll_for_token", fake_poll)
+
+    io = MattermostInteractionIO(_CaptureTransport())
+    assert await serve._run_login(io, "u1", Settings()) is True
+
+
+@pytest.mark.asyncio
+async def test_run_login_returns_false_without_user_id():
+    from bamboo.frontends.mattermost import serve
+    from bamboo.frontends.mattermost.io import MattermostInteractionIO
+
+    io = MattermostInteractionIO(_CaptureTransport())
+    assert await serve._run_login(io, None, Settings()) is False
+
+
+class _AutoLoginTransport(_CaptureTransport):
+    """Transport whose run_in_dm simulates the DM login exchange with a fixed result."""
+
+    def __init__(self, login_ok: bool):
+        super().__init__()
+        self._login_ok = login_ok
+        self.dm_user_id = None
+
+    async def run_in_dm(self, user_id, run):  # noqa: D401
+        self.dm_user_id = user_id
+        return self._login_ok
+
+
+@pytest.mark.asyncio
+async def test_run_session_auto_login_then_runs_op(monkeypatch):
+    """Logged-out user + require_user_login → auto-login via DM, then the op runs."""
+    from bamboo.frontends.mattermost import analyze as analyze_mod
+    from bamboo.frontends.mattermost import serve
+    from bamboo.frontends.mattermost.bot import Command
+
+    monkeypatch.setattr(serve, "get_settings", lambda: Settings(mattermost_require_user_login=True))
+
+    calls = {"n": 0}
+
+    async def fake_resolve(uid, s):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else PandaCredentials(id_token="tok", auth_vo="atlas")
+
+    monkeypatch.setattr(serve, "resolve_user_credentials", fake_resolve)
+
+    ran = {}
+
+    async def fake_run_analyze(io, *, task_id, deps):
+        ran["task_id"] = task_id
+        return True
+
+    monkeypatch.setattr(analyze_mod, "run_analyze", fake_run_analyze)
+
+    t = _AutoLoginTransport(login_ok=True)
+    await serve._run_session(t, Command(kind="analyze", task_id=42, user_id="u1"))
+
+    assert t.dm_user_id == "u1"  # login was driven via the user's DM
+    assert ran.get("task_id") == 42  # op continued after login
+    assert any("sent a login link to your DM" in s for s in t.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_session_auto_login_failure_aborts(monkeypatch):
+    from bamboo.frontends.mattermost import analyze as analyze_mod
+    from bamboo.frontends.mattermost import serve
+    from bamboo.frontends.mattermost.bot import Command
+
+    monkeypatch.setattr(serve, "get_settings", lambda: Settings(mattermost_require_user_login=True))
+
+    async def no_creds(uid, s):
+        return None
+
+    monkeypatch.setattr(serve, "resolve_user_credentials", no_creds)
+
+    ran = {"called": False}
+
+    async def fake_run_analyze(io, *, task_id, deps):
+        ran["called"] = True
+        return True
+
+    monkeypatch.setattr(analyze_mod, "run_analyze", fake_run_analyze)
+
+    t = _AutoLoginTransport(login_ok=False)
+    await serve._run_session(t, Command(kind="analyze", task_id=42, user_id="u1"))
+
+    assert ran["called"] is False  # op never ran
+    assert any("Login didn't complete" in s for s in t.sent)

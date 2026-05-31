@@ -123,6 +123,9 @@ class _ThreadSession(ThreadTransport):
     async def bot_status(self) -> "BotStatus":
         return await self._bot.status_snapshot()
 
+    async def run_in_dm(self, user_id: str, run: Any) -> Any:
+        return await self._bot.run_in_dm(user_id, run)
+
     # --- driven by the bot ---
     def deliver(self, text: str) -> None:
         self._inbox.put_nowait(text)
@@ -177,6 +180,29 @@ class MattermostBot:
             [self.bot_user_id, user_id]
         )
         return channel["id"]
+
+    async def run_in_dm(self, user_id: str, run: Any) -> Any:
+        """Run *run(io)* against a temporary IO bound to *user_id*'s DM channel.
+
+        Opens (or reuses) the bot↔user DM, spins a short-lived sender so the IO's
+        messages are delivered in order, awaits ``run``, then drains and tears the
+        sender down. Used to drive a private exchange (e.g. auto-login) from inside
+        a public-channel session.
+        """
+        from bamboo.frontends.mattermost.io import MattermostInteractionIO  # noqa: PLC0415
+
+        dm_id = await self.open_direct_channel(user_id)
+        sess = _ThreadSession(self, dm_id, "")
+        sess._sender_task = asyncio.ensure_future(sess._sender_loop())
+        try:
+            return await run(MattermostInteractionIO(sess))
+        finally:
+            try:
+                await asyncio.wait_for(sess._outbox.join(), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                pass
+            if sess._sender_task is not None:
+                sess._sender_task.cancel()
 
     async def get_thread_messages(self, root_id: str) -> list[str]:
         """Return human (non-bot) messages in a thread, oldest first."""
