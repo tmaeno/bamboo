@@ -18,11 +18,7 @@ from pathlib import Path
 
 import click
 
-from bamboo.agents.investigation_session import InvestigationOrchestrator, _Deps
-from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-from bamboo.agents.reasoning_navigator import ReasoningNavigator
-from bamboo.database.graph_database_client import GraphDatabaseClient
-from bamboo.database.vector_database_client import VectorDatabaseClient
+from bamboo.agents.investigation_session import InvestigationOrchestrator
 from bamboo.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -131,46 +127,17 @@ async def _run(
     dry_run: bool,
 ) -> None:
     # Local imports keep module load fast for `bamboo --help`.
-    from bamboo.agents.context_enricher import ContextEnricher
-    from bamboo.agents.extractors.panda_knowledge_extractor import (
-        ErrorCategoryClassifier,
-        PandaKnowledgeExtractor,
-    )
-    from bamboo.mcp.panda_mcp_client import PandaMcpClient
+    from rich.console import Console
 
-    mcp_client = PandaMcpClient()
-    graph_db = GraphDatabaseClient()
-    vector_db = VectorDatabaseClient()
-    extractor = PandaKnowledgeExtractor()
-    error_classifier = ErrorCategoryClassifier()
+    from bamboo.agents.deps import build_deps
+    from bamboo.frontends.cli import CliInteractionIO
 
-    # KnowledgeAccumulator is used at commit time to call _store_graph etc.
-    explorer = ContextEnricher(mcp_client=mcp_client)
-    accumulator = KnowledgeAccumulator(
-        extractor=extractor,
-        graph_db=graph_db,
-        vector_db=vector_db,
-        reviewer=None,
-        explorer=explorer,
-    )
-
-    # ReasoningNavigator powers the proactive past-similar hypothesis at start.
-    reasoning_navigator = ReasoningNavigator(
-        graph_db=graph_db,
-        vector_db=vector_db,
-        extractor=extractor,
-        explorer=explorer,
-    )
-
-    deps = _Deps(
-        mcp_client=mcp_client,
-        graph_db=graph_db,
-        vector_db=vector_db,
-        extractor=extractor,
-        reasoning_navigator=reasoning_navigator,
-        knowledge_accumulator=accumulator,
-        error_classifier=error_classifier,
-    )
+    # Build the terminal IO up front so the shared factory can route interactive
+    # MCP tools (e.g. request_human_input) through it, and the orchestrator reuses it.
+    console = Console()
+    io = CliInteractionIO(console)
+    deps = build_deps(io=io)
+    deps.console = console
 
     orch = InvestigationOrchestrator(
         deps=deps,

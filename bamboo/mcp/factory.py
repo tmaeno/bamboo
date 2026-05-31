@@ -14,7 +14,7 @@ from bamboo.mcp.base import McpClient
 logger = logging.getLogger(__name__)
 
 
-def build_mcp_client(settings: object, strategy=None) -> McpClient:
+def build_mcp_client(settings: object, strategy=None, *, io=None) -> McpClient:
     """Build the MCP client for :class:`~bamboo.agents.ContextEnricher`.
 
     Args:
@@ -24,6 +24,9 @@ def build_mcp_client(settings: object, strategy=None) -> McpClient:
                   :func:`~bamboo.agents.extractors.get_extraction_strategy`.
                   Built-in clients are sourced from
                   :meth:`~bamboo.agents.extractors.base.ExtractionStrategy.builtin_mcp_clients`.
+        io:       Optional :class:`~bamboo.frontends.base.InteractionIO` for the
+                  interactive client to gather human input through (terminal or
+                  chat). When ``None`` the interactive client falls back to stdin.
 
     Returns:
         :class:`~bamboo.mcp.external_mcp_client.CompositeMcpClient` combining
@@ -42,7 +45,7 @@ def build_mcp_client(settings: object, strategy=None) -> McpClient:
     if strategy is None:
         strategy = get_extraction_strategy()
 
-    clients: list[McpClient] = [*strategy.builtin_mcp_clients(), InteractiveMcpClient()]
+    clients: list[McpClient] = [*strategy.builtin_mcp_clients(), InteractiveMcpClient(io)]
 
     config_path: str = getattr(settings, "mcp_servers_config", "") or ""
     if config_path:

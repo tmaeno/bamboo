@@ -48,6 +48,15 @@ class InteractionIO(ABC):
     capture-from-thread, and analyze flows.
     """
 
+    @property
+    def supports_interaction(self) -> bool:
+        """Whether this frontend can prompt the operator and get a reply.
+
+        Gates interactive MCP tools (e.g. ``request_human_input``).  Defaults to
+        ``False``; concrete frontends override (terminal: a TTY; chat: always).
+        """
+        return False
+
     # ------------------------------------------------------------------
     # Input
     # ------------------------------------------------------------------

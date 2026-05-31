@@ -89,6 +89,11 @@ class MattermostInteractionIO(InteractionIO):
     def __init__(self, transport: ThreadTransport) -> None:
         self.transport = transport
 
+    @property
+    def supports_interaction(self) -> bool:
+        """Always interactive — the bot can post a prompt and await a thread reply."""
+        return True
+
     # ------------------------------------------------------------------
     # Input (reply-based)
     # ------------------------------------------------------------------

@@ -10,6 +10,7 @@ preserved byte-for-byte after the frontend refactor.
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from rich.console import Console
 from rich.panel import Panel
@@ -92,6 +93,11 @@ class CliInteractionIO(InteractionIO):
 
     def __init__(self, console: Console | None = None) -> None:
         self.console = console or Console()
+
+    @property
+    def supports_interaction(self) -> bool:
+        """Interactive only on a real terminal (not when piped / under cron)."""
+        return sys.stdout.isatty()
 
     # ------------------------------------------------------------------
     # Input

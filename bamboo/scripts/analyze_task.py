@@ -9,9 +9,7 @@ from pathlib import Path
 
 import click
 
-from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.database.graph_database_client import GraphDatabaseClient
-from bamboo.database.vector_database_client import VectorDatabaseClient
 from bamboo.models.knowledge_entity import AnalysisResult
 from bamboo.utils.logging import setup_logging
 
@@ -331,23 +329,20 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             sys.exit(1)
 
     from bamboo.agents.email_drafter import EmailDrafter
-    from bamboo.agents.context_enricher import ContextEnricher
-    from bamboo.agents.extractors import get_extraction_strategy
+    from bamboo.agents.deps import build_deps
     from bamboo.agents.prescription_composer import PrescriptionComposer
-    from bamboo.config import get_settings
-    from bamboo.mcp.factory import build_mcp_client
 
-    graph_db = GraphDatabaseClient()
-    vector_db = VectorDatabaseClient()
+    # Shared factory (one-shot CLI: io=None → stdin/TTY fallback for interactive tools).
+    deps = build_deps()
+    graph_db = deps.graph_db
+    vector_db = deps.vector_db
 
     try:
         await graph_db.connect()
         await vector_db.connect()
 
-        settings = get_settings()
-        _mcp = build_mcp_client(settings)
-        explorer = ContextEnricher(_mcp, source_navigator=get_extraction_strategy().source_navigator())
-        agent = ReasoningNavigator(graph_db, vector_db, explorer=explorer)
+        _mcp = deps.mcp_client
+        agent = deps.reasoning_navigator
 
         debug_trace: dict | None = {} if debug_report else None
 

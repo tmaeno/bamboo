@@ -103,9 +103,13 @@ class ContextEnricher:
         self,
         mcp_client: McpClient,
         source_navigator=None,
+        io=None,
     ) -> None:
         self._client = mcp_client
         self._source_navigator = source_navigator
+        # Optional InteractionIO. Decides whether interactive tools (e.g.
+        # request_human_input) are offered; falls back to TTY detection when None.
+        self._io = io
         self._llm = None  # lazy — same pattern as KnowledgeAccumulator
 
     @property
@@ -115,10 +119,20 @@ class ContextEnricher:
         return self._llm
 
     def _filtered_tools(self) -> list[McpTool]:
-        """Return tools from the client, excluding interactive tools when not on a tty."""
-        import sys
+        """Return tools from the client, excluding interactive tools when the
+        frontend can't gather human input.
+
+        Uses the injected ``InteractionIO.supports_interaction`` when available
+        (so the chat bot can offer interactive tools via thread replies); falls
+        back to TTY detection for IO-less callers.
+        """
         tools = self._client.list_tools()
-        if not sys.stdout.isatty():
+        if self._io is not None:
+            interactive = self._io.supports_interaction
+        else:
+            import sys
+            interactive = sys.stdout.isatty()
+        if not interactive:
             tools = [t for t in tools if not t.requires_interaction]
         return tools
 

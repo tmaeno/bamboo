@@ -16,7 +16,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from bamboo.agents.investigation_session import InvestigationOrchestrator, _Deps
-from bamboo.frontends.mattermost.bot import Command, MattermostBot, parse_command
+from bamboo.frontends.mattermost.bot import (
+    Command,
+    MattermostBot,
+    _is_addressed,
+    parse_command,
+)
 from bamboo.frontends.mattermost.io import (
     MattermostInteractionIO,
     ThreadTransport,
@@ -117,6 +122,21 @@ def test_parse_command_analyze():
     assert parse_command("/bamboo analyze 9") == Command(kind="analyze", task_id=9)
     cmd = parse_command("analyze")
     assert cmd.kind == "analyze" and cmd.task_id is None
+
+
+def test_parse_command_help():
+    assert parse_command("help") == Command(kind="help")
+    assert parse_command("@bamboo help").kind == "help"
+    assert parse_command("/bamboo help") == Command(kind="help")
+
+
+def test_is_addressed():
+    assert _is_addressed("@bamboo foo", "bamboo") is True
+    assert _is_addressed("/bamboo foo", "bamboo") is True
+    assert _is_addressed("bamboo foo", "bamboo") is True
+    assert _is_addressed("@bamboo", "bamboo") is True
+    assert _is_addressed("hello team", "bamboo") is False
+    assert _is_addressed("@someoneelse foo", "bamboo") is False
 
 
 def test_parse_command_returns_none_for_chatter():
@@ -278,6 +298,41 @@ async def test_bot_starts_session_and_routes_replies():
     assert bot._sessions == {}
     posted = [c["message"] for c in bot.driver.posts.created]
     assert "kickoff" in posted
+
+
+@pytest.mark.asyncio
+async def test_unknown_command_replies_help_only_when_addressed():
+    started: list[str] = []
+
+    async def run_session(transport, command):
+        started.append(command.kind)
+
+    bot = _make_bot(run_session)
+    bot.bot_user_id = "bot-user"
+    bot.bot_username = "bamboo"
+
+    # Addressed but unrecognized → falls back to a help session.
+    await bot.handle_event(_posted_event("chan-ok", "u1", "@bamboo bogus", post_id="p1"))
+    await asyncio.sleep(0.05)
+    assert started == ["help"]
+
+    # Ordinary chatter that doesn't address the bot → ignored, no session.
+    await bot.handle_event(_posted_event("chan-ok", "u1", "hello team", post_id="p2"))
+    await asyncio.sleep(0.05)
+    assert started == ["help"]
+    assert "p2" not in bot._sessions
+
+
+@pytest.mark.asyncio
+async def test_run_session_help_lists_commands():
+    from bamboo.frontends.mattermost import serve
+
+    t = FakeTransport()
+    await serve._run_session(t, Command(kind="help"))
+
+    blob = "\n".join(t.sent)
+    for name in ("investigate", "capture", "analyze", "login", "status", "help"):
+        assert name in blob
 
 
 @pytest.mark.asyncio

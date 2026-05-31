@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class Command:
     """A parsed start command from a thread-root message."""
 
-    kind: str  # "investigate" | "capture" | "analyze" | "login" | "logout" | "status"
+    kind: str  # "investigate" | "capture" | "analyze" | "login" | "logout" | "status" | "help"
     task_id: Optional[int] = None
     user_id: Optional[str] = None  # Mattermost user who issued the command
 
@@ -46,8 +46,8 @@ def parse_command(message: str) -> Optional[Command]:
     """Parse a start command from a message, tolerating a leading @mention.
 
     Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``,
-    ``analyze [<task_id>]``, ``login``, ``logout``, and ``status``.  Returns
-    ``None`` when the message is not a start command.
+    ``analyze [<task_id>]``, ``login``, ``logout``, ``status``, and ``help``.
+    Returns ``None`` when the message is not a start command.
     """
     text = (message or "").strip()
     # Drop a leading @mention token if present.
@@ -72,9 +72,27 @@ def parse_command(message: str) -> Optional[Command]:
                 task_id = int(tok)
                 break
         return Command(kind=verb, task_id=task_id)
-    if verb in ("login", "logout", "status"):
+    if verb in ("login", "logout", "status", "help"):
         return Command(kind=verb)
     return None
+
+
+def _is_addressed(message: str, bot_username: Optional[str]) -> bool:
+    """True when *message* is clearly directed at the bot.
+
+    Either it uses a ``/bamboo``/``bamboo `` command prefix (the same ones
+    :func:`parse_command` honors) or its leading ``@token`` is the bot's own
+    @mention.  Used to decide whether an *unrecognized* message should get a
+    ``help`` reply or be silently ignored as ordinary channel chatter.
+    """
+    text = (message or "").strip()
+    low = text.lower()
+    if low.startswith("/bamboo") or low.startswith("bamboo ") or low == "bamboo":
+        return True
+    if bot_username and text.startswith("@"):
+        first = text.split(None, 1)[0]
+        return first.lstrip("@").lower() == bot_username.lower()
+    return False
 
 
 # A session runner: given a transport + command, drive the flow to completion.
@@ -138,6 +156,7 @@ class MattermostBot:
         self._sessions: dict[str, _ThreadSession] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self.bot_user_id: Optional[str] = None
+        self.bot_username: Optional[str] = None
         self._started_at: Optional[float] = None
 
     async def create_post(
@@ -178,6 +197,7 @@ class MattermostBot:
         await self.driver.login()
         me = await self.driver.users.get_user("me")
         self.bot_user_id = me.get("id") if isinstance(me, dict) else None
+        self.bot_username = me.get("username") if isinstance(me, dict) else None
         self._started_at = time.monotonic()
         logger.info("Mattermost bot connected as user %s", self.bot_user_id)
         await self.driver.init_websocket(self.handle_event)
@@ -240,7 +260,12 @@ class MattermostBot:
         # Otherwise, maybe a start command (rooted at this message).
         command = parse_command(message)
         if command is None:
-            return
+            # Unrecognized: reply with help only if the bot was clearly addressed
+            # (@mention or /bamboo prefix); ignore ordinary channel chatter.
+            if _is_addressed(message, self.bot_username):
+                command = Command(kind="help")
+            else:
+                return
         command.user_id = user_id  # attribute the session to the invoking user
         await self._start_session(channel_id, root_id, command)
 

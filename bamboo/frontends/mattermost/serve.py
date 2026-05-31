@@ -22,54 +22,26 @@ from bamboo.frontends.mattermost.io import MattermostInteractionIO, ThreadTransp
 
 logger = logging.getLogger(__name__)
 
+_HELP = (
+    "**bamboo commands** — a leading `@bamboo` or `/bamboo` is optional.\n"
+    "- `investigate <taskID>` — live, turn-by-turn co-investigation of a task.\n"
+    "- `capture [<taskID>]` — turn this thread's discussion into curated knowledge.\n"
+    "- `analyze <taskID>` — one-shot root-cause analysis; posts a result card.\n"
+    "- `login` / `logout` — sign in as yourself via IAM / revert to the service identity.\n"
+    "- `status` — check the bot is alive and functional.\n"
+    "- `help` — show this list."
+)
+
 
 def _parse_allowed_channels(settings: Settings) -> set[str]:
     return {c.strip() for c in (settings.mattermost_allowed_channels or "").split(",") if c.strip()}
 
 
 def _build_deps(io: MattermostInteractionIO):
-    """Build a per-session ``_Deps`` (mirrors ``bamboo.scripts.investigate._run``)."""
-    from bamboo.agents.context_enricher import ContextEnricher
-    from bamboo.agents.extractors.panda_knowledge_extractor import (
-        ErrorCategoryClassifier,
-        PandaKnowledgeExtractor,
-    )
-    from bamboo.agents.investigation_session import _Deps
-    from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
-    from bamboo.agents.reasoning_navigator import ReasoningNavigator
-    from bamboo.database.graph_database_client import GraphDatabaseClient
-    from bamboo.database.vector_database_client import VectorDatabaseClient
-    from bamboo.mcp.panda_mcp_client import PandaMcpClient
+    """Build a per-session ``_Deps`` via the shared factory (IO is the only diff)."""
+    from bamboo.agents.deps import build_deps
 
-    mcp_client = PandaMcpClient()
-    graph_db = GraphDatabaseClient()
-    vector_db = VectorDatabaseClient()
-    extractor = PandaKnowledgeExtractor()
-    error_classifier = ErrorCategoryClassifier()
-    explorer = ContextEnricher(mcp_client=mcp_client)
-    accumulator = KnowledgeAccumulator(
-        extractor=extractor,
-        graph_db=graph_db,
-        vector_db=vector_db,
-        reviewer=None,
-        explorer=explorer,
-    )
-    reasoning_navigator = ReasoningNavigator(
-        graph_db=graph_db,
-        vector_db=vector_db,
-        extractor=extractor,
-        explorer=explorer,
-    )
-    return _Deps(
-        mcp_client=mcp_client,
-        graph_db=graph_db,
-        vector_db=vector_db,
-        extractor=extractor,
-        reasoning_navigator=reasoning_navigator,
-        knowledge_accumulator=accumulator,
-        error_classifier=error_classifier,
-        io=io,
-    )
+    return build_deps(io=io)
 
 
 def _auth_vo() -> str:
@@ -154,6 +126,9 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     settings = get_settings()
     io = MattermostInteractionIO(transport)
 
+    if command.kind == "help":
+        io.notice(_HELP)
+        return
     if command.kind == "login":
         await _run_login(io, command.user_id, settings)
         return

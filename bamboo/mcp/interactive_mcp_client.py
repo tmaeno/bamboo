@@ -24,7 +24,10 @@ class InteractiveMcpClient(McpClient):
     Currently exposes a single tool: ``request_human_input``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, io: Any = None) -> None:
+        # Optional InteractionIO. When set, human input is gathered through it
+        # (terminal prompt or chat reply); otherwise we fall back to stdin.
+        self._io = io
         self._tools: list[McpTool] = [
             McpTool(
                 name="request_human_input",
@@ -62,7 +65,15 @@ class InteractiveMcpClient(McpClient):
         raise ValueError(f"InteractiveMcpClient: unknown tool {tool_name!r}")
 
     async def _request_human_input(self, prompt: str) -> str:
-        """Display ``prompt`` to the operator and return their typed response."""
+        """Display ``prompt`` to the operator and return their response.
+
+        Routes through the active :class:`~bamboo.frontends.base.InteractionIO`
+        when one is set (terminal prompt or chat reply); otherwise falls back to
+        reading stdin directly.
+        """
+        if self._io is not None:
+            text = await self._io.ask(prompt)
+            return (text or "").strip()
         say("─" * 60)
         say(f"[Human input requested]\n{prompt}")
         say("─" * 60)
