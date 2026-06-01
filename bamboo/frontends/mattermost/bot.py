@@ -169,9 +169,14 @@ class MattermostBot:
         *,
         root_id: str = "",
         props: Optional[dict[str, Any]] = None,
+        file_ids: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         return await self.driver.posts.create_post(
-            channel_id=channel_id, message=message, root_id=root_id, props=props
+            channel_id=channel_id,
+            message=message,
+            root_id=root_id,
+            props=props,
+            file_ids=file_ids,
         )
 
     async def open_direct_channel(self, user_id: str) -> str:
@@ -180,6 +185,29 @@ class MattermostBot:
             [self.bot_user_id, user_id]
         )
         return channel["id"]
+
+    async def update_post(
+        self,
+        post_id: str,
+        *,
+        message: Optional[str] = None,
+        file_ids: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """Patch an existing post's message and/or attachments (in-place edit)."""
+        return await self.driver.posts.patch_post(
+            post_id, message=message, file_ids=file_ids
+        )
+
+    async def delete_post(self, post_id: str) -> Any:
+        """Delete a post (used as a fallback when an attachment can't be detached)."""
+        return await self.driver.posts.delete_post(post_id)
+
+    async def upload_file(self, channel_id: str, filename: str, data: bytes) -> str:
+        """Upload *data* as *filename* to *channel_id*; return the new file id."""
+        resp = await self.driver.files.upload_file(
+            files={"files": (filename, data)}, channel_id=channel_id
+        )
+        return resp["file_infos"][0]["id"]
 
     async def run_in_dm(self, user_id: str, run: Any) -> Any:
         """Run *run(io)* against a temporary IO bound to *user_id*'s DM channel.

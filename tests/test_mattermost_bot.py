@@ -50,10 +50,19 @@ class FakeTransport(ThreadTransport):
 class _Posts:
     def __init__(self) -> None:
         self.created: list[dict] = []
+        self.patched: list[dict] = []
+        self.deleted: list[str] = []
 
     async def create_post(self, **kwargs):
         self.created.append(kwargs)
         return {"id": f"post-{len(self.created)}"}
+
+    async def patch_post(self, post_id, **kwargs):
+        self.patched.append({"post_id": post_id, **kwargs})
+        return {"id": post_id}
+
+    async def delete_post(self, post_id):
+        self.deleted.append(post_id)
 
 
 class _Users:
@@ -70,11 +79,21 @@ class _Channels:
         return {"id": "dm-chan"}
 
 
+class _Files:
+    def __init__(self) -> None:
+        self.uploaded: list[dict] = []
+
+    async def upload_file(self, files=None, channel_id=None):
+        self.uploaded.append({"files": files, "channel_id": channel_id})
+        return {"file_infos": [{"id": "file-1"}]}
+
+
 class FakeDriver:
     def __init__(self) -> None:
         self.posts = _Posts()
         self.users = _Users()
         self.channels = _Channels()
+        self.files = _Files()
         self.logged_in = False
 
     async def login(self):
@@ -321,6 +340,22 @@ async def test_unknown_command_replies_help_only_when_addressed():
     await asyncio.sleep(0.05)
     assert started == ["help"]
     assert "p2" not in bot._sessions
+
+
+@pytest.mark.asyncio
+async def test_update_upload_delete_post_call_driver():
+    bot = _make_bot(lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    await bot.update_post("p1", message="edited", file_ids=[])
+    assert bot.driver.posts.patched[-1] == {"post_id": "p1", "message": "edited", "file_ids": []}
+
+    fid = await bot.upload_file("chan-1", "spinner.gif", b"GIF89a...")
+    assert fid == "file-1"
+    assert bot.driver.files.uploaded[-1]["channel_id"] == "chan-1"
+
+    await bot.delete_post("p1")
+    assert bot.driver.posts.deleted == ["p1"]
 
 
 @pytest.mark.asyncio

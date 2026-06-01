@@ -44,7 +44,6 @@ async def run_analyze(
         return False
 
     fetch = fetch or _default_fetch
-    io.notice(f"Analyzing task {task_id}… (this can take a minute)")
 
     try:
         task_data = await fetch(task_id)

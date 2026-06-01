@@ -196,6 +196,13 @@ engine, and posts a result card (root cause, confidence, suggested resolution,
 plus any novel symptoms / capability gaps) back into the thread. It is read-only
 — it queries the knowledge base and PanDA but writes nothing.
 
+**Live progress.** While `investigate`/`capture`/`analyze` run, the bot streams
+progress into the thread: a **status message with an animated spinner** showing the
+current step (frozen to "✓ done" at the end) and a **detail message with the last
+few narration lines** (Mattermost folds it under "Show more" when long). The *full*
+trace is written to the server log under the `bamboo.narration` logger for
+debugging — only the bounded view goes to chat.
+
 ### Batch/automation analysis posting
 
 For **scripted/bulk** posting (e.g. a cron job analysing many tasks and pushing

@@ -123,6 +123,7 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     from bamboo.frontends.mattermost import oidc
     from bamboo.frontends.mattermost.analyze import run_analyze
     from bamboo.frontends.mattermost.capture import run_capture
+    from bamboo.frontends.mattermost.narration import stream_narration
     from bamboo.utils.panda_client import panda_credentials
 
     settings = get_settings()
@@ -177,26 +178,29 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     # Bind per-user PanDA identity for every API call in this session (no-op when
     # creds is None). ContextVars propagate across asyncio.to_thread.
     with panda_credentials(creds):
-        if command.kind == "investigate":
-            orch = InvestigationOrchestrator(deps=deps)
-            await orch.start(task_id=command.task_id)
-            await orch.run()
-            await orch.finalize()
-        elif command.kind == "capture":
-            messages = await transport.thread_messages()
-            transcript = "\n".join(messages)
-            await run_capture(
-                io,
-                transcript=transcript,
-                task_id=command.task_id,
-                accumulator=deps.knowledge_accumulator,
-                graph_db=deps.graph_db,
-                mcp_client=deps.mcp_client,
-            )
-        elif command.kind == "analyze":
-            await run_analyze(io, task_id=command.task_id, deps=deps)
-        else:  # pragma: no cover - parse_command only emits the above
-            transport.send(f"Unknown command: {command.kind}")
+        # Stream the engine's progress narration into this thread (status spinner +
+        # foldable last-N detail; full firehose goes to the `bamboo.narration` log).
+        async with stream_narration(transport):
+            if command.kind == "investigate":
+                orch = InvestigationOrchestrator(deps=deps)
+                await orch.start(task_id=command.task_id)
+                await orch.run()
+                await orch.finalize()
+            elif command.kind == "capture":
+                messages = await transport.thread_messages()
+                transcript = "\n".join(messages)
+                await run_capture(
+                    io,
+                    transcript=transcript,
+                    task_id=command.task_id,
+                    accumulator=deps.knowledge_accumulator,
+                    graph_db=deps.graph_db,
+                    mcp_client=deps.mcp_client,
+                )
+            elif command.kind == "analyze":
+                await run_analyze(io, task_id=command.task_id, deps=deps)
+            else:  # pragma: no cover - parse_command only emits the above
+                transport.send(f"Unknown command: {command.kind}")
 
 
 async def serve(settings: Optional[Settings] = None) -> None:

@@ -25,7 +25,7 @@ import inspect
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Callable, Generator
+from typing import Callable, Generator, Protocol, runtime_checkable
 
 from rich.console import Console
 from rich.panel import Panel
@@ -35,6 +35,42 @@ from rich.theme import Theme
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
+
+
+@runtime_checkable
+class NarrationSink(Protocol):
+    """A frontend-agnostic destination for narration events.
+
+    Installed via :func:`set_narration_sink` so frontends other than the Rich
+    terminal (e.g. the Mattermost bot) can receive the same progress narration
+    the CLI shows.  Implementations should be cheap/non-blocking — heavy work
+    (network posts) belongs in a separate task.
+    """
+
+    def say(self, msg: str) -> None: ...
+
+    def block(self, title: str, content: str) -> None: ...
+
+    def step(self, label: str) -> None: ...
+
+
+# Optional sink, task-scoped like the console. When set, say/show_block/thinking
+# forward to it (in addition to / instead of the Rich console).
+_sink: ContextVar["NarrationSink | None"] = ContextVar("narrator_sink", default=None)
+
+
+def set_narration_sink(sink: "NarrationSink | None") -> Token:
+    """Install *sink* as the narration destination for the current task context.
+
+    Returns the :class:`~contextvars.Token` so the caller can restore the
+    previous sink with ``reset_narration_sink(token)``.
+    """
+    return _sink.set(sink)
+
+
+def reset_narration_sink(token: Token) -> None:
+    """Restore the sink replaced by :func:`set_narration_sink`."""
+    _sink.reset(token)
 
 # Shared Progress instance for all concurrent thinking() callers.
 # _progress_lock is only held briefly (no await inside), so no deadlock risk.
@@ -66,7 +102,14 @@ def set_narrator(console: Console, verbose: bool = False) -> Token:
 
 
 def say(msg: str) -> None:
-    """Print *msg* to the narrator console (no-op when none is set or not verbose)."""
+    """Print *msg* to the narrator console (no-op when none is set or not verbose).
+
+    Also forwarded to an installed :class:`NarrationSink` (independent of the
+    verbose flag) so non-terminal frontends can stream it.
+    """
+    sink = _sink.get()
+    if sink is not None:
+        sink.say(msg)
     if _verbose.get():
         c = _console.get()
         if c is not None:
@@ -84,6 +127,9 @@ def show_block(title: str, content: str, max_lines: int = 60) -> None:
         content:   The text to display.
         max_lines: Maximum lines before truncation (default 60).
     """
+    sink = _sink.get()
+    if sink is not None:
+        sink.block(title, content)
     if not _verbose.get():
         return
     c = _console.get()
@@ -118,14 +164,19 @@ def thinking(msg: str) -> Generator[None, None, None]:
     """
     global _progress, _progress_ref_count
 
+    caller = inspect.stack()[2]
+    module = inspect.getmodule(caller[0])
+    module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
+
+    sink = _sink.get()
+    if sink is not None:
+        sink.step(f"[{module_name}] {msg}")
+
     c = _console.get()
     if c is None:
         yield
         return
 
-    caller = inspect.stack()[2]
-    module = inspect.getmodule(caller[0])
-    module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
     description = f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg}[/cyan]"
 
     with _progress_lock:
@@ -167,15 +218,27 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
     """
     global _progress, _progress_ref_count
 
-    c = _console.get()
-    if c is None:
-        yield lambda: None
-        return
-
     caller = inspect.stack()[2]
     module = inspect.getmodule(caller[0])
     module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
     done = 0
+
+    sink = _sink.get()
+    if sink is not None:
+        sink.step(f"[{module_name}] {msg} (0/{total})")
+
+    c = _console.get()
+    if c is None:
+        # Still drive the sink's step counter without a Rich progress bar.
+        if sink is not None:
+            def advance_sink() -> None:
+                nonlocal done
+                done += 1
+                sink.step(f"[{module_name}] {msg} ({done}/{total})")
+            yield advance_sink
+        else:
+            yield lambda: None
+        return
 
     def _desc(n: int) -> str:
         return f"[dim cyan]\\[{module_name}][/dim cyan] [cyan]{msg} ({n}/{total})[/cyan]"
@@ -195,6 +258,8 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
     def advance() -> None:
         nonlocal done
         done += 1
+        if sink is not None:
+            sink.step(f"[{module_name}] {msg} ({done}/{total})")
         with _progress_lock:
             if _progress is not None:
                 _progress.update(task_id, description=_desc(done))
