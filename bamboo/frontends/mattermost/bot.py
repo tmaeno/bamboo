@@ -199,10 +199,11 @@ class MattermostBot:
         *,
         message: Optional[str] = None,
         file_ids: Optional[list[str]] = None,
+        props: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Patch an existing post's message and/or attachments (in-place edit)."""
+        """Patch an existing post's message, attachments, and/or props (in-place edit)."""
         return await self.driver.posts.patch_post(
-            post_id, message=message, file_ids=file_ids
+            post_id, message=message, file_ids=file_ids, props=props
         )
 
     async def delete_post(self, post_id: str) -> Any:
@@ -253,11 +254,11 @@ class MattermostBot:
         if isinstance(existing, dict) and existing.get("id"):
             if await self._spinner_emoji_matches(existing["id"], data):
                 self.spinner_emoji = SPINNER_EMOJI_NAME
-                narration_log.info("narration: spinner emoji present (:%s:)", SPINNER_EMOJI_NAME)
+                narration_log.debug("narration: spinner emoji present (:%s:)", SPINNER_EMOJI_NAME)
                 return
             try:
                 await self.driver.emoji.delete_emoji(existing["id"])
-                narration_log.info("narration: spinner emoji refreshed (stale image replaced)")
+                narration_log.debug("narration: spinner emoji refreshed (stale image replaced)")
             except Exception as exc:  # noqa: BLE001 — can't delete → reuse what's there
                 self.spinner_emoji = SPINNER_EMOJI_NAME
                 narration_log.warning(
@@ -271,7 +272,7 @@ class MattermostBot:
                 emoji=json.dumps({"name": SPINNER_EMOJI_NAME, "creator_id": self.bot_user_id}),
             )
             self.spinner_emoji = SPINNER_EMOJI_NAME
-            narration_log.info("narration: spinner emoji created (:%s:)", SPINNER_EMOJI_NAME)
+            narration_log.debug("narration: spinner emoji created (:%s:)", SPINNER_EMOJI_NAME)
         except Exception as exc:  # noqa: BLE001
             # A concurrent create may have won the race — one recovery lookup.
             try:

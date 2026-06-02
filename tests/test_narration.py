@@ -7,9 +7,11 @@ import logging
 
 import pytest
 
+import re
+
 from bamboo.frontends.mattermost.narration import (
     MattermostNarrationSink,
-    _DETAIL_LINES,
+    _DETAIL_ENTRIES,
 )
 from bamboo.utils import narrator
 
@@ -78,11 +80,13 @@ class _FakeBot:
     async def create_post(self, channel_id, message, *, root_id="", props=None, file_ids=None):
         self._n += 1
         pid = f"post-{self._n}"
-        self.created.append({"id": pid, "channel_id": channel_id, "message": message, "file_ids": file_ids})
+        self.created.append(
+            {"id": pid, "channel_id": channel_id, "message": message, "props": props, "file_ids": file_ids}
+        )
         return {"id": pid}
 
-    async def update_post(self, post_id, *, message=None, file_ids=None):
-        self.patched.append({"id": post_id, "message": message, "file_ids": file_ids})
+    async def update_post(self, post_id, *, message=None, file_ids=None, props=None):
+        self.patched.append({"id": post_id, "message": message, "props": props, "file_ids": file_ids})
         return {"id": post_id}
 
     async def delete_post(self, post_id):
@@ -93,8 +97,11 @@ def _sink(bot):
     return MattermostNarrationSink(bot, "chan-1", "root-1", asyncio.get_event_loop())
 
 
+_TS = re.compile(r"\d\d:\d\d:\d\d")  # HH:MM:SS console timestamp prefix
+
+
 @pytest.mark.asyncio
-async def test_sink_creates_one_post_with_emoji_then_patches_on_update(caplog):
+async def test_sink_console_log_post_then_patches(caplog):
     bot = _FakeBot()
     sink = _sink(bot)
 
@@ -102,31 +109,40 @@ async def test_sink_creates_one_post_with_emoji_then_patches_on_update(caplog):
         sink.step("[nav] analysing")
         sink.say("looking at logs")
         await sink._flush_once()
-        # First flush: ONE post created (no file upload — the spinner is a custom
-        # emoji in the text, not an attachment), head + detail.
-        assert bot.uploaded == []
-        assert len(bot.created) == 1
-        post = bot.created[0]
-        assert post["file_ids"] is None
-        assert post["message"].startswith(":bamboo_spinner: 🔎") and "analysing" in post["message"]
-        assert "→ looking at logs" in post["message"]
+        # First flush: ONE live post; head carries the spinner emoji + step, the
+        # say line is a timestamped entry inside a monospace code block.
+        assert bot.uploaded == [] and len(bot.created) == 1
+        msg = bot.created[0]["message"]
+        assert msg.startswith(":bamboo_spinner: 🔎") and "analysing" in msg
+        assert "```" in msg and "→ looking at logs" in msg
+        body = msg.split("```")[1]
+        assert _TS.search(body)  # the say line is timestamped
 
-        # A later update edits the same post (no new post).
+        # A later update edits the SAME post (no new post; both lines present).
+        sink.say("found an error")
         sink.step("[nav] root cause")
         await sink._flush_once()
-        assert len(bot.created) == 1  # still just the one post
-        assert bot.patched and "root cause" in bot.patched[-1]["message"]
-        assert bot.patched[-1]["id"] == "post-1"
+        assert len(bot.created) == 1
+        last = bot.patched[-1]
+        assert last["id"] == "post-1" and "root cause" in last["message"]
+        assert "→ looking at logs" in last["message"] and "→ found an error" in last["message"]
 
-    # Every event was logged for dev debugging.
-    assert any("analysing" in r.message for r in caplog.records)
-    # Operational diagnostics land on the SAME `bamboo.narration` logger (so they
-    # show alongside the firehose and aren't filtered out by a `bamboo.narration`
-    # grep that misses the module logger name).
+    # Firehose stays at INFO; the post-plumbing diagnostics are NOT at INFO anymore.
+    assert any("looking at logs" in r.message for r in caplog.records)
+    info_msgs = [r.getMessage() for r in caplog.records if r.name == "bamboo.narration"]
+    assert not any(m.startswith("narration: created post id=") for m in info_msgs)
+    assert not any(m.startswith("narration: flush ") for m in info_msgs)
+
+
+@pytest.mark.asyncio
+async def test_sink_diagnostics_at_debug(caplog):
+    bot = _FakeBot()
+    sink = _sink(bot)
+    with caplog.at_level(logging.DEBUG, logger="bamboo.narration"):
+        sink.say("hello")
+        await sink._flush_once()
     msgs = [r.getMessage() for r in caplog.records if r.name == "bamboo.narration"]
-    assert any(m.startswith("narration: created post id=") for m in msgs)
-    # The noisy per-flush heartbeat is gone.
-    assert not any(m.startswith("narration: flush ") for m in msgs)
+    assert any(m.startswith("narration: created post id=") for m in msgs)  # available at DEBUG
 
 
 @pytest.mark.asyncio
@@ -140,21 +156,35 @@ async def test_sink_falls_back_to_glyph_without_emoji():
 
 
 @pytest.mark.asyncio
-async def test_sink_detail_capped_and_logged(caplog):
+async def test_sink_log_window_capped_and_logged(caplog):
     bot = _FakeBot()
     sink = _sink(bot)
     with caplog.at_level(logging.INFO, logger="bamboo.narration"):
-        for i in range(_DETAIL_LINES + 10):
+        for i in range(_DETAIL_ENTRIES + 10):
             sink.say(f"line {i}")
         await sink._flush_once()
 
-    detail = bot.created[-1]["message"]
-    # Only the last _DETAIL_LINES survive in the MM post...
-    assert "line 9" not in detail  # evicted
-    assert f"line {_DETAIL_LINES + 9}" in detail
-    assert detail.count("→ line") == _DETAIL_LINES
+    body = bot.created[-1]["message"]
+    # Only the last _DETAIL_ENTRIES survive in the live post...
+    assert "→ line 9" not in body  # evicted
+    assert f"→ line {_DETAIL_ENTRIES + 9}" in body
+    assert body.count("→ line") == _DETAIL_ENTRIES
     # ...but the full firehose reached the log.
-    assert sum("line" in r.message for r in caplog.records) >= _DETAIL_LINES + 10
+    assert sum("line" in r.message for r in caplog.records) >= _DETAIL_ENTRIES + 10
+
+
+@pytest.mark.asyncio
+async def test_sink_block_is_log_only_not_sent_to_mm(caplog):
+    bot = _FakeBot()
+    sink = _sink(bot)
+    with caplog.at_level(logging.INFO, logger="bamboo.narration"):
+        sink.block("LLM prompt: root cause", "PROMPT-" + "x" * 5000)  # big block
+        await sink._flush_once()
+
+    # Nothing posted to MM for a block (only say/step drive the live post).
+    assert bot.created == [] and bot.patched == []
+    # ...but the full block content reached the log.
+    assert any("PROMPT-" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

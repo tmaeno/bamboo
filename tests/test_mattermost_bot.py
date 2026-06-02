@@ -383,7 +383,9 @@ async def test_update_upload_delete_post_call_driver():
     bot.bot_user_id = "bot-user"
 
     await bot.update_post("p1", message="edited", file_ids=[])
-    assert bot.driver.posts.patched[-1] == {"post_id": "p1", "message": "edited", "file_ids": []}
+    assert bot.driver.posts.patched[-1] == {
+        "post_id": "p1", "message": "edited", "file_ids": [], "props": None
+    }
 
     fid = await bot.upload_file("chan-1", "spinner.gif", b"GIF89a...")
     assert fid == "file-1"

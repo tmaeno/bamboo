@@ -198,10 +198,12 @@ plus any novel symptoms / capability gaps) back into the thread. It is read-only
 
 **Live progress.** While `investigate`/`capture`/`analyze` run, the bot streams
 progress into the thread as a **single live-updating reply**: a head line with an
-animated spinner showing the current step (frozen to "✓ done" at the end), and
-below it the last few narration lines in a code block (Mattermost folds it under
-"Show more" when long). The *full* trace is written to the server log under the
-`bamboo.narration` logger for debugging — only the bounded view goes to chat.
+animated spinner showing the current step (frozen to "✓ done" at the end) and,
+below it, a **console-style monospace log** of the last few progress lines, each
+timestamped. Larger detail blocks (LLM prompts, log dumps, generated code) are
+**not** posted to chat — they're debugging detail that goes to the server log only.
+The *full* trace (including those blocks) is written under the `bamboo.narration`
+logger; only the bounded progress log reaches chat.
 
 The spinner is an **animated custom emoji** (`:bamboo_spinner:`) the bot registers
 on startup, because custom emoji render on Mattermost's inline-text path and so
