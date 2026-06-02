@@ -20,6 +20,10 @@ from bamboo.frontends.mattermost.io import ThreadTransport
 
 logger = logging.getLogger(__name__)
 
+# Animated custom emoji used as the live-progress spinner (registered on startup;
+# see ``MattermostBot.ensure_spinner_emoji``).
+SPINNER_EMOJI_NAME = "bamboo_spinner"
+
 
 @dataclass
 class Command:
@@ -160,6 +164,9 @@ class MattermostBot:
         self._tasks: dict[str, asyncio.Task] = {}
         self.bot_user_id: Optional[str] = None
         self.bot_username: Optional[str] = None
+        # Name of the animated spinner custom emoji once registered, else None
+        # (the narration sink uses it; falls back to a static glyph when unset).
+        self.spinner_emoji: Optional[str] = None
         self._started_at: Optional[float] = None
 
     async def create_post(
@@ -203,11 +210,93 @@ class MattermostBot:
         return await self.driver.posts.delete_post(post_id)
 
     async def upload_file(self, channel_id: str, filename: str, data: bytes) -> str:
-        """Upload *data* as *filename* to *channel_id*; return the new file id."""
+        """Upload *data* as *filename* to *channel_id*; return the new file id.
+
+        ``files`` is a single ``(filename, bytes, content_type)`` tuple — the driver
+        wraps it as ``{"files": files}`` itself, so we must NOT nest it again.
+        """
         resp = await self.driver.files.upload_file(
-            files={"files": (filename, data)}, channel_id=channel_id
+            files=(filename, data, "image/gif"), channel_id=channel_id
         )
         return resp["file_infos"][0]["id"]
+
+    async def ensure_spinner_emoji(self) -> None:
+        """Register the animated spinner as a custom emoji (best-effort, once).
+
+        Custom emoji render on Mattermost's inline text path (unlike file
+        attachments), so an animated-GIF custom emoji spins client-side without a
+        timer.  The registration is **self-healing**: if an emoji with our name
+        already exists but its stored image differs from the bundled gif (e.g. a
+        stale one left over from an older build), we delete and recreate it so an
+        updated asset always propagates.  On any failure (custom emoji disabled /
+        no permission) we leave ``spinner_emoji`` unset and the narration sink
+        degrades to a static glyph.
+        """
+        narration_log = logging.getLogger("bamboo.narration")
+        import importlib.resources as ir  # noqa: PLC0415
+
+        try:
+            data = (
+                ir.files("bamboo.frontends.mattermost")
+                .joinpath("assets/spinner.gif")
+                .read_bytes()
+            )
+        except Exception as exc:  # noqa: BLE001
+            narration_log.warning("narration: spinner asset unreadable (%s); using a static glyph", exc)
+            return
+
+        # Look up an existing emoji; if its image is stale, delete it so we recreate.
+        try:
+            existing = await self.driver.emoji.get_emoji_by_name(SPINNER_EMOJI_NAME)
+        except Exception:  # noqa: BLE001 — not found is the common, expected case
+            existing = None
+        if isinstance(existing, dict) and existing.get("id"):
+            if await self._spinner_emoji_matches(existing["id"], data):
+                self.spinner_emoji = SPINNER_EMOJI_NAME
+                narration_log.info("narration: spinner emoji present (:%s:)", SPINNER_EMOJI_NAME)
+                return
+            try:
+                await self.driver.emoji.delete_emoji(existing["id"])
+                narration_log.info("narration: spinner emoji refreshed (stale image replaced)")
+            except Exception as exc:  # noqa: BLE001 — can't delete → reuse what's there
+                self.spinner_emoji = SPINNER_EMOJI_NAME
+                narration_log.warning(
+                    "narration: stale spinner emoji could not be replaced (%s); using it as-is", exc
+                )
+                return
+
+        try:
+            await self.driver.emoji.create_emoji(
+                image=("spinner.gif", data, "image/gif"),
+                emoji=json.dumps({"name": SPINNER_EMOJI_NAME, "creator_id": self.bot_user_id}),
+            )
+            self.spinner_emoji = SPINNER_EMOJI_NAME
+            narration_log.info("narration: spinner emoji created (:%s:)", SPINNER_EMOJI_NAME)
+        except Exception as exc:  # noqa: BLE001
+            # A concurrent create may have won the race — one recovery lookup.
+            try:
+                recovered = await self.driver.emoji.get_emoji_by_name(SPINNER_EMOJI_NAME)
+                if isinstance(recovered, dict) and recovered.get("id"):
+                    self.spinner_emoji = SPINNER_EMOJI_NAME
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            narration_log.warning(
+                "narration: spinner emoji unavailable (%s); progress will use a static glyph", exc
+            )
+
+    async def _spinner_emoji_matches(self, emoji_id: str, data: bytes) -> bool:
+        """True if the stored emoji image equals the bundled gif (best-effort).
+
+        On any error fetching/reading the image we return True (reuse), so a
+        transient read failure never causes us to delete a working emoji.
+        """
+        try:
+            resp = await self.driver.emoji.get_emoji_image(emoji_id)
+            stored = getattr(resp, "content", resp)
+            return isinstance(stored, (bytes, bytearray)) and bytes(stored) == data
+        except Exception:  # noqa: BLE001
+            return True
 
     async def run_in_dm(self, user_id: str, run: Any) -> Any:
         """Run *run(io)* against a temporary IO bound to *user_id*'s DM channel.
@@ -254,6 +343,7 @@ class MattermostBot:
         self.bot_username = me.get("username") if isinstance(me, dict) else None
         self._started_at = time.monotonic()
         logger.info("Mattermost bot connected as user %s", self.bot_user_id)
+        await self.ensure_spinner_emoji()
         await self.driver.init_websocket(self.handle_event)
 
     async def status_snapshot(self) -> BotStatus:

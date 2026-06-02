@@ -386,7 +386,7 @@ class PandaSourceNavigator:
             question=question,
             sources=json.dumps(accumulated, indent=2),
         )
-        with thinking("Synthesizing answer"):
+        with thinking("Synthesizing source description"):
             response = await self.llm.ainvoke([
                 SystemMessage(content="You are analyzing panda-server Python source code."),
                 HumanMessage(content=prompt),

@@ -63,7 +63,8 @@ def test_narrator_silent_without_sink_or_console():
 
 
 class _FakeBot:
-    def __init__(self):
+    def __init__(self, spinner_emoji="bamboo_spinner"):
+        self.spinner_emoji = spinner_emoji
         self.uploaded = []
         self.created = []
         self.patched = []
@@ -93,27 +94,49 @@ def _sink(bot):
 
 
 @pytest.mark.asyncio
-async def test_sink_creates_status_with_gif_then_patches_on_step(caplog):
+async def test_sink_creates_one_post_with_emoji_then_patches_on_update(caplog):
     bot = _FakeBot()
     sink = _sink(bot)
 
     with caplog.at_level(logging.INFO, logger="bamboo.narration"):
         sink.step("[nav] analysing")
+        sink.say("looking at logs")
         await sink._flush_once()
-        # First status flush: gif uploaded + status post created with it.
-        assert bot.uploaded == [("chan-1", "spinner.gif", 704)] or bot.uploaded[0][1] == "spinner.gif"
-        status = bot.created[0]
-        assert status["file_ids"] == ["gif-1"]
-        assert "analysing" in status["message"] and status["message"].startswith("🔎")
+        # First flush: ONE post created (no file upload — the spinner is a custom
+        # emoji in the text, not an attachment), head + detail.
+        assert bot.uploaded == []
+        assert len(bot.created) == 1
+        post = bot.created[0]
+        assert post["file_ids"] is None
+        assert post["message"].startswith(":bamboo_spinner: 🔎") and "analysing" in post["message"]
+        assert "→ looking at logs" in post["message"]
 
-        # A later step edits the same status post (no new post, gif stays).
+        # A later update edits the same post (no new post).
         sink.step("[nav] root cause")
         await sink._flush_once()
+        assert len(bot.created) == 1  # still just the one post
         assert bot.patched and "root cause" in bot.patched[-1]["message"]
-        assert len([c for c in bot.created if c["id"] == "post-1"]) == 1
+        assert bot.patched[-1]["id"] == "post-1"
 
     # Every event was logged for dev debugging.
     assert any("analysing" in r.message for r in caplog.records)
+    # Operational diagnostics land on the SAME `bamboo.narration` logger (so they
+    # show alongside the firehose and aren't filtered out by a `bamboo.narration`
+    # grep that misses the module logger name).
+    msgs = [r.getMessage() for r in caplog.records if r.name == "bamboo.narration"]
+    assert any(m.startswith("narration: created post id=") for m in msgs)
+    # The noisy per-flush heartbeat is gone.
+    assert not any(m.startswith("narration: flush ") for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_sink_falls_back_to_glyph_without_emoji():
+    bot = _FakeBot(spinner_emoji=None)
+    sink = _sink(bot)
+    sink.step("[nav] analysing")
+    await sink._flush_once()
+    head = bot.created[0]["message"]
+    assert head.startswith("🔎 ") and ":bamboo_spinner:" not in head
 
 
 @pytest.mark.asyncio
@@ -135,7 +158,7 @@ async def test_sink_detail_capped_and_logged(caplog):
 
 
 @pytest.mark.asyncio
-async def test_sink_finalize_freezes_status_and_drops_gif():
+async def test_sink_finalize_freezes_post_to_done():
     bot = _FakeBot()
     sink = _sink(bot)
     sink.step("[nav] analysing")
@@ -144,8 +167,9 @@ async def test_sink_finalize_freezes_status_and_drops_gif():
 
     last = bot.patched[-1]
     assert last["id"] == "post-1"
+    # Frozen to a static completion line; the spinner emoji is gone from the head.
     assert last["message"].startswith("✓ done")
-    assert last["file_ids"] == []  # gif removed
+    assert ":bamboo_spinner:" not in last["message"]
 
 
 @pytest.mark.asyncio

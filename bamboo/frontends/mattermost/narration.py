@@ -4,13 +4,15 @@ The reasoning/analysis engines report progress through
 :mod:`bamboo.utils.narrator` (``say`` / ``show_block`` / ``thinking``).  In the
 CLI that goes to a Rich console; in the bot we install a
 :class:`MattermostNarrationSink` (per session, via the narrator's ``ContextVar``)
-that turns those events into two live-updating thread posts:
+that turns those events into a **single** live-updating thread post:
 
-* a **status** post carrying an animated spinner GIF (uploaded once) plus the
-  current step — the GIF animates client-side, so we only edit the text when the
-  step changes; on completion it's frozen to a static "✓ done";
-* a **detail** post showing only the last *N* narration lines (Mattermost folds it
-  with "Show more" when tall).
+* a head line carrying the current step (``:bamboo_spinner: 🔎 <step>``) — the
+  ``:bamboo_spinner:`` animated custom emoji (registered once at bot startup) spins
+  client-side on MM's inline text path, so we only edit the text when the step
+  changes; on completion the head is frozen to a static "✓ done". If the emoji
+  isn't available the head degrades to a plain ``🔎 <step>``;
+* below the head, a fenced code block of the last *N* narration lines (Mattermost
+  folds it under "Show more" when tall).
 
 The *full* firehose is always logged to ``bamboo.narration`` (stdout/log file)
 for later debugging — only a bounded view reaches chat.
@@ -29,7 +31,9 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
+# All narration logging (firehose + operational diagnostics) goes to one logger so
+# it shows together in the bot's output (the module logger name differs and is
+# easy to filter out by accident).
 _narration_log = logging.getLogger("bamboo.narration")
 
 _DETAIL_LINES = 5  # most-recent narration lines kept in the MM detail post
@@ -43,7 +47,7 @@ def _clip(text: str, limit: int = _LINE_CLIP) -> str:
 
 
 class MattermostNarrationSink:
-    """Thread-safe narrator sink that mirrors progress into two MM posts.
+    """Thread-safe narrator sink that mirrors progress into a single MM post.
 
     Sink methods may be called from worker threads (``asyncio.to_thread``); they
     only mutate guarded state + wake the flusher via ``call_soon_threadsafe``, so
@@ -59,12 +63,12 @@ class MattermostNarrationSink:
         self._wake = asyncio.Event()
         self._latest_step: str = "working…"
         self._detail: deque[str] = deque(maxlen=_DETAIL_LINES)
-        self._status_dirty = False
-        self._detail_dirty = False
-        # Post ids + uploaded gif id, set lazily by the flusher; read by finalize().
-        self._status_id: Optional[str] = None
-        self._detail_id: Optional[str] = None
-        self._gif_id: Optional[str] = None
+        self._dirty = False
+        # Animated spinner custom-emoji name if the bot registered one, else None
+        # (renders on MM's inline text path; falls back to a static glyph).
+        self._spinner: Optional[str] = getattr(bot, "spinner_emoji", None)
+        # Post id, set lazily by the flusher; read by finalize().
+        self._post_id: Optional[str] = None
         self._started_at: float = 0.0
 
     # --- NarrationSink (called from engine code, possibly off-loop) ---
@@ -72,7 +76,7 @@ class MattermostNarrationSink:
         _narration_log.info("→ %s", msg)
         with self._lock:
             self._detail.append(f"→ {_clip(msg)}")
-            self._detail_dirty = True
+            self._dirty = True
         self._signal()
 
     def block(self, title: str, content: str) -> None:
@@ -81,14 +85,14 @@ class MattermostNarrationSink:
         head = first[0] if first else ""
         with self._lock:
             self._detail.append(f"▎{_clip(title, 80)}: {_clip(head)}")
-            self._detail_dirty = True
+            self._dirty = True
         self._signal()
 
     def step(self, label: str) -> None:
         _narration_log.info("%s", label)
         with self._lock:
             self._latest_step = _clip(label, 160)
-            self._status_dirty = True
+            self._dirty = True
         self._signal()
 
     def _signal(self) -> None:
@@ -100,9 +104,10 @@ class MattermostNarrationSink:
 
     # --- driven by stream_narration ---
     async def run(self, started_at: float) -> None:
-        """Flusher loop: coalesce events into throttled status/detail edits."""
+        """Flusher loop: coalesce events into throttled edits to the one post."""
         self._started_at = started_at
         last_flush = 0.0
+        _narration_log.info("narration: flusher started")
         while True:
             await self._wake.wait()
             self._wake.clear()
@@ -113,79 +118,67 @@ class MattermostNarrationSink:
             await self._flush_once()
             last_flush = time.monotonic()
 
+    def _compose(self, step: str, detail_lines: list[str], *, done: bool = False, elapsed: int = 0) -> str:
+        """Build the single post body: a head line + a folded code block of detail."""
+        if done:
+            head = f"✓ done ({elapsed}s)"
+        elif self._spinner:
+            # Animated custom emoji — renders + spins on MM's inline text path.
+            head = f":{self._spinner}: 🔎 {step}"
+        else:
+            head = f"🔎 {step}"
+        if not detail_lines:
+            return head
+        return head + "\n```\n" + "\n".join(detail_lines) + "\n```"
+
     async def _flush_once(self) -> None:
-        """Push the current status/detail snapshot to MM (create on first use)."""
+        """Push the current snapshot to MM as one post (create on first use)."""
         with self._lock:
             step = self._latest_step
             detail_lines = list(self._detail)
-            status_dirty, self._status_dirty = self._status_dirty, False
-            detail_dirty, self._detail_dirty = self._detail_dirty, False
-        if status_dirty:
-            if self._status_id is None:
-                self._gif_id = await self._upload_spinner()
-                self._status_id = await self._create(
-                    f"🔎 {step}", file_ids=[self._gif_id] if self._gif_id else None
-                )
-            else:
-                await self._patch(self._status_id, message=f"🔎 {step}")
-        if detail_dirty and detail_lines:
-            body = "```\n" + "\n".join(detail_lines) + "\n```"
-            if self._detail_id is None:
-                self._detail_id = await self._create(body)
-            else:
-                await self._patch(self._detail_id, message=body)
+            dirty, self._dirty = self._dirty, False
+        if not dirty:
+            return
+        msg = self._compose(step, detail_lines)
+        if self._post_id is None:
+            self._post_id = await self._create(msg)
+        else:
+            await self._patch(self._post_id, message=msg)
 
     async def finalize(self) -> None:
-        """Freeze the status to a static '✓ done' and drop the spinner GIF."""
+        """Freeze the post to a static '✓ done' (drops the spinner emoji)."""
         with self._lock:
+            step = self._latest_step
             detail_lines = list(self._detail)
-        if self._status_id is None and not detail_lines:
+        if self._post_id is None and not detail_lines:
             return  # nothing was ever streamed
         elapsed = max(0, int(time.monotonic() - (self._started_at or time.monotonic())))
-        if self._status_id is not None:
-            # Remove the GIF (best-effort) and show a static completion line.
-            ok = await self._patch(
-                self._status_id, message=f"✓ done ({elapsed}s)", file_ids=[]
-            )
-            if not ok and self._gif_id is not None:
-                # Fallback: delete the spinner post; the result card stands alone.
-                with contextlib.suppress(Exception):
-                    await self._bot.delete_post(self._status_id)
-        if self._detail_id is not None and detail_lines:
-            body = "```\n" + "\n".join(detail_lines) + "\n```"
-            await self._patch(self._detail_id, message=body)
+        msg = self._compose(step, detail_lines, done=True, elapsed=elapsed)
+        if self._post_id is None:
+            # Streaming produced detail but never flushed a post; create it now.
+            self._post_id = await self._create(msg)
+            return
+        await self._patch(self._post_id, message=msg)
 
     # --- MM I/O helpers (best-effort) ---
-    async def _upload_spinner(self) -> Optional[str]:
-        try:
-            import importlib.resources as ir  # noqa: PLC0415
-
-            data = (
-                ir.files("bamboo.frontends.mattermost")
-                .joinpath("assets/spinner.gif")
-                .read_bytes()
-            )
-            return await self._bot.upload_file(self._channel_id, "spinner.gif", data)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("narration: spinner upload failed (%s); status will be text-only", exc)
-            return None
-
-    async def _create(self, message: str, *, file_ids: Optional[list[str]] = None) -> Optional[str]:
+    async def _create(self, message: str) -> Optional[str]:
         try:
             post = await self._bot.create_post(
-                self._channel_id, message, root_id=self._root_id, file_ids=file_ids
+                self._channel_id, message, root_id=self._root_id
             )
-            return post.get("id") if isinstance(post, dict) else None
+            pid = post.get("id") if isinstance(post, dict) else None
+            _narration_log.info("narration: created post id=%s", pid)
+            return pid
         except Exception as exc:  # noqa: BLE001
-            logger.warning("narration: create_post failed (%s)", exc)
+            _narration_log.warning("narration: create_post failed (%s)", exc)
             return None
 
-    async def _patch(self, post_id: str, *, message: str, file_ids: Optional[list[str]] = None) -> bool:
+    async def _patch(self, post_id: str, *, message: str) -> bool:
         try:
-            await self._bot.update_post(post_id, message=message, file_ids=file_ids)
+            await self._bot.update_post(post_id, message=message)
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.warning("narration: update_post failed (%s)", exc)
+            _narration_log.warning("narration: update_post failed (%s)", exc)
             return False
 
 

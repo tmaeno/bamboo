@@ -17,6 +17,7 @@ import pytest
 
 from bamboo.agents.investigation_session import InvestigationOrchestrator, _Deps
 from bamboo.frontends.mattermost.bot import (
+    SPINNER_EMOJI_NAME,
     Command,
     MattermostBot,
     _is_addressed,
@@ -88,12 +89,46 @@ class _Files:
         return {"file_infos": [{"id": "file-1"}]}
 
 
+class _EmojiImageResp:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+
+class _Emoji:
+    def __init__(self, *, existing=False, stored_image=b"", create_raises=False) -> None:
+        self._existing = existing  # emoji already present on the server
+        self._stored_image = stored_image  # bytes the existing emoji holds
+        self._create_raises = create_raises
+        self.created: list[dict] = []
+        self.deleted: list[str] = []
+
+    async def get_emoji_by_name(self, name):
+        if self._existing:
+            return {"id": "emoji-1", "name": name}
+        raise RuntimeError("not found")  # MM returns 404 for a missing emoji
+
+    async def get_emoji_image(self, emoji_id):
+        return _EmojiImageResp(self._stored_image)
+
+    async def delete_emoji(self, emoji_id):
+        self.deleted.append(emoji_id)
+        self._existing = False
+
+    async def create_emoji(self, image=None, emoji=None):
+        if self._create_raises:
+            raise RuntimeError("custom emoji disabled")
+        self.created.append({"image": image, "emoji": emoji})
+        self._existing = True
+        return {"id": "emoji-1"}
+
+
 class FakeDriver:
-    def __init__(self) -> None:
+    def __init__(self, *, emoji=None) -> None:
         self.posts = _Posts()
         self.users = _Users()
         self.channels = _Channels()
         self.files = _Files()
+        self.emoji = emoji or _Emoji()
         self.logged_in = False
 
     async def login(self):
@@ -352,10 +387,77 @@ async def test_update_upload_delete_post_call_driver():
 
     fid = await bot.upload_file("chan-1", "spinner.gif", b"GIF89a...")
     assert fid == "file-1"
-    assert bot.driver.files.uploaded[-1]["channel_id"] == "chan-1"
+    up = bot.driver.files.uploaded[-1]
+    assert up["channel_id"] == "chan-1"
+    # `files` must be a flat (filename, bytes, content_type) tuple — NOT nested in a
+    # dict (the driver wraps it as {"files": files}; double-wrapping breaks the upload).
+    assert isinstance(up["files"], tuple) and up["files"][0] == "spinner.gif"
+    assert up["files"][1] == b"GIF89a..."
 
     await bot.delete_post("p1")
     assert bot.driver.posts.deleted == ["p1"]
+
+
+def _bundled_spinner_bytes() -> bytes:
+    import importlib.resources as ir
+
+    return ir.files("bamboo.frontends.mattermost").joinpath("assets/spinner.gif").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_ensure_spinner_emoji_creates_when_missing():
+    driver = FakeDriver(emoji=_Emoji(existing=False))
+    bot = MattermostBot(driver, allowed_channels={"chan-ok"}, run_session=lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    await bot.ensure_spinner_emoji()
+
+    assert bot.spinner_emoji == SPINNER_EMOJI_NAME
+    assert len(driver.emoji.created) == 1
+    created = driver.emoji.created[0]
+    # multipart: image as a flat tuple, emoji as a JSON string with name + creator.
+    assert isinstance(created["image"], tuple) and created["image"][0] == "spinner.gif"
+    meta = json.loads(created["emoji"])
+    assert meta == {"name": SPINNER_EMOJI_NAME, "creator_id": "bot-user"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_spinner_emoji_reuses_when_image_matches():
+    # Existing emoji whose stored image equals the bundled gif → reuse, no churn.
+    driver = FakeDriver(emoji=_Emoji(existing=True, stored_image=_bundled_spinner_bytes()))
+    bot = MattermostBot(driver, allowed_channels={"chan-ok"}, run_session=lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    await bot.ensure_spinner_emoji()
+
+    assert bot.spinner_emoji == SPINNER_EMOJI_NAME
+    assert driver.emoji.created == []  # matching image → no create
+    assert driver.emoji.deleted == []  # ...and no delete
+
+
+@pytest.mark.asyncio
+async def test_ensure_spinner_emoji_refreshes_when_image_stale():
+    # Existing emoji with a different (stale) image → delete + recreate.
+    driver = FakeDriver(emoji=_Emoji(existing=True, stored_image=b"OLD-16px-gif"))
+    bot = MattermostBot(driver, allowed_channels={"chan-ok"}, run_session=lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    await bot.ensure_spinner_emoji()
+
+    assert bot.spinner_emoji == SPINNER_EMOJI_NAME
+    assert driver.emoji.deleted == ["emoji-1"]  # stale one removed
+    assert len(driver.emoji.created) == 1  # ...and recreated from the bundled gif
+
+
+@pytest.mark.asyncio
+async def test_ensure_spinner_emoji_degrades_on_error():
+    driver = FakeDriver(emoji=_Emoji(existing=False, create_raises=True))
+    bot = MattermostBot(driver, allowed_channels={"chan-ok"}, run_session=lambda *a: None)
+    bot.bot_user_id = "bot-user"
+
+    await bot.ensure_spinner_emoji()  # must not raise
+
+    assert bot.spinner_emoji is None  # graceful degrade → narration uses a glyph
 
 
 @pytest.mark.asyncio

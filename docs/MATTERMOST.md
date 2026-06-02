@@ -197,11 +197,18 @@ plus any novel symptoms / capability gaps) back into the thread. It is read-only
 — it queries the knowledge base and PanDA but writes nothing.
 
 **Live progress.** While `investigate`/`capture`/`analyze` run, the bot streams
-progress into the thread: a **status message with an animated spinner** showing the
-current step (frozen to "✓ done" at the end) and a **detail message with the last
-few narration lines** (Mattermost folds it under "Show more" when long). The *full*
-trace is written to the server log under the `bamboo.narration` logger for
-debugging — only the bounded view goes to chat.
+progress into the thread as a **single live-updating reply**: a head line with an
+animated spinner showing the current step (frozen to "✓ done" at the end), and
+below it the last few narration lines in a code block (Mattermost folds it under
+"Show more" when long). The *full* trace is written to the server log under the
+`bamboo.narration` logger for debugging — only the bounded view goes to chat.
+
+The spinner is an **animated custom emoji** (`:bamboo_spinner:`) the bot registers
+on startup, because custom emoji render on Mattermost's inline-text path and so
+animate reliably (unlike a file-attached GIF, whose inline animation depends on the
+client/server preview settings). If the instance disables custom emoji or the bot
+lacks permission to create them, the head degrades to a static `🔎` and the status
+text still updates live.
 
 ### Batch/automation analysis posting
 
@@ -256,6 +263,19 @@ confirmation in the thread.
   framework builds). Run `bamboo verify`: it sets `SSL_CERT_FILE` to the bundled
   `certifi` roots in your `.env`, then restart the bot. Note `PANDA_VERIFY_HOST`
   does **not** affect login — it only applies to PanDA data-plane calls.
+- **Live-progress spinner doesn't animate** — the bot registers an animated custom
+  emoji (`:bamboo_spinner:`) on startup; if your instance disables custom emoji or
+  the bot lacks the "Create Custom Emoji" permission, the head shows a static `🔎`
+  instead (the step text and detail still update). Enable custom emoji / grant the
+  bot the permission, then restart the bot. The startup log line under
+  `bamboo.narration` reports whether the emoji was created/found/refreshed or is
+  unavailable.
+- **Spinner shows a tiny/old image** — the registered emoji is stale. The bot
+  self-heals on startup: it compares the stored emoji image to the bundled
+  `spinner.gif` and recreates it on mismatch (log: `spinner emoji refreshed`). If you
+  changed the bundled gif, just reinstall (`pip install -U .`) and restart — the new
+  image is packaged (the build uses **hatchling**, which always ships current files)
+  and the emoji refreshes itself on the next start.
 - **Commit diff shows raw `mermaid` code** — the Mattermost instance doesn't have
   Mermaid rendering enabled; the diagram still reads as a code block. Enable
   Mermaid on the instance, or rely on the textual summary line.

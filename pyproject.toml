@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "bamboo"
@@ -76,13 +76,15 @@ bamboo = "bamboo.cli:cli"
 [project.urls]
 Homepage = "https://github.com/yourusername/bamboo"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["bamboo*"]
-
-[tool.setuptools.package-data]
-"bamboo" = ["data/.env.example", "data/completions/_bamboo", "data/completions/_bamboo.bash"]
-"bamboo.frontends.mattermost" = ["assets/spinner.gif"]
+[tool.hatch.build.targets.wheel]
+# Hatchling ships every file under bamboo/ (not just .py), so most data files —
+# e.g. frontends/mattermost/assets/spinner.gif — are included by default.
+packages = ["bamboo"]
+# The repo-wide `.gitignore` rule `data/` also matches bamboo/data/, and hatchling
+# honors .gitignore patterns (not git tracked-status), so it would drop the whole
+# bamboo/data/ package (including its __init__.py → bamboo.data wouldn't import).
+# `artifacts` force-includes those files regardless of the ignore rule.
+artifacts = ["bamboo/data/**"]
 
 [tool.black]
 line-length = 88
