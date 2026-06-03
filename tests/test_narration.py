@@ -1,4 +1,4 @@
-"""Unit tests for narrator→sink forwarding and the Mattermost narration sink."""
+"""Tests for narrator→logging emission and the Mattermost narration handler."""
 
 from __future__ import annotations
 
@@ -7,204 +7,278 @@ import logging
 
 import pytest
 
-import re
-
-from bamboo.frontends.mattermost.narration import (
-    MattermostNarrationSink,
-    _DETAIL_ENTRIES,
-)
+from bamboo.frontends.mattermost import narration as narr
+from bamboo.frontends.mattermost.narration import _LivePost, _DETAIL_ENTRIES
 from bamboo.utils import narrator
 
 
 # ---------------------------------------------------------------------------
-# narrator → sink forwarding
+# narrator → bamboo.narration logging emission
 # ---------------------------------------------------------------------------
 
 
-class _RecordingSink:
-    def __init__(self):
-        self.says, self.blocks, self.steps = [], [], []
+class _Capture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
 
-    def say(self, msg):
-        self.says.append(msg)
-
-    def block(self, title, content):
-        self.blocks.append((title, content))
-
-    def step(self, label):
-        self.steps.append(label)
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
-def test_narrator_forwards_to_sink():
-    sink = _RecordingSink()
-    token = narrator.set_narration_sink(sink)
+@pytest.fixture
+def cap():
+    lg = logging.getLogger("bamboo.narration")
+    h = _Capture()
+    lg.addHandler(h)
+    old_level, old_prop = lg.level, lg.propagate
+    lg.setLevel(logging.DEBUG)
     try:
-        narrator.say("hello")  # forwarded regardless of verbose flag
-        narrator.show_block("Title", "line1\nline2")
-        with narrator.thinking("doing work"):
-            pass
+        yield h
     finally:
-        narrator.reset_narration_sink(token)
-
-    assert sink.says == ["hello"]
-    assert sink.blocks == [("Title", "line1\nline2")]
-    assert len(sink.steps) == 1 and "doing work" in sink.steps[0]
+        lg.removeHandler(h)
+        lg.setLevel(old_level)
+        lg.propagate = old_prop
 
 
-def test_narrator_silent_without_sink_or_console():
-    # No sink, no console → all no-ops, no exceptions.
-    narrator.say("nobody hears this")
-    narrator.show_block("t", "c")
-    with narrator.thinking("x"):
+def _kind(rec):
+    return getattr(rec, "narration_kind", "line")
+
+
+def test_say_emits_info_line(cap):
+    narrator.say("hello")
+    assert len(cap.records) == 1
+    r = cap.records[0]
+    assert r.levelno == logging.INFO and r.getMessage() == "hello" and _kind(r) == "line"
+
+
+def test_say_debug_is_detail(cap):
+    narrator.say("verbose detail", level=logging.DEBUG)
+    assert cap.records[-1].levelno == logging.DEBUG
+
+
+def test_warn_and_error_levels(cap):
+    narrator.warn("careful")
+    narrator.error("boom")
+    assert cap.records[-2].levelno == logging.WARNING and cap.records[-2].getMessage() == "careful"
+    assert cap.records[-1].levelno == logging.ERROR and cap.records[-1].getMessage() == "boom"
+
+
+def test_thinking_emits_step_record(cap):
+    with narrator.thinking("doing work"):
         pass
+    steps = [r for r in cap.records if _kind(r) == "step"]
+    assert steps and "doing work" in steps[0].getMessage()
+
+
+def test_show_block_is_block_kind(cap):
+    narrator.show_block("Title", "line1\nline2")
+    blocks = [r for r in cap.records if _kind(r) == "block"]
+    assert blocks and "Title" in blocks[0].getMessage() and "line1" in blocks[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
-# MattermostNarrationSink
+# _LivePost (fed by the handler)
 # ---------------------------------------------------------------------------
 
 
 class _FakeBot:
     def __init__(self, spinner_emoji="bamboo_spinner"):
         self.spinner_emoji = spinner_emoji
-        self.uploaded = []
-        self.created = []
-        self.patched = []
-        self.deleted = []
+        self.created, self.patched, self.deleted = [], [], []
         self._n = 0
-
-    async def upload_file(self, channel_id, filename, data):
-        self.uploaded.append((channel_id, filename, len(data)))
-        return "gif-1"
 
     async def create_post(self, channel_id, message, *, root_id="", props=None, file_ids=None):
         self._n += 1
         pid = f"post-{self._n}"
-        self.created.append(
-            {"id": pid, "channel_id": channel_id, "message": message, "props": props, "file_ids": file_ids}
-        )
+        self.created.append({"id": pid, "message": message})
         return {"id": pid}
 
     async def update_post(self, post_id, *, message=None, file_ids=None, props=None):
-        self.patched.append({"id": post_id, "message": message, "props": props, "file_ids": file_ids})
+        self.patched.append({"id": post_id, "message": message})
         return {"id": post_id}
 
     async def delete_post(self, post_id):
         self.deleted.append(post_id)
 
 
-def _sink(bot):
-    return MattermostNarrationSink(bot, "chan-1", "root-1", asyncio.get_event_loop())
+def _live(bot, threshold=logging.INFO):
+    return _LivePost(bot, "chan-1", "root-1", asyncio.get_event_loop(), threshold)
 
 
-_TS = re.compile(r"\d\d:\d\d:\d\d")  # HH:MM:SS console timestamp prefix
+def _rec(msg, level=logging.INFO, kind=None):
+    r = logging.LogRecord("bamboo.narration", level, __file__, 0, "%s", (msg,), None)
+    if kind is not None:
+        r.narration_kind = kind
+    return r
 
 
 @pytest.mark.asyncio
-async def test_sink_console_log_post_then_patches(caplog):
+async def test_livepost_step_head_and_body_lines():
     bot = _FakeBot()
-    sink = _sink(bot)
+    post = _live(bot)
+    post.feed(_rec("[nav] analysing", kind="step"))
+    post.feed(_rec("looking at logs"))
+    await post._flush_once()
 
-    with caplog.at_level(logging.INFO, logger="bamboo.narration"):
-        sink.step("[nav] analysing")
-        sink.say("looking at logs")
-        await sink._flush_once()
-        # First flush: ONE live post; head carries the spinner emoji + step, the
-        # say line is a timestamped entry inside a monospace code block.
-        assert bot.uploaded == [] and len(bot.created) == 1
-        msg = bot.created[0]["message"]
-        assert msg.startswith(":bamboo_spinner: 🔎") and "analysing" in msg
-        assert "```" in msg and "→ looking at logs" in msg
-        body = msg.split("```")[1]
-        assert _TS.search(body)  # the say line is timestamped
-
-        # A later update edits the SAME post (no new post; both lines present).
-        sink.say("found an error")
-        sink.step("[nav] root cause")
-        await sink._flush_once()
-        assert len(bot.created) == 1
-        last = bot.patched[-1]
-        assert last["id"] == "post-1" and "root cause" in last["message"]
-        assert "→ looking at logs" in last["message"] and "→ found an error" in last["message"]
-
-    # Firehose stays at INFO; the post-plumbing diagnostics are NOT at INFO anymore.
-    assert any("looking at logs" in r.message for r in caplog.records)
-    info_msgs = [r.getMessage() for r in caplog.records if r.name == "bamboo.narration"]
-    assert not any(m.startswith("narration: created post id=") for m in info_msgs)
-    assert not any(m.startswith("narration: flush ") for m in info_msgs)
+    assert len(bot.created) == 1
+    msg = bot.created[0]["message"]
+    assert msg.startswith(":bamboo_spinner: 🔎") and "analysing" in msg
+    assert "```" in msg and "→ looking at logs" in msg
 
 
 @pytest.mark.asyncio
-async def test_sink_diagnostics_at_debug(caplog):
+async def test_livepost_ignores_block_and_below_threshold():
     bot = _FakeBot()
-    sink = _sink(bot)
-    with caplog.at_level(logging.DEBUG, logger="bamboo.narration"):
-        sink.say("hello")
-        await sink._flush_once()
-    msgs = [r.getMessage() for r in caplog.records if r.name == "bamboo.narration"]
-    assert any(m.startswith("narration: created post id=") for m in msgs)  # available at DEBUG
+    post = _live(bot, threshold=logging.INFO)
+    post.feed(_rec("a prompt dump", kind="block"))   # block → never
+    post.feed(_rec("debug detail", level=logging.DEBUG))  # below threshold
+    await post._flush_once()
+    assert bot.created == []  # nothing dirty → no post
 
 
 @pytest.mark.asyncio
-async def test_sink_falls_back_to_glyph_without_emoji():
+async def test_livepost_highlights_warning():
+    bot = _FakeBot()
+    post = _live(bot)
+    post.feed(_rec("careful now", level=logging.WARNING))
+    await post._flush_once()
+    assert "⚠️ careful now" in bot.created[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_livepost_body_capped():
+    bot = _FakeBot()
+    post = _live(bot)
+    for i in range(_DETAIL_ENTRIES + 10):
+        post.feed(_rec(f"line {i}"))
+    await post._flush_once()
+    body = bot.created[-1]["message"]
+    assert body.count("→ line") == _DETAIL_ENTRIES
+    assert "→ line 9" not in body and f"→ line {_DETAIL_ENTRIES + 9}" in body
+
+
+@pytest.mark.asyncio
+async def test_livepost_falls_back_to_glyph_without_emoji():
     bot = _FakeBot(spinner_emoji=None)
-    sink = _sink(bot)
-    sink.step("[nav] analysing")
-    await sink._flush_once()
+    post = _live(bot)
+    post.feed(_rec("[nav] analysing", kind="step"))
+    await post._flush_once()
     head = bot.created[0]["message"]
     assert head.startswith("🔎 ") and ":bamboo_spinner:" not in head
 
 
 @pytest.mark.asyncio
-async def test_sink_log_window_capped_and_logged(caplog):
+async def test_livepost_finalize_success_deletes():
     bot = _FakeBot()
-    sink = _sink(bot)
-    with caplog.at_level(logging.INFO, logger="bamboo.narration"):
-        for i in range(_DETAIL_ENTRIES + 10):
-            sink.say(f"line {i}")
-        await sink._flush_once()
-
-    body = bot.created[-1]["message"]
-    # Only the last _DETAIL_ENTRIES survive in the live post...
-    assert "→ line 9" not in body  # evicted
-    assert f"→ line {_DETAIL_ENTRIES + 9}" in body
-    assert body.count("→ line") == _DETAIL_ENTRIES
-    # ...but the full firehose reached the log.
-    assert sum("line" in r.message for r in caplog.records) >= _DETAIL_ENTRIES + 10
+    post = _live(bot)
+    post.feed(_rec("[nav] analysing", kind="step"))
+    await post._flush_once()
+    await post.finalize(success=True)
+    assert bot.deleted == ["post-1"]
 
 
 @pytest.mark.asyncio
-async def test_sink_block_is_log_only_not_sent_to_mm(caplog):
+async def test_livepost_finalize_failure_keeps_static():
     bot = _FakeBot()
-    sink = _sink(bot)
-    with caplog.at_level(logging.INFO, logger="bamboo.narration"):
-        sink.block("LLM prompt: root cause", "PROMPT-" + "x" * 5000)  # big block
-        await sink._flush_once()
-
-    # Nothing posted to MM for a block (only say/step drive the live post).
-    assert bot.created == [] and bot.patched == []
-    # ...but the full block content reached the log.
-    assert any("PROMPT-" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_sink_finalize_freezes_post_to_done():
-    bot = _FakeBot()
-    sink = _sink(bot)
-    sink.step("[nav] analysing")
-    await sink._flush_once()
-    await sink.finalize()
-
+    post = _live(bot)
+    post.feed(_rec("[nav] analysing", kind="step"))
+    post.feed(_rec("looking at logs"))
+    await post._flush_once()
+    await post.finalize(success=False)
     last = bot.patched[-1]
-    assert last["id"] == "post-1"
-    # Frozen to a static completion line; the spinner emoji is gone from the head.
-    assert last["message"].startswith("✓ done")
-    assert ":bamboo_spinner:" not in last["message"]
+    assert bot.deleted == []
+    assert last["message"].startswith("🔎") and ":bamboo_spinner:" not in last["message"]
+    assert "→ looking at logs" in last["message"]
 
 
 @pytest.mark.asyncio
-async def test_sink_finalize_noop_when_nothing_streamed():
+async def test_livepost_finalize_noop_when_nothing_streamed():
     bot = _FakeBot()
-    sink = _sink(bot)
-    await sink.finalize()
-    assert bot.created == [] and bot.patched == [] and bot.uploaded == []
+    post = _live(bot)
+    await post.finalize(success=True)
+    assert bot.created == [] and bot.patched == [] and bot.deleted == []
+
+
+# ---------------------------------------------------------------------------
+# stream_narration end-to-end (narrator → global handler → live post)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTransport:
+    def __init__(self, bot):
+        self._bot = bot
+        self.channel_id = "chan-1"
+        self.root_id = "root-1"
+
+
+@pytest.mark.asyncio
+async def test_stream_narration_deletes_on_success():
+    bot = _FakeBot()
+    async with narr.stream_narration(_FakeTransport(bot)):
+        narrator.say("doing work")
+        await asyncio.sleep(0.1)  # let the flusher create the post
+    assert bot.created, "expected a progress post"
+    assert bot.deleted == [bot.created[-1]["id"]]
+
+
+@pytest.mark.asyncio
+async def test_stream_narration_keeps_on_failure():
+    bot = _FakeBot()
+    with pytest.raises(RuntimeError):
+        async with narr.stream_narration(_FakeTransport(bot)):
+            narrator.say("doing work")
+            await asyncio.sleep(0.1)
+            raise RuntimeError("boom")
+    assert bot.created and bot.deleted == []
+    assert bot.patched[-1]["message"].startswith("🔎")
+
+
+@pytest.mark.asyncio
+async def test_stream_narration_noop_without_bot():
+    class _Bare:
+        channel_id = None
+    async with narr.stream_narration(_Bare()):
+        narrator.say("nobody listening")  # no handler target → just logs
+    # nothing to assert beyond "no exception"
+
+
+# ---------------------------------------------------------------------------
+# set_narrator routes logging through the Rich Console (CLI spinner coordination)
+# ---------------------------------------------------------------------------
+
+
+def test_route_logging_through_console_swaps_handlers():
+    import io as _io
+    import logging as _logging
+    from rich.console import Console
+    from bamboo.utils.narrator import _ConsoleLogHandler, _route_logging_through_console
+
+    root = _logging.getLogger()
+    saved_handlers = list(root.handlers)
+    stray = _logging.StreamHandler()  # mimic setup_logging's plain stdout handler
+    root.addHandler(stray)
+    try:
+        console = Console(file=_io.StringIO(), force_terminal=False, width=200)
+        _route_logging_through_console(console)
+        # The plain StreamHandler is gone; exactly one console handler is installed.
+        assert stray not in root.handlers
+        assert sum(isinstance(h, _ConsoleLogHandler) for h in root.handlers) == 1
+        # Idempotent: a second call doesn't add another.
+        _route_logging_through_console(console)
+        assert sum(isinstance(h, _ConsoleLogHandler) for h in root.handlers) == 1
+    finally:
+        root.handlers[:] = saved_handlers
+
+
+def test_console_log_handler_renders_through_console():
+    import io as _io
+    import logging as _logging
+    from rich.console import Console
+    from bamboo.utils.narrator import _ConsoleLogHandler
+
+    buf = _io.StringIO()
+    h = _ConsoleLogHandler(Console(file=buf, force_terminal=False, width=200))
+    rec = _logging.LogRecord("bamboo.demo", _logging.INFO, __file__, 0, "rendered-line", None, None)
+    h.emit(rec)
+    assert "rendered-line" in buf.getvalue()

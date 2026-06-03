@@ -198,12 +198,29 @@ plus any novel symptoms / capability gaps) back into the thread. It is read-only
 
 **Live progress.** While `investigate`/`capture`/`analyze` run, the bot streams
 progress into the thread as a **single live-updating reply**: a head line with an
-animated spinner showing the current step (frozen to "✓ done" at the end) and,
-below it, a **console-style monospace log** of the last few progress lines, each
-timestamped. Larger detail blocks (LLM prompts, log dumps, generated code) are
-**not** posted to chat — they're debugging detail that goes to the server log only.
-The *full* trace (including those blocks) is written under the `bamboo.narration`
-logger; only the bounded progress log reaches chat.
+animated spinner showing the current step and, below it, a **console-style
+monospace log** of the last few progress lines, each timestamped. Larger detail
+blocks (LLM prompts, log dumps, generated code) are **not** posted to chat —
+they're debugging detail that goes to the server log only. When the run finishes
+successfully the progress reply is **removed**, leaving just the command and the
+result (card / notices). If it fails, the reply is **kept** — frozen to a static
+`🔎 <last step>` with the last log lines as a trail. The *full* trace (including
+those blocks) is always written under the `bamboo.narration` logger.
+
+**One stream, two views.** Progress narration is a single logging stream
+(`bamboo.narration`): the server console and the Mattermost reply render the
+*same* records, so what MM shows is always a level-filtered subset of the console
+— never a divergent set. Two independent level knobs control the two views:
+
+| Setting | Default | Gates |
+|---------|---------|-------|
+| `LOG_LEVEL` | `INFO` | the server console / log file (all loggers) |
+| `NARRATION_LEVEL` | `INFO` | what narration reaches the Mattermost reply |
+
+So `NARRATION_LEVEL=DEBUG` surfaces verbose detail in chat too (still a subset of
+the console at `LOG_LEVEL=DEBUG`); raising it shows less. Operator-significant
+warnings/errors are narrated at WARNING/ERROR and appear highlighted (⚠️); ordinary
+module logs (`bamboo.agents.*`, db/MCP, …) stay on the console and never reach chat.
 
 The spinner is an **animated custom emoji** (`:bamboo_spinner:`) the bot registers
 on startup, because custom emoji render on Mattermost's inline-text path and so

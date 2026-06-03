@@ -22,10 +22,11 @@ without any global state.
 from __future__ import annotations
 
 import inspect
+import logging
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Callable, Generator, Protocol, runtime_checkable
+from typing import Callable, Generator
 
 from rich.console import Console
 from rich.panel import Panel
@@ -36,41 +37,54 @@ from rich.theme import Theme
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
 
+# Narration is emitted as records on this single logger — the one progress
+# stream.  Interactive frontends (e.g. the Mattermost bot) attach a logging
+# Handler to it; the console/file see the same records, so a frontend view is
+# always a subset of the console.  ``extra={"narration_kind": ...}`` tags a
+# record as a ``"step"`` (drives a frontend status head) or ``"block"`` (verbose
+# detail kept out of chat); untagged records are ordinary progress lines.
+_NARRATION_LOGGER = logging.getLogger("bamboo.narration")
 
-@runtime_checkable
-class NarrationSink(Protocol):
-    """A frontend-agnostic destination for narration events.
+_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-    Installed via :func:`set_narration_sink` so frontends other than the Rich
-    terminal (e.g. the Mattermost bot) can receive the same progress narration
-    the CLI shows.  Implementations should be cheap/non-blocking — heavy work
-    (network posts) belongs in a separate task.
+
+class _ConsoleLogHandler(logging.Handler):
+    """Render log records through a Rich ``Console`` instead of raw stdout.
+
+    Routing logging through the *same* Console as the ``thinking()`` spinner makes
+    Rich coordinate the two (it clears the live spinner region, prints the line,
+    then redraws), so log lines no longer corrupt an in-progress spinner.
     """
 
-    def say(self, msg: str) -> None: ...
+    def __init__(self, console: Console) -> None:
+        super().__init__()
+        self._console = console
+        self.setFormatter(logging.Formatter(_LOG_FORMAT))
 
-    def block(self, title: str, content: str) -> None: ...
-
-    def step(self, label: str) -> None: ...
-
-
-# Optional sink, task-scoped like the console. When set, say/show_block/thinking
-# forward to it (in addition to / instead of the Rich console).
-_sink: ContextVar["NarrationSink | None"] = ContextVar("narrator_sink", default=None)
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._console.print(self.format(record), markup=False, highlight=False)
+        except Exception:  # noqa: BLE001
+            self.handleError(record)
 
 
-def set_narration_sink(sink: "NarrationSink | None") -> Token:
-    """Install *sink* as the narration destination for the current task context.
+def _route_logging_through_console(console: Console) -> None:
+    """Make the root logger render through *console* (CLI), not raw stdout.
 
-    Returns the :class:`~contextvars.Token` so the caller can restore the
-    previous sink with ``reset_narration_sink(token)``.
+    Replaces the plain stdout/stderr ``StreamHandler``(s) installed by
+    ``setup_logging`` with a single :class:`_ConsoleLogHandler` so all logging
+    coordinates with the narrator's live spinner. Idempotent.
     """
-    return _sink.set(sink)
+    root = logging.getLogger()
+    if any(isinstance(h, _ConsoleLogHandler) for h in root.handlers):
+        return
+    for h in list(root.handlers):
+        # Drop the plain stream handlers (stdout/stderr); leave anything else
+        # (e.g. pytest's capture handler, file handlers) intact.
+        if type(h) is logging.StreamHandler:
+            root.removeHandler(h)
+    root.addHandler(_ConsoleLogHandler(console))
 
-
-def reset_narration_sink(token: Token) -> None:
-    """Restore the sink replaced by :func:`set_narration_sink`."""
-    _sink.reset(token)
 
 # Shared Progress instance for all concurrent thinking() callers.
 # _progress_lock is only held briefly (no await inside), so no deadlock risk.
@@ -98,38 +112,57 @@ def set_narrator(console: Console, verbose: bool = False) -> Token:
     custom_theme = Theme({"custom.number": "bold magenta", "custom.string": "bold green"})
     console.highlighter = CustomHighlighter()
     console.push_theme(custom_theme)
+    # The Rich console is now the renderer for narration on this (CLI) process,
+    # so keep the narration logger from *also* echoing to the root stdout handler
+    # (which would double every line). The bot never sets a console, so there the
+    # narration logger keeps propagating (→ server console) + its MM handler.
+    _NARRATION_LOGGER.propagate = False
+    # Route module logging through this Console too, so log lines coordinate with
+    # the live thinking() spinner instead of corrupting it (raw stdout doesn't).
+    _route_logging_through_console(console)
     return _console.set(console)
 
 
-def say(msg: str) -> None:
-    """Print *msg* to the narrator console (no-op when none is set or not verbose).
+def say(msg: str, *, level: int = logging.INFO) -> None:
+    """Emit a progress line on the narration logger; render on the CLI console.
 
-    Also forwarded to an installed :class:`NarrationSink` (independent of the
-    verbose flag) so non-terminal frontends can stream it.
+    The record flows to the console/file (via logging) and to any installed
+    frontend handler (e.g. Mattermost) that filters by level. ``level`` is a
+    stdlib logging level (``logging.INFO`` for a milestone, ``logging.DEBUG`` for
+    verbose detail). On a CLI with a Rich console it also pretty-prints when
+    verbose.
     """
-    sink = _sink.get()
-    if sink is not None:
-        sink.say(msg)
+    _NARRATION_LOGGER.log(level, "%s", msg)
     if _verbose.get():
         c = _console.get()
         if c is not None:
-            c.print(f"[dim cyan]  →[/dim cyan] {msg}")
+            prefix = "[yellow]  ⚠[/yellow]" if level >= logging.WARNING else "[dim cyan]  →[/dim cyan]"
+            c.print(f"{prefix} {msg}")
+
+
+def warn(msg: str) -> None:
+    """Narrate an operator-significant warning (WARNING level; surfaced + highlighted)."""
+    say(msg, level=logging.WARNING)
+
+
+def error(msg: str) -> None:
+    """Narrate an operator-significant error (ERROR level; surfaced + highlighted)."""
+    say(msg, level=logging.ERROR)
 
 
 def show_block(title: str, content: str, max_lines: int = 60) -> None:
-    """Print *content* inside a labelled panel (no-op when not verbose).
+    """Log *content* as a verbose detail block; render as a panel on the CLI.
 
-    Long content is truncated to *max_lines* lines with a note showing how
-    many lines were omitted, so the terminal is not flooded.
+    Logged at INFO tagged ``narration_kind="block"`` so it appears in the
+    console/file firehose but is **excluded** from chat frontends. Long content
+    is truncated to *max_lines* lines on the CLI panel.
 
     Args:
         title:     Panel border title, e.g. ``"brokerage_log (filtered)"``.
         content:   The text to display.
         max_lines: Maximum lines before truncation (default 60).
     """
-    sink = _sink.get()
-    if sink is not None:
-        sink.block(title, content)
+    _NARRATION_LOGGER.info("[%s]\n%s", title, content, extra={"narration_kind": "block"})
     if not _verbose.get():
         return
     c = _console.get()
@@ -168,9 +201,8 @@ def thinking(msg: str) -> Generator[None, None, None]:
     module = inspect.getmodule(caller[0])
     module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
 
-    sink = _sink.get()
-    if sink is not None:
-        sink.step(f"[{module_name}] {msg}")
+    # A "step" record → frontends use it as the status head; console sees it too.
+    _NARRATION_LOGGER.info("[%s] %s", module_name, msg, extra={"narration_kind": "step"})
 
     c = _console.get()
     if c is None:
@@ -223,21 +255,21 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
     module_name = module.__name__.rsplit(".", 1)[-1] if module else "?"
     done = 0
 
-    sink = _sink.get()
-    if sink is not None:
-        sink.step(f"[{module_name}] {msg} (0/{total})")
+    def _emit_step(n: int) -> None:
+        _NARRATION_LOGGER.info(
+            "[%s] %s (%d/%d)", module_name, msg, n, total, extra={"narration_kind": "step"}
+        )
+
+    _emit_step(0)
 
     c = _console.get()
     if c is None:
-        # Still drive the sink's step counter without a Rich progress bar.
-        if sink is not None:
-            def advance_sink() -> None:
-                nonlocal done
-                done += 1
-                sink.step(f"[{module_name}] {msg} ({done}/{total})")
-            yield advance_sink
-        else:
-            yield lambda: None
+        # No Rich progress bar, but still emit step records as work advances.
+        def advance_log() -> None:
+            nonlocal done
+            done += 1
+            _emit_step(done)
+        yield advance_log
         return
 
     def _desc(n: int) -> str:
@@ -258,8 +290,7 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
     def advance() -> None:
         nonlocal done
         done += 1
-        if sink is not None:
-            sink.step(f"[{module_name}] {msg} ({done}/{total})")
+        _emit_step(done)
         with _progress_lock:
             if _progress is not None:
                 _progress.update(task_id, description=_desc(done))

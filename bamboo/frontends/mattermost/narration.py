@@ -1,24 +1,25 @@
-"""Stream engine progress narration into a Mattermost thread.
+"""Render engine progress narration into a Mattermost thread.
 
-The reasoning/analysis engines report progress through
-:mod:`bamboo.utils.narrator` (``say`` / ``show_block`` / ``thinking``).  In the
-CLI that goes to a Rich console; in the bot we install a
-:class:`MattermostNarrationSink` (per session, via the narrator's ``ContextVar``)
-that mirrors progress into a **single live-updating post**:
+Narration is a single logging stream: :mod:`bamboo.utils.narrator`
+(``say`` / ``thinking`` / ``show_block`` / ``warn`` / ``error``) emits records on
+the ``bamboo.narration`` logger.  The bot attaches a :class:`MattermostLogHandler`
+to that logger; the server console sees the same records, so **what MM shows is a
+level-filtered subset of the console** (never divergent).
 
-* a head line carrying the current step (``:bamboo_spinner: 🔎 <step>``; the
-  animated custom emoji spins client-side on MM's inline text path, frozen to
-  ``✓ done`` at the end);
-* below it, a **monospace code block** of the last *N* ``say()`` lines, each
-  prefixed with a wall-clock timestamp — it reads like the bot's console log.
+Per session, :func:`stream_narration` installs a :class:`_LivePost` (the live
+post's state + a flusher task) and points a ContextVar at it; the global handler
+routes each record to whichever session is active in the emitting context.  A
+record's ``narration_kind`` decides its role:
 
-``show_block()`` content (LLM prompts, log dumps, code) is **not** sent to MM —
-it's debugging detail that goes only to the ``bamboo.narration`` log.  The full
-firehose (say / block / step) is always logged there for later inspection.
+* ``"step"`` → the post **head** (``:bamboo_spinner: 🔎 <step>``; the animated
+  emoji spins client-side; frozen / deleted at the end);
+* ``"block"`` → **ignored** (verbose detail stays in the server log only);
+* otherwise → a timestamped **body line** (last *N* kept), with WARNING/ERROR
+  highlighted.
 
-All Mattermost I/O happens in the per-session flusher task (coalesced/throttled);
-the sink methods (which may run on ``asyncio.to_thread`` workers) only mutate
-guarded state and wake the flusher.
+The handler only ever sees records logging already admitted (≥ ``LOG_LEVEL``), and
+further filters by ``NARRATION_LEVEL``.  ``emit`` is non-blocking — it just mutates
+guarded state and wakes the flusher, which does all Mattermost I/O.
 """
 
 from __future__ import annotations
@@ -29,17 +30,21 @@ import logging
 import threading
 import time
 from collections import deque
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Optional
 
-# All narration logging goes to one logger.  The say/block/step *firehose* is
-# emitted here at INFO (this is the console log operators read); the sink's own
-# post-plumbing diagnostics are at DEBUG so they don't pollute that stream.
-_narration_log = logging.getLogger("bamboo.narration")
+# Operational diagnostics for the handler itself (post create/patch failures).
+# Kept at DEBUG so they don't pollute the narration stream operators read.
+_diag = logging.getLogger("bamboo.narration")
 
-_DETAIL_ENTRIES = 5  # most-recent say-lines kept in the live post (sliding window)
-_LINE_CLIP = 200  # max chars per say line (full text still goes to the log)
+_DETAIL_ENTRIES = 15  # most-recent body lines kept in the live post (sliding window)
+_LINE_CLIP = 200  # max chars per body line (full text still goes to the log)
 _FLUSH_INTERVAL = 1.0  # min seconds between Mattermost API edits (coalescing)
+
+# The active session's live post, for the emitting context. The global handler
+# reads this to route a record to the right thread; None between/outside sessions.
+_active_post: ContextVar[Optional["_LivePost"]] = ContextVar("mm_live_post", default=None)
 
 
 def _clip(text: str, limit: int = _LINE_CLIP) -> str:
@@ -47,57 +52,60 @@ def _clip(text: str, limit: int = _LINE_CLIP) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-class MattermostNarrationSink:
-    """Thread-safe narrator sink that mirrors progress into one MM post.
+class _LivePost:
+    """Per-session builder of one live-updating Mattermost progress post.
 
-    Sink methods may be called from worker threads (``asyncio.to_thread``); they
-    only mutate guarded state + wake the flusher via ``call_soon_threadsafe``, so
-    no MM I/O happens on the caller's thread.
+    Fed records by :class:`MattermostLogHandler` (possibly from worker threads);
+    ``feed`` only mutates guarded state + wakes the flusher via
+    ``call_soon_threadsafe`` — no Mattermost I/O on the caller's thread.
     """
 
-    def __init__(self, bot: Any, channel_id: str, root_id: str, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        bot: Any,
+        channel_id: str,
+        root_id: str,
+        loop: asyncio.AbstractEventLoop,
+        threshold: int,
+    ) -> None:
         self._bot = bot
         self._channel_id = channel_id
         self._root_id = root_id
         self._loop = loop
+        self._threshold = threshold
         self._lock = threading.Lock()
         self._wake = asyncio.Event()
         self._latest_step: str = "working…"
-        # Live sliding window of console-style say lines (already timestamped).
         self._lines: deque[str] = deque(maxlen=_DETAIL_ENTRIES)
         self._dirty = False
         self._streamed = False
-        # Animated spinner custom-emoji name if the bot registered one, else None
-        # (renders on MM's inline text path; falls back to a static glyph).
         self._spinner: Optional[str] = getattr(bot, "spinner_emoji", None)
-        # Live post id, set lazily by the flusher; read by finalize().
         self._post_id: Optional[str] = None
         self._started_at: float = 0.0
 
-    # --- NarrationSink (called from engine code, possibly off-loop) ---
-    def say(self, msg: str) -> None:
-        _narration_log.info("→ %s", msg)
-        line = f"{datetime.now().strftime('%H:%M:%S')}  → {_clip(msg)}"
+    # --- fed by the logging handler (possibly off-loop) ---
+    def feed(self, record: logging.LogRecord) -> None:
+        if record.levelno < self._threshold:
+            return
+        kind = getattr(record, "narration_kind", "line")
+        if kind == "block":
+            return  # verbose detail — server log only, never chat
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 — never let logging formatting break us
+            return
+        ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
         with self._lock:
-            self._lines.append(line)
-            self._dirty = True
-            self._streamed = True
-        self._signal()
-
-    def block(self, title: str, content: str) -> None:
-        # Debugging detail: log only — never sent to MM.
-        _narration_log.info("[%s]\n%s", title, content)
-
-    def step(self, label: str) -> None:
-        _narration_log.info("%s", label)
-        with self._lock:
-            self._latest_step = _clip(label, 160)
+            if kind == "step":
+                self._latest_step = _clip(msg, 160)
+            else:
+                mark = "⚠️ " if record.levelno >= logging.WARNING else "→ "
+                self._lines.append(f"{ts}  {mark}{_clip(msg)}")
             self._dirty = True
             self._streamed = True
         self._signal()
 
     def _signal(self) -> None:
-        # Wake the flusher from any thread.
         try:
             self._loop.call_soon_threadsafe(self._wake.set)
         except RuntimeError:  # loop closed/closing
@@ -105,26 +113,26 @@ class MattermostNarrationSink:
 
     # --- driven by stream_narration ---
     async def run(self, started_at: float) -> None:
-        """Flusher loop: coalesce events into throttled edits to the one post."""
+        """Flusher loop: coalesce records into throttled edits to the one post."""
         self._started_at = started_at
         last_flush = 0.0
-        _narration_log.debug("narration: flusher started")
         while True:
             await self._wake.wait()
             self._wake.clear()
-            # Throttle: never edit more than once per _FLUSH_INTERVAL.
             delta = time.monotonic() - last_flush
             if delta < _FLUSH_INTERVAL:
                 await asyncio.sleep(_FLUSH_INTERVAL - delta)
             await self._flush_once()
             last_flush = time.monotonic()
 
-    def _compose(self, lines: list[str], *, done: bool = False, elapsed: int = 0) -> str:
-        """Build the post body: a head line + a monospace log of recent lines."""
+    def _compose(self, lines: list[str], *, done: bool = False, stopped: bool = False, elapsed: int = 0) -> str:
+        """A head line + a monospace log of recent lines.
+
+        ``stopped`` (failure) renders a static head with no spinner emoji.
+        """
         if done:
             head = f"✓ done ({elapsed}s)"
-        elif self._spinner:
-            # Animated custom emoji — renders + spins on MM's inline text path.
+        elif not stopped and self._spinner:
             head = f":{self._spinner}: 🔎 {self._latest_step}"
         else:
             head = f"🔎 {self._latest_step}"
@@ -133,7 +141,6 @@ class MattermostNarrationSink:
         return head + "\n```\n" + "\n".join(lines) + "\n```"
 
     async def _flush_once(self) -> None:
-        """Push the current snapshot to MM as one post (create on first use)."""
         with self._lock:
             lines = list(self._lines)
             dirty, self._dirty = self._dirty, False
@@ -145,15 +152,18 @@ class MattermostNarrationSink:
         else:
             await self._patch(self._post_id, message=msg)
 
-    async def finalize(self) -> None:
-        """Freeze the post to a static '✓ done' (drops the spinner emoji)."""
+    async def finalize(self, *, success: bool) -> None:
+        """On success delete the progress post; on failure freeze it (static head)."""
         with self._lock:
             lines = list(self._lines)
             streamed = self._streamed
         if not streamed:
-            return  # nothing was ever streamed
-        elapsed = max(0, int(time.monotonic() - (self._started_at or time.monotonic())))
-        msg = self._compose(lines, done=True, elapsed=elapsed)
+            return
+        if success:
+            if self._post_id is not None:
+                await self._delete(self._post_id)
+            return
+        msg = self._compose(lines, stopped=True)
         if self._post_id is None:
             self._post_id = await self._create(msg)
         else:
@@ -162,14 +172,12 @@ class MattermostNarrationSink:
     # --- MM I/O helpers (best-effort) ---
     async def _create(self, message: str) -> Optional[str]:
         try:
-            post = await self._bot.create_post(
-                self._channel_id, message, root_id=self._root_id
-            )
+            post = await self._bot.create_post(self._channel_id, message, root_id=self._root_id)
             pid = post.get("id") if isinstance(post, dict) else None
-            _narration_log.debug("narration: created post id=%s", pid)
+            _diag.debug("narration: created post id=%s", pid)
             return pid
         except Exception as exc:  # noqa: BLE001
-            _narration_log.warning("narration: create_post failed (%s)", exc)
+            _diag.warning("narration: create_post failed (%s)", exc)
             return None
 
     async def _patch(self, post_id: str, *, message: str) -> bool:
@@ -177,19 +185,69 @@ class MattermostNarrationSink:
             await self._bot.update_post(post_id, message=message)
             return True
         except Exception as exc:  # noqa: BLE001
-            _narration_log.warning("narration: update_post failed (%s)", exc)
+            _diag.warning("narration: update_post failed (%s)", exc)
             return False
+
+    async def _delete(self, post_id: str) -> bool:
+        try:
+            await self._bot.delete_post(post_id)
+            _diag.debug("narration: deleted post id=%s", post_id)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            _diag.warning("narration: delete_post failed (%s)", exc)
+            return False
+
+
+class MattermostLogHandler(logging.Handler):
+    """Routes ``bamboo.narration`` records to the active session's live post.
+
+    A single instance is attached to the ``bamboo.narration`` logger; it reads the
+    per-session :data:`_active_post` ContextVar (set in the emitting context) so
+    concurrent sessions each get their own post with no cross-talk. No-ops when no
+    session is active. ``emit`` is non-blocking (delegates to ``_LivePost.feed``).
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        post = _active_post.get()
+        if post is None:
+            return
+        try:
+            post.feed(record)
+        except Exception:  # noqa: BLE001
+            self.handleError(record)
+
+
+# The handler is global and attached once; it self-gates on the ContextVar.
+_handler: Optional[MattermostLogHandler] = None
+_handler_lock = threading.Lock()
+
+
+def _ensure_handler() -> None:
+    global _handler
+    with _handler_lock:
+        if _handler is None:
+            _handler = MattermostLogHandler()
+            _handler.setLevel(logging.NOTSET)  # threshold applied per-post in feed()
+            logging.getLogger("bamboo.narration").addHandler(_handler)
+
+
+def _threshold() -> int:
+    try:
+        from bamboo.config import get_settings  # noqa: PLC0415
+
+        name = (get_settings().narration_level or "INFO").upper()
+        return getattr(logging, name, logging.INFO)
+    except Exception:  # noqa: BLE001
+        return logging.INFO
 
 
 @contextlib.asynccontextmanager
 async def stream_narration(transport: Any):
-    """Install a per-session narration sink that streams engine progress to MM.
+    """Install a per-session live post that mirrors the narration stream to MM.
 
-    No-op for transports not backed by a bot (e.g. test fakes): narration stays
-    silent, exactly as before.
+    No-op for transports not backed by a bot (e.g. test fakes): narration stays on
+    the logging stream only, exactly as before.
     """
-    from bamboo.utils.narrator import reset_narration_sink, set_narration_sink  # noqa: PLC0415
-
     bot = getattr(transport, "_bot", None)
     channel_id = getattr(transport, "channel_id", None)
     if bot is None or not channel_id:
@@ -197,16 +255,28 @@ async def stream_narration(transport: Any):
         return
 
     loop = asyncio.get_running_loop()
-    sink = MattermostNarrationSink(bot, channel_id, getattr(transport, "root_id", ""), loop)
-    token = set_narration_sink(sink)
+    threshold = _threshold()
+    post = _LivePost(bot, channel_id, getattr(transport, "root_id", ""), loop, threshold)
+    _ensure_handler()
+    # Ensure narration records at >= threshold actually reach the handler: a record
+    # is dropped before any handler if the logger's effective level is higher
+    # (e.g. when LOG_LEVEL/root is above NARRATION_LEVEL). Only lower it if needed.
+    nlog = logging.getLogger("bamboo.narration")
+    prev_level = nlog.level
+    if nlog.getEffectiveLevel() > threshold:
+        nlog.setLevel(threshold)
+    token = _active_post.set(post)
     started_at = time.monotonic()
-    flusher = asyncio.ensure_future(sink.run(started_at))
+    flusher = asyncio.ensure_future(post.run(started_at))
+    ok = False
     try:
         yield
+        ok = True
     finally:
-        reset_narration_sink(token)
-        with contextlib.suppress(Exception):
-            await sink.finalize()
+        _active_post.reset(token)
+        nlog.setLevel(prev_level)
         flusher.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await flusher
+        with contextlib.suppress(Exception):
+            await post.finalize(success=ok)

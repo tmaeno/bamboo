@@ -170,6 +170,12 @@ class Settings(BaseSettings):
 
     # Application
     log_level: str = "INFO"
+    # Minimum level of narration (say/step/warn) surfaced to an interactive
+    # frontend (e.g. the Mattermost live-progress post). Frontend-agnostic and
+    # distinct from ``log_level`` (which gates the console/file). A frontend
+    # handler shows narration records at >= this level; since it's downstream of
+    # ``log_level``, the frontend view is always a subset of the console.
+    narration_level: str = "INFO"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
     reranker_model: str = ""
