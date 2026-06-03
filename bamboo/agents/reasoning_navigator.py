@@ -658,7 +658,8 @@ class ReasoningNavigator:
             f"external_info={len(external_info_str):,}, "
             f"domain_hints={len(domain_hints):,}, "
             f"graph_results={len(graph_results_str):,}, "
-            f"vector_results={len(vector_results_str):,} chars"
+            f"vector_results={len(vector_results_str):,} chars",
+            level=logging.DEBUG,
         )
         if (
             len(external_info_str) > 50_000
@@ -677,7 +678,8 @@ class ReasoningNavigator:
             summary = ", ".join(f"{k}={n:,}" for k, n in shown)
             say(
                 f"external_data per-key sizes "
-                f"(top {len(shown)} of {len(per_key)}): {summary}"
+                f"(top {len(shown)} of {len(per_key)}): {summary}",
+                level=logging.DEBUG,
             )
         prompt = CAUSE_IDENTIFICATION_PROMPT.format(
             task_info=task_info_str,

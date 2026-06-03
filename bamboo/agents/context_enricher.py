@@ -223,13 +223,13 @@ class ContextEnricher:
                 out.tool_calls.append(tc)
                 try:
                     result = await self._client.execute("request_human_input", prompt=_prompt)
-                    say("  request_human_input: done.")
+                    say("  request_human_input: done.", level=logging.DEBUG)
                 except Exception as exc:
-                    say(f"  request_human_input: failed — {exc}")
+                    warn(f"request_human_input failed — {exc}")
                     result = exc
                 self._merge_tool_result("request_human_input", result, out, task_data=task_data)
             elif procedure_issues:
-                say("  Procedure gap: request_human_input not available.")
+                say("  Procedure gap: request_human_input not available.", level=logging.DEBUG)
 
             if not other_issues:
                 return out
@@ -273,9 +273,9 @@ class ContextEnricher:
             out.tool_calls.extend(tool_calls)
             for tc, result in zip(tool_calls, results):
                 if isinstance(result, BaseException):
-                    say(f"  {tc['tool']}: failed — {result}")
+                    say(f"  {tc['tool']}: failed — {result}", level=logging.DEBUG)
                 else:
-                    say(f"  {tc['tool']}: done.")
+                    say(f"  {tc['tool']}: done.", level=logging.DEBUG)
                     if isinstance(result, str) and result:
                         show_block(tc["tool"], result)
                 self._merge_tool_result(tc["tool"], result, out, task_data=task_data)

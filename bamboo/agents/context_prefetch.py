@@ -90,8 +90,8 @@ async def prefetch_panda_docs(
             clean_kw = [k for k in keywords if k and isinstance(k, str)]
             if nl_query_from_llm or clean_kw:
                 keyword_query_str = " ".join(clean_kw)
-                say(f"Doc NL query: {nl_query_from_llm!r}")
-                say(f"Doc keywords: {clean_kw}")
+                say(f"Doc NL query: {nl_query_from_llm!r}", level=logging.DEBUG)
+                say(f"Doc keywords: {clean_kw}", level=logging.DEBUG)
         except Exception as exc:
             logger.warning(
                 "prefetch_panda_docs: query extraction failed (%s) — falling back to raw errorDialog",

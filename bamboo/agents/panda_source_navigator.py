@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -223,7 +224,7 @@ class PandaSourceNavigator:
             return "Neither pandaserver nor pandajedi is installed — cannot navigate source."
 
         for pkg_name, pkg_root in pkg_roots.items():
-            say(f"pkg_root: {pkg_name} → {pkg_root}")
+            say(f"pkg_root: {pkg_name} → {pkg_root}", level=logging.DEBUG)
 
         # Step 0: ask LLM which exact strings to grep for in the source
         with thinking("Extracting source grep terms"):
@@ -242,7 +243,7 @@ class PandaSourceNavigator:
             grep_terms = [w for w in question.split() if len(w) >= 6]
             self.last_term_extraction_succeeded = False
         self.last_grep_terms = grep_terms
-        say(f"Suggested grep terms: {grep_terms}")
+        say(f"Suggested grep terms: {grep_terms}", level=logging.DEBUG)
 
         loop = asyncio.get_event_loop()
 
@@ -255,12 +256,12 @@ class PandaSourceNavigator:
                 frag_candidates, _, term_used = await loop.run_in_executor(
                     None, _grep_sliding_window, pkg_roots, fragment
                 )
-                say(f"  fragment {fragment!r} → term {term_used!r} → {len(frag_candidates)} hit(s)")
+                say(f"  fragment {fragment!r} → term {term_used!r} → {len(frag_candidates)} hit(s)", level=logging.DEBUG)
                 if len(frag_candidates) > _MAX_FRAG_HITS:
-                    say("  (skipping — too many hits, fragment is too generic)")
+                    say("  (skipping — too many hits, fragment is too generic)", level=logging.DEBUG)
                     continue
                 for c in frag_candidates:
-                    say(f"    \\[{c['module']}] {c['qualname']}")
+                    say(f"    \\[{c['module']}] {c['qualname']}", level=logging.DEBUG)
                 seen_in_fragment: set[str] = set()
                 for c in frag_candidates:
                     qn = f"{c['module']}::{c['qualname']}"
@@ -311,7 +312,7 @@ class PandaSourceNavigator:
                 full_qn = f"{candidate['module']}::{qualname}"
                 if full_qn in accumulated_qualnames:
                     continue
-                say(f"Reading {candidate['module']}::{qualname}")
+                say(f"Reading {candidate['module']}::{qualname}", level=logging.DEBUG)
                 src = _read_method(candidate["module"], qualname)
                 if src:
                     accumulated.append(src)
@@ -323,7 +324,7 @@ class PandaSourceNavigator:
                         max_lines=80,
                     )
                 else:
-                    say(f"  (not found)")
+                    say(f"  (not found)", level=logging.DEBUG)
 
             if not accumulated:
                 break
@@ -338,7 +339,7 @@ class PandaSourceNavigator:
                 sources_read=sources_read,
             )
             say(f"Round {round_num + 1}/{self.MAX_ROUNDS}: asking LLM for follow-up "
-                f"(read so far: {list(accumulated_qualnames)})")
+                f"(read so far: {list(accumulated_qualnames)})", level=logging.DEBUG)
             with thinking(f"Round {round_num + 1} — follow-up decision"):
                 response = await self.llm.ainvoke([
                     SystemMessage(content="You are navigating panda-server Python source code."),

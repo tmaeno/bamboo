@@ -38,7 +38,7 @@ from typing import Any, Optional
 # Kept at DEBUG so they don't pollute the narration stream operators read.
 _diag = logging.getLogger("bamboo.narration")
 
-_DETAIL_ENTRIES = 15  # most-recent body lines kept in the live post (sliding window)
+_DETAIL_ENTRIES = 10  # most-recent body lines kept in the live post (sliding window)
 _LINE_CLIP = 200  # max chars per body line (full text still goes to the log)
 _FLUSH_INTERVAL = 1.0  # min seconds between Mattermost API edits (coalescing)
 

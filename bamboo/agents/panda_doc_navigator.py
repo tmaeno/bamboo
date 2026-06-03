@@ -209,8 +209,8 @@ class PandaDocNavigator:
         """
         await self.ensure_initialized()
         _kw = keyword_query or query
-        say(f"NL query (semantic+LLM): {query!r}")
-        say(f"Keyword query (BM25):    {_kw!r}")
+        say(f"NL query (semantic+LLM): {query!r}", level=logging.DEBUG)
+        say(f"Keyword query (BM25):    {_kw!r}", level=logging.DEBUG)
 
         semantic_task = self._semantic_search(query, top_k=top_k)
         traversal_task = self._llm_traversal(query)
@@ -233,7 +233,8 @@ class PandaDocNavigator:
         say(
             f"Raw hits — semantic:{len(semantic_results)} "
             f"llm:{len(traversal_results)} "
-            f"bm25:{len(bm25_results)}"
+            f"bm25:{len(bm25_results)}",
+            level=logging.DEBUG,
         )
 
         # Deduplicate by URL; label each result with every strategy that found it.
@@ -267,12 +268,13 @@ class PandaDocNavigator:
                 results = filtered
             say(
                 f"Reranked: {len(filtered)}/{n_before} passed threshold "
-                f"(top score {results[0].score:.2f})"
+                f"(top score {results[0].score:.2f})",
+                level=logging.DEBUG,
             )
             for r in rejected:
                 label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
                 concept_tag = " \\[concept]" if r.doc_type == "concept" else ""
-                say(f"  ✗ \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}")
+                say(f"  ✗ \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}", level=logging.DEBUG)
         except Exception as exc:
             logger.warning("PandaDocNavigator: reranking failed: %s", exc)
             all_ranked = results
@@ -290,10 +292,10 @@ class PandaDocNavigator:
         for r in diag:
             label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
             concept_tag = " \\[concept]" if r.doc_type == "concept" else ""
-            say(f"  \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}")
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f}){concept_tag}", level=logging.DEBUG)
         for r in concept:
             label = f"{r.breadcrumb[-1]} › {r.title}" if r.breadcrumb else r.title
-            say(f"  \\[{r.source}] {label}  ({r.score:.2f}) \\[concept]")
+            say(f"  \\[{r.source}] {label}  ({r.score:.2f}) \\[concept]", level=logging.DEBUG)
         return final
 
     # ------------------------------------------------------------------
