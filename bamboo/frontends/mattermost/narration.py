@@ -11,11 +11,11 @@ post's state + a flusher task) and points a ContextVar at it; the global handler
 routes each record to whichever session is active in the emitting context.  A
 record's ``narration_kind`` decides its role:
 
-* ``"step"`` → the post **head** (``:bamboo_spinner: 🔎 <step>``; the animated
-  emoji spins client-side; frozen / deleted at the end);
+* ``"step"`` → the post **head** (``:bamboo_spinner: <step>``; the animated emoji
+  spins client-side; frozen to ``✓ done`` / a static head at the end);
 * ``"block"`` → **ignored** (verbose detail stays in the server log only);
-* otherwise → a timestamped **body line** (last *N* kept), with WARNING/ERROR
-  highlighted.
+* otherwise → a timestamped **body line** rendered in a separate attachment **card**
+  (last *N* kept, **newest first**), with a ✅/⚠️/❌ accent by level.
 
 The handler only ever sees records logging already admitted (≥ ``LOG_LEVEL``), and
 further filters by ``NARRATION_LEVEL``.  ``emit`` is non-blocking — it just mutates
@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -42,6 +43,10 @@ _DETAIL_ENTRIES = 10  # most-recent body lines kept in the live post (sliding wi
 _LINE_CLIP = 200  # max chars per body line (full text still goes to the log)
 _FLUSH_INTERVAL = 1.0  # min seconds between Mattermost API edits (coalescing)
 
+# Color of the body attachment's left bar — status at a glance.
+_COLOR_RUNNING = "#4a90d9"  # blue while in progress
+_COLOR_FAILED = "#d9534f"  # red when the run ended in failure
+
 # The active session's live post, for the emitting context. The global handler
 # reads this to route a record to the right thread; None between/outside sessions.
 _active_post: ContextVar[Optional["_LivePost"]] = ContextVar("mm_live_post", default=None)
@@ -50,6 +55,56 @@ _active_post: ContextVar[Optional["_LivePost"]] = ContextVar("mm_live_post", def
 def _clip(text: str, limit: int = _LINE_CLIP) -> str:
     text = " ".join((text or "").split())  # collapse whitespace/newlines
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# Markdown specials to escape so message text (identifiers, paths like
+# ``payload.stdout``, ``a_b_c``) renders literally instead of as italics/code/etc.
+_MD_SPECIALS = "\\`*_~|"
+
+# Leading chars that would otherwise start a markdown block (list/heading/quote).
+_MD_LEADING = ("-", "#", ">")
+
+
+def _md_escape(text: str) -> str:
+    """Escape Mattermost-markdown specials in a plain message."""
+    for ch in _MD_SPECIALS:
+        text = text.replace(ch, "\\" + ch)
+    if text[:1] in _MD_LEADING:
+        text = "\\" + text
+    return text
+
+
+# Per-line accent for milestone (non-warn/error) lines — cycled so it isn't
+# monotonous. Warnings/errors use their own fixed glyphs (see feed()).
+_GREEN_POOL = ("🦚", "💚", "🌿", "🌱", "☘️", "🌵", "🍏")
+
+# URLs are turned into a clickable "[link](url)" so long links don't clutter chat
+# (the full URL is still in the bamboo.narration server log).
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _format_line(msg: str) -> str:
+    """Clip + markdown-escape a body message, turning URLs into clickable ``[link](url)``.
+
+    URLs are stashed behind markdown-inert placeholders *before* escaping (so the
+    URL itself isn't mangled by :func:`_md_escape`), then reinserted raw as the
+    link destination. Prose around them is still clipped and escaped.
+    """
+    urls: list[str] = []
+
+    def _stash(m: "re.Match[str]") -> str:
+        urls.append(m.group(0))
+        return f"\x00{len(urls) - 1}\x00"
+
+    text = _md_escape(_clip(_URL_RE.sub(_stash, msg)))
+    for i, url in enumerate(urls):
+        text = text.replace(f"\x00{i}\x00", f"[link]({url})")
+    return text.replace("\x00", "")  # drop any placeholder remnant clipped mid-token
+
+
+def _strip_module(label: str) -> str:
+    """Drop a leading ``[module] `` prefix (dev noise) from a step label."""
+    return re.sub(r"^\[[^\]]+\]\s*", "", label)
 
 
 class _LivePost:
@@ -77,6 +132,7 @@ class _LivePost:
         self._wake = asyncio.Event()
         self._latest_step: str = "working…"
         self._lines: deque[str] = deque(maxlen=_DETAIL_ENTRIES)
+        self._green_idx = 0  # cycles _GREEN_POOL across milestone lines
         self._dirty = False
         self._streamed = False
         self._spinner: Optional[str] = getattr(bot, "spinner_emoji", None)
@@ -97,10 +153,18 @@ class _LivePost:
         ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S")
         with self._lock:
             if kind == "step":
-                self._latest_step = _clip(msg, 160)
+                self._latest_step = _strip_module(_clip(msg, 160))
             else:
-                mark = "⚠️ " if record.levelno >= logging.WARNING else "→ "
-                self._lines.append(f"{ts}  {mark}{_clip(msg)}")
+                # Rich, compact line: **HH:MM:SS** + accent + escaped text (URLs → [link]).
+                if record.levelno >= logging.ERROR:
+                    emoji = "❌"
+                elif record.levelno >= logging.WARNING:
+                    emoji = "⚠️"
+                else:
+                    emoji = _GREEN_POOL[self._green_idx % len(_GREEN_POOL)]
+                    self._green_idx += 1
+                text = _format_line(msg)
+                self._lines.append(f"**{ts}**  {emoji} {text}")
             self._dirty = True
             self._streamed = True
         self._signal()
@@ -125,20 +189,34 @@ class _LivePost:
             await self._flush_once()
             last_flush = time.monotonic()
 
-    def _compose(self, lines: list[str], *, done: bool = False, stopped: bool = False, elapsed: int = 0) -> str:
-        """A head line + a monospace log of recent lines.
+    def _render(
+        self, lines: list[str], *, done: bool = False, stopped: bool = False, elapsed: int = 0
+    ) -> tuple[str, Optional[dict]]:
+        """Build ``(message, props)`` for the live post.
 
-        ``stopped`` (failure) renders a static head with no spinner emoji.
+        ``message`` is the head only — running → `` :spinner: <step> ``; done →
+        ``✅ done (Ns)``; stopped (failure) → ``<step>`` (static, no spinner). The
+        body lines (each `` `HH:MM:SS` `` + level emoji + escaped text, built in
+        ``feed``) go in **one attachment card** so they're visually separated from
+        the head, rendered **newest-first** (the deque appends oldest→newest /
+        evicts the oldest; only display order flips) and joined by ``"  \\n"`` hard
+        breaks. The card's left-bar color signals status. ``done`` drops the detail
+        (head only, no card).
         """
+        spacer = " " * 10
         if done:
-            head = f"✓ done ({elapsed}s)"
-        elif not stopped and self._spinner:
-            head = f":{self._spinner}: 🔎 {self._latest_step}"
+            # Explicit empty attachments (not None) so the patch *clears* the body
+            # card — the driver drops a None ``props`` (= "leave unchanged").
+            return f"✅ **done** ({elapsed}s) ✅{spacer}", {"attachments": []}
+        if not stopped and self._spinner:
+            head = f":{self._spinner}: **{self._latest_step}** :{self._spinner}:{spacer}"
         else:
-            head = f"🔎 {self._latest_step}"
+            head = f"🔎 **{self._latest_step}** 🔎{spacer}"
         if not lines:
-            return head
-        return head + "\n```\n" + "\n".join(lines) + "\n```"
+            return head, None
+        body = "  \n".join(reversed(lines))  # newest first
+        color = _COLOR_FAILED if stopped else _COLOR_RUNNING
+        return head, {"attachments": [{"color": color, "text": body}]}
 
     async def _flush_once(self) -> None:
         with self._lock:
@@ -146,18 +224,18 @@ class _LivePost:
             dirty, self._dirty = self._dirty, False
         if not dirty:
             return
-        msg = self._compose(lines)
+        message, props = self._render(lines)
         if self._post_id is None:
-            self._post_id = await self._create(msg)
+            self._post_id = await self._create(message, props=props)
         else:
-            await self._patch(self._post_id, message=msg)
+            await self._patch(self._post_id, message=message, props=props)
 
     async def finalize(self, *, success: bool) -> None:
         """Freeze the post when the run ends.
 
         On success → a terse ``✓ done (Ns)`` line with the streamed detail dropped.
         On failure → a static ``🔎 <last step>`` head (no spinner) keeping the last
-        lines as a trail.
+        lines as a trail in a red card.
         """
         with self._lock:
             lines = list(self._lines)
@@ -166,18 +244,20 @@ class _LivePost:
             return
         elapsed = max(0, int(time.monotonic() - (self._started_at or time.monotonic())))
         if success:
-            msg = self._compose([], done=True, elapsed=elapsed)  # head only, detail dropped
+            message, props = self._render([], done=True, elapsed=elapsed)  # head only
         else:
-            msg = self._compose(lines, stopped=True)
+            message, props = self._render(lines, stopped=True)
         if self._post_id is None:
-            self._post_id = await self._create(msg)
+            self._post_id = await self._create(message, props=props)
         else:
-            await self._patch(self._post_id, message=msg)
+            await self._patch(self._post_id, message=message, props=props)
 
     # --- MM I/O helpers (best-effort) ---
-    async def _create(self, message: str) -> Optional[str]:
+    async def _create(self, message: str, *, props: Optional[dict] = None) -> Optional[str]:
         try:
-            post = await self._bot.create_post(self._channel_id, message, root_id=self._root_id)
+            post = await self._bot.create_post(
+                self._channel_id, message, root_id=self._root_id, props=props
+            )
             pid = post.get("id") if isinstance(post, dict) else None
             _diag.debug("narration: created post id=%s", pid)
             return pid
@@ -185,9 +265,9 @@ class _LivePost:
             _diag.warning("narration: create_post failed (%s)", exc)
             return None
 
-    async def _patch(self, post_id: str, *, message: str) -> bool:
+    async def _patch(self, post_id: str, *, message: str, props: Optional[dict] = None) -> bool:
         try:
-            await self._bot.update_post(post_id, message=message)
+            await self._bot.update_post(post_id, message=message, props=props)
             return True
         except Exception as exc:  # noqa: BLE001
             _diag.warning("narration: update_post failed (%s)", exc)

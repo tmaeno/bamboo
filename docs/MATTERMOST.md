@@ -198,9 +198,10 @@ plus any novel symptoms / capability gaps) back into the thread. It is read-only
 
 **Live progress.** While `investigate`/`capture`/`analyze` run, the bot streams
 progress into the thread as a **single live-updating reply**: a head line with an
-animated spinner showing the current step and, below it, a **console-style
-monospace log** of the last few progress lines, each timestamped. Larger detail
-blocks (LLM prompts, log dumps, generated code) are **not** posted to chat —
+animated spinner showing the current step and, below it in a **colored card**, the
+last few progress lines (**newest first**) — each a compact row with a small
+timestamp, a status accent (`✅`, or `⚠️`/`❌` for warnings/errors), and the message.
+Larger detail blocks (LLM prompts, log dumps, generated code) are **not** posted to chat —
 they're debugging detail that goes to the server log only. When the run finishes
 successfully the reply is **frozen to a terse `✓ done (Ns)`** line (the streamed
 detail is dropped), leaving the command, the `✓ done`, and the result (card /

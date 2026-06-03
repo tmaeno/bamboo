@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import pytest
 
@@ -91,11 +92,11 @@ class _FakeBot:
     async def create_post(self, channel_id, message, *, root_id="", props=None, file_ids=None):
         self._n += 1
         pid = f"post-{self._n}"
-        self.created.append({"id": pid, "message": message})
+        self.created.append({"id": pid, "message": message, "props": props})
         return {"id": pid}
 
     async def update_post(self, post_id, *, message=None, file_ids=None, props=None):
-        self.patched.append({"id": post_id, "message": message})
+        self.patched.append({"id": post_id, "message": message, "props": props})
         return {"id": post_id}
 
     async def delete_post(self, post_id):
@@ -113,6 +114,12 @@ def _rec(msg, level=logging.INFO, kind=None):
     return r
 
 
+def _body(post: dict) -> str:
+    """The body attachment's text (where progress lines now live)."""
+    atts = (post.get("props") or {}).get("attachments") or []
+    return atts[0]["text"] if atts else ""
+
+
 @pytest.mark.asyncio
 async def test_livepost_step_head_and_body_lines():
     bot = _FakeBot()
@@ -122,9 +129,16 @@ async def test_livepost_step_head_and_body_lines():
     await post._flush_once()
 
     assert len(bot.created) == 1
+    # Head (message): spinner emoji + the step, with the [module] prefix stripped.
     msg = bot.created[0]["message"]
-    assert msg.startswith(":bamboo_spinner: 🔎") and "analysing" in msg
-    assert "```" in msg and "→ looking at logs" in msg
+    assert msg.startswith(":bamboo_spinner:") and "analysing" in msg and "[nav]" not in msg
+    assert "looking at logs" not in msg  # body is in the card, not the head
+    # Body (attachment card): **HH:MM:SS** + green accent + the message; no code block.
+    body = _body(bot.created[0])
+    assert "looking at logs" in body  # message present (accent emoji varies per pool)
+    assert "```" not in body
+    assert re.search(r"\*\*\d\d:\d\d:\d\d\*\*", body)  # bold timestamp
+    assert bot.created[0]["props"]["attachments"][0]["color"]  # status-colored bar
 
 
 @pytest.mark.asyncio
@@ -143,7 +157,54 @@ async def test_livepost_highlights_warning():
     post = _live(bot)
     post.feed(_rec("careful now", level=logging.WARNING))
     await post._flush_once()
-    assert "⚠️ careful now" in bot.created[0]["message"]
+    assert "⚠️ careful now" in _body(bot.created[0])
+
+
+@pytest.mark.asyncio
+async def test_livepost_escapes_markdown_in_message():
+    bot = _FakeBot()
+    post = _live(bot)
+    post.feed(_rec("find_similar a*b ~c~"))  # underscores/asterisks/tildes
+    await post._flush_once()
+    body = _body(bot.created[0])
+    assert "find\\_similar" in body and "a\\*b" in body and "\\~c\\~" in body
+
+
+@pytest.mark.asyncio
+async def test_livepost_body_newest_first():
+    bot = _FakeBot()
+    post = _live(bot)
+    post.feed(_rec("first"))
+    post.feed(_rec("second"))
+    await post._flush_once()
+    body = _body(bot.created[0])
+    assert body.index("second") < body.index("first")  # newest on top
+
+
+@pytest.mark.asyncio
+async def test_livepost_cycles_green_emoji():
+    from bamboo.frontends.mattermost.narration import _GREEN_POOL
+
+    bot = _FakeBot()
+    post = _live(bot)
+    for i in range(len(_GREEN_POOL)):
+        post.feed(_rec(f"milestone {i}"))
+    await post._flush_once()
+    body = _body(bot.created[0])
+    used = {e for e in _GREEN_POOL if e in body}
+    assert len(used) >= 2  # not all the same green emoji
+
+
+@pytest.mark.asyncio
+async def test_livepost_replaces_url_with_clickable_link():
+    bot = _FakeBot()
+    post = _live(bot)
+    post.feed(_rec("fetched 9 chars from https://h.example/x?a&b"))
+    await post._flush_once()
+    body = _body(bot.created[0])
+    # Clickable markdown link with the raw URL as the destination.
+    assert "[link](https://h.example/x?a&b)" in body
+    assert "\x00" not in body  # no placeholder remnants
 
 
 @pytest.mark.asyncio
@@ -153,9 +214,10 @@ async def test_livepost_body_capped():
     for i in range(_DETAIL_ENTRIES + 10):
         post.feed(_rec(f"line {i}"))
     await post._flush_once()
-    body = bot.created[-1]["message"]
-    assert body.count("→ line") == _DETAIL_ENTRIES
-    assert "→ line 9" not in body and f"→ line {_DETAIL_ENTRIES + 9}" in body
+    body = _body(bot.created[-1])
+    # Green accent varies per line, so count entries by the hard-break join.
+    assert len(body.split("  \n")) == _DETAIL_ENTRIES
+    assert "line 9" not in body and f"line {_DETAIL_ENTRIES + 9}" in body
 
 
 @pytest.mark.asyncio
@@ -176,11 +238,14 @@ async def test_livepost_finalize_success_freezes_done():
     post.feed(_rec("looking at logs"))
     await post._flush_once()
     await post.finalize(success=True)
-    # Frozen to a terse "✓ done" line — detail dropped, post NOT deleted.
+    # Frozen to a terse "done" line — body card cleared, post NOT deleted.
     last = bot.patched[-1]
     assert bot.deleted == []
-    assert last["message"].startswith("✓ done")
-    assert "```" not in last["message"] and "looking at logs" not in last["message"]
+    assert "done" in last["message"] and "looking at logs" not in last["message"]
+    # The patch must explicitly clear attachments ([], not None) — None leaves the
+    # existing card in place (the driver drops a None props).
+    assert last["props"] == {"attachments": []}
+    assert _body(last) == ""
 
 
 @pytest.mark.asyncio
@@ -194,7 +259,7 @@ async def test_livepost_finalize_failure_keeps_static():
     last = bot.patched[-1]
     assert bot.deleted == []
     assert last["message"].startswith("🔎") and ":bamboo_spinner:" not in last["message"]
-    assert "→ looking at logs" in last["message"]
+    assert "looking at logs" in _body(last)  # last lines kept in the (red) card
 
 
 @pytest.mark.asyncio
@@ -225,7 +290,8 @@ async def test_stream_narration_freezes_done_on_success():
         await asyncio.sleep(0.1)  # let the flusher create the post
     assert bot.created, "expected a progress post"
     assert bot.deleted == []  # kept, not deleted
-    assert bot.patched[-1]["message"].startswith("✓ done")
+    assert "done" in bot.patched[-1]["message"]
+    assert bot.patched[-1]["props"] == {"attachments": []}  # body card cleared
 
 
 @pytest.mark.asyncio
