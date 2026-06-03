@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
-from bamboo.utils.narrator import thinking
+from bamboo.utils.narrator import say, thinking
 
 import warnings
 from urllib3.exceptions import InsecureRequestWarning
@@ -174,7 +174,7 @@ async def async_fetch_log_content(url: str, timeout: float = 30.0) -> str | None
                 return None
         else:
             text = response.text
-        logger.info("async_fetch_log_content: fetched %d chars from %s", len(text), url)
+        say(f"fetched {len(text):,} chars from {url}")
         return text
     except Exception as exc:
         logger.warning("async_fetch_log_content: failed to fetch %s: %s", url, exc)
@@ -237,8 +237,6 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
     if verbose:
         logging.getLogger("bamboo").setLevel(logging.DEBUG)
 
-    logger.info("Fetching task details from PanDA for task_id=%s", task_id_int)
-
     with thinking("Fetching task data from PanDA"):
         try:
             data = await asyncio.to_thread(
@@ -250,11 +248,7 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
                 "Check PANDA_API_URL_SSL."
             ) from exc
 
-    logger.info(
-        "Successfully fetched task details for task_id=%s (%d fields)",
-        task_id_int,
-        len(data),
-    )
+    say(f"fetched task {task_id_int} details ({len(data)} fields)")
     return data
 
 

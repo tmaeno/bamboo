@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
+from bamboo.utils.narrator import say
 from bamboo.utils.panda_client import (
     async_fetch_log_content,
     extract_log_urls,
@@ -697,12 +698,7 @@ class PandaMcpClient(McpClient):
                 )
             elif content:
                 result[url] = content
-        logger.info(
-            "PandaMcpClient.fetch_linked_log_files: fetched %d/%d log(s) for task_id=%s",
-            len(result),
-            len(urls),
-            task_id,
-        )
+        say(f"fetched {len(result)}/{len(urls)} linked log file(s)")
         return result
 
     async def _get_parent_task(
@@ -778,11 +774,7 @@ class PandaMcpClient(McpClient):
             chain.append(compact)
             current_id = parent.get("retryID")
 
-        logger.info(
-            "PandaMcpClient.get_retry_chain: found %d ancestor(s) for task_id=%s",
-            len(chain),
-            task_id,
-        )
+        say(f"found {len(chain)} ancestor task(s) in the retry chain")
         return chain
 
     async def _get_task_jobs_summary(
@@ -817,12 +809,7 @@ class PandaMcpClient(McpClient):
                 if diag
             ]
             failed_ids = [j.get("PandaID") for j in failed[:20]]
-            logger.info(
-                "PandaMcpClient.get_task_jobs_summary: %d total job(s), %d failed for task_id=%s",
-                len(jobs),
-                len(failed),
-                task_id,
-            )
+            say(f"{len(jobs)} total job(s), {len(failed)} failed")
             return {
                 "status_counts": status_counts,
                 "top_errors": top_errors,
@@ -907,11 +894,7 @@ class PandaMcpClient(McpClient):
                 if d not in selected:
                     selected.append(d)
 
-            logger.info(
-                "PandaMcpClient.get_scout_job_details: selected %d job(s) for task_id=%s",
-                len(selected),
-                task_id_int,
-            )
+            say(f"selected {len(selected)} job(s)")
             return selected
         except Exception as exc:
             logger.warning(
@@ -934,11 +917,7 @@ class PandaMcpClient(McpClient):
         task_id_int = int(task_data["jediTaskID"])
         try:
             datasets = await get_datasets_and_files(task_id_int, dataset_only=True)
-            logger.info(
-                "PandaMcpClient.get_task_input_datasets: fetched %d dataset(s) for task_id=%s",
-                len(datasets),
-                task_id_int,
-            )
+            say(f"fetched {len(datasets)} input dataset(s)")
             return datasets
         except Exception as exc:
             logger.warning(
@@ -956,10 +935,7 @@ class PandaMcpClient(McpClient):
         """Return recently-finished tasks similar to the failing task."""
         try:
             results = await get_similar_successful_tasks(task_data, n_tasks)
-            logger.info(
-                "PandaMcpClient.find_similar_successful_tasks: found %d candidate(s)",
-                len(results),
-            )
+            say(f"found {len(results)} similar successful task(s)")
             return results
         except Exception as exc:
             logger.warning("PandaMcpClient.find_similar_successful_tasks: failed: %s", exc)
@@ -982,13 +958,9 @@ class PandaMcpClient(McpClient):
             summary = summarize_log_content(content)
             summary["pandaID"] = panda_id
             summary["filename"] = "payload.stdout"
-            logger.info(
-                "PandaMcpClient.get_failed_job_log_summary: PandaID=%s, "
-                "%d lines, %d error line(s), last_section=%r",
-                panda_id,
-                summary["total_lines"],
-                len(summary["error_lines"]),
-                summary["last_section_marker"],
+            say(
+                f"summarized failed job log: {summary['total_lines']} lines, "
+                f"{len(summary['error_lines'])} error line(s)"
             )
             return summary
         except Exception as exc:
@@ -1027,12 +999,10 @@ class PandaMcpClient(McpClient):
             result["failed_panda_id"] = failed_pid
             result["successful_panda_id"] = succ_pid
             result["reference_task_id"] = ref_id
-            logger.info(
-                "PandaMcpClient.compare_failed_vs_successful_job_logs: "
-                "failed=%s successful=%s ref_task=%s truncated=%s step=%r",
-                failed_pid, succ_pid, ref_id,
-                result["failed_log_appears_truncated_mid_execution"],
-                result["candidate_problem_step_from_alignment"],
+            say(
+                "compared failed vs successful job logs "
+                f"(truncated={result['failed_log_appears_truncated_mid_execution']}, "
+                f"step={result['candidate_problem_step_from_alignment']!r})"
             )
             return result
         except Exception as exc:
@@ -1056,13 +1026,9 @@ class PandaMcpClient(McpClient):
             summary = summarize_log_content(content)
             summary["pandaID"] = pid
             summary["filename"] = "payload.stdout"
-            logger.info(
-                "PandaMcpClient.summarize_job_log: PandaID=%s, %d lines, "
-                "%d error line(s), last_section=%r",
-                pid,
-                summary["total_lines"],
-                len(summary["error_lines"]),
-                summary["last_section_marker"],
+            say(
+                f"summarized job log for PandaID={pid}: {summary['total_lines']} lines, "
+                f"{len(summary['error_lines'])} error line(s)"
             )
             return summary
         except Exception as exc:
@@ -1126,11 +1092,7 @@ class PandaMcpClient(McpClient):
 
         try:
             results = await asyncio.to_thread(_search)
-            logger.info(
-                "PandaMcpClient.search_panda_server_source: %d match(es) for query=%r",
-                len(results),
-                query,
-            )
+            say(f"found {len(results)} source match(es) for {query!r}")
             return results
         except Exception as exc:
             logger.warning(
@@ -1176,9 +1138,7 @@ class PandaMcpClient(McpClient):
             )
             return []
 
-        logger.info(
-            "PandaMcpClient.search_panda_docs: %d result(s) for query=%r", len(results), query
-        )
+        say(f"found {len(results)} documentation result(s) for {query!r}")
         return [
             {
                 "title": r.title,
@@ -1212,11 +1172,7 @@ class PandaMcpClient(McpClient):
             for url, c in zip(urls, contents)
             if c and not isinstance(c, BaseException)
         }
-        logger.info(
-            "PandaMcpClient.fetch_brokerage_context: fetched %d/%d log(s)",
-            len(logs),
-            len(urls),
-        )
+        say(f"fetched {len(logs)}/{len(urls)} brokerage log(s)")
         brokerage_doc, doc_path = await self._fetch_brokerage_doc()
         return {"logs": logs, "brokerage_doc": brokerage_doc, "doc_path": doc_path}
 

@@ -17,6 +17,27 @@ Usage::
 A ``ContextVar`` is used so that the narrator is scoped to an asyncio task /
 coroutine tree; multiple parallel extractions can have independent narrators
 without any global state.
+
+Convention — narration vs. logging
+----------------------------------
+These functions emit on the ``bamboo.narration`` logger and are the
+**operator-facing** progress channel: they render on the CLI Rich console *and*
+are surfaced by interactive frontends (the Mattermost bot shows them in its live
+post). Use them for things a person watching a run wants to see:
+
+* ``say(msg)``                  — a progress milestone / result ("found 3 similar
+                                  tasks", "fetched payload.stdout (2.5 MB)").
+* ``thinking(msg)``/``counting``— the current step (drives a spinner / status head).
+* ``warn(msg)`` / ``error(msg)``— an operator-significant warning / error (highlighted).
+* ``show_block(title, body)``   — verbose detail (LLM prompts, logs); logged but
+                                  **not** sent to chat.
+
+Plain ``logging`` (``logger = logging.getLogger(__name__)``; ``logger.info`` /
+``debug`` / ``warning`` …) is the **developer/diagnostic** channel — console/log
+file only, never chat. Use it for low-level detail, per-item / hot-loop logs, and
+internal diagnostics. Rule of thumb: if an operator should see it, narrate it;
+otherwise ``logger.*`` it. Don't emit the same milestone via both (the CLI would
+print it twice).
 """
 
 from __future__ import annotations

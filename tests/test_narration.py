@@ -169,13 +169,18 @@ async def test_livepost_falls_back_to_glyph_without_emoji():
 
 
 @pytest.mark.asyncio
-async def test_livepost_finalize_success_deletes():
+async def test_livepost_finalize_success_freezes_done():
     bot = _FakeBot()
     post = _live(bot)
     post.feed(_rec("[nav] analysing", kind="step"))
+    post.feed(_rec("looking at logs"))
     await post._flush_once()
     await post.finalize(success=True)
-    assert bot.deleted == ["post-1"]
+    # Frozen to a terse "✓ done" line — detail dropped, post NOT deleted.
+    last = bot.patched[-1]
+    assert bot.deleted == []
+    assert last["message"].startswith("✓ done")
+    assert "```" not in last["message"] and "looking at logs" not in last["message"]
 
 
 @pytest.mark.asyncio
@@ -213,13 +218,14 @@ class _FakeTransport:
 
 
 @pytest.mark.asyncio
-async def test_stream_narration_deletes_on_success():
+async def test_stream_narration_freezes_done_on_success():
     bot = _FakeBot()
     async with narr.stream_narration(_FakeTransport(bot)):
         narrator.say("doing work")
         await asyncio.sleep(0.1)  # let the flusher create the post
     assert bot.created, "expected a progress post"
-    assert bot.deleted == [bot.created[-1]["id"]]
+    assert bot.deleted == []  # kept, not deleted
+    assert bot.patched[-1]["message"].startswith("✓ done")
 
 
 @pytest.mark.asyncio

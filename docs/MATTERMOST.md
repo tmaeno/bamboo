@@ -202,10 +202,11 @@ animated spinner showing the current step and, below it, a **console-style
 monospace log** of the last few progress lines, each timestamped. Larger detail
 blocks (LLM prompts, log dumps, generated code) are **not** posted to chat —
 they're debugging detail that goes to the server log only. When the run finishes
-successfully the progress reply is **removed**, leaving just the command and the
-result (card / notices). If it fails, the reply is **kept** — frozen to a static
-`🔎 <last step>` with the last log lines as a trail. The *full* trace (including
-those blocks) is always written under the `bamboo.narration` logger.
+successfully the reply is **frozen to a terse `✓ done (Ns)`** line (the streamed
+detail is dropped), leaving the command, the `✓ done`, and the result (card /
+notices). If it fails, the reply is **kept** — frozen to a static `🔎 <last step>`
+with the last log lines as a trail. The *full* trace (including those blocks) is
+always written under the `bamboo.narration` logger.
 
 **One stream, two views.** Progress narration is a single logging stream
 (`bamboo.narration`): the server console and the Mattermost reply render the

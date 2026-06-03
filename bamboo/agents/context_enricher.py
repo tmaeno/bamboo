@@ -38,7 +38,7 @@ from bamboo.llm import (
     get_extraction_llm,
 )
 from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in type hints)
-from bamboo.utils.narrator import say, show_block, thinking
+from bamboo.utils.narrator import error, say, show_block, thinking, warn
 
 logger = logging.getLogger(__name__)
 
@@ -229,10 +229,6 @@ class ContextEnricher:
                     result = exc
                 self._merge_tool_result("request_human_input", result, out, task_data=task_data)
             elif procedure_issues:
-                logger.info(
-                    "ContextEnricher: procedure gap found but request_human_input "
-                    "not available — skipping"
-                )
                 say("  Procedure gap: request_human_input not available.")
 
             if not other_issues:
@@ -265,16 +261,10 @@ class ContextEnricher:
             # ── Fallback: single-wave concurrent path ─
             tool_calls = await self._select_tools(task_data, other_issues, tools)
             if not tool_calls:
-                logger.info("ContextEnricher: LLM selected no tools — nothing to explore")
-                say("Explorer selected no additional tools.")
+                say("no tools selected — nothing to explore")
                 return out
 
             tool_names = [tc["tool"] for tc in tool_calls]
-            logger.info(
-                "ContextEnricher: executing %d tool call(s): %s",
-                len(tool_calls),
-                tool_names,
-            )
             say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
 
             coros = [self._tool_coro(tc, task_data, task_data_tool_names) for tc in tool_calls]
@@ -411,8 +401,7 @@ class ContextEnricher:
                 )
             return code, capability_gaps
         except Exception as exc:
-            logger.warning("ContextEnricher._generate_orchestration_code: failed (%s)", exc)
-            say(f"Explorer: code generation raised {type(exc).__name__}: {exc}")
+            warn(f"code generation failed — {type(exc).__name__}: {exc}")
             return None
 
     # ------------------------------------------------------------------
@@ -470,7 +459,7 @@ class ContextEnricher:
                 response = await self.llm.ainvoke(messages)
             return _parse_tool_calls(response.content)
         except Exception:
-            logger.exception("ContextEnricher: LLM tool-selection call failed — failing open")
+            warn("LLM tool-selection call failed — failing open")
             return []
 
     def _tool_coro(
@@ -725,10 +714,6 @@ def _parse_orchestration_response(response: str) -> tuple[str, list[dict]]:
             if isinstance(explanation, str) and explanation.strip():
                 show_block(
                     "orchestration: argument-source explanation",
-                    explanation,
-                )
-                logger.info(
-                    "ContextEnricher: orchestration explanation: %s",
                     explanation,
                 )
 

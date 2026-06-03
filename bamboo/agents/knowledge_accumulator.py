@@ -34,7 +34,7 @@ from bamboo.llm import (
     get_summary_llm,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
-from bamboo.utils.narrator import say, show_block, thinking
+from bamboo.utils.narrator import say, show_block, thinking, warn
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ class KnowledgeAccumulator:
             :class:`~bamboo.models.knowledge_entity.ExtractedKnowledge` with
             the graph, summary, and key insights.
         """
-        logger.info("KnowledgeAccumulator: starting knowledge extraction")
+        say("starting knowledge extraction")
 
         task_id = (task_data or {}).get("jediTaskID")
         task_status = (task_data or {}).get("status")
@@ -220,11 +220,6 @@ class KnowledgeAccumulator:
             # On rejection: ask the explorer to fetch real additional data based
             # on the reviewer's issues.  Never re-extract from the same sources
             # with a feedback prompt — that risks the LLM fabricating information.
-            logger.info(
-                "KnowledgeAccumulator: pass 1 rejected (%d issue(s)) — "
-                "invoking explorer for additional data",
-                len(review_result.issues),
-            )
             say(
                 f"Pass 1: {len(review_result.issues)} gap(s) found — "
                 "fetching additional data sources..."
@@ -246,10 +241,9 @@ class KnowledgeAccumulator:
             # Pass 2: re-extract from enriched sources → final review.
             graph, review_result = await _extract_and_review("pass 2")
             if review_result is not None and not review_result.approved:
-                logger.warning(
-                    "KnowledgeAccumulator: reviewer not satisfied after explorer pass — "
-                    "storing best result (confidence=%.2f)",
-                    review_result.confidence,
+                warn(
+                    f"reviewer not satisfied after explorer pass — storing best "
+                    f"result (confidence={review_result.confidence:.2f})"
                 )
 
         # Create explicit contribute_to edges for all Task_Feature nodes whose
@@ -287,11 +281,6 @@ class KnowledgeAccumulator:
                 "No Procedure nodes found — graph not stored (--require-procedures). "
                 "Provide an email thread with investigation steps, or run interactively."
             )
-            logger.warning(
-                "KnowledgeAccumulator: require_procedures=True but no Procedure nodes — "
-                "skipping storage for graph_id=%s",
-                graph_id,
-            )
             summary = await self._generate_summary(graph, doc_hints=_doc_hints, email_text=email_text)
             key_insights = await self._extract_key_insights(graph)
             return ExtractedKnowledge(
@@ -312,9 +301,7 @@ class KnowledgeAccumulator:
             )
 
         if dry_run:
-            logger.info(
-                "KnowledgeAccumulator: dry-run mode — skipping all database writes"
-            )
+            say("dry-run mode — skipping all database writes")
             if debug_trace is not None:
                 debug_trace["previously_processed"] = None  # unknown in dry-run
         else:
@@ -336,12 +323,6 @@ class KnowledgeAccumulator:
                         f"updated/removed, {counts['nodes_removed']} isolated "
                         "node(s) removed."
                     )
-                    logger.info(
-                        "KnowledgeAccumulator: re-processing cleanup for "
-                        "graph_id=%s: %s",
-                        graph_id,
-                        counts,
-                    )
             if debug_trace is not None:
                 debug_trace["previously_processed"] = _previously_processed
             await self._store_graph(graph)
@@ -355,12 +336,9 @@ class KnowledgeAccumulator:
         if not dry_run:
             await self._store_in_vector_db(graph, summary, key_insights)
 
-        logger.info(
-            "KnowledgeAccumulator: extraction completed for graph '%s' "
-            "(task_id=%s, task_status=%s)",
-            graph_id,
-            task_id,
-            task_status,
+        say(
+            f"extraction completed for graph '{graph_id}' "
+            f"(task_id={task_id}, task_status={task_status})"
         )
         return ExtractedKnowledge(
             graph=graph,
@@ -483,10 +461,6 @@ class KnowledgeAccumulator:
             say(
                 f"Reconciled {len(new_rels)} cross-extractor link(s) between nodes from different sources."
             )
-            logger.info(
-                "KnowledgeAccumulator: reconciled %d cross-extractor link(s)",
-                len(new_rels),
-            )
 
     def _add_context_edges(self, graph: KnowledgeGraph) -> None:
         """Connect concept=context nodes to every Symptom with ``associated_with``.
@@ -573,10 +547,9 @@ class KnowledgeAccumulator:
                     for n in feature_nodes
                 ),
             )
-            logger.info(
-                "KnowledgeAccumulator: added %d dimension-matched feature edge(s) for %s",
-                len(new_rels),
-                sorted(dimensions),
+            say(
+                f"added {len(new_rels)} dimension-matched feature edge(s) "
+                f"for {sorted(dimensions)}"
             )
 
     # Node types that must NOT be stored in the graph database (Neo4j).
@@ -632,13 +605,9 @@ class KnowledgeAccumulator:
         ]
         n_vector_only = len(graph.nodes) - len(all_eligible)
         n_isolated = len(all_eligible) - len(graph_nodes)
-        logger.info(
-            "KnowledgeAccumulator: storing %d/%d nodes in graph DB "
-            "(%d vector-only skipped, %d isolated skipped)",
-            len(graph_nodes),
-            len(graph.nodes),
-            n_vector_only,
-            n_isolated,
+        say(
+            f"storing {len(graph_nodes)}/{len(graph.nodes)} nodes in graph DB "
+            f"({n_vector_only} vector-only skipped, {n_isolated} isolated skipped)"
         )
 
         # For Procedure nodes: LLM-merge descriptions when a same-named node exists.
@@ -700,7 +669,7 @@ class KnowledgeAccumulator:
             )
             await self.graph_db.create_relationship(db_rel)
 
-        logger.info("KnowledgeAccumulator: graph stored successfully")
+        say("graph stored successfully")
 
     async def _generate_summary(
         self,
@@ -713,7 +682,6 @@ class KnowledgeAccumulator:
         The summary is stored in Qdrant so that users can retrieve full
         incident narratives via semantic search.
         """
-        logger.info("KnowledgeAccumulator: generating graph summary")
         say("Generating a narrative summary of the extracted graph...")
 
         graph_data = {
@@ -814,7 +782,7 @@ class KnowledgeAccumulator:
         Deterministic point IDs are used so that re-processing the same graph
         overwrites existing points rather than inserting duplicates.
         """
-        logger.info("KnowledgeAccumulator: storing vectors in vector DB")
+        say("storing vectors in vector DB")
 
         graph_id = graph.metadata["graph_id"]
 
@@ -844,10 +812,9 @@ class KnowledgeAccumulator:
             metadata={"graph_id": graph_id},
         )
 
-        logger.info(
-            "KnowledgeAccumulator: stored %d node descriptions + 1 summary for graph '%s'",
-            len(key_insights),
-            graph_id,
+        say(
+            f"stored {len(key_insights)} node descriptions + 1 summary "
+            f"for graph '{graph_id}'"
         )
 
     @staticmethod

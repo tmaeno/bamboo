@@ -307,11 +307,8 @@ class PandaDocNavigator:
             return not _META_FILE.exists()
         meta = self._read_meta()
         if meta is None or meta.get("sha") != current_sha:
-            logger.info(
-                "PandaDocNavigator: SHA changed (%s → %s) — rebuilding index",
-                meta.get("sha") if meta else "none",
-                current_sha,
-            )
+            old_sha = meta.get("sha") if meta else "none"
+            say(f"doc index SHA changed ({old_sha} → {current_sha}) — rebuilding")
             return True
         return False
 
@@ -454,11 +451,7 @@ class PandaDocNavigator:
             self._graph[node.id] = node
 
         self._page_ids = [nid for nid, n in self._graph.items() if n.level == 0]
-        logger.info(
-            "PandaDocNavigator: loaded %d nodes (%d pages) from Qdrant",
-            len(self._graph), len(self._page_ids),
-        )
-        say(f"Loaded {len(self._graph)} nodes ({len(self._page_ids)} pages) from Qdrant")
+        say(f"loaded {len(self._graph)} nodes ({len(self._page_ids)} pages) from Qdrant")
 
     # ------------------------------------------------------------------
     # Index build pipeline
@@ -473,15 +466,13 @@ class PandaDocNavigator:
         for files that were deleted. For first-run or legacy meta the diff is
         empty, so this collapses to the full rebuild seen historically.
         """
-        say("Building PanDA doc index — this may take a few minutes")
-        logger.info("PandaDocNavigator: building doc index — this may take a few minutes")
+        say("building PanDA doc index — this may take a few minutes")
 
         with thinking("Fetching PanDA doc file list"):
             rst_paths, tree_sha, file_shas = await self._fetch_rst_paths()
         if not rst_paths:
             logger.warning("PandaDocNavigator: no RST paths found — aborting build")
             return
-        say(f"Discovered {len(rst_paths)} RST paths")
 
         # ── File-level diff against stored meta ─────────────────────────────
         old_meta = self._read_meta() or {}
@@ -540,17 +531,12 @@ class PandaDocNavigator:
         if paths_to_process:
             with thinking(f"Downloading {len(paths_to_process)} HTML page(s)"):
                 html_pages = await self._fetch_html_pages(paths_to_process)
-            say(f"Fetched {len(html_pages)}/{len(paths_to_process)} pages")
 
             from bs4 import BeautifulSoup  # noqa: PLC0415 — lazy import
             for rst_path, html in html_pages.items():
                 new_nodes.extend(self._parse_page_to_nodes(rst_path, html, BeautifulSoup))
 
-            logger.info(
-                "PandaDocNavigator: parsed %d nodes across %d pages",
-                len(new_nodes), len(html_pages),
-            )
-            say(f"Parsed {len(new_nodes)} nodes across {len(html_pages)} pages")
+            say(f"parsed {len(new_nodes)} nodes across {len(html_pages)} pages")
 
             with counting(f"Summarising {len(new_nodes)} nodes", total=len(new_nodes)) as advance:
                 await self._summarize_nodes(new_nodes, advance_fn=advance)
@@ -581,11 +567,7 @@ class PandaDocNavigator:
                 file_shas=file_shas,
             )
 
-        logger.info(
-            "PandaDocNavigator: index ready — %d nodes, %d pages",
-            len(self._graph), len(self._page_ids),
-        )
-        say(f"Doc index ready — {len(self._graph)} nodes, {len(self._page_ids)} pages")
+        say(f"doc index ready — {len(self._graph)} nodes, {len(self._page_ids)} pages")
 
     async def _fetch_rst_paths(self) -> tuple[list[str], str | None, dict[str, str]]:
         """Return (rst_paths, tree_sha, file_shas).
@@ -615,7 +597,7 @@ class PandaDocNavigator:
                     blob_sha = item.get("sha")
                     if blob_sha:
                         file_shas[path] = blob_sha
-            logger.info("PandaDocNavigator: discovered %d RST paths", len(rst_paths))
+            say(f"discovered {len(rst_paths)} doc page path(s)")
             return rst_paths, sha, file_shas
         except Exception as exc:
             logger.warning("PandaDocNavigator: failed to fetch RST paths: %s", exc)
@@ -637,7 +619,7 @@ class PandaDocNavigator:
             fetched = await asyncio.gather(*[_fetch_one(client, p) for p in rst_paths])
 
         result = {path: html for path, html in fetched if html}
-        logger.info("PandaDocNavigator: fetched %d/%d HTML pages", len(result), len(rst_paths))
+        say(f"fetched {len(result)}/{len(rst_paths)} HTML page(s)")
         return result
 
     @staticmethod
@@ -819,14 +801,10 @@ class PandaDocNavigator:
 
         await asyncio.gather(*[_one(n) for n in nodes])
         self._write_node_cache(node_cache)
-        logger.info(
-            "PandaDocNavigator: summarized %d nodes (%d cache hits, %d LLM calls)",
-            len(nodes), cache_hits, len(nodes) - cache_hits,
-        )
         if nodes:
             say(
-                f"Summarised {len(nodes)} nodes "
-                f"(cache: {cache_hits}/{len(nodes)} hits)"
+                f"summarised {len(nodes)} nodes "
+                f"({cache_hits} cache hits, {len(nodes) - cache_hits} LLM calls)"
             )
 
     async def _embed_and_upsert(self, nodes: list[DocNode]) -> None:
@@ -880,7 +858,7 @@ class PandaDocNavigator:
             for i in range(0, len(points), batch):
                 await client.upsert(collection_name=_COLLECTION, points=points[i:i + batch])
 
-            logger.info("PandaDocNavigator: upserted %d vectors to Qdrant", len(points))
+            say(f"upserted {len(points)} vectors to Qdrant")
         finally:
             await client.close()
 
@@ -938,7 +916,7 @@ class PandaDocNavigator:
         self._bm25_ids = list(self._graph.keys())
         corpus = [self._graph[nid].content.split() for nid in self._bm25_ids]
         self._bm25 = BM25Okapi(corpus)
-        logger.info("PandaDocNavigator: BM25 index built over %d nodes", len(self._bm25_ids))
+        say(f"BM25 index built over {len(self._bm25_ids)} nodes")
 
     def _bm25_search(self, query: str, top_k: int) -> list[DocResult]:
         """Keyword search using BM25 — reliable for exact technical identifiers.

@@ -153,17 +153,22 @@ class _LivePost:
             await self._patch(self._post_id, message=msg)
 
     async def finalize(self, *, success: bool) -> None:
-        """On success delete the progress post; on failure freeze it (static head)."""
+        """Freeze the post when the run ends.
+
+        On success → a terse ``✓ done (Ns)`` line with the streamed detail dropped.
+        On failure → a static ``🔎 <last step>`` head (no spinner) keeping the last
+        lines as a trail.
+        """
         with self._lock:
             lines = list(self._lines)
             streamed = self._streamed
         if not streamed:
             return
+        elapsed = max(0, int(time.monotonic() - (self._started_at or time.monotonic())))
         if success:
-            if self._post_id is not None:
-                await self._delete(self._post_id)
-            return
-        msg = self._compose(lines, stopped=True)
+            msg = self._compose([], done=True, elapsed=elapsed)  # head only, detail dropped
+        else:
+            msg = self._compose(lines, stopped=True)
         if self._post_id is None:
             self._post_id = await self._create(msg)
         else:
@@ -186,15 +191,6 @@ class _LivePost:
             return True
         except Exception as exc:  # noqa: BLE001
             _diag.warning("narration: update_post failed (%s)", exc)
-            return False
-
-    async def _delete(self, post_id: str) -> bool:
-        try:
-            await self._bot.delete_post(post_id)
-            _diag.debug("narration: deleted post id=%s", post_id)
-            return True
-        except Exception as exc:  # noqa: BLE001
-            _diag.warning("narration: delete_post failed (%s)", exc)
             return False
 
 

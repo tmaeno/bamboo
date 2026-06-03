@@ -175,7 +175,7 @@ class ReasoningNavigator:
         raw_task_id = task_data.get("jediTaskID") or "unknown"
         task_status = task_data.get("status")
         task_id = f"{raw_task_id}:{task_status}" if task_status else raw_task_id
-        logger.info("ReasoningNavigator: analysing task '%s'", task_id)
+        say(f"analysing task '{task_id}'")
 
         try:
             snapshot = await self.graph_db.summary()
@@ -295,9 +295,7 @@ class ReasoningNavigator:
                 exploration_result.external_data or exploration_result.task_logs
             ):
                 merged_external = {**(external_data or {}), **exploration_result.external_data}
-                logger.info(
-                    "ReasoningNavigator: re-running root cause analysis with exploratory data"
-                )
+                say("re-running root cause analysis with exploratory data")
                 analysis = await self._identify_root_cause(
                     task_data, merged_external, graph_results, vector_results,
                     domain_hints=domain_hints,
@@ -324,10 +322,9 @@ class ReasoningNavigator:
                 "No investigation procedure found for the identified cause. "
                 "Manual investigation is recommended."
             )
-            logger.info(
-                "ReasoningNavigator: no procedures found for cause '%s' — "
-                "manual investigation recommended",
-                analysis.get("root_cause", "unknown"),
+            say(
+                f"no procedures found for cause '{analysis.get('root_cause', 'unknown')}' "
+                "— manual investigation recommended"
             )
 
         # --- Merge investigation results and run second analysis pass ---
@@ -335,7 +332,7 @@ class ReasoningNavigator:
         inv_logs = investigation_result.get("task_logs") or {}
         if inv_external or inv_logs:
             merged_external = {**(external_data or {}), **inv_external}
-            logger.info("ReasoningNavigator: re-running root cause analysis with investigation data")
+            say("re-running root cause analysis with investigation data")
             analysis = await self._identify_root_cause(
                 task_data, merged_external, graph_results, vector_results, domain_hints=domain_hints
             )
@@ -395,7 +392,6 @@ class ReasoningNavigator:
             ``unmatched_symptoms`` lists symptoms that had zero graph DB matches
             and are forwarded to the exploratory planner as novel leads.
         """
-        logger.info("ReasoningNavigator: querying graph database")
         show_block(
             "graph DB query inputs",
             "\n".join(
@@ -417,10 +413,9 @@ class ReasoningNavigator:
         for symptom in symptoms:
             single = await self.graph_db.find_causes(symptoms=[symptom], limit=1)
             if not single:
-                logger.info(
-                    "ReasoningNavigator: symptom '%s' has no known causes in graph "
-                    "— recording as novel lead",
-                    symptom,
+                say(
+                    f"symptom '{symptom}' has no known causes in graph "
+                    "— recording as novel lead"
                 )
                 unmatched_symptoms.append(symptom)
             if debug_trace is not None:
@@ -444,7 +439,7 @@ class ReasoningNavigator:
             components=extracted_clues.get("components"),
             limit=10,
         )
-        logger.info("ReasoningNavigator: graph DB returned %d causes", len(results))
+        say(f"graph DB returned {len(results)} cause(s)")
 
         if results:
             lines = []
@@ -482,13 +477,9 @@ class ReasoningNavigator:
         """
         if not cause_names:
             return []
-        logger.info(
-            "ReasoningNavigator: querying procedures for %d cause(s)", len(cause_names)
-        )
+        say(f"querying procedures for {len(cause_names)} cause(s)")
         results = await self.graph_db.find_procedures_for_causes(cause_names)
-        logger.info(
-            "ReasoningNavigator: found %d procedure(s) for identified causes", len(results)
-        )
+        say(f"found {len(results)} procedure(s) for identified causes")
         return results
 
     async def _query_vector_database(
@@ -518,7 +509,7 @@ class ReasoningNavigator:
             List of summary dicts, each augmented with a ``score`` field
             reflecting the strength of the best section match.
         """
-        logger.info("ReasoningNavigator: querying vector database (two-step)")
+        say("querying vector database (two-step)")
 
         section_queries: list[tuple[str, str]] = []
 
@@ -597,7 +588,7 @@ class ReasoningNavigator:
                 )
 
         if not graph_id_scores:
-            logger.info("ReasoningNavigator: no matching graphs found in vector DB")
+            say("no matching graphs found in vector DB")
             return []
 
         # Step 2: fetch summaries for all matched graph_ids
@@ -615,10 +606,9 @@ class ReasoningNavigator:
         ]
         results.sort(key=lambda x: x["score"], reverse=True)
 
-        logger.info(
-            "ReasoningNavigator: vector DB returned %d past cases via %d graph IDs",
-            len(results),
-            len(graph_id_scores),
+        say(
+            f"vector DB returned {len(results)} past case(s) "
+            f"via {len(graph_id_scores)} graph ID(s)"
         )
         return results
 
@@ -642,8 +632,6 @@ class ReasoningNavigator:
             Dict with keys ``root_cause``, ``confidence``, ``resolution``,
             ``reasoning``, and ``supporting_evidence``.
         """
-        logger.info("ReasoningNavigator: identifying root cause with LLM")
-
         task_info_str = json.dumps(
             sanitize_for_llm(task_data), indent=2, default=str
         )
@@ -763,10 +751,7 @@ class ReasoningNavigator:
             Returns ``(None, [])`` when no explorer is configured.
         """
         if self._explorer is None:
-            logger.info(
-                "ReasoningNavigator: exploratory investigation skipped — "
-                "no explorer configured"
-            )
+            say("exploratory investigation skipped — no explorer configured")
             return None, []
 
         # Build review_issues from the partial evidence and novel leads so the
@@ -794,7 +779,7 @@ class ReasoningNavigator:
             )
 
         if not review_issues:
-            logger.info("ReasoningNavigator: no hypotheses or novel leads to investigate")
+            say("no hypotheses or novel leads to investigate")
             return None, []
 
         say("Exploratory investigation: planning via orchestration-code path...")
@@ -807,7 +792,7 @@ class ReasoningNavigator:
             if exploration_result.tool_calls
             else "Exploratory investigation: explorer selected no tools."
         )
-        logger.info("ReasoningNavigator: %s", note)
+        say(note)
 
         return exploration_result, exploration_result.capability_gaps
 
@@ -838,10 +823,7 @@ class ReasoningNavigator:
             Dict with ``procedures`` (the raw procedure list) and
             ``investigation_note`` describing the recommended next steps.
         """
-        logger.info(
-            "ReasoningNavigator: Phase 2 — %d procedure(s) available",
-            len(procedures),
-        )
+        say(f"Phase 2 — {len(procedures)} procedure(s) available")
 
         # Stub fallback when no explorer is wired.
         if self._explorer is None:
@@ -855,7 +837,7 @@ class ReasoningNavigator:
                 "Recommended strategies:\n"
                 + "\n".join(f"  • {s}" for s in strategies)
             )
-            logger.info("ReasoningNavigator: investigation note: %s", note)
+            say(note)
             return {"procedures": procedures, "investigation_note": note}
 
         # Prefer stored orchestration code (captured by `bamboo investigate`)
@@ -930,7 +912,7 @@ class ReasoningNavigator:
             if exploration.tool_calls
             else "Explorer selected no tools for the investigation procedure."
         )
-        logger.info("ReasoningNavigator: %s", note)
+        say(note)
 
         return {
             "procedures": procedures,
