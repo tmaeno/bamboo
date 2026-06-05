@@ -111,6 +111,7 @@ def main(
             session_id=session_id_override,
             max_turns=max_turns,
             dry_run=dry_run,
+            verbose=verbose,
         )
     )
 
@@ -125,19 +126,39 @@ async def _run(
     session_id: str | None,
     max_turns: int,
     dry_run: bool,
+    verbose: bool = False,
 ) -> None:
     # Local imports keep module load fast for `bamboo --help`.
     from rich.console import Console
 
     from bamboo.agents.deps import build_deps
     from bamboo.frontends.cli import CliInteractionIO
+    from bamboo.utils.narrator import set_narrator
 
     # Build the terminal IO up front so the shared factory can route interactive
     # MCP tools (e.g. request_human_input) through it, and the orchestrator reuses it.
     console = Console()
+    # Wire the narrator on the SAME console so say()'s "→" lines render and the
+    # thinking() spinner coordinates with the IO's prompts/panels — the setup every
+    # other CLI command does (e.g. analyze). Without it investigate shows no narration.
+    set_narrator(console, verbose=verbose)
     io = CliInteractionIO(console)
     deps = build_deps(io=io)
     deps.console = console
+
+    # Connect the knowledge backends up front (best-effort), mirroring `analyze`,
+    # so the session-start hypothesis (analyze_task) and the end-of-session commit
+    # can query them. A missing DB degrades gracefully — it must not abort the
+    # interactive session — so connect failures are warned, not fatal.
+    for _db in (deps.graph_db, deps.vector_db):
+        try:
+            await _db.connect()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "investigate: %s connect failed (%s) — continuing degraded",
+                type(_db).__name__,
+                exc,
+            )
 
     orch = InvestigationOrchestrator(
         deps=deps,
@@ -162,7 +183,16 @@ async def _run(
         await orch.run()
     except KeyboardInterrupt:
         click.echo("\nInterrupted; session saved.")
-    await orch.finalize()
+    try:
+        await orch.finalize()
+    finally:
+        # Close the backends we opened (best-effort) so the async drivers don't
+        # leak / warn on process exit.
+        for _db in (deps.graph_db, deps.vector_db):
+            try:
+                await _db.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":

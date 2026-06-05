@@ -69,3 +69,31 @@ def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
         error_classifier=ErrorCategoryClassifier(),
         io=io,
     )
+
+
+async def resolve_task_data(
+    task_id: Any = None,
+    task_data: Optional[dict] = None,
+    *,
+    verbose: bool = False,
+) -> Optional[dict]:
+    """THE single way to obtain PanDA ``task_data`` for an entry point.
+
+    Returns ``task_data`` unchanged when the caller already has it (from a
+    ``--task-data`` file, a draft's embedded dict, chat context, …); otherwise
+    fetches it from PanDA via :func:`bamboo.utils.panda_client.fetch_task_data`
+    when only a ``task_id`` is given.  Returns ``None`` when neither is provided.
+
+    This is input *acquisition*, which legitimately lives at the entry point
+    (the only layer that knows the source) — unlike ``prefetch_hints``, the
+    strategy-owned algorithm step that stays encapsulated inside the agents.
+    Consolidating it here is what keeps the ``analyze`` / ``investigate`` /
+    ``capture`` / ``populate`` fetch from drifting apart again.
+
+    Raises on fetch failure — each caller keeps its own try/except for error UX.
+    """
+    if task_data is not None or task_id is None:
+        return task_data
+    from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415  (keep pandaclient import lazy)
+
+    return await fetch_task_data(task_id, verbose=verbose)

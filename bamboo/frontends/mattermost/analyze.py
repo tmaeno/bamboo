@@ -22,10 +22,10 @@ FetchFn = Callable[[int], Awaitable[dict]]
 
 
 async def _default_fetch(task_id: int) -> dict:
-    """Fetch task data from PanDA (lazy import keeps pandaclient off the hot path)."""
-    from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+    """Fetch task data via the shared seam (the same one analyze/investigate/populate use)."""
+    from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
 
-    return await fetch_task_data(task_id)
+    return await resolve_task_data(task_id)
 
 
 async def run_analyze(

@@ -320,10 +320,10 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
     set_narrator(Console(), verbose=verbose)
 
     if task_id is not None:
-        from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+        from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
 
         try:
-            task_dict = await fetch_task_data(task_id)
+            task_dict = await resolve_task_data(task_id)
         except Exception as e:
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)

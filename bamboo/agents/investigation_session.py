@@ -308,11 +308,14 @@ class InvestigationOrchestrator:
             fit=True,
         )
 
-        # 1) Fetch task_data if a task_id was supplied.
+        # 1) Fetch task_data if a task_id was supplied — via the shared seam, the
+        #    same one analyze/capture/populate use (input acquisition lives at the
+        #    entry point; the agent's contract is just "give me a task_data dict").
         if task_id is not None and task_data is None:
-            await self.deps.mcp_client.connect()
+            from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
+
             try:
-                task_data = await self.deps.mcp_client.execute("get_task_data", task_id=task_id)
+                task_data = await resolve_task_data(task_id)
             except Exception as exc:  # noqa: BLE001
                 self.io.notice(f"[yellow]Failed to fetch task_data: {exc}[/yellow]")
                 task_data = None
@@ -745,7 +748,12 @@ class InvestigationOrchestrator:
         if not task_data:
             return
         try:
-            result = await self.deps.reasoning_navigator.analyze_task(task_data)
+            # Reuse the hints already fetched in start() step 2 so analyze_task
+            # doesn't prefetch a second time (its doc_hints= hook skips the
+            # internal prefetch when given). None ⇒ let it self-prefetch.
+            result = await self.deps.reasoning_navigator.analyze_task(
+                task_data, doc_hints=self.session.doc_hints or None
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("analyze_task in session-start failed: %s", exc)
             return

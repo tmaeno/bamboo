@@ -56,12 +56,15 @@ async def run_capture(
     mcp_client: Any = None,
 ) -> bool:
     """Drive a capture-from-thread session. Returns True if knowledge was stored."""
-    # 1) Optionally enrich with structured task data.
+    # 1) Optionally enrich with structured task data — via the shared fetch seam
+    #    (same one analyze/investigate/populate use). Capture only needs the dict,
+    #    not the MCP tool client.
     task_data: Optional[dict[str, Any]] = None
-    if task_id is not None and mcp_client is not None:
+    if task_id is not None:
+        from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
+
         try:
-            await mcp_client.connect()
-            task_data = await mcp_client.execute("get_task_data", task_id=task_id)
+            task_data = await resolve_task_data(task_id)
         except Exception as exc:  # noqa: BLE001
             io.notice(f"[yellow]Could not fetch task_data for {task_id}: {exc}[/yellow]")
 

@@ -16,7 +16,7 @@ import builtins
 import pytest
 
 from bamboo.agents.context_enricher import ContextEnricher
-from bamboo.agents.deps import build_deps
+from bamboo.agents.deps import build_deps, resolve_task_data
 from bamboo.mcp.interactive_mcp_client import InteractiveMcpClient
 
 
@@ -52,6 +52,57 @@ def test_build_deps_returns_full_bundle():
     assert deps.io is not None
     # Explorer carries the strategy's source_navigator (default "panda" → non-None).
     assert deps.reasoning_navigator._explorer._source_navigator is not None
+
+
+# ---------------------------------------------------------------------------
+# resolve_task_data — the shared fetch seam
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_task_data_passthrough_when_given(monkeypatch):
+    import bamboo.utils.panda_client as pc
+
+    called = False
+
+    async def _should_not_run(*_a, **_k):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(pc, "fetch_task_data", _should_not_run)
+    td = {"jediTaskID": 7}
+    out = await resolve_task_data(task_id=7, task_data=td)
+    assert out is td and called is False  # no fetch when task_data already provided
+
+
+@pytest.mark.asyncio
+async def test_resolve_task_data_fetches_when_only_task_id(monkeypatch):
+    import bamboo.utils.panda_client as pc
+
+    async def _fetch(task_id, verbose=False):
+        return {"jediTaskID": int(task_id), "fetched": True}
+
+    monkeypatch.setattr(pc, "fetch_task_data", _fetch)
+    out = await resolve_task_data(task_id=42)
+    assert out == {"jediTaskID": 42, "fetched": True}
+
+
+@pytest.mark.asyncio
+async def test_resolve_task_data_none_when_neither():
+    assert await resolve_task_data() is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_task_data_propagates_fetch_error(monkeypatch):
+    import bamboo.utils.panda_client as pc
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("panda down")
+
+    monkeypatch.setattr(pc, "fetch_task_data", _boom)
+    with pytest.raises(RuntimeError, match="panda down"):
+        await resolve_task_data(task_id=1)
 
 
 # ---------------------------------------------------------------------------

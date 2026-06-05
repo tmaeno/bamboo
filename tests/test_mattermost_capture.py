@@ -115,20 +115,43 @@ async def test_run_capture_handles_empty_extraction():
 
 
 @pytest.mark.asyncio
-async def test_run_capture_fetches_task_data_when_task_id_given():
+async def test_run_capture_fetches_task_data_when_task_id_given(monkeypatch):
     acc = _accumulator_with_graph([ResolutionNode(name="r", description="d")])
-    mcp = MagicMock()
-    mcp.connect = AsyncMock()
-    mcp.execute = AsyncMock(return_value={"jediTaskID": 42, "status": "broken"})
+    # Capture fetches via the shared seam (resolve_task_data), not an MCP tool.
+    import bamboo.agents.deps as deps
+
+    monkeypatch.setattr(
+        deps,
+        "resolve_task_data",
+        AsyncMock(return_value={"jediTaskID": 42, "status": "broken"}),
+    )
     io = MattermostInteractionIO(FakeTransport(["the cause", "the fix", "yes"]))
 
-    await run_capture(
-        io, transcript="t", task_id=42, accumulator=acc, graph_db=_graph_db(), mcp_client=mcp
-    )
+    await run_capture(io, transcript="t", task_id=42, accumulator=acc, graph_db=_graph_db())
 
-    mcp.execute.assert_awaited_once()
+    deps.resolve_task_data.assert_awaited_once_with(42)
     # task_data flowed into extraction.
     assert acc.process_knowledge.call_args.kwargs["task_data"] == {
         "jediTaskID": 42,
         "status": "broken",
     }
+
+
+@pytest.mark.asyncio
+async def test_run_capture_continues_when_task_data_fetch_fails(monkeypatch):
+    acc = _accumulator_with_graph([CauseNode(name="c", description="d")])
+    import bamboo.agents.deps as deps
+
+    monkeypatch.setattr(
+        deps, "resolve_task_data", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    io = MattermostInteractionIO(FakeTransport(["the cause", "", "yes"]))
+
+    stored = await run_capture(
+        io, transcript="t", task_id=42, accumulator=acc, graph_db=_graph_db()
+    )
+
+    # Fetch failed → a notice is posted and capture continues with task_data=None.
+    assert any("Could not fetch task_data" in s for s in io.transport.sent)
+    assert acc.process_knowledge.call_args.kwargs["task_data"] is None
+    assert stored is True
