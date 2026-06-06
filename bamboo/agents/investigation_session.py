@@ -12,11 +12,12 @@ investigation session. See plan §C-§F for the design rationale:
   rolls back the last turn's mutation; ``/done`` and ``/abandon`` terminate
   (§D).
 * The **tool branch** generates a sandboxed orchestration code block via the
-  ``INVESTIGATE_ORCHESTRATION`` prompt, statically detects whether it touches
-  any side-effecting tool, prompts the human ``[y/N/edit]`` only in that case,
-  and executes via the shared :func:`bamboo.agents.orchestration.run_orchestration_code`.
-  Each block becomes ONE atomic_action with stored code + summary + signals
-  on the Procedure (per the §G replayability schema).
+  ``INVESTIGATE_ORCHESTRATION`` prompt. **Every new code block is reviewed** by the
+  human before it runs (``_review_code``), who sets a per-code session policy
+  (run-once / auto-run / always-ask); approved code executes via the shared
+  :func:`bamboo.agents.orchestration.run_orchestration_code`. Each block becomes
+  ONE atomic_action with stored code + summary + signals on the Procedure (per the
+  §G replayability schema). See docs/EXECUTION_TRUST.md for the trust model.
 * The **narration branch** runs the parameterised email-extraction prompt
   (per §0.3) on the utterance + recent turn history; merges the extracted
   entities into ``partial_graph`` with canonical-name dedup.
@@ -29,6 +30,7 @@ investigation session. See plan §C-§F for the design rationale:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -44,6 +46,7 @@ from rich.console import Console
 
 from bamboo.agents.orchestration import analyze_code_side_effects, run_orchestration_code
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
+from bamboo.utils.narrator import say
 from bamboo.frontends.base import Column, InteractionIO
 from bamboo.frontends.cli import CliInteractionIO
 from bamboo.llm import (
@@ -100,7 +103,7 @@ class OrchestrationRun(BaseModel):
     code: str
     code_summary: str = ""
     trigger_signals: list[str] = Field(default_factory=list)
-    has_side_effects: bool = True
+    external_access: bool = True  # code calls an external (PanDA) tool; formerly has_side_effects
     call_log: list[str] = Field(default_factory=list)
     result_summary: str = ""
     atomic_action_id: str = ""
@@ -130,6 +133,11 @@ class InvestigationSession(BaseModel):
     tool_gap_log: list[ToolGap] = Field(default_factory=list)
     intent_gap_log: list[IntentGap] = Field(default_factory=list)
     status: str = "ongoing"  # "ongoing" | "resolved" | "abandoned"
+    # Session-scoped review decisions: code_hash → "auto_run" | "always_ask".
+    # A human reviews each new code block once and chooses its policy; this is
+    # honored for the rest of the session (persists with the session JSON, so it
+    # survives --resume). NOT shared across sessions/users — see docs/EXECUTION_TRUST.md.
+    code_policies: dict[str, str] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +172,12 @@ def _format_available_tools(tools: list[dict[str, Any]]) -> str:
         return "(none)"
     lines = []
     for t in tools:
-        side = "side-effects=True" if t.get("has_side_effects") else "side-effects=False"
+        access = "external" if t.get("external_access") else "internal"
+        # read_only defaults True (a tool only modifies state when explicitly tagged).
+        rw = "read-only" if t.get("read_only", True) else "MODIFIES-STATE"
         schema = json.dumps(t.get("parameters_schema") or {}, indent=None)
         lines.append(
-            f"- {t['name']} [{side}]: {t.get('description', '').strip()}\n"
+            f"- {t['name']} [{access}, {rw}]: {t.get('description', '').strip()}\n"
             f"    args schema: {schema}"
         )
     return "\n".join(lines)
@@ -233,6 +243,18 @@ def _summarise_result(result: Any, max_len: int = 200) -> str:
         s = "<unrepr-able result>"
     s = re.sub(r"\s+", " ", s)
     return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+def _code_hash(code: str) -> str:
+    """Stable identity for a code block under whitespace-only normalization.
+
+    Strips per-line trailing whitespace and drops blank lines (leading
+    indentation is preserved — it is significant in Python), then sha256. Two
+    blocks that differ only in formatting share a hash; a logic change yields a
+    new hash, so it is re-reviewed (the safe direction). See docs/EXECUTION_TRUST.md.
+    """
+    normalized = "\n".join(line.rstrip() for line in (code or "").splitlines() if line.strip())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:
@@ -474,6 +496,32 @@ class InvestigationOrchestrator:
             # move on without recording anything for this turn.
             self.io.notice("[dim]Skipped this turn (no action recorded).[/dim]")
             return True
+        if cmd == "/approvals":
+            policies = self.session.code_policies
+            if not policies:
+                self.io.notice("[dim]No code-execution policies set this session.[/dim]")
+            else:
+                lines = "\n".join(f"  {h[:12]} → {p}" for h, p in policies.items())
+                self.io.notice(f"[bold]Code policies (this session):[/bold]\n{lines}")
+            return True
+        if cmd.startswith("/revoke"):
+            arg = cmd[len("/revoke"):].strip()
+            if not arg:
+                self.io.notice("[dim]Usage: /revoke <hash-prefix|all>[/dim]")
+            elif arg == "all":
+                n = len(self.session.code_policies)
+                self.session.code_policies.clear()
+                self.io.notice(f"[dim]Cleared {n} code polic(y/ies).[/dim]")
+            else:
+                matched = [h for h in self.session.code_policies if h.startswith(arg)]
+                for h in matched:
+                    del self.session.code_policies[h]
+                self.io.notice(
+                    f"[dim]Revoked {len(matched)} polic(y/ies).[/dim]"
+                    if matched
+                    else f"[dim]No policy matches '{arg}'.[/dim]"
+                )
+            return True
         return False
 
     async def _classify_intent(self, utterance: str) -> str:
@@ -495,6 +543,12 @@ class InvestigationOrchestrator:
         if intent not in ("tool", "narration"):
             intent = "narration"
 
+        say(
+            f"intent → {intent} (confidence {confidence:.2f}"
+            f"{'; close call' if is_close else ''})",
+            level=logging.DEBUG,
+        )
+
         if confidence < 0.7 or is_close:
             chosen = await self.io.ask(
                 "[dim]I'm not sure — did you want me to[/dim] [bold](t)[/bold]ool [dim]or are you[/dim] [bold](s)[/bold]haring a finding?",
@@ -514,7 +568,7 @@ class InvestigationOrchestrator:
         return intent
 
     async def _tool_turn(self, utterance: str) -> None:
-        """Plan §D tool branch — generate code, confirm if side-effects, execute, record."""
+        """Plan §D tool branch — generate code, review (per-code policy), execute, record."""
         task_id = (self.session.initial_inputs.get("task_id"))
         task_data = self.session.initial_inputs.get("task_data") or {}
         error_dialog = (task_data.get("errorDialog") if task_data else None) or self.session.initial_inputs.get("symptom") or ""
@@ -551,57 +605,30 @@ class InvestigationOrchestrator:
         code_summary = str(plan.get("code_summary") or "").strip()
         trigger_signals = list(plan.get("trigger_signals") or [])
 
-        # Static side-effects analysis is the ground truth (not the LLM's self-report).
-        side_effect_names = {t["name"] for t in tool_descriptors_full if t.get("has_side_effects")}
-        has_side_effects = analyze_code_side_effects(code, side_effect_names)
+        say(f"strategy → {strategy_type}: {code_summary}", level=logging.DEBUG)
 
-        if has_side_effects:
-            self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
-            choice = await self.io.ask(
-                "[bold]Proceed?[/bold]",
-                default="N",
-                choices=["y", "N", "edit"],
+        # Every new code block is reviewed (not just state-changing ones); the human
+        # sets a per-code session policy. external_tool_names → recorded as Procedure
+        # metadata (does this code hit PanDA), not the gate. See docs/EXECUTION_TRUST.md.
+        external_tool_names = {t["name"] for t in tool_descriptors_full if t.get("external_access")}
+
+        reviewed = await self._review_code(strategy_type, code_summary, trigger_signals, code)
+        if reviewed is None:
+            self.session.intent_gap_log.append(
+                IntentGap(
+                    utterance=utterance,
+                    classifier_guess="tool",
+                    kind="reject_code",
+                    turn=self.session.turn,
+                )
             )
-            if choice == "N":
-                self.session.intent_gap_log.append(
-                    IntentGap(
-                        utterance=utterance,
-                        classifier_guess="tool",
-                        kind="reject_code",
-                        turn=self.session.turn,
-                    )
-                )
-                self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
-                self.io.notice("[dim]Aborted. Re-prompt to try a different request.[/dim]")
-                return
-            if choice == "edit":
-                strategy_type, code, code_summary, trigger_signals = await self.io.edit(
-                    strategy_type=strategy_type,
-                    code=code,
-                    summary=code_summary,
-                    triggers=trigger_signals,
-                )
-                # Re-analyse side-effects after edit (defensive — edit might have added/removed external calls).
-                has_side_effects = analyze_code_side_effects(code, side_effect_names)
-                # Re-display the now-edited block and re-prompt.
-                self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
-                second = await self.io.ask(
-                    "[bold]Proceed with edited code?[/bold]",
-                    default="N",
-                    choices=["y", "N"],
-                )
-                if second == "N":
-                    self.session.intent_gap_log.append(
-                        IntentGap(
-                            utterance=utterance,
-                            classifier_guess="tool",
-                            kind="reject_code",
-                            turn=self.session.turn,
-                        )
-                    )
-                    self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
-                    self.io.notice("[dim]Aborted after edit.[/dim]")
-                    return
+            self.session.turn_history.append(Turn(role="system", kind="reject_code", text=strategy_type))
+            self.io.notice("[dim]Aborted. Re-prompt to try a different request.[/dim]")
+            return
+        strategy_type, code, code_summary, trigger_signals = reviewed
+
+        # Recorded as Procedure metadata; computed on the final (possibly edited) code.
+        external_access = analyze_code_side_effects(code, external_tool_names)
 
         # Execute.
         result, call_log, error = await self._execute_orchestration(code, task_id, task_data)
@@ -613,7 +640,7 @@ class InvestigationOrchestrator:
             code=code,
             code_summary=code_summary,
             trigger_signals=trigger_signals,
-            has_side_effects=has_side_effects,
+            external_access=external_access,
             call_log=call_log,
             result_summary=_summarise_result(result),
             atomic_action_id=atomic_action_id,
@@ -626,6 +653,62 @@ class InvestigationOrchestrator:
             self.io.notice(f"[red]Tool execution error: {error}[/red]")
         else:
             self.io.result(_summarise_result(result, max_len=1000), title=f"result · {strategy_type}")
+
+    async def _review_code(
+        self,
+        strategy_type: str,
+        code_summary: str,
+        trigger_signals: list[str],
+        code: str,
+    ) -> Optional[tuple[str, str, str, list[str]]]:
+        """Review-and-policy gate (Phase 1, session-scoped).
+
+        Every code block not yet approved this session is shown to the operator,
+        who picks a per-code policy: ``run-once`` (no persistence), ``auto-run``
+        (skip future prompts for identical code this session), or ``always-ask``
+        (re-prompt each time). ``auto_run`` code runs with no prompt. The decision
+        is keyed on :func:`_code_hash` and stored on ``session.code_policies``.
+        Returns the (possibly edited) ``(strategy_type, code, code_summary,
+        trigger_signals)`` to execute, or ``None`` if declined.
+        See docs/EXECUTION_TRUST.md.
+        """
+        while True:
+            h = _code_hash(code)
+            policy = self.session.code_policies.get(h)
+            if policy == "auto_run":
+                say(f"↻ auto-running approved code: {strategy_type}", level=logging.DEBUG)
+                return strategy_type, code, code_summary, trigger_signals
+
+            self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
+            if policy == "always_ask":
+                choice = await self.io.ask(
+                    "[bold]Proceed?[/bold]", default="N", choices=["y", "N", "edit"]
+                )
+            else:
+                choice = await self.io.ask(
+                    "[bold]Review[/bold] — [y] run once / [a] auto-run / [k] always ask / "
+                    "[edit] / [N] reject",
+                    default="N",
+                    choices=["y", "a", "k", "edit", "N"],
+                )
+
+            if choice == "N":
+                return None
+            if choice == "edit":
+                strategy_type, code, code_summary, trigger_signals = await self.io.edit(
+                    strategy_type=strategy_type,
+                    code=code,
+                    summary=code_summary,
+                    triggers=trigger_signals,
+                )
+                continue  # re-review the edited code (recompute hash + re-prompt)
+            if choice == "a":
+                self.session.code_policies[h] = "auto_run"
+                self.io.notice("[dim]✓ will auto-run this exact code for the rest of the session.[/dim]")
+            elif choice == "k":
+                self.session.code_policies[h] = "always_ask"
+            # choice == "y" → run once, persist nothing.
+            return strategy_type, code, code_summary, trigger_signals
 
     async def _narration_turn(self, utterance: str) -> None:
         """Plan §D narration branch — extract entities, merge into partial_graph."""
@@ -677,7 +760,8 @@ class InvestigationOrchestrator:
                     "name": t.name,
                     "description": t.description,
                     "parameters_schema": t.parameters_schema,
-                    "has_side_effects": getattr(t, "has_side_effects", True),
+                    "external_access": getattr(t, "external_access", True),
+                    "read_only": getattr(t, "read_only", True),
                 }
             )
         for name, t in self._internal_tools_descriptors.items():
@@ -686,7 +770,8 @@ class InvestigationOrchestrator:
                     "name": t.name,
                     "description": t.description,
                     "parameters_schema": t.parameters_schema,
-                    "has_side_effects": getattr(t, "has_side_effects", False),
+                    "external_access": getattr(t, "external_access", False),
+                    "read_only": getattr(t, "read_only", True),
                 }
             )
         return out
@@ -805,7 +890,7 @@ class InvestigationOrchestrator:
                     r.code_summary or "-",
                     called,
                     res,
-                    "y" if r.has_side_effects else "n",
+                    "y" if r.external_access else "n",
                 ]
             )
         self.io.table(
@@ -816,7 +901,7 @@ class InvestigationOrchestrator:
                 Column("summary"),
                 Column("called"),
                 Column("result"),
-                Column("side-fx?", justify="center"),
+                Column("external?", justify="center"),
             ],
             rows=rows,
         )
@@ -841,7 +926,7 @@ class InvestigationOrchestrator:
         proc_metadata: dict[str, Any] = {
             "orchestration_code": run.code,
             "code_summary": run.code_summary,
-            "has_side_effects": run.has_side_effects,
+            "external_access": run.external_access,
             "atomic_action_id": run.atomic_action_id,
             # The per-edge fields (trigger_signals, result_summary, executed_at)
             # are kept here too during the session; finalize splits them onto the

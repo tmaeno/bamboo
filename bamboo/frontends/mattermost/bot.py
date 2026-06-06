@@ -32,6 +32,7 @@ class Command:
     kind: str  # "investigate" | "capture" | "analyze" | "login" | "logout" | "status" | "help"
     task_id: Optional[int] = None
     user_id: Optional[str] = None  # Mattermost user who issued the command
+    verbose: bool = False  # `--verbose`/`-v` on the command → DEBUG narration in the live post
 
 
 @dataclass
@@ -49,9 +50,10 @@ class BotStatus:
 def parse_command(message: str) -> Optional[Command]:
     """Parse a start command from a message, tolerating a leading @mention.
 
-    Recognises ``investigate [<task_id>]``, ``capture [<task_id>]``,
+    Recognises ``investigate [<task_id>] [--verbose|-v]``, ``capture [<task_id>]``,
     ``analyze [<task_id>]``, ``login``, ``logout``, ``status``, and ``help``.
-    Returns ``None`` when the message is not a start command.
+    A ``--verbose``/``-v`` token streams behind-the-scenes DEBUG narration into the
+    thread's live post. Returns ``None`` when the message is not a start command.
     """
     text = (message or "").strip()
     # Drop a leading @mention token if present.
@@ -71,11 +73,13 @@ def parse_command(message: str) -> Optional[Command]:
     verb = tokens[0].lower()
     if verb in ("investigate", "capture", "analyze"):
         task_id = None
+        verbose = False
         for tok in tokens[1:]:
-            if tok.isdigit():
+            if tok.isdigit() and task_id is None:
                 task_id = int(tok)
-                break
-        return Command(kind=verb, task_id=task_id)
+            elif tok.lower() in ("--verbose", "-v"):
+                verbose = True
+        return Command(kind=verb, task_id=task_id, verbose=verbose)
     if verb in ("login", "logout", "status", "help"):
         return Command(kind=verb)
     return None

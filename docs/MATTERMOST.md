@@ -180,12 +180,16 @@ If you address the bot (`@bamboo …` or `/bamboo …`) with an unrecognized com
 it replies with `help`. Ordinary channel chatter that doesn't address the bot is
 ignored.
 
-**Investigate.** Reply in the thread to drive each turn. Meta-commands (as
-replies): `/done`, `/abandon`, `/undo`, `/tool <request>`, `/show-graph`,
-`/show-tools`. When the bot proposes side-effecting code it asks you to reply
-`y`, `N`, or `edit` before running it. At the end it asks for the cause and
-resolution, shows the commit diff (a **Mermaid** graph on instances that support
-it), and asks you to confirm before writing to the knowledge base.
+**Investigate.** `investigate <taskID> [--verbose]` — reply in the thread to drive
+each turn. Meta-commands (as replies): `/done`, `/abandon`, `/undo`,
+`/tool <request>`, `/show-graph`, `/show-tools`, `/approvals`, `/revoke`. The bot
+shows **every new code block** before running it (read-only is not a free pass) and
+asks you to choose a policy — run once / auto-run / always-ask / edit / reject;
+auto-run skips the prompt for that exact code for the rest of the session. Adding
+`--verbose`/`-v` streams behind-the-scenes detail (intent, strategy, per-tool calls)
+into the live post. At the end it asks for the cause and resolution, shows the commit
+diff (a **Mermaid** graph on instances that support it), and asks you to confirm
+before writing to the knowledge base. (Full model: [EXECUTION_TRUST.md](EXECUTION_TRUST.md).)
 
 **Capture.** The bot reads the thread transcript, asks for the cause and
 resolution, extracts the knowledge, shows the commit diff for review, and stores
@@ -263,43 +267,11 @@ Two layers:
    their identity — no manual `login` + re-run. (Per-user tokens are checked and
    auto-refreshed each time; expired/near-expiry tokens refresh transparently.)
 
-Side-effecting orchestration code is **never** executed without an explicit reply
-confirmation in the thread.
-
----
-
-## Troubleshooting
-
-- **"requires the optional client" / import error** — install the extra:
-  `pip install 'bamboo[mattermost]'` (and `'bamboo[panda]'` for `login`).
-- **Bot doesn't respond** — confirm it is a member of the channel, the channel ID
-  is in `MATTERMOST_ALLOWED_CHANNELS`, and `MATTERMOST_TOKEN`/`MATTERMOST_URL`
-  are correct. Run with `-v` to see WebSocket events.
-- **`login` fails** — ensure `PANDA_AUTH_VO` and `PANDA_API_URL_SSL` are set so
-  the IAM auth config can be resolved; check the bot host can reach IAM; the
-  device code expires after a few minutes, so finish the browser sign-in
-  promptly.
-- **`login` fails with "certificate verify failed: unable to get local issuer
-  certificate"** — the bot's Python has no CA trust store (common on python.org
-  framework builds). Run `bamboo verify`: it sets `SSL_CERT_FILE` to the bundled
-  `certifi` roots in your `.env`, then restart the bot. Note `PANDA_VERIFY_HOST`
-  does **not** affect login — it only applies to PanDA data-plane calls.
-- **Live-progress spinner doesn't animate** — the bot registers an animated custom
-  emoji (`:bamboo_spinner:`) on startup; if your instance disables custom emoji or
-  the bot lacks the "Create Custom Emoji" permission, the head shows a static `🔎`
-  instead (the step text and detail still update). Enable custom emoji / grant the
-  bot the permission, then restart the bot. The startup log line under
-  `bamboo.narration` reports whether the emoji was created/found/refreshed or is
-  unavailable.
-- **Spinner shows a tiny/old image** — the registered emoji is stale. The bot
-  self-heals on startup: it compares the stored emoji image to the bundled
-  `spinner.gif` and recreates it on mismatch (log: `spinner emoji refreshed`). If you
-  changed the bundled gif, just reinstall (`pip install -U .`) and restart — the new
-  image is packaged (the build uses **hatchling**, which always ships current files)
-  and the emoji refreshes itself on the next start.
-- **Commit diff shows raw `mermaid` code** — the Mattermost instance doesn't have
-  Mermaid rendering enabled; the diagram still reads as a code block. Enable
-  Mermaid on the instance, or rely on the textual summary line.
+**Every** newly generated orchestration code block is shown for review before it
+runs (not only state-changing ones), and runs only on your reply — unless you have
+granted that exact code auto-run for the session. Side effects only ever happen in
+the interactive loop; the automatic `analyze` phase is read-only. See
+[EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
 ---
 

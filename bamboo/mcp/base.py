@@ -34,15 +34,31 @@ class McpTool:
                            LLM when running in an interactive terminal
                            (``sys.stdout.isatty()``).  Set this for tools
                            that prompt the human operator for input.
-        has_side_effects:  When ``True`` (the default), calling this tool has
-                           external side effects (PanDA server request,
-                           non-trivial cost, observable change). When
-                           ``False``, the tool is read-only against bamboo's
-                           own state (e.g. internal graph-DB queries) and
-                           ``bamboo investigate`` may auto-execute the call
-                           without prompting for confirmation. Default True
-                           is safe: any tool not explicitly tagged as
-                           side-effect-free will gate confirmation.
+
+    Two **orthogonal** trust axes describe a tool (see docs/EXECUTION_TRUST.md):
+
+        read_only:         When ``True`` (the default), the tool only *reads* —
+                           it changes no state, internal *or* external. When
+                           ``False``, it modifies state (mutates PanDA, e.g.
+                           kill/retry, **or** writes bamboo's own DB) — so a
+                           bamboo-DB writer is **not** read-only even though it
+                           never touches PanDA. The **security** axis: automatic,
+                           unattended phases (analyze, populate, the
+                           investigate-startup hypothesis) may run **only**
+                           ``read_only=True`` tools; anything that changes state
+                           requires a human in the interactive loop.
+        external_access:   When ``True`` (the default), the tool reaches an
+                           external system (a PanDA server request — has cost /
+                           observable interaction). When ``False``, it operates
+                           only on bamboo's own state (e.g. internal graph-DB
+                           queries). Informational: cost-awareness and the LLM's
+                           internal-vs-external hint. Default ``True`` is the
+                           conservative assumption for an untagged tool.
+
+    Note: ``external_access`` is *not* a mutation flag — an external PanDA
+    *read* is ``read_only=True, external_access=True``. Use ``read_only`` for
+    "does this change anything"; use ``external_access`` for "does this hit
+    PanDA". (``external_access`` was formerly ``has_side_effects``.)
     """
 
     name: str
@@ -50,7 +66,8 @@ class McpTool:
     parameters_schema: dict[str, Any]
     metadata: dict[str, Any] = field(default_factory=dict)
     requires_interaction: bool = field(default=False)
-    has_side_effects: bool = field(default=True)
+    read_only: bool = field(default=True)
+    external_access: bool = field(default=True)
 
 
 class McpClient(ABC):

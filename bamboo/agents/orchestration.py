@@ -21,8 +21,9 @@ Public API
   (external MCP tools + optional internal read-only callables).
 * :func:`run_orchestration_code` — async-exec the code, return
   ``(result, call_log)``.
-* :func:`analyze_code_side_effects` — AST-walk the code and decide whether
-  any ``tools.<name>`` call references a tool with ``has_side_effects=True``.
+* :func:`analyze_code_side_effects` — AST-walk the code and decide whether it
+  references any ``tools.<name>`` whose name is in a caller-supplied set (e.g.
+  the state-changing / external tools).
 """
 
 from __future__ import annotations
@@ -54,6 +55,31 @@ SAFE_BUILTINS: dict[str, Any] = {
 }
 
 
+def _fmt_kwargs(kwargs: dict[str, Any]) -> str:
+    """Compact, value-clipped ``k=repr(v)`` rendering for verbose per-call narration."""
+    parts = []
+    for k, v in kwargs.items():
+        try:
+            r = repr(v)
+        except Exception:  # noqa: BLE001
+            r = "<unrepr-able>"
+        if len(r) > 60:
+            r = r[:59] + "…"
+        parts.append(f"{k}={r}")
+    return ", ".join(parts)
+
+
+def _describe_result(result: Any) -> str:
+    """One-token shape of a tool result for verbose per-call narration."""
+    if isinstance(result, (list, tuple, set)):
+        return f"{type(result).__name__}[{len(result)}]"
+    if isinstance(result, dict):
+        return f"dict[{len(result)} keys]"
+    if isinstance(result, str):
+        return f"str[{len(result)} chars]"
+    return type(result).__name__
+
+
 class ToolProxy:
     """Exposes MCP tools (and optional internal tools) as async methods for LLM-generated code.
 
@@ -68,6 +94,14 @@ class ToolProxy:
     caller can correlate the orchestration's effects with which tools were
     actually invoked.
 
+    ``allowed_tools`` is the runtime execution boundary: when not ``None``, any
+    call to a tool whose name is **not** in the set is refused *before* dispatch
+    (the tool never runs). Because the check uses the resolved name at call time,
+    it is alias-proof — ``m = tools.kill_job; await m()`` is caught even though
+    static analysis of the source would miss it. Unattended callers pass the
+    read-only tool names here so automatic phases can never mutate; the
+    interactive investigate loop passes ``None`` (its code is human-reviewed).
+
     Args:
         client:                MCP client with ``execute(name, **kwargs)``.
         task_data:             Current task fields — auto-injected for MCP
@@ -79,6 +113,8 @@ class ToolProxy:
                                internal read-only tools (no client routing).
                                Default empty preserves ContextEnricher's
                                historical behavior.
+        allowed_tools:         Optional allow-set of tool names permitted to run.
+                               ``None`` (default) imposes no restriction.
     """
 
     def __init__(
@@ -88,21 +124,37 @@ class ToolProxy:
         task_data_tool_names: frozenset[str],
         call_log: list[str],
         internal_tools: dict[str, Callable[..., Awaitable[Any]]] | None = None,
+        allowed_tools: frozenset[str] | None = None,
     ) -> None:
         self._client = client
         self._task_data = task_data
         self._td_names = task_data_tool_names
         self._log = call_log
         self._internal = internal_tools or {}
+        self._allowed = allowed_tools
 
     def __getattr__(self, name: str):
         async def call(**kwargs):
+            # Runtime boundary (alias-proof): refuse disallowed tools before dispatch.
+            if self._allowed is not None and name not in self._allowed:
+                from bamboo.utils.narrator import warn  # noqa: PLC0415
+
+                warn(f"refused tool {name!r}: not permitted in this (read-only) context")
+                raise PermissionError(f"tool {name!r} not permitted in this execution context")
+            # Verbose per-call narration — format the LLM-supplied kwargs *before*
+            # task_data injection so the (large) task_data dict is never dumped.
+            from bamboo.utils.narrator import say  # noqa: PLC0415
+
+            say(f"→ {name}({_fmt_kwargs(kwargs)})", level=logging.DEBUG)
             self._log.append(name)
             if name in self._internal:
-                return await self._internal[name](**kwargs)
-            if name in self._td_names:
-                kwargs["task_data"] = self._task_data
-            return await self._client.execute(name, **kwargs)
+                result = await self._internal[name](**kwargs)
+            else:
+                if name in self._td_names:
+                    kwargs["task_data"] = self._task_data
+                result = await self._client.execute(name, **kwargs)
+            say(f"   ↳ {name} returned {_describe_result(result)}", level=logging.DEBUG)
+            return result
         return call
 
 
@@ -113,6 +165,7 @@ async def run_orchestration_code(
     task_data: dict[str, Any],
     task_data_tool_names: frozenset[str],
     internal_tools: dict[str, Callable[..., Awaitable[Any]]] | None = None,
+    allowed_tools: frozenset[str] | None = None,
     extra_globals: dict[str, Any] | None = None,
     timeout: float = 600.0,
     log_prefix: str = "orchestration",
@@ -131,6 +184,9 @@ async def run_orchestration_code(
                                ``task_data_tool_names``.
         task_data_tool_names:  See :class:`ToolProxy`.
         internal_tools:        See :class:`ToolProxy`.
+        allowed_tools:         Runtime allow-set of tool names; see :class:`ToolProxy`.
+                               Unattended callers pass the read-only names so
+                               automatic phases cannot mutate.
         extra_globals:         Optional ``{name: value}`` of additional names
                                to bind as local variables inside ``_fn``.
                                Used by ``bamboo investigate`` to expose
@@ -160,6 +216,7 @@ async def run_orchestration_code(
         task_data_tool_names=task_data_tool_names,
         call_log=call_log,
         internal_tools=internal_tools,
+        allowed_tools=allowed_tools,
     )
     namespace: dict[str, Any] = {"asyncio": asyncio, "__builtins__": SAFE_BUILTINS}
 
@@ -208,16 +265,18 @@ def analyze_code_side_effects(
     code: str,
     side_effect_tool_names: set[str] | frozenset[str],
 ) -> bool:
-    """Return True if ``code`` calls any ``tools.<name>`` where name is side-effecting.
+    """Return True if ``code`` references any ``tools.<name>`` in the given set.
 
-    Used by investigate's pre-execution confirmation gate (§D) — only orchestration
-    blocks that touch side-effect-ful tools require human ``[y/N/edit]``;
-    purely-internal blocks (all calls hit read-only graph queries) auto-execute.
+    A generic static screen over the caller-supplied set. Callers pass the set
+    that matters to them — e.g. the navigator passes the **state-changing**
+    (``read_only=False``) tool names to pre-screen a stored procedure before
+    unattended replay, and the investigate turn passes the **external** tool
+    names to record whether a procedure hits PanDA. The runtime ``ToolProxy``
+    allow-set is the actual boundary; this is advisory (see docs/EXECUTION_TRUST.md).
 
     Args:
         code:                     Source of the orchestration function body.
-        side_effect_tool_names:   Names of tools tagged ``has_side_effects=True``
-                                  in the caller's unified registry.
+        side_effect_tool_names:   The tool names to screen for (caller-defined).
 
     Returns:
         True if any AST node matches ``await? tools.<name>(...)`` where ``name``

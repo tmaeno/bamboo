@@ -49,6 +49,10 @@ class InteractiveMcpClient(McpClient):
                     "required": ["prompt"],
                 },
                 requires_interaction=True,
+                # Internal (no PanDA call) and read-only (asking a human changes no
+                # state). read_only=True is the default; external_access=False marks
+                # it as not hitting PanDA.
+                external_access=False,
             ),
         ]
 

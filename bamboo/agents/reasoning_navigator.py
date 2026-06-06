@@ -34,6 +34,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.agents.context_enricher import ExplorationResult
+from bamboo.agents.orchestration import analyze_code_side_effects
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
@@ -844,17 +845,38 @@ class ReasoningNavigator:
 
         # Prefer stored orchestration code (captured by `bamboo investigate`)
         # over the explorer's regenerate-from-description path: re-execute the
-        # human-confirmed Python from the past session directly. Procedures
-        # without stored code (populate-captured) fall through to today's
-        # explorer-driven regeneration.
+        # past session's Python directly. Procedures without stored code
+        # (populate-captured) fall through to today's explorer-driven
+        # regeneration.
+        #
+        # This is an **automatic** phase (no operator watching turn-by-turn), so
+        # it is read-only: a stored procedure whose code would call a
+        # state-changing tool (read_only=False) is NOT replayed here — it is
+        # skipped and surfaced as a suggestion for the operator to run in
+        # investigate's interactive loop. External PanDA *reads* replay fine.
+        # (The ``ToolProxy`` read-only allow-set in the explorer is the runtime
+        # backstop for anything this static screen misses, e.g. aliasing. See
+        # docs/EXECUTION_TRUST.md.)
+        non_read_only_names = self._explorer.non_read_only_tool_names()
         stored_code_procedures = [p for p in procedures if (p.get("orchestration_code") or "").strip()]
         regen_procedures = [p for p in procedures if not (p.get("orchestration_code") or "").strip()]
 
         stored_tool_calls: list[dict[str, Any]] = []
         stored_external_data: dict[str, Any] = {}
+        suggested_state_changing: list[str] = []
         for p in stored_code_procedures:
             code = p["orchestration_code"].strip()
             summary = (p.get("code_summary") or "").strip() or "(no summary)"
+            if analyze_code_side_effects(code, non_read_only_names):
+                say(
+                    f"Phase 2: skipping state-changing stored procedure "
+                    f"'{p['strategy_type']}' for cause '{p['cause_name']}' — "
+                    f"suggest running it in `bamboo investigate`."
+                )
+                suggested_state_changing.append(
+                    f"{p['strategy_type']} (cause: {p['cause_name']}) — {summary}"
+                )
+                continue
             say(
                 f"Phase 2: re-executing stored procedure '{p['strategy_type']}' "
                 f"for cause '{p['cause_name']}' — {summary}"
@@ -914,6 +936,11 @@ class ReasoningNavigator:
             if exploration.tool_calls
             else "Explorer selected no tools for the investigation procedure."
         )
+        if suggested_state_changing:
+            note += (
+                "\nSuggested (not auto-run — state-changing; run via `bamboo investigate`): "
+                + "; ".join(suggested_state_changing)
+            )
         say(note)
 
         return {

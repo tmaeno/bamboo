@@ -68,7 +68,8 @@ def _enrich_procedure_rows(
             continue
         row["orchestration_code"] = proc_meta.get("orchestration_code", "")
         row["code_summary"] = proc_meta.get("code_summary", "")
-        row["has_side_effects"] = proc_meta.get("has_side_effects")
+        # Renamed has_side_effects → external_access; read old nodes via fallback.
+        row["external_access"] = proc_meta.get("external_access", proc_meta.get("has_side_effects"))
         triggers = edge_meta.get("trigger_signals", [])
         row["trigger_signals"] = list(triggers) if isinstance(triggers, list) else []
         row["result_summary"] = edge_meta.get("result_summary", "")
@@ -482,7 +483,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             List of dicts with keys ``cause_name``, ``procedure_name``,
             ``strategy_type``, ``description``, ``parameters``, ``frequency``,
             plus the new fields ``orchestration_code`` (str), ``code_summary``
-            (str), ``has_side_effects`` (bool|None), ``trigger_signals``
+            (str), ``external_access`` (bool|None), ``trigger_signals``
             (list[str]), and ``result_summary`` (str). The new fields are
             empty / None when the underlying Procedure / edge does not carry
             them in its JSON metadata.

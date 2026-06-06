@@ -119,14 +119,21 @@ class ContextEnricher:
         return self._llm
 
     def _filtered_tools(self) -> list[McpTool]:
-        """Return tools from the client, excluding interactive tools when the
-        frontend can't gather human input.
+        """Return the read-only tools the explorer's planner may use.
 
-        Uses the injected ``InteractionIO.supports_interaction`` when available
-        (so the chat bot can offer interactive tools via thread replies); falls
+        The explorer only ever does automatic, unattended data-gathering (no
+        operator turn-by-turn), so **state-changing tools are dropped** (those
+        with ``read_only=False``) — the planner never even sees them, so it
+        generates read-only code by construction (the ``ToolProxy`` allow-set in
+        ``_run_orchestration_code`` is the runtime backstop). External PanDA
+        *reads* (``read_only=True, external_access=True``) are kept — fetching
+        data is exactly the explorer's job. Interactive tools
+        (``request_human_input``) are also dropped when the frontend can't gather
+        human input, using the injected ``InteractionIO.supports_interaction``
+        when available (so the chat bot can offer them via thread replies); falls
         back to TTY detection for IO-less callers.
         """
-        tools = self._client.list_tools()
+        tools = [t for t in self._client.list_tools() if t.read_only]
         if self._io is not None:
             interactive = self._io.supports_interaction
         else:
@@ -143,6 +150,16 @@ class ContextEnricher:
         ``"→ resolvable with <tool_name>"``.
         """
         return self._filtered_tools()
+
+    def non_read_only_tool_names(self) -> frozenset[str]:
+        """Names of the client's state-changing tools (``read_only=False``).
+
+        For callers (e.g. :class:`ReasoningNavigator`) that statically pre-screen
+        stored procedure code before unattended replay, so a state-changing
+        procedure can be skipped + surfaced as a suggestion rather than attempted
+        and refused at the ``ToolProxy`` boundary.
+        """
+        return frozenset(t.name for t in self._client.list_tools() if not t.read_only)
 
     async def run_stored_code(
         self,
@@ -419,15 +436,27 @@ class ContextEnricher:
         Thin delegate to
         :func:`bamboo.agents.orchestration.run_orchestration_code` so the
         sandbox/proxy/exec mechanics are shared with ``bamboo investigate``.
-        Behavior preserved exactly (same 600 s timeout, same fail-open
-        semantics, same ``call_log`` semantics, same narrator message).
+
+        The explorer runs in **automatic** phases (populate, and the navigator's
+        ``analyze_task`` hypothesis) with no operator watching turn-by-turn, so it
+        is confined to **read-only** tools: ``allowed_tools`` is the read-only
+        subset of the client's tools, and any state-changing call — whether from
+        regenerated code, an aliased reference, or a replayed stored procedure —
+        is refused at the :class:`~bamboo.agents.orchestration.ToolProxy`
+        boundary. External PanDA *reads* are allowed (fetching data is the job);
+        only ``read_only=False`` tools are blocked. (State changes only ever
+        happen in investigate's interactive turn loop. See docs/EXECUTION_TRUST.md.)
         """
+        read_only_tool_names = frozenset(
+            t.name for t in self._client.list_tools() if t.read_only
+        )
         return await _shared_run_orchestration_code(
             code,
             client=self._client,
             task_data=task_data,
             task_data_tool_names=task_data_tool_names,
             internal_tools=None,  # ContextEnricher has no internal-tool registry
+            allowed_tools=read_only_tool_names,
             timeout=600.0,
             log_prefix="orchestration",
         )

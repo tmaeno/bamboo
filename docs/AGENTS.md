@@ -188,8 +188,14 @@ switches by `mode`:
 The generated function body runs as `async def _fn(tools, asyncio)` in a
 restricted namespace exposing only a curated `_SAFE_BUILTINS`, `asyncio`, and
 a `ToolProxy` (which auto-injects `task_data` for tools that accept it). A
-120-second timeout guards against runaway code. Any syntax error, runtime
+timeout guards against runaway code. Any syntax error, runtime
 exception, or timeout is logged and the call returns `{}` — fail-open.
+Because the explorer runs in **automatic, read-only** phases, its tool list is
+filtered to `read_only=True` tools (`_filtered_tools`) *and* it passes
+`allowed_tools = <read_only names>` to the `ToolProxy`, which refuses any
+state-changing (`read_only=False`) call at the call site (alias-proof) — external
+PanDA *reads* are still allowed. State changes only ever happen in `investigate`'s
+interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
 **Returned data** (`ExplorationResult`):
 

@@ -318,11 +318,16 @@ def _threshold() -> int:
 
 
 @contextlib.asynccontextmanager
-async def stream_narration(transport: Any):
+async def stream_narration(transport: Any, *, verbose: bool = False):
     """Install a per-session live post that mirrors the narration stream to MM.
 
     No-op for transports not backed by a bot (e.g. test fakes): narration stays on
     the logging stream only, exactly as before.
+
+    When *verbose* is set (a ``--verbose``/``-v`` command flag), this session's post
+    uses a ``DEBUG`` threshold instead of the global ``NARRATION_LEVEL``, surfacing
+    the behind-the-scenes detail (intent, strategy, per-tool calls). Per-session, so
+    it doesn't change verbosity for other concurrent threads.
     """
     bot = getattr(transport, "_bot", None)
     channel_id = getattr(transport, "channel_id", None)
@@ -331,7 +336,7 @@ async def stream_narration(transport: Any):
         return
 
     loop = asyncio.get_running_loop()
-    threshold = _threshold()
+    threshold = logging.DEBUG if verbose else _threshold()
     post = _LivePost(bot, channel_id, getattr(transport, "root_id", ""), loop, threshold)
     _ensure_handler()
     # Ensure narration records at >= threshold actually reach the handler: a record

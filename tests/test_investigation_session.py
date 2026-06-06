@@ -11,6 +11,7 @@ mocked.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,6 +23,7 @@ from bamboo.agents.investigation_session import (
     InvestigationSession,
     OrchestrationRun,
     Turn,
+    _code_hash,
     _Deps,
     _format_running_graph_summary,
     _parse_json_response,
@@ -89,6 +91,21 @@ class _ScriptedIO(InteractionIO):
 
     def diff(self, rows, *, edge_count, edges=None) -> None:
         pass
+
+
+class _QueueIO(_ScriptedIO):
+    """`_ScriptedIO` whose ``ask`` returns answers from a queue (then ``"N"``).
+
+    Used to script the review-and-policy prompt choices (``y``/``a``/``k``/``N``).
+    """
+
+    def __init__(self, answers: list[str]) -> None:
+        super().__init__()
+        self.answers = list(answers)
+
+    async def ask(self, prompt, *, default=None, choices=None) -> str:
+        self.asked.append(prompt)
+        return self.answers.pop(0) if self.answers else "N"
 
 
 def _make_mcp_client(tools: list[McpTool] | None = None) -> Any:
@@ -299,7 +316,7 @@ def test_record_atomic_action_creates_procedure_and_task_context():
         code='return {"jobs": []}',
         code_summary="Fetch scout jobs.",
         trigger_signals=["scout phase failed"],
-        has_side_effects=True,
+        external_access=True,
         call_log=["get_scout_job_details"],
         result_summary="0 jobs",
         atomic_action_id="abc123",
@@ -313,7 +330,7 @@ def test_record_atomic_action_creates_procedure_and_task_context():
     proc = procs[0]
     assert proc.metadata["orchestration_code"] == 'return {"jobs": []}'
     assert proc.metadata["code_summary"] == "Fetch scout jobs."
-    assert proc.metadata["has_side_effects"] is True
+    assert proc.metadata["external_access"] is True
     # The per-edge fields are pending until finalize() wires them onto an edge.
     assert proc.metadata["_pending_edge"]["trigger_signals"] == ["scout phase failed"]
 
@@ -403,10 +420,13 @@ async def test_build_tool_registry_merges_mcp_and_internal_tools():
     assert "get_x" in names
     assert "query_past_causes_for_symptom" in names
     assert "query_past_procedures_for_cause" in names
-    # External MCP tool defaults to has_side_effects=True; internal tools are False.
+    # External MCP tool defaults to external_access=True; internal tools are False.
     by_name = {t["name"]: t for t in unified}
-    assert by_name["get_x"]["has_side_effects"] is True
-    assert by_name["query_past_causes_for_symptom"]["has_side_effects"] is False
+    assert by_name["get_x"]["external_access"] is True
+    assert by_name["query_past_causes_for_symptom"]["external_access"] is False
+    # Both are read_only=True (no current tool changes state).
+    assert by_name["get_x"]["read_only"] is True
+    assert by_name["query_past_causes_for_symptom"]["read_only"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -460,7 +480,7 @@ async def test_session_resume_round_trip(tmp_path):
                 metadata={
                     "orchestration_code": 'return {"ok": True}',
                     "code_summary": "probe x",
-                    "has_side_effects": True,
+                    "external_access": True,
                     "atomic_action_id": "aa1",
                     "_pending_edge": {
                         "trigger_signals": ["low cpu seen"],
@@ -481,7 +501,7 @@ async def test_session_resume_round_trip(tmp_path):
                 code='return {"ok": True}',
                 code_summary="probe x",
                 trigger_signals=["low cpu seen"],
-                has_side_effects=True,
+                external_access=True,
                 call_log=["foo"],
                 result_summary='{"ok": True}',
                 atomic_action_id="aa1",
@@ -701,7 +721,7 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
                 name="get_scout_job_details",
                 description="fetch scout job info",
                 parameters_schema={"type": "object", "properties": {"task_id": {"type": "integer"}}},
-                has_side_effects=True,
+                external_access=True,
             ),
         ]
     )
@@ -763,7 +783,7 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
     assert len(procs) == 1
     proc = procs[0]
     assert proc.strategy_type == "inspect_failed_scout_jobs"
-    assert proc.metadata["has_side_effects"] is True
+    assert proc.metadata["external_access"] is True
     assert "get_scout_job_details" in proc.metadata["orchestration_code"]
     # The tool was actually invoked through the proxy.
     mcp_client.execute.assert_called_once()
@@ -801,3 +821,107 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
     # graph_id was set on the graph for resume idempotency.
     stored_graph = accumulator.store_extracted.call_args.args[0]
     assert stored_graph.metadata.get("graph_id") == "investigate:integ-test"
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 review-and-policy gate (docs/EXECUTION_TRUST.md)
+# ---------------------------------------------------------------------------
+
+
+def test_code_hash_ignores_whitespace_but_not_logic():
+    assert _code_hash("x = 1\n\n  y = 2  ") == _code_hash("x = 1\n  y = 2")
+    assert _code_hash("x = 1") != _code_hash("x = 2")
+
+
+def test_code_policies_round_trips():
+    s = InvestigationSession(session_id="s")
+    s.code_policies["abc123"] = "auto_run"
+    s2 = InvestigationSession.model_validate_json(s.model_dump_json())
+    assert s2.code_policies == {"abc123": "auto_run"}
+
+
+def _readonly_tool() -> McpTool:
+    # read_only=True is the default; a plain read tool.
+    return McpTool(
+        name="get_x",
+        description="read x",
+        parameters_schema={"type": "object"},
+    )
+
+
+def _orch_plan(code: str) -> str:
+    return json.dumps(
+        {"strategy_type": "s", "code": code, "code_summary": "sum", "trigger_signals": []}
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_turn_auto_run_policy_persists_and_skips_prompt(monkeypatch):
+    """Choosing `a` persists auto_run; the same code re-runs with no further prompt."""
+    io = _QueueIO(["a"])  # turn 1: review → auto-run
+    orch = _build_orch(mcp_tools=[_readonly_tool()], io=io)
+    await orch._build_tool_registry()
+    code = 'r = await tools.get_x()\nreturn {"r": r}'
+
+    async def fake_invoke(_self, system, user):  # noqa: ARG001
+        return _orch_plan(code)
+
+    monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
+
+    await orch._tool_turn("do x")
+    assert orch.session.code_policies.get(_code_hash(code)) == "auto_run"
+    asked_after_first = len(io.asked)
+
+    # Turn 2: identical code → auto-run, no new prompt.
+    await orch._tool_turn("do x again")
+    assert len(io.asked) == asked_after_first  # no additional ask
+    tool_turns = [t for t in orch.session.turn_history if t.kind == "tool"]
+    assert len(tool_turns) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_turn_reject_records_no_procedure(monkeypatch):
+    io = _QueueIO(["N"])
+    orch = _build_orch(mcp_tools=[_readonly_tool()], io=io)
+    await orch._build_tool_registry()
+
+    async def fake_invoke(_self, system, user):  # noqa: ARG001
+        return _orch_plan('return {"r": await tools.get_x()}')
+
+    monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
+    await orch._tool_turn("do x")
+
+    procs = [n for n in orch.session.partial_graph.nodes if isinstance(n, ProcedureNode)]
+    assert procs == []
+    assert any(g.kind == "reject_code" for g in orch.session.intent_gap_log)
+
+
+@pytest.mark.asyncio
+async def test_tool_turn_run_once_does_not_persist_policy(monkeypatch):
+    io = _QueueIO(["y"])  # run once, no persistence
+    orch = _build_orch(mcp_tools=[_readonly_tool()], io=io)
+    await orch._build_tool_registry()
+    code = 'return {"r": await tools.get_x()}'
+
+    async def fake_invoke(_self, system, user):  # noqa: ARG001
+        return _orch_plan(code)
+
+    monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
+    await orch._tool_turn("do x")
+    assert orch.session.code_policies == {}  # nothing remembered
+
+
+@pytest.mark.asyncio
+async def test_approvals_and_revoke_meta_commands():
+    orch = _build_orch()
+    orch.session.code_policies["deadbeef0001"] = "auto_run"
+    orch.session.code_policies["cafebabe0002"] = "always_ask"
+
+    assert await orch._handle_meta_command("/approvals") is True
+    # Revoke by hash-prefix.
+    assert await orch._handle_meta_command("/revoke deadbeef") is True
+    assert "deadbeef0001" not in orch.session.code_policies
+    assert "cafebabe0002" in orch.session.code_policies
+    # Revoke all.
+    assert await orch._handle_meta_command("/revoke all") is True
+    assert orch.session.code_policies == {}

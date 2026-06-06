@@ -131,7 +131,7 @@ class GraphDatabaseBackend(ABC):
             List of dicts with keys ``cause_name``, ``procedure_name``,
             ``strategy_type``, ``description``, ``parameters``, ``frequency``,
             plus the v1 stored-code fields ``orchestration_code`` (str),
-            ``code_summary`` (str), ``has_side_effects`` (bool|None),
+            ``code_summary`` (str), ``external_access`` (bool|None),
             ``trigger_signals`` (list[str]), ``result_summary`` (str). The new
             fields are empty / None when the underlying Procedure / edge does
             not carry them in its metadata (populate-captured procedures).

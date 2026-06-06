@@ -5,8 +5,11 @@ investigate` co-drives a *live* investigation turn-by-turn, `bamboo analyze` is
 the *automated, read-only* counterpart: give it a task and it queries the graph +
 vector databases for matching causes and similar past incidents, reasons over
 them with the LLM, and returns a root cause, confidence, and recommended
-resolution — re-running stored investigation procedures along the way when a
-known cause matches.
+resolution — replaying stored investigation procedures along the way when a
+known cause matches. Because it is automatic (no operator watching), `analyze` is
+strictly **read-only**: it never executes state-changing code, even from a stored
+procedure (those are surfaced as suggestions to run in `investigate`). See
+[EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
 ## Quick start
 
@@ -66,9 +69,13 @@ The structured result (`AnalysisResult`) carries: `root_cause`, `confidence`
    tools to gather more signals, recording any `capability_gaps` (useful
    investigation directions no available tool could address), then re-synthesizes.
 5. **Phase 2 — procedure-driven** — if a matched cause has stored investigation
-   **Procedures**, bamboo re-executes them (the exact code captured by a prior
+   **Procedures**, bamboo replays them (the exact code captured by a prior
    `investigate`/`populate`) and re-synthesizes with the results; otherwise it
-   notes that manual investigation is recommended.
+   notes that manual investigation is recommended. This phase is **read-only**:
+   a stored procedure whose code would call a state-changing (`read_only=False`) tool is *not* run —
+   it is skipped and surfaced as a suggestion (the explorer's tools are filtered to
+   read-only, with a `ToolProxy` allow-set as the runtime backstop). See
+   [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
 ## Known vs. novel incidents
 

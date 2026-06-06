@@ -178,6 +178,17 @@ def test_parse_command_analyze():
     assert cmd.kind == "analyze" and cmd.task_id is None
 
 
+def test_parse_command_verbose_flag():
+    assert parse_command("investigate 123 --verbose") == Command(
+        kind="investigate", task_id=123, verbose=True
+    )
+    assert parse_command("investigate -v 123").verbose is True
+    assert parse_command("@bamboo investigate 7 --verbose").verbose is True
+    assert parse_command("/bamboo analyze 9 -v") == Command(kind="analyze", task_id=9, verbose=True)
+    # Default off when the flag is absent.
+    assert parse_command("investigate 123").verbose is False
+
+
 def test_parse_command_help():
     assert parse_command("help") == Command(kind="help")
     assert parse_command("@bamboo help").kind == "help"

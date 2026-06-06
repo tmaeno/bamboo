@@ -24,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 _HELP = (
     "**bamboo commands** — a leading `@bamboo` or `/bamboo` is optional.\n"
-    "- `investigate <taskID>` — live, turn-by-turn co-investigation of a task.\n"
+    "- `investigate <taskID> [--verbose]` — live, turn-by-turn co-investigation of a task "
+    "(`--verbose`/`-v` streams behind-the-scenes detail: intent, strategy, per-tool calls).\n"
     "- `capture [<taskID>]` — turn this thread's discussion into curated knowledge.\n"
     "- `analyze <taskID>` — one-shot root-cause analysis; posts a result card.\n"
     "- `login` / `logout` — sign in as yourself via IAM / revert to the service identity.\n"
@@ -180,7 +181,7 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     with panda_credentials(creds):
         # Stream the engine's progress narration into this thread (status spinner +
         # foldable last-N detail; full firehose goes to the `bamboo.narration` log).
-        async with stream_narration(transport):
+        async with stream_narration(transport, verbose=command.verbose):
             if command.kind == "investigate":
                 orch = InvestigationOrchestrator(deps=deps)
                 await orch.start(task_id=command.task_id)

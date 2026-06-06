@@ -47,7 +47,7 @@ $ bamboo investigate --task-id 12345
 jobs = await tools.get_scout_job_details(task_id=task_id)
 return {"jobs": jobs}
 
-Proceed? [y/N/edit]: y
+Review — [y] run once / [a] auto-run / [k] always ask / [edit] / [N] reject: a
 [... result displayed ...]
 
 > the failed jobs all OOMed on site X
@@ -68,6 +68,8 @@ Proceed? [y/N/edit]: y
 | `/tool <text>` | Force tool intent (skip the classifier — useful when it misreads) |
 | `/show-graph` | Print the current partial graph |
 | `/show-tools` | Print the unified tool registry (PanDA MCP + internal queries) |
+| `/approvals` | List the code-execution policies set this session (`auto_run` / `always_ask`) |
+| `/revoke <hash-prefix\|all>` | Clear one or all auto-run/always-ask policies for this session |
 
 ## CLI options
 
@@ -80,20 +82,23 @@ Proceed? [y/N/edit]: y
 | `--resume PATH` | — | Resume from a prior `--save` file |
 | `--max-turns INT` | 30 | Safety cap |
 | `--dry-run` | off | Walk through the session but never commit |
-| `-v, --verbose` | off | DEBUG logging |
+| `-v, --verbose` | off | DEBUG logging + behind-the-scenes narration (intent, strategy, per-tool calls) |
 
 ## What's captured (and why it's reusable)
 
-Each tool turn produces **one orchestration block** — a small async Python function body that calls one or more MCP tools. When the session commits, each block becomes a `Procedure` node with the source code stored on `metadata.orchestration_code` along with `code_summary`, `has_side_effects`, and the per-incident `trigger_signals`.
+Each tool turn produces **one orchestration block** — a small async Python function body that calls one or more MCP tools. When the session commits, each block becomes a `Procedure` node with the source code stored on `metadata.orchestration_code` along with `code_summary`, `external_access` (whether the code hits PanDA), and the per-incident `trigger_signals`.
 
-When `bamboo analyze` later encounters a similar task and Phase 2 retrieves the Procedure for the matched Cause, it **prefers the stored code over regenerating new code** — the exact bytes that worked last time run this time. This is more reproducible than the prior approach of regenerating orchestration code from a procedure description every analyze run, and faster (skips one LLM call per procedure). Procedures captured by `bamboo populate` (no stored code) still work through the regenerate path — zero regression.
+When `bamboo analyze` later encounters a similar task and Phase 2 retrieves the Procedure for the matched Cause, it **replays the stored code** — the exact bytes that worked last time run this time, more reproducibly than regenerating from a description. But `analyze` is an **automatic, read-only** phase (no operator watching), so a stored procedure whose code would call a state-changing (`read_only=False`) tool is **not** replayed there — it is skipped and surfaced as a *suggestion* to run in the interactive `investigate` loop. External PanDA *reads* replay fine; state changes only ever happen inside the interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
 The full design rationale is in [the plan file](../.claude/plans/i-m-planning-to-evolve-bubbly-blossom.md).
 
 ## Safety model
 
-- **Tool calls with side effects** (anything that hits PanDA) always show a pre-execution confirmation panel with the proposed code + summary + trigger signals. `y` runs, `N` aborts, `edit` opens it in `$EDITOR` for free-form editing (you can fix the strategy slug, summary, trigger signals, or code itself in one buffer).
-- **Read-only internal queries** (graph DB lookups against bamboo's own state) auto-execute without confirmation — these are millisecond-scale and have no external impact.
+The full model — including the unattended (`analyze`/startup) read-only boundary — is in
+[EXECUTION_TRUST.md](EXECUTION_TRUST.md). In the interactive loop:
+
+- **Every new code block is reviewed before it runs** — the proposed code + summary + trigger signals are shown, regardless of whether it only reads or changes state (a read is *not* a free pass). You choose a per-code policy: `y` runs it once; `a` runs it and **auto-runs** the same code for the rest of the session without prompting; `k` runs it but keeps asking each time; `edit` opens it in `$EDITOR`; `N` rejects.
+- **Auto-run is keyed on the exact code** (whitespace-normalized) and scoped to the session (persists across `--resume`; not shared with other sessions/users). `/approvals` lists the policies; `/revoke` clears them.
 - **Abandoned sessions** (`/abandon` without declaring a cause) commit Procedures tagged `metadata.status="tentative"`. Default analyze queries filter these out via `include_tentative=False`.
 
 ## Two ways to use it
@@ -106,6 +111,6 @@ The full design rationale is in [the plan file](../.claude/plans/i-m-planning-to
 Same knowledge graph, different drivers:
 - `populate` — ingest a frozen narrative (email) in batch
 - `investigate` — generate the same narrative via streaming dialog
-- `analyze` — query the graph; Phase 2 re-executes stored procedures on a new task
+- `analyze` — query the graph; Phase 2 replays stored procedures on a new task (automatic = read-only; state-changing procedures are suggested, not run)
 
 All three share the same node-vs-edge schema and storage path. The differences are in the front door and the input modality, not the output.

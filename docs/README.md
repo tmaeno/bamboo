@@ -42,6 +42,13 @@ The ops-facing chat frontend: a bot (`bamboo serve-mattermost`) that runs
 topology, bot setup, the two tokens (Mattermost vs. CERN-IAM PanDA OIDC),
 per-user `login`, authorization, and troubleshooting.
 
+### 🔐 [Code-Execution Trust Model](EXECUTION_TRUST.md)
+How bamboo decides whether LLM-generated / stored orchestration code may run: human
+review of every new code block with a per-code policy (run-once / auto-run / always-ask),
+the runtime `ToolProxy` allow-set boundary, and why automatic phases (`analyze`,
+investigate-startup, `populate`) are strictly read-only. Cross-cutting across
+investigate / analyze / populate / Mattermost.
+
 ### 🤖 [Agent Reference](AGENTS.md)
 All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ContextEnricher`, `ReasoningNavigator`, and their components.
 

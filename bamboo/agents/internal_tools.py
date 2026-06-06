@@ -4,7 +4,7 @@ These are *not* MCP tools — they don't call out to PanDA. They expose a small
 set of read-only queries against bamboo's own knowledge graph (Neo4j) and
 analysis pipeline (ReasoningNavigator). From the orchestration LLM's
 perspective they look identical to MCP tools (same descriptor shape — name,
-description, parameters_schema, has_side_effects=False) so a single
+description, parameters_schema, external_access=False) so a single
 ``INVESTIGATE_ORCHESTRATION`` prompt can pick from a unified registry.
 
 The registry is built by :func:`build_internal_tools_registry`, which returns
@@ -80,7 +80,7 @@ def build_internal_tools_registry(
 
         Delegates to :meth:`GraphDatabaseClient.find_procedures_for_causes`
         with the v1 stored-code fields surfaced (orchestration_code,
-        code_summary, has_side_effects, trigger_signals, result_summary —
+        code_summary, external_access, trigger_signals, result_summary —
         see §0.6.a). ``include_tentative`` mirrors that method's flag for
         callers that want to see abandoned-session procedures too.
         """
@@ -109,7 +109,7 @@ def build_internal_tools_registry(
                 },
                 "required": ["symptom"],
             },
-            has_side_effects=False,
+            external_access=False,
         ),
         "query_past_procedures_for_cause": McpTool(
             name="query_past_procedures_for_cause",
@@ -136,7 +136,7 @@ def build_internal_tools_registry(
                 },
                 "required": ["cause_name"],
             },
-            has_side_effects=False,
+            external_access=False,
         ),
     }
 

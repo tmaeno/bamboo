@@ -306,6 +306,36 @@ async def test_stream_narration_keeps_on_failure():
     assert bot.patched[-1]["message"].startswith("🔎")
 
 
+def _post_text(bot) -> str:
+    """All body/message text across created + patched posts."""
+    chunks: list[str] = []
+    for entry in (*bot.created, *bot.patched):
+        chunks.append(entry.get("message") or "")
+        for att in (entry.get("props") or {}).get("attachments", []):
+            chunks.append(att.get("text", ""))
+    return "\n".join(chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_narration_verbose_surfaces_debug():
+    """`--verbose` lowers this session's post threshold to DEBUG."""
+    bot = _FakeBot()
+    async with narr.stream_narration(_FakeTransport(bot), verbose=True):
+        narrator.say("behind the scenes detail", level=logging.DEBUG)
+        await asyncio.sleep(0.1)
+    assert "behind the scenes detail" in _post_text(bot)
+
+
+@pytest.mark.asyncio
+async def test_stream_narration_default_drops_debug():
+    """Without `--verbose`, a DEBUG line stays out of the post (INFO threshold)."""
+    bot = _FakeBot()
+    async with narr.stream_narration(_FakeTransport(bot)):
+        narrator.say("behind the scenes detail", level=logging.DEBUG)
+        await asyncio.sleep(0.1)
+    assert "behind the scenes detail" not in _post_text(bot)
+
+
 @pytest.mark.asyncio
 async def test_stream_narration_noop_without_bot():
     class _Bare:
