@@ -70,6 +70,10 @@ def _enrich_procedure_rows(
         row["code_summary"] = proc_meta.get("code_summary", "")
         # Renamed has_side_effects → external_access; read old nodes via fallback.
         row["external_access"] = proc_meta.get("external_access", proc_meta.get("has_side_effects"))
+        # Phase 2a: signature-based identity (empty on pre-2a procedures).
+        sig = proc_meta.get("signature", [])
+        row["signature"] = list(sig) if isinstance(sig, list) else []
+        row["tool_name"] = proc_meta.get("tool_name", "")
         triggers = edge_meta.get("trigger_signals", [])
         row["trigger_signals"] = list(triggers) if isinstance(triggers, list) else []
         row["result_summary"] = edge_meta.get("result_summary", "")
@@ -506,6 +510,47 @@ class Neo4jBackend(GraphDatabaseBackend):
                 ORDER BY frequency DESC
                 """,
                 cause_names=cause_names,
+            )
+            raw_rows = [dict(record) async for record in result]
+
+        return _enrich_procedure_rows(raw_rows, include_tentative=include_tentative)
+
+    async def find_all_procedures(
+        self,
+        limit: int = 50,
+        include_tentative: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return procedures **cause-agnostically**, ordered by total reuse frequency.
+
+        Unlike :meth:`find_procedures_for_causes` (scoped to a matched cause), this
+        lists every Procedure with its frequency summed across all ``investigated_by``
+        edges (= how reused the step is overall, regardless of cause) and the list of
+        causes it has been used for. Used by ``bamboo investigate`` to expose the
+        reusable-procedure toolkit during *exploratory* sessions where the cause is
+        unknown. Same enriched row shape as ``find_procedures_for_causes`` plus
+        ``cause_names`` (list); ordered ``frequency DESC`` and capped at *limit*.
+        """
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            result = await session.run(
+                """
+                MATCH (p:Procedure)
+                OPTIONAL MATCH (c:Cause)-[r:investigated_by]->(p)
+                WITH p, collect({cause: c.name, freq: coalesce(r.frequency, 0),
+                                 meta: r.metadata, params: coalesce(r.parameters, [])}) AS edges
+                RETURN p.name          AS procedure_name,
+                       p.strategy_type AS strategy_type,
+                       p.description   AS description,
+                       p.metadata      AS procedure_metadata_json,
+                       [e IN edges WHERE e.cause IS NOT NULL | e.cause]      AS cause_names,
+                       head([e IN edges | e.meta])                          AS edge_metadata_json,
+                       head([e IN edges | e.params])                        AS parameters,
+                       reduce(s = 0, e IN edges | s + e.freq)               AS frequency
+                ORDER BY frequency DESC
+                LIMIT $limit
+                """,
+                limit=limit,
             )
             raw_rows = [dict(record) async for record in result]
 

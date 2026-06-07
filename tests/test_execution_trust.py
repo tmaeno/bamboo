@@ -18,7 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from bamboo.agents.context_enricher import ContextEnricher, ExplorationResult
-from bamboo.agents.orchestration import run_orchestration_code
+from bamboo.agents.orchestration import referenced_tool_names, run_orchestration_code
+from bamboo.agents.procedure_tools import (
+    build_procedure_tools_registry,
+    procedure_signature,
+    procedure_tool_name,
+)
 from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.mcp.base import McpTool
 
@@ -203,3 +208,91 @@ async def test_navigator_skips_and_suggests_side_effecting_stored_procedure():
     note = result["investigation_note"]
     assert "kill_the_jobs" in note
     assert "suggest" in note.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a: procedure signature/identity + reusable procedure-tools
+# ---------------------------------------------------------------------------
+
+
+def test_referenced_tool_names():
+    assert referenced_tool_names("a=await tools.get_jobs()\nb=await tools.fetch_logs()\nreturn {}") == frozenset(
+        {"get_jobs", "fetch_logs"}
+    )
+    assert referenced_tool_names("return await tools.get_status()") == frozenset({"get_status"})
+    # aliased (non-call attribute access) is still seen
+    assert referenced_tool_names("m = tools.kill_job\nreturn await m()") == frozenset({"kill_job"})
+    assert referenced_tool_names("def (:") == frozenset()  # unparseable → empty
+
+
+def test_procedure_signature_and_name():
+    code = "a=await tools.get_jobs()\nb=await tools.fetch_logs()\nreturn {}"
+    sig = procedure_signature(code)
+    assert sig == ["fetch_logs", "get_jobs"]  # sorted
+    name = procedure_tool_name(sig)
+    assert name == "proc__fetch_logs__get_jobs"
+    assert name.isidentifier()  # callable as tools.<name>
+    # Same tools (any order/phrasing) → same identity; different tools → different.
+    assert procedure_tool_name(procedure_signature("b=await tools.fetch_logs()\nreturn await tools.get_jobs()")) == name
+    assert procedure_tool_name(["get_jobs"]) != name
+    assert procedure_tool_name([]) == ""  # no-tool block → caller falls back to legacy naming
+
+
+_PROCS = [
+    {  # non-trivial, read-only → exposed
+        "tool_name": "proc__fetch_logs__get_jobs",
+        "signature": ["fetch_logs", "get_jobs"],
+        "orchestration_code": "a=await tools.get_jobs(task_id=task_id)\nb=await tools.fetch_logs()\nreturn {'a': a, 'b': b}",
+        "strategy_type": "check failed jobs",
+        "code_summary": "fetch jobs + logs",
+        "external_access": True,
+        "cause_names": ["memory pressure"],
+    },
+    {  # single-tool → skipped (raw tool covers it)
+        "tool_name": "proc__get_jobs",
+        "signature": ["get_jobs"],
+        "orchestration_code": "return await tools.get_jobs()",
+        "external_access": True,
+        "cause_names": ["x"],
+    },
+    {  # state-changing → skipped
+        "tool_name": "proc__get_jobs__kill_job",
+        "signature": ["get_jobs", "kill_job"],
+        "orchestration_code": "await tools.kill_job()\nreturn await tools.get_jobs()",
+        "external_access": True,
+        "cause_names": ["y"],
+    },
+]
+
+
+def test_build_procedure_tools_registry_filters():
+    client = _FakeClient()
+    descs, calls = build_procedure_tools_registry(
+        _PROCS,
+        client=client,
+        task_data={"jediTaskID": 42},
+        task_id=42,
+        task_data_tool_names=frozenset(),
+        non_read_only_tool_names=frozenset({"kill_job"}),
+    )
+    assert set(descs) == {"proc__fetch_logs__get_jobs"}  # only non-trivial + read-only
+    d = descs["proc__fetch_logs__get_jobs"]
+    assert d.read_only is True and d.external_access is True
+    assert "fetch_logs" in d.description and "get_jobs" in d.description
+
+
+@pytest.mark.asyncio
+async def test_procedure_tool_callable_runs_via_sandbox():
+    client = _FakeClient()
+    _descs, calls = build_procedure_tools_registry(
+        _PROCS[:1],
+        client=client,
+        task_data={"jediTaskID": 42},
+        task_id=42,
+        task_data_tool_names=frozenset(),
+        non_read_only_tool_names=frozenset({"kill_job"}),
+    )
+    result = await calls["proc__fetch_logs__get_jobs"]()
+    # The stored code ran through the sandbox: both tools were dispatched, task_id injected.
+    assert client.calls == ["get_jobs", "fetch_logs"]
+    assert result["a"] == {"ran": "get_jobs"}

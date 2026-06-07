@@ -1513,6 +1513,12 @@ when the human's request clearly calls for it. Every code block you produce is
 shown to the human for review before it runs — just write the code that does
 what the human asked.
 
+Tools named ``proc__...`` are **saved procedures** — reusable investigation steps
+captured from past sessions (their description lists the tools they compose). When
+one matches what the human is asking for, prefer calling it (e.g.
+``await tools.proc__fetch_x__get_y()``) to reuse proven prior work instead of
+re-deriving the same logic from the raw tools.
+
 Sandbox notes:
 - The code body runs inside ``async def _fn(tools, asyncio, task_id, task_data):``
   with a restricted set of builtins (``len``, ``isinstance``, ``dict``,

@@ -261,54 +261,52 @@ async def run_orchestration_code(
     return result, call_log
 
 
+def _referenced_tool_names(code: str) -> frozenset[str] | None:
+    """Tool names ``code`` references as ``tools.<name>``; ``None`` if unparseable.
+
+    Matches any ``tools.<attr>`` **attribute access** (a call ``tools.foo(...)``
+    *or* a bare reference ``m = tools.foo``), so it also sees aliased references
+    that a call-only match would miss.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "tools"
+        ):
+            names.add(node.attr)
+    return frozenset(names)
+
+
+def referenced_tool_names(code: str) -> frozenset[str]:
+    """The set of tool names ``code`` references as ``tools.<name>`` (empty if unparseable).
+
+    Used for the procedure **signature** (which tools a block uses — the stable
+    dedup/identity key, replacing the free-text ``strategy_type``) and as the
+    basis for :func:`analyze_code_side_effects`.
+    """
+    return _referenced_tool_names(code) or frozenset()
+
+
 def analyze_code_side_effects(
     code: str,
     side_effect_tool_names: set[str] | frozenset[str],
 ) -> bool:
     """Return True if ``code`` references any ``tools.<name>`` in the given set.
 
-    A generic static screen over the caller-supplied set. Callers pass the set
-    that matters to them — e.g. the navigator passes the **state-changing**
-    (``read_only=False``) tool names to pre-screen a stored procedure before
-    unattended replay, and the investigate turn passes the **external** tool
-    names to record whether a procedure hits PanDA. The runtime ``ToolProxy``
-    allow-set is the actual boundary; this is advisory (see docs/EXECUTION_TRUST.md).
-
-    Args:
-        code:                     Source of the orchestration function body.
-        side_effect_tool_names:   The tool names to screen for (caller-defined).
-
-    Returns:
-        True if any AST node matches ``await? tools.<name>(...)`` where ``name``
-        is in ``side_effect_tool_names``. False if the code parses but contains
-        no such call, OR if the code is syntactically invalid (the caller's
-        ``run_orchestration_code`` will surface the syntax error at execution
-        time). Defensive default: if static analysis cannot prove the code is
-        side-effect-free, treat it as side-effect-ful by returning True.
+    A generic static screen over the caller-supplied set (the navigator passes the
+    **state-changing** ``read_only=False`` names; the investigate turn passes the
+    **external** names). Matches attribute access, so it also catches aliased refs
+    (``m = tools.kill_job``). Unparseable code → ``True`` (conservative). The
+    runtime ``ToolProxy`` allow-set is the actual boundary; this is advisory
+    (see docs/EXECUTION_TRUST.md).
     """
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        # Conservatively assume side-effects when we cannot analyze.
-        return True
-
-    for node in ast.walk(tree):
-        # Match `tools.<name>(...)` and `await tools.<name>(...)`.
-        call_node: ast.Call | None = None
-        if isinstance(node, ast.Call):
-            call_node = node
-        if call_node is None:
-            continue
-        func = call_node.func
-        # We're looking for Attribute access of the form `tools.<name>` —
-        # either directly (`tools.foo(...)`) or via await (the Call is the
-        # operand of an Await elsewhere in the tree; either way we'll visit
-        # the inner Call via ast.walk).
-        if (
-            isinstance(func, ast.Attribute)
-            and isinstance(func.value, ast.Name)
-            and func.value.id == "tools"
-            and func.attr in side_effect_tool_names
-        ):
-            return True
-    return False
+    refs = _referenced_tool_names(code)
+    if refs is None:
+        return True  # cannot analyze → conservatively side-effecting
+    return bool(refs & set(side_effect_tool_names))

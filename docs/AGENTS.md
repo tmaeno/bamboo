@@ -197,6 +197,18 @@ state-changing (`read_only=False`) call at the call site (alias-proof) — exter
 PanDA *reads* are still allowed. State changes only ever happen in `investigate`'s
 interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
+**Reusable procedures as tools** (`bamboo/agents/procedure_tools.py`): a captured
+`ProcedureNode` is identified by a **tool-call signature** (`procedure_signature` /
+`procedure_tool_name`) — the set of `tools.<name>` its code calls — which is its
+stable dedup key (replacing the free-text `strategy_type`; the cause is an edge).
+`build_procedure_tools_registry` turns approved, non-trivial (≥2-tool), read-only
+procedures into callable `proc__…` tools whose handler replays the stored code via
+`run_orchestration_code` (so the read-only boundary composes). `InvestigationOrchestrator`
+loads them cause-agnostically via `GraphDatabaseClient.find_all_procedures(limit=N)`
+(ordered by reuse frequency) and adds them to the planner's registry, so the LLM can
+reuse prior work by calling `tools.proc__…()`. (Exposure-only this phase — the reused
+code is still reviewed per turn; no durable auto-run.)
+
 **Returned data** (`ExplorationResult`):
 
 - `task_logs` — log content keyed by source label

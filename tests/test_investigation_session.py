@@ -121,6 +121,7 @@ def _make_graph_db() -> Any:
     db = MagicMock()
     db.find_causes = AsyncMock(return_value=[])
     db.find_procedures_for_causes = AsyncMock(return_value=[])
+    db.find_all_procedures = AsyncMock(return_value=[])
     db.get_node_description = AsyncMock(return_value=None)
     return db
 
@@ -806,11 +807,10 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
     orch.session.status = "resolved"
     await orch.finalize()
 
-    # Procedure was promoted to canonical name strategy:cause.
+    # Procedure was promoted to its stable, signature-based canonical name (Phase 2a):
+    # the cause is carried by the investigated_by edge, not the node name.
     proc_names = [n.name for n in orch.session.partial_graph.nodes if isinstance(n, ProcedureNode)]
-    assert any(":memory pressure" in n for n in proc_names) or any(
-        ":memory" in n or ":use larger queue" in n for n in proc_names
-    )
+    assert "proc__get_scout_job_details" in proc_names, proc_names
     # investigated_by edge wired between Cause and Procedure.
     rel_types = {r.relation_type for r in orch.session.partial_graph.relationships}
     assert RelationType.INVESTIGATED_BY in rel_types
@@ -909,6 +909,32 @@ async def test_tool_turn_run_once_does_not_persist_policy(monkeypatch):
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
     await orch._tool_turn("do x")
     assert orch.session.code_policies == {}  # nothing remembered
+
+
+@pytest.mark.asyncio
+async def test_build_tool_registry_exposes_reusable_procedure_tools():
+    """Phase 2a: approved non-trivial read-only procedures become callable proc__ tools."""
+    orch = _build_orch()
+    orch.deps.graph_db.find_all_procedures = AsyncMock(
+        return_value=[
+            {
+                "tool_name": "proc__fetch_logs__get_jobs",
+                "signature": ["fetch_logs", "get_jobs"],
+                "orchestration_code": "a=await tools.get_jobs(task_id=task_id)\nb=await tools.fetch_logs()\nreturn {}",
+                "strategy_type": "check jobs",
+                "code_summary": "fetch jobs + logs",
+                "external_access": True,
+                "cause_names": ["memory pressure"],
+            },
+        ]
+    )
+    await orch._build_tool_registry()
+    assert "proc__fetch_logs__get_jobs" in orch._procedure_tool_descriptors
+    assert "proc__fetch_logs__get_jobs" in orch._procedure_tool_callables
+    # And it's surfaced in the unified descriptor list the planner sees, as read-only.
+    by_name = {d["name"]: d for d in orch._unified_tool_descriptors()}
+    assert "proc__fetch_logs__get_jobs" in by_name
+    assert by_name["proc__fetch_logs__get_jobs"]["read_only"] is True
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,21 @@ class GraphDatabaseClient:
             cause_names, include_tentative=include_tentative
         )
 
+    async def find_all_procedures(
+        self,
+        limit: int = 50,
+        include_tentative: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return procedures cause-agnostically, ordered by total reuse frequency.
+
+        Cause-agnostic counterpart to :meth:`find_procedures_for_causes`, used by
+        exploratory ``bamboo investigate`` to expose the reusable-procedure toolkit
+        when the cause is unknown. Capped at *limit*; ``frequency DESC``.
+        """
+        return await self._backend.find_all_procedures(
+            limit=limit, include_tentative=include_tentative
+        )
+
     async def find_common_pattern(
         self,
         graph_ids: list[str],

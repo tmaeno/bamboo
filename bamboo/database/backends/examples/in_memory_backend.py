@@ -205,6 +205,41 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         results.sort(key=lambda x: x["frequency"], reverse=True)
         return results
 
+    async def find_all_procedures(
+        self, limit: int = 50, include_tentative: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return procedures cause-agnostically, by total reuse frequency (in-memory stub)."""
+        agg: dict[str, dict[str, Any]] = {}
+        for rel in self.relationships.values():
+            if "investigated_by" not in str(rel.relation_type):
+                continue
+            cause_node = self.nodes.get(rel.source_id)
+            proc_node = self.nodes.get(rel.target_id)
+            if not proc_node:
+                continue
+            meta = getattr(proc_node, "metadata", {}) or {}
+            row = agg.setdefault(
+                proc_node.name,
+                {
+                    "procedure_name": proc_node.name,
+                    "strategy_type": getattr(proc_node, "strategy_type", ""),
+                    "description": proc_node.description,
+                    "orchestration_code": meta.get("orchestration_code", ""),
+                    "code_summary": meta.get("code_summary", ""),
+                    "external_access": meta.get("external_access"),
+                    "signature": list(meta.get("signature", []) or []),
+                    "tool_name": meta.get("tool_name", ""),
+                    "parameters": rel.properties.get("parameters", []),
+                    "cause_names": [],
+                    "frequency": 0,
+                },
+            )
+            row["frequency"] += rel.properties.get("frequency", 1)
+            if cause_node:
+                row["cause_names"].append(cause_node.name)
+        results = sorted(agg.values(), key=lambda x: x["frequency"], reverse=True)
+        return results[:limit]
+
     async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
         """Remove a graph_id's contribution (in-memory stub)."""
         rels_affected = 0

@@ -111,6 +111,21 @@ caller-supplied set?), used only to decide whether to show a hint / to pre-scree
 (against the `read_only=False` names) for the skip-and-suggest path. It is a syntactic
 over-approximation (and misses aliasing) — which is why the runtime allow-set, not it, is the boundary.
 
+## Reusable procedures as tools (Phase 2a)
+
+A captured procedure is a **reusable unit** identified by its **tool-call signature** (the set of
+`tools.<name>` its code calls) — a stable identity that replaces the free-text `strategy_type`, so
+the same step dedups across phrasings and causes (the cause is carried by an edge; reuse frequency
+accumulates across causes). Approved, **non-trivial (≥2-tool), read-only** procedures are exposed to
+the `investigate` planner as callable `proc__…` tools (cause-agnostic, capped by frequency via
+`find_all_procedures`); the planner *reuses* one by calling it, and it replays the stored,
+already-reviewed code through the same sandbox (so the read-only boundary composes). Single-tool
+blocks are still captured + replayable but not exposed as tools (the raw tool already covers them).
+
+**No durable auto-run yet:** the outer code that calls a `proc__…` tool is still reviewed each turn
+(the review-and-policy lifecycle above). A durable, cross-session per-procedure auto-run policy —
+attached to this stable procedure identity — is the next iteration.
+
 ## Verbose visibility (`-v` / `--verbose`)
 
 Orthogonal to trust: CLI `bamboo investigate -v` and Mattermost `investigate <id> --verbose` stream
@@ -126,4 +141,5 @@ visibility only, never what is allowed to run.
 | Review-and-policy lifecycle | `_tool_turn` / `_review_code` / `code_policies` (`bamboo/agents/investigation_session.py`) |
 | Read-only automatic explorer | `_filtered_tools` / `_run_orchestration_code` (`bamboo/agents/context_enricher.py`) |
 | Skip + suggest state-changing stored procedures | `_run_investigation` (`bamboo/agents/reasoning_navigator.py`) |
+| Procedure identity + reusable procedure-tools | `procedure_signature` / `build_procedure_tools_registry` (`bamboo/agents/procedure_tools.py`); `find_all_procedures` (`bamboo/database/`) |
 | Per-thread verbose | `Command.verbose` / `parse_command` / `stream_narration` (`bamboo/frontends/mattermost/`) |

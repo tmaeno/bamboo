@@ -44,7 +44,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
 
-from bamboo.agents.orchestration import analyze_code_side_effects, run_orchestration_code
+from bamboo.agents.orchestration import (
+    analyze_code_side_effects,
+    run_orchestration_code,
+)
+from bamboo.agents.procedure_tools import (
+    build_procedure_tools_registry,
+    procedure_signature,
+    procedure_tool_name,
+)
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
 from bamboo.utils.narrator import say
 from bamboo.frontends.base import Column, InteractionIO
@@ -146,6 +154,10 @@ class InvestigationSession(BaseModel):
 
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+
+# Cap on how many reusable procedure-tools (most-reused first) are exposed to the
+# planner per session — keeps the prompt focused and bounded (Phase 2a).
+_PROCEDURE_TOOL_LIMIT = 25
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
@@ -751,6 +763,33 @@ class InvestigationOrchestrator:
         self._internal_tools_descriptors = descs
         self._internal_tools_callables = calls
 
+        # Phase 2a: expose approved, non-trivial, read-only procedures as reusable
+        # tools — a cause-agnostic toolkit (capped by reuse frequency) the planner
+        # can call to reuse prior work. See docs/EXECUTION_TRUST.md.
+        self._procedure_tool_descriptors: dict[str, Any] = {}
+        self._procedure_tool_callables: dict[str, Any] = {}
+        try:
+            non_read_only = frozenset(
+                t.name for t in mcp_tools if not getattr(t, "read_only", True)
+            ) | frozenset(
+                n for n, t in descs.items() if not getattr(t, "read_only", True)
+            )
+            candidates = await self.deps.graph_db.find_all_procedures(limit=_PROCEDURE_TOOL_LIMIT)
+            p_descs, p_calls = build_procedure_tools_registry(
+                candidates,
+                client=self.deps.mcp_client,
+                task_data=self.session.initial_inputs.get("task_data") or {},
+                task_id=self.session.initial_inputs.get("task_id"),
+                task_data_tool_names=self._task_data_tool_names,
+                non_read_only_tool_names=non_read_only,
+            )
+            self._procedure_tool_descriptors = p_descs
+            self._procedure_tool_callables = p_calls
+            if p_descs:
+                say(f"loaded {len(p_descs)} reusable procedure(s) as tools", level=logging.DEBUG)
+        except Exception as exc:  # noqa: BLE001 — a degraded graph must not break the session
+            logger.warning("could not build procedure-tools registry: %s", exc)
+
     def _unified_tool_descriptors(self) -> list[dict[str, Any]]:
         """Render unified descriptors for the orchestration prompt."""
         out: list[dict[str, Any]] = []
@@ -765,6 +804,18 @@ class InvestigationOrchestrator:
                 }
             )
         for name, t in self._internal_tools_descriptors.items():
+            out.append(
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters_schema": t.parameters_schema,
+                    "external_access": getattr(t, "external_access", False),
+                    "read_only": getattr(t, "read_only", True),
+                }
+            )
+        # Phase 2a: reusable saved-procedure tools (the planner may call these to
+        # reuse prior work instead of re-deriving the logic).
+        for t in getattr(self, "_procedure_tool_descriptors", {}).values():
             out.append(
                 {
                     "name": t.name,
@@ -796,7 +847,11 @@ class InvestigationOrchestrator:
                 client=self.deps.mcp_client,
                 task_data=task_data,
                 task_data_tool_names=self._task_data_tool_names,
-                internal_tools=self._internal_tools_callables,
+                # Internal read-only queries + reusable saved-procedure tools (Phase 2a).
+                internal_tools={
+                    **self._internal_tools_callables,
+                    **getattr(self, "_procedure_tool_callables", {}),
+                },
                 extra_globals={"task_id": task_id, "task_data": task_data},
                 timeout=600.0,
                 log_prefix=f"investigate:turn{self.session.turn}",
@@ -923,11 +978,17 @@ class InvestigationOrchestrator:
 
     def _record_atomic_action(self, run: OrchestrationRun, raw_result: Any) -> None:
         """Append a tentative ProcedureNode + a Task_Context node for the result."""
+        signature = procedure_signature(run.code)
         proc_metadata: dict[str, Any] = {
             "orchestration_code": run.code,
             "code_summary": run.code_summary,
             "external_access": run.external_access,
             "atomic_action_id": run.atomic_action_id,
+            # Stable, signature-based identity (Phase 2a): the sorted tool-call set
+            # and an identifier-safe name derived from it. The cause is an edge, so
+            # one node per distinct tool-plan accumulates frequency across causes.
+            "signature": signature,
+            "tool_name": procedure_tool_name(signature),
             # The per-edge fields (trigger_signals, result_summary, executed_at)
             # are kept here too during the session; finalize splits them onto the
             # eventual investigated_by edge per §G.
@@ -1047,8 +1108,11 @@ class InvestigationOrchestrator:
                 n.metadata.setdefault("session_status", "ongoing")
                 # Without a Cause we can't materialise the investigated_by edge.
                 continue
-            # Strip the per-session uniquifier and re-canonicalise.
-            canonical_name = f"{n.strategy_type}:{cause_node.name}"
+            # Canonicalise to the SIGNATURE-based name (stable, cause-agnostic): one
+            # node per distinct tool-plan, with the cause carried by the edge below so
+            # frequency accumulates across causes. Fall back to the legacy
+            # strategy_type:cause name only for no-tool code (empty signature).
+            canonical_name = (n.metadata or {}).get("tool_name") or f"{n.strategy_type}:{cause_node.name}"
             n.name = canonical_name
             self.session.partial_graph.relationships.append(
                 GraphRelationship(

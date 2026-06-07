@@ -140,6 +140,23 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def find_all_procedures(
+        self,
+        limit: int = 50,
+        include_tentative: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return procedures cause-agnostically, ordered by total reuse frequency.
+
+        Lists every Procedure with its frequency summed across all
+        ``investigated_by`` edges (overall reuse, regardless of cause) plus a
+        ``cause_names`` list. Same enriched row shape as
+        :meth:`find_procedures_for_causes`. Ordered ``frequency DESC`` and capped
+        at *limit*. Used by exploratory ``bamboo investigate`` to expose the
+        reusable-procedure toolkit when the cause is still unknown.
+        """
+        pass
+
+    @abstractmethod
     async def find_common_pattern(
         self,
         graph_ids: list[str],
