@@ -150,6 +150,10 @@ behind-the-scenes DEBUG narration — the intent decision, the chosen strategy, 
 its arguments and result shape — so an operator can watch how a turn was constructed. It changes
 visibility only, never what is allowed to run.
 
+(Distinct from the bot's *launch* flag `serve-mattermost -v`, which is a server-side knob — full
+DEBUG to the console/log for the whole process, not the per-command Mattermost reply; see
+[MATTERMOST.md](MATTERMOST.md). It too only affects visibility.)
+
 ## Where this is implemented
 
 | Concern | Location |

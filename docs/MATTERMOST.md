@@ -138,7 +138,7 @@ Per-user login additionally needs `PANDA_API_URL_SSL` and `PANDA_AUTH_VO`
 
 ```bash
 pip install 'bamboo[mattermost]'
-bamboo serve-mattermost          # add -v for debug logging
+bamboo serve-mattermost          # add -v for verbose server-side logging (all bamboo DEBUG; ≈ LOG_LEVEL=DEBUG)
 ```
 
 It's a long-running service (a single outbound WebSocket + REST connection). A
@@ -227,6 +227,19 @@ So `NARRATION_LEVEL=DEBUG` surfaces verbose detail in chat too (still a subset o
 the console at `LOG_LEVEL=DEBUG`); raising it shows less. Operator-significant
 warnings/errors are narrated at WARNING/ERROR and appear highlighted (⚠️); ordinary
 module logs (`bamboo.agents.*`, db/MCP, …) stay on the console and never reach chat.
+
+**Two `-v`/`--verbose` flags, two knobs.** Don't confuse them:
+
+- **Launch** `bamboo serve-mattermost -v` is the *server-side* knob — it sets every
+  `bamboo` logger to DEBUG for the whole bot (≈ `LOG_LEVEL=DEBUG`), so the console/log
+  shows full detail (**including** module logs) for **all** commands, for the life of
+  the process.
+- A **command's own** `--verbose` (e.g. `investigate <id> --verbose`) is the *chat-side*
+  knob — it raises narration to DEBUG for **that one session** (≈ `NARRATION_LEVEL=DEBUG`),
+  surfacing the behind-the-scenes detail in *that* command's Mattermost reply.
+
+They're independent: launch `-v` never changes the Mattermost reply, and a command's
+`--verbose` never turns on module `logger.debug` on the console.
 
 The spinner is an **animated custom emoji** (`:bamboo_spinner:`) the bot registers
 on startup, because custom emoji render on Mattermost's inline-text path and so

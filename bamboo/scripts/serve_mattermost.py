@@ -18,7 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 @click.command()
-@click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose log output.")
+@click.option(
+    "-v",
+    "--verbose",
+    is_flag=True,
+    default=False,
+    help=(
+        "Verbose SERVER-SIDE logging: set all bamboo loggers to DEBUG (like LOG_LEVEL=DEBUG), "
+        "for the whole bot. Affects the server console/log only — to surface a command's "
+        "behind-the-scenes detail in its Mattermost reply, use that command's own --verbose."
+    ),
+)
 def main(verbose: bool) -> None:
     """Run the Mattermost bot daemon (ops-facing chat frontend)."""
     setup_logging()
