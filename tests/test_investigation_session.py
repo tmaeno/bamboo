@@ -937,6 +937,67 @@ async def test_build_tool_registry_exposes_reusable_procedure_tools():
     assert by_name["proc__fetch_logs__get_jobs"]["read_only"] is True
 
 
+def _durable_proc_row(auto_run: bool) -> dict:
+    return {
+        "tool_name": "proc__fetch_logs__get_jobs",
+        "signature": ["fetch_logs", "get_jobs"],
+        "orchestration_code": "a=await tools.get_jobs(task_id=task_id)\nb=await tools.fetch_logs()\nreturn {}",
+        "strategy_type": "check jobs",
+        "code_summary": "fetch jobs + logs",
+        "external_access": True,
+        "auto_run": auto_run,
+        "cause_names": ["memory pressure"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_durable_autorun_skips_prompt_for_granted_procedure(monkeypatch):
+    """Phase 2b: a turn that calls only a durably-granted procedure runs with NO prompt."""
+    io = _QueueIO([])  # would return "N" if asked — we assert it is NOT asked
+    orch = _build_orch(io=io)
+    orch.deps.graph_db.find_all_procedures = AsyncMock(return_value=[_durable_proc_row(auto_run=True)])
+    await orch._build_tool_registry()
+    assert "proc__fetch_logs__get_jobs" in orch._durable_autorun_procs
+
+    async def fake_invoke(_self, system, user):  # noqa: ARG001
+        return _orch_plan("return await tools.proc__fetch_logs__get_jobs()")
+
+    monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
+    asked_before = len(io.asked)
+    await orch._tool_turn("reuse the saved procedure")
+    assert len(io.asked) == asked_before  # auto-ran without a review prompt
+    assert [t for t in orch.session.turn_history if t.kind == "tool"]  # the turn executed
+
+
+@pytest.mark.asyncio
+async def test_grant_durable_autorun_on_procedure_reuse(monkeypatch):
+    """Choosing `a` on a procedure-reuse turn persists a durable (cross-session) grant."""
+    io = _QueueIO(["a"])
+    orch = _build_orch(io=io)
+    orch.deps.graph_db.set_procedure_auto_run = AsyncMock(return_value=True)
+    orch.deps.graph_db.find_all_procedures = AsyncMock(return_value=[_durable_proc_row(auto_run=False)])
+    await orch._build_tool_registry()
+    assert "proc__fetch_logs__get_jobs" not in orch._durable_autorun_procs  # not granted yet
+
+    async def fake_invoke(_self, system, user):  # noqa: ARG001
+        return _orch_plan("return await tools.proc__fetch_logs__get_jobs()")
+
+    monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
+    await orch._tool_turn("reuse and trust it")
+    orch.deps.graph_db.set_procedure_auto_run.assert_awaited_with("proc__fetch_logs__get_jobs", True)
+    assert "proc__fetch_logs__get_jobs" in orch._durable_autorun_procs
+
+
+@pytest.mark.asyncio
+async def test_revoke_durable_procedure_grant():
+    orch = _build_orch()
+    orch.deps.graph_db.set_procedure_auto_run = AsyncMock(return_value=True)
+    orch._durable_autorun_procs = {"proc__x__y"}
+    assert await orch._handle_meta_command("/revoke proc__x__y") is True
+    orch.deps.graph_db.set_procedure_auto_run.assert_awaited_with("proc__x__y", False)
+    assert "proc__x__y" not in orch._durable_autorun_procs
+
+
 @pytest.mark.asyncio
 async def test_approvals_and_revoke_meta_commands():
     orch = _build_orch()

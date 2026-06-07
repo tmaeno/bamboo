@@ -176,6 +176,12 @@ class Settings(BaseSettings):
     # handler shows narration records at >= this level; since it's downstream of
     # ``log_level``, the frontend view is always a subset of the console.
     narration_level: str = "INFO"
+    # Phase 2b escape hatch: when True, `bamboo investigate` may expose + durably
+    # auto-run *state-changing* (read_only=False) procedures in the interactive loop
+    # (default off — only read-only procedures are auto-runnable). The automatic
+    # `analyze` phase stays read-only regardless. Inert until a read_only=False tool
+    # exists. The `--allow-mutating-autorun` CLI flag overrides this per run.
+    allow_mutating_autorun: bool = False
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = 1536
     reranker_model: str = ""

@@ -68,8 +68,8 @@ Review — [y] run once / [a] auto-run / [k] always ask / [edit] / [N] reject: a
 | `/tool <text>` | Force tool intent (skip the classifier — useful when it misreads) |
 | `/show-graph` | Print the current partial graph |
 | `/show-tools` | Print the unified tool registry (PanDA MCP + internal queries) |
-| `/approvals` | List the code-execution policies set this session (`auto_run` / `always_ask`) |
-| `/revoke <hash-prefix\|all>` | Clear one or all auto-run/always-ask policies for this session |
+| `/approvals` | List code-execution policies — session (`code_hash`) **and** durable per-procedure auto-run grants |
+| `/revoke <hash-prefix\|proc-name\|all>` | Clear a session policy (hash), a durable procedure grant (`proc__…`), or all |
 
 ## CLI options
 
@@ -83,6 +83,7 @@ Review — [y] run once / [a] auto-run / [k] always ask / [edit] / [N] reject: a
 | `--max-turns INT` | 30 | Safety cap |
 | `--dry-run` | off | Walk through the session but never commit |
 | `-v, --verbose` | off | DEBUG logging + behind-the-scenes narration (intent, strategy, per-tool calls) |
+| `--allow-mutating-autorun` | off | Also allow durable auto-run of **state-changing** procedures (interactive loop only; analyze stays read-only). Inert until a state-changing tool exists |
 
 ## What's captured (and why it's reusable)
 
@@ -100,7 +101,7 @@ The full model — including the unattended (`analyze`/startup) read-only bounda
 [EXECUTION_TRUST.md](EXECUTION_TRUST.md). In the interactive loop:
 
 - **Every new code block is reviewed before it runs** — the proposed code + summary + trigger signals are shown, regardless of whether it only reads or changes state (a read is *not* a free pass). You choose a per-code policy: `y` runs it once; `a` runs it and **auto-runs** the same code for the rest of the session without prompting; `k` runs it but keeps asking each time; `edit` opens it in `$EDITOR`; `N` rejects.
-- **Auto-run is keyed on the exact code** (whitespace-normalized) and scoped to the session (persists across `--resume`; not shared with other sessions/users). `/approvals` lists the policies; `/revoke` clears them.
+- **Two auto-run scopes.** For ad-hoc/raw-tool code, `a` is **session-scoped**, keyed on the exact (whitespace-normalized) code. When the turn *reuses* a saved procedure (`proc__…` tool), `a` instead grants that procedure **durable, cross-session** auto-run (`ProcedureNode.metadata.auto_run`, per-deployment); a later turn that calls only durably-granted procedures runs with no prompt. Durable auto-run is **read-only by default** — state-changing procedures require `--allow-mutating-autorun` (interactive loop only). `/approvals` lists both; `/revoke` clears them.
 - **Abandoned sessions** (`/abandon` without declaring a cause) commit Procedures tagged `metadata.status="tentative"`. Default analyze queries filter these out via `include_tentative=False`.
 
 ## Two ways to use it

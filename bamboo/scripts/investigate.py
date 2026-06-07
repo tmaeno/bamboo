@@ -61,6 +61,17 @@ logger = logging.getLogger(__name__)
     help="Walk through the session but never commit at the end.",
 )
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Verbose log output.")
+@click.option(
+    "--allow-mutating-autorun",
+    is_flag=True,
+    default=False,
+    help=(
+        "Allow state-changing (read_only=False) procedures to also be durably "
+        "auto-run in the interactive loop (default: read-only procedures only). "
+        "Inert until a state-changing tool exists; the automatic analyze phase "
+        "stays read-only regardless."
+    ),
+)
 def main(
     task_id: int | None,
     task_data: str | None,
@@ -70,6 +81,7 @@ def main(
     max_turns: int,
     dry_run: bool,
     verbose: bool,
+    allow_mutating_autorun: bool,
 ) -> None:
     """Co-investigate a live incident with bamboo."""
     setup_logging()
@@ -112,6 +124,7 @@ def main(
             max_turns=max_turns,
             dry_run=dry_run,
             verbose=verbose,
+            allow_mutating_autorun=allow_mutating_autorun,
         )
     )
 
@@ -127,6 +140,7 @@ async def _run(
     max_turns: int,
     dry_run: bool,
     verbose: bool = False,
+    allow_mutating_autorun: bool = False,
 ) -> None:
     # Local imports keep module load fast for `bamboo --help`.
     from rich.console import Console
@@ -166,6 +180,7 @@ async def _run(
         max_turns=max_turns,
         save_path=save_path,
         dry_run=dry_run,
+        allow_mutating_autorun=allow_mutating_autorun,
     )
 
     if resume_from is not None:

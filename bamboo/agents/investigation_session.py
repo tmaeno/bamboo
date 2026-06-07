@@ -46,6 +46,7 @@ from rich.console import Console
 
 from bamboo.agents.orchestration import (
     analyze_code_side_effects,
+    referenced_tool_names,
     run_orchestration_code,
 )
 from bamboo.agents.procedure_tools import (
@@ -308,6 +309,7 @@ class InvestigationOrchestrator:
         max_turns: int = 30,
         save_path: Optional[Path] = None,
         dry_run: bool = False,
+        allow_mutating_autorun: bool = False,
     ) -> None:
         self.deps = deps
         self.console = deps.console or Console()
@@ -316,6 +318,11 @@ class InvestigationOrchestrator:
         self.io: InteractionIO = deps.io or CliInteractionIO(self.console)
         self.save_path = save_path
         self.dry_run = dry_run
+        # Phase 2b escape hatch: when True, state-changing procedures may also be
+        # exposed + durably auto-run in the *interactive* loop (default off; the
+        # automatic analyze phase stays read-only regardless). Inert until a
+        # read_only=False tool exists. See docs/EXECUTION_TRUST.md.
+        self.allow_mutating_autorun = allow_mutating_autorun
         sid = session_id or uuid.uuid4().hex[:12]
         self.session = InvestigationSession(session_id=sid, max_turns=max_turns)
         self._llm = None  # lazy
@@ -323,6 +330,10 @@ class InvestigationOrchestrator:
         self._internal_tools_callables: dict = {}
         self._mcp_tool_descriptors: list = []
         self._task_data_tool_names: frozenset[str] = frozenset()
+        self._procedure_tool_descriptors: dict = {}
+        self._procedure_tool_callables: dict = {}
+        # Procedure tool-names with a durable (cross-session) auto-run grant.
+        self._durable_autorun_procs: set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -509,27 +520,49 @@ class InvestigationOrchestrator:
             self.io.notice("[dim]Skipped this turn (no action recorded).[/dim]")
             return True
         if cmd == "/approvals":
-            policies = self.session.code_policies
-            if not policies:
-                self.io.notice("[dim]No code-execution policies set this session.[/dim]")
-            else:
-                lines = "\n".join(f"  {h[:12]} → {p}" for h, p in policies.items())
-                self.io.notice(f"[bold]Code policies (this session):[/bold]\n{lines}")
+            session_lines = [f"  {h[:12]} → {p} (session)" for h, p in self.session.code_policies.items()]
+            durable_lines = [f"  {name} → auto_run (durable)" for name in sorted(self._durable_autorun_procs)]
+            lines = session_lines + durable_lines
+            self.io.notice(
+                "[bold]Code-execution policies:[/bold]\n" + "\n".join(lines)
+                if lines
+                else "[dim]No code-execution policies set.[/dim]"
+            )
             return True
         if cmd.startswith("/revoke"):
             arg = cmd[len("/revoke"):].strip()
             if not arg:
-                self.io.notice("[dim]Usage: /revoke <hash-prefix|all>[/dim]")
+                self.io.notice("[dim]Usage: /revoke <hash-prefix|procedure-name|all>[/dim]")
             elif arg == "all":
-                n = len(self.session.code_policies)
+                n = len(self.session.code_policies) + len(self._durable_autorun_procs)
                 self.session.code_policies.clear()
-                self.io.notice(f"[dim]Cleared {n} code polic(y/ies).[/dim]")
+                for pname in list(self._durable_autorun_procs):
+                    try:
+                        await self.deps.graph_db.set_procedure_auto_run(pname, False)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("could not clear durable auto-run for %s: %s", pname, exc)
+                self._durable_autorun_procs.clear()
+                self.io.notice(f"[dim]Cleared {n} polic(y/ies) (session + durable).[/dim]")
+            elif arg.startswith("proc__"):
+                # Durable per-procedure grant (matched by name / prefix).
+                matched = [n for n in self._durable_autorun_procs if n.startswith(arg)]
+                for pname in matched:
+                    try:
+                        await self.deps.graph_db.set_procedure_auto_run(pname, False)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("could not clear durable auto-run for %s: %s", pname, exc)
+                    self._durable_autorun_procs.discard(pname)
+                self.io.notice(
+                    f"[dim]Revoked {len(matched)} durable procedure grant(s).[/dim]"
+                    if matched
+                    else f"[dim]No durable grant matches '{arg}'.[/dim]"
+                )
             else:
                 matched = [h for h in self.session.code_policies if h.startswith(arg)]
                 for h in matched:
                     del self.session.code_policies[h]
                 self.io.notice(
-                    f"[dim]Revoked {len(matched)} polic(y/ies).[/dim]"
+                    f"[dim]Revoked {len(matched)} session polic(y/ies).[/dim]"
                     if matched
                     else f"[dim]No policy matches '{arg}'.[/dim]"
                 )
@@ -673,18 +706,35 @@ class InvestigationOrchestrator:
         trigger_signals: list[str],
         code: str,
     ) -> Optional[tuple[str, str, str, list[str]]]:
-        """Review-and-policy gate (Phase 1, session-scoped).
+        """Review-and-policy gate.
 
-        Every code block not yet approved this session is shown to the operator,
-        who picks a per-code policy: ``run-once`` (no persistence), ``auto-run``
-        (skip future prompts for identical code this session), or ``always-ask``
-        (re-prompt each time). ``auto_run`` code runs with no prompt. The decision
-        is keyed on :func:`_code_hash` and stored on ``session.code_policies``.
+        Every code block not yet approved is shown to the operator, who picks a
+        policy: ``run-once`` (no persistence), ``auto-run`` (skip future prompts),
+        ``always-ask`` (re-prompt each time). Two auto-run scopes:
+
+        * **Session** (Phase 1C) — keyed on :func:`_code_hash`, stored on
+          ``session.code_policies``; used for ad-hoc/raw-tool code (no stable id).
+        * **Durable** (Phase 2b) — when the turn *reuses* saved procedure-tool(s),
+          ``auto-run`` grants those procedures cross-session
+          (``ProcedureNode.metadata.auto_run`` via ``graph_db.set_procedure_auto_run``);
+          a later turn that calls only durably-granted procedures runs with no prompt.
+
         Returns the (possibly edited) ``(strategy_type, code, code_summary,
         trigger_signals)`` to execute, or ``None`` if declined.
         See docs/EXECUTION_TRUST.md.
         """
+        proc_names = set(self._procedure_tool_descriptors)
         while True:
+            refs = referenced_tool_names(code)
+            # Phase 2b — durable (cross-session) auto-run: a turn that calls only
+            # procedures the operator has durably granted (and that are eligible/
+            # exposed) runs with no prompt.
+            if refs and refs <= self._durable_autorun_procs:
+                say(
+                    f"↻ auto-running approved procedure(s): {', '.join(sorted(refs))}",
+                    level=logging.DEBUG,
+                )
+                return strategy_type, code, code_summary, trigger_signals
             h = _code_hash(code)
             policy = self.session.code_policies.get(h)
             if policy == "auto_run":
@@ -715,8 +765,28 @@ class InvestigationOrchestrator:
                 )
                 continue  # re-review the edited code (recompute hash + re-prompt)
             if choice == "a":
-                self.session.code_policies[h] = "auto_run"
-                self.io.notice("[dim]✓ will auto-run this exact code for the rest of the session.[/dim]")
+                reused = refs & proc_names
+                if refs and refs <= proc_names and reused:
+                    # Pure procedure-reuse → DURABLE, cross-session grant on the
+                    # procedure(s) (attached to their stable identity in the graph).
+                    for pname in sorted(reused):
+                        try:
+                            await self.deps.graph_db.set_procedure_auto_run(pname, True)
+                        except Exception as exc:  # noqa: BLE001 — degraded graph: keep session-effective
+                            logger.warning("could not persist durable auto-run for %s: %s", pname, exc)
+                        self._durable_autorun_procs.add(pname)
+                    say(
+                        f"durable auto-run granted: {', '.join(sorted(reused))}",
+                        level=logging.INFO,
+                    )
+                    self.io.notice(
+                        f"[dim]✓ will auto-run procedure(s) {', '.join(sorted(reused))} "
+                        "in all future sessions.[/dim]"
+                    )
+                else:
+                    # Ad-hoc/raw-tool code has no stable durable identity → session-scoped.
+                    self.session.code_policies[h] = "auto_run"
+                    self.io.notice("[dim]✓ will auto-run this exact code for the rest of the session.[/dim]")
             elif choice == "k":
                 self.session.code_policies[h] = "always_ask"
             # choice == "y" → run once, persist nothing.
@@ -765,9 +835,12 @@ class InvestigationOrchestrator:
 
         # Phase 2a: expose approved, non-trivial, read-only procedures as reusable
         # tools — a cause-agnostic toolkit (capped by reuse frequency) the planner
-        # can call to reuse prior work. See docs/EXECUTION_TRUST.md.
-        self._procedure_tool_descriptors: dict[str, Any] = {}
-        self._procedure_tool_callables: dict[str, Any] = {}
+        # can call to reuse prior work. Phase 2b: a durably auto-run-granted
+        # procedure (ProcedureNode.metadata.auto_run) runs without a per-turn prompt.
+        # See docs/EXECUTION_TRUST.md.
+        self._procedure_tool_descriptors = {}
+        self._procedure_tool_callables = {}
+        self._durable_autorun_procs = set()
         try:
             non_read_only = frozenset(
                 t.name for t in mcp_tools if not getattr(t, "read_only", True)
@@ -782,11 +855,21 @@ class InvestigationOrchestrator:
                 task_id=self.session.initial_inputs.get("task_id"),
                 task_data_tool_names=self._task_data_tool_names,
                 non_read_only_tool_names=non_read_only,
+                allow_mutating=self.allow_mutating_autorun,
             )
             self._procedure_tool_descriptors = p_descs
             self._procedure_tool_callables = p_calls
+            # Durable auto-run set: exposed procedure-tools carrying the grant. (Only
+            # eligible procedures are exposed, so eligibility is already enforced.)
+            self._durable_autorun_procs = {
+                n for n, t in p_descs.items() if (t.metadata or {}).get("auto_run")
+            }
             if p_descs:
-                say(f"loaded {len(p_descs)} reusable procedure(s) as tools", level=logging.DEBUG)
+                say(
+                    f"loaded {len(p_descs)} reusable procedure(s) as tools "
+                    f"({len(self._durable_autorun_procs)} auto-run)",
+                    level=logging.DEBUG,
+                )
         except Exception as exc:  # noqa: BLE001 — a degraded graph must not break the session
             logger.warning("could not build procedure-tools registry: %s", exc)
 

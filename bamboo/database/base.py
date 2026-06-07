@@ -157,6 +157,17 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def set_procedure_auto_run(self, procedure_name: str, value: bool) -> bool:
+        """Set/clear the durable per-procedure auto-run grant (Phase 2b).
+
+        Marks a `Procedure` node so a future investigate turn that reuses it can run
+        without a review prompt (a per-deployment grant). Stored as a top-level
+        boolean property `auto_run` on the node — no schema change (Neo4j is
+        schemaless). Returns True if a matching procedure was updated.
+        """
+        pass
+
+    @abstractmethod
     async def find_common_pattern(
         self,
         graph_ids: list[str],

@@ -296,3 +296,45 @@ async def test_procedure_tool_callable_runs_via_sandbox():
     # The stored code ran through the sandbox: both tools were dispatched, task_id injected.
     assert client.calls == ["get_jobs", "fetch_logs"]
     assert result["a"] == {"ran": "get_jobs"}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: durable auto_run surfacing + allow_mutating exposure
+# ---------------------------------------------------------------------------
+
+
+def test_registry_surfaces_auto_run_and_respects_allow_mutating():
+    procs = [
+        {  # read-only, durably granted
+            "tool_name": "proc__a__b",
+            "signature": ["a", "b"],
+            "orchestration_code": "x=await tools.a()\ny=await tools.b()\nreturn {}",
+            "external_access": True,
+            "auto_run": True,
+            "cause_names": ["c"],
+        },
+        {  # state-changing (calls kill_job) + granted
+            "tool_name": "proc__get__kill_job",
+            "signature": ["get", "kill_job"],
+            "orchestration_code": "await tools.kill_job()\nreturn await tools.get()",
+            "external_access": True,
+            "auto_run": True,
+            "cause_names": ["c"],
+        },
+    ]
+    common = {
+        "client": _FakeClient(),
+        "task_data": {},
+        "task_id": None,
+        "task_data_tool_names": frozenset(),
+        "non_read_only_tool_names": frozenset({"kill_job"}),
+    }
+    # Default: state-changing excluded; auto_run surfaced on the read-only one.
+    d, _ = build_procedure_tools_registry(procs, **common)
+    assert set(d) == {"proc__a__b"}
+    assert d["proc__a__b"].metadata["auto_run"] is True
+    assert d["proc__a__b"].read_only is True
+    # allow_mutating: state-changing procedure also exposed, flagged read_only=False.
+    d2, _ = build_procedure_tools_registry(procs, allow_mutating=True, **common)
+    assert set(d2) == {"proc__a__b", "proc__get__kill_job"}
+    assert d2["proc__get__kill_job"].read_only is False

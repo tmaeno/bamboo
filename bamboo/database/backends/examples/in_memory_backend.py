@@ -229,6 +229,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
                     "external_access": meta.get("external_access"),
                     "signature": list(meta.get("signature", []) or []),
                     "tool_name": meta.get("tool_name", ""),
+                    "auto_run": bool(meta.get("auto_run", False)),
                     "parameters": rel.properties.get("parameters", []),
                     "cause_names": [],
                     "frequency": 0,
@@ -239,6 +240,19 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
                 row["cause_names"].append(cause_node.name)
         results = sorted(agg.values(), key=lambda x: x["frequency"], reverse=True)
         return results[:limit]
+
+    async def set_procedure_auto_run(self, procedure_name: str, value: bool) -> bool:
+        """Set/clear the durable per-procedure auto-run grant (in-memory stub)."""
+        updated = False
+        for node in self.nodes.values():
+            if getattr(node, "name", None) == procedure_name and "Procedure" in str(
+                getattr(node, "node_type", "")
+            ):
+                if getattr(node, "metadata", None) is None:
+                    node.metadata = {}
+                node.metadata["auto_run"] = bool(value)
+                updated = True
+        return updated
 
     async def remove_graph_id(self, graph_id: str) -> dict[str, int]:
         """Remove a graph_id's contribution (in-memory stub)."""

@@ -105,6 +105,14 @@ class GraphDatabaseClient:
             limit=limit, include_tentative=include_tentative
         )
 
+    async def set_procedure_auto_run(self, procedure_name: str, value: bool) -> bool:
+        """Set/clear the durable per-procedure auto-run grant (Phase 2b).
+
+        Returns True if a matching procedure was updated. See
+        :meth:`GraphDatabaseBackend.set_procedure_auto_run`.
+        """
+        return await self._backend.set_procedure_auto_run(procedure_name, value)
+
     async def find_common_pattern(
         self,
         graph_ids: list[str],

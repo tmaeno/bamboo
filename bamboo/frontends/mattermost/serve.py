@@ -183,7 +183,10 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
         # foldable last-N detail; full firehose goes to the `bamboo.narration` log).
         async with stream_narration(transport, verbose=command.verbose):
             if command.kind == "investigate":
-                orch = InvestigationOrchestrator(deps=deps)
+                orch = InvestigationOrchestrator(
+                    deps=deps,
+                    allow_mutating_autorun=settings.allow_mutating_autorun,
+                )
                 await orch.start(task_id=command.task_id)
                 await orch.run()
                 await orch.finalize()

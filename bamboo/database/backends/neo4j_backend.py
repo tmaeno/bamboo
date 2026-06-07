@@ -74,6 +74,8 @@ def _enrich_procedure_rows(
         sig = proc_meta.get("signature", [])
         row["signature"] = list(sig) if isinstance(sig, list) else []
         row["tool_name"] = proc_meta.get("tool_name", "")
+        # Phase 2b: durable per-procedure auto-run grant (top-level node property).
+        row["auto_run"] = bool(row.get("auto_run", False))
         triggers = edge_meta.get("trigger_signals", [])
         row["trigger_signals"] = list(triggers) if isinstance(triggers, list) else []
         row["result_summary"] = edge_meta.get("result_summary", "")
@@ -506,7 +508,8 @@ class Neo4jBackend(GraphDatabaseBackend):
                        p.metadata         AS procedure_metadata_json,
                        r.metadata         AS edge_metadata_json,
                        coalesce(r.parameters, []) AS parameters,
-                       coalesce(r.frequency, 1)   AS frequency
+                       coalesce(r.frequency, 1)   AS frequency,
+                       coalesce(p.auto_run, false) AS auto_run
                 ORDER BY frequency DESC
                 """,
                 cause_names=cause_names,
@@ -546,7 +549,8 @@ class Neo4jBackend(GraphDatabaseBackend):
                        [e IN edges WHERE e.cause IS NOT NULL | e.cause]      AS cause_names,
                        head([e IN edges | e.meta])                          AS edge_metadata_json,
                        head([e IN edges | e.params])                        AS parameters,
-                       reduce(s = 0, e IN edges | s + e.freq)               AS frequency
+                       reduce(s = 0, e IN edges | s + e.freq)               AS frequency,
+                       coalesce(p.auto_run, false)                          AS auto_run
                 ORDER BY frequency DESC
                 LIMIT $limit
                 """,
@@ -555,6 +559,27 @@ class Neo4jBackend(GraphDatabaseBackend):
             raw_rows = [dict(record) async for record in result]
 
         return _enrich_procedure_rows(raw_rows, include_tentative=include_tentative)
+
+    async def set_procedure_auto_run(self, procedure_name: str, value: bool) -> bool:
+        """Set/clear the durable per-procedure auto-run grant (Phase 2b).
+
+        Stores a top-level boolean property ``auto_run`` on the Procedure node
+        (Neo4j is schemaless, so no migration). Returns True iff a node matched.
+        """
+        async with self.driver.session(
+            database=self.settings.neo4j_database
+        ) as session:
+            result = await session.run(
+                """
+                MATCH (p:Procedure {name: $name})
+                SET p.auto_run = $value
+                RETURN count(p) AS n
+                """,
+                name=procedure_name,
+                value=bool(value),
+            )
+            record = await result.single()
+            return bool(record and record["n"])
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

@@ -122,9 +122,26 @@ the `investigate` planner as callable `proc__…` tools (cause-agnostic, capped 
 already-reviewed code through the same sandbox (so the read-only boundary composes). Single-tool
 blocks are still captured + replayable but not exposed as tools (the raw tool already covers them).
 
-**No durable auto-run yet:** the outer code that calls a `proc__…` tool is still reviewed each turn
-(the review-and-policy lifecycle above). A durable, cross-session per-procedure auto-run policy —
-attached to this stable procedure identity — is the next iteration.
+## Durable per-procedure auto-run (Phase 2b)
+
+A procedure can carry a **durable, cross-session auto-run grant** — `ProcedureNode.metadata.auto_run`
+(a per-deployment flag on the node; no schema change). When a `investigate` turn's code references
+**only** durably-granted procedures, it runs **without a review prompt**; a turn that mixes in a raw
+or un-granted tool is still reviewed (the lifecycle above). The grant is created by choosing `auto-run`
+on a turn that *reuses* procedure-tool(s) (the `a` choice persists those procedures via
+`set_procedure_auto_run`); ad-hoc/raw-tool code has no stable identity, so its `auto-run` stays
+session-scoped (`code_hash`).
+
+**Read-only by default.** Only read-only procedures are exposed/auto-runnable (each procedure's
+`read_only` is **recomputed from its code**, not trusted from a stored flag — so a procedure that
+becomes state-changing can't keep auto-running). The opt-in escape hatch — `bamboo investigate
+--allow-mutating-autorun` (or the `allow_mutating_autorun` config setting, read by the Mattermost bot)
+— also exposes + allows **state-changing** procedures, but **only in the interactive loop**; the
+**automatic** `analyze` phase stays read-only-enforced regardless. Per-deployment sharing is safe
+precisely because, by default, only reads can ever be auto-run.
+
+`/approvals` lists session + durable grants; `/revoke <hash-prefix|proc-name|all>` clears them
+(durable grants via `set_procedure_auto_run(..., False)`). Grant creation is narrated (audit).
 
 ## Verbose visibility (`-v` / `--verbose`)
 
@@ -142,4 +159,5 @@ visibility only, never what is allowed to run.
 | Read-only automatic explorer | `_filtered_tools` / `_run_orchestration_code` (`bamboo/agents/context_enricher.py`) |
 | Skip + suggest state-changing stored procedures | `_run_investigation` (`bamboo/agents/reasoning_navigator.py`) |
 | Procedure identity + reusable procedure-tools | `procedure_signature` / `build_procedure_tools_registry` (`bamboo/agents/procedure_tools.py`); `find_all_procedures` (`bamboo/database/`) |
+| Durable per-procedure auto-run | `ProcedureNode.metadata.auto_run` via `set_procedure_auto_run` (`bamboo/database/`); `_review_code` durable check/grant + `_durable_autorun_procs` (`bamboo/agents/investigation_session.py`); `--allow-mutating-autorun` / `allow_mutating_autorun` setting |
 | Per-thread verbose | `Command.verbose` / `parse_command` / `stream_narration` (`bamboo/frontends/mattermost/`) |
