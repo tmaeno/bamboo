@@ -82,6 +82,28 @@ class Column:
     justify: str = "left"
 
 
+@dataclass
+class Card:
+    """One titled card for :meth:`InteractionIO.cards`.
+
+    Rendered as a panel on the terminal and as one message-attachment card in a
+    chat frontend (several cards in a chat message become one post).
+
+    Attributes:
+        title:  Card heading (may be ``None``).
+        body:   Card body (may contain Rich markup).
+        style:  Optional border/accent style/color name (e.g. ``"cyan"``).
+        fields: Optional ``(name, value, short)`` rows rendered as a key/value
+                grid — a chat frontend lays them out as attachment fields
+                (``short`` ⇒ two-per-row); the terminal folds them into the body.
+    """
+
+    title: str | None
+    body: str
+    style: str | None = None
+    fields: list[tuple[str, str, bool]] | None = None
+
+
 @dataclass(frozen=True)
 class ReviewOption:
     """One choice in a :meth:`InteractionIO.review_orchestration` prompt.
@@ -252,6 +274,21 @@ class InteractionIO(ABC):
                         them; the terminal frontend ignores them.
         """
         ...
+
+    def cards(self, cards: list[Card]) -> None:
+        """Render several cards together.
+
+        The default renders each card as its own panel (the terminal has no notion
+        of grouping); a chat frontend can override to post them as one message with
+        multiple attachment cards.  Any ``Card.fields`` are folded into the panel
+        body as aligned ``key: value`` lines.
+        """
+        for c in cards:
+            body = c.body or ""
+            if c.fields:
+                kv = "\n".join(f"[bold]{name}:[/bold] {value}" for name, value, _short in c.fields)
+                body = f"{body}\n{kv}" if body else kv
+            self.panel(body, title=c.title, style=c.style)
 
     # ------------------------------------------------------------------
     # Streaming detail (live region for one turn's verbose detail)

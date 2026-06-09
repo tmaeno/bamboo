@@ -1135,3 +1135,65 @@ async def test_review_orchestration_default_reprompts_then_accepts_alias():
         strategy_type="s", summary="", triggers=[], code="x = 1", options=_OPTS
     )
     assert choice == "run"
+
+
+# ---------------------------------------------------------------------------
+# Session-start root-cause hypothesis panel (_show_past_similar)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_show_past_similar_stashes_full_analysis_card():
+    from bamboo.models.knowledge_entity import AnalysisResult
+
+    orch = _build_orch()
+    orch.deps.reasoning_navigator = SimpleNamespace(
+        analyze_task=AsyncMock(
+            return_value=AnalysisResult(
+                task_id="t1",
+                root_cause="Input dataset metadata mismatch",
+                confidence=0.95,
+                resolution="Verify the dataset integrity in Rucio.",
+                explanation="file list len=0 != meta=1 — Rucio listing empty vs metadata.",
+            )
+        )
+    )
+
+    await orch._show_past_similar({"status": "exhausted"}, None)
+
+    # The hypothesis is stashed (posted with the CTA in run()), not rendered here.
+    card = orch._hypothesis_card
+    assert card is not None
+    assert "root cause analysis" in (card.title or "").lower()
+    assert "Input dataset metadata mismatch" in card.body  # cause
+    assert "0.95" in card.body  # confidence
+    assert "Verify the dataset integrity in Rucio." in card.body  # resolution
+    assert "file list len=0 != meta=1" in card.body  # reasoning included
+
+
+def test_display_kickoff_panel_builds_fields_card():
+    from bamboo.frontends.base import Card
+
+    io = _ScriptedIO()
+    captured: list[Card] = []
+    io.cards = lambda cards: captured.extend(cards)
+    orch = _build_orch(io=io)
+
+    orch._display_kickoff_panel(
+        {
+            "status": "failed",
+            "taskType": "anal",
+            "site": "DESY-HH_TEST",
+            "errorDialog": "failed since no file was successfully processed",
+        },
+        None,
+    )
+
+    assert len(captured) == 1
+    card = captured[0]
+    assert card.title == "Task under investigation"
+    assert card.style == "red"  # failed → red accent
+    assert "failed since no file" in card.body  # errorDialog as body
+    assert ("status", "failed", True) in card.fields
+    assert ("taskType", "anal", True) in card.fields
+    assert ("site", "DESY-HH_TEST", True) in card.fields

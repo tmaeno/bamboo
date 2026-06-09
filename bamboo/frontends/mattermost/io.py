@@ -28,12 +28,27 @@ from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from bamboo.frontends.base import (
+    Card,
     Column,
     DetailSink,
     InteractionIO,
     ReviewOption,
     match_choice,
 )
+
+# Rich style/color name → Mattermost attachment left-bar color.
+_STYLE_COLORS = {
+    "cyan": "#4a90d9",
+    "magenta": "#b07cc6",
+    "yellow": "#e0a800",
+    "blue": "#4a90d9",
+    "green": "#2eb886",
+    "red": "#d9534f",
+}
+
+
+def _style_color(style: str | None) -> str | None:
+    return _STYLE_COLORS.get(style or "")
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +394,27 @@ class MattermostInteractionIO(InteractionIO):
 
     def notice(self, text: str) -> None:
         self.transport.send(to_markdown(text))
+
+    def cards(self, cards: list[Card]) -> None:
+        """Post several cards as one message with multiple attachment cards.
+
+        ``Card.fields`` become Mattermost attachment ``fields`` (``short`` ⇒ a
+        two-column grid).
+        """
+        attachments = []
+        for c in cards:
+            att = {
+                "title": c.title or "",
+                "text": to_markdown(c.body),
+                "color": _style_color(c.style),
+            }
+            if c.fields:
+                att["fields"] = [
+                    {"title": name, "value": to_markdown(value), "short": short}
+                    for name, value, short in c.fields
+                ]
+            attachments.append(att)
+        self.transport.send("", props={"attachments": attachments})
 
     def panel(
         self,

@@ -57,7 +57,7 @@ from bamboo.agents.procedure_tools import (
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
 from bamboo.config import get_settings
 from bamboo.utils.narrator import say, step
-from bamboo.frontends.base import Column, DetailSink, InteractionIO, ReviewOption
+from bamboo.frontends.base import Card, Column, DetailSink, InteractionIO, ReviewOption
 from bamboo.frontends.cli import CliInteractionIO
 from bamboo.llm import (
     EMAIL_EXTRACTION_SYSTEM,
@@ -250,12 +250,26 @@ def _format_available_tools(tools: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# Task-data keys surfaced as the kickoff "signals" (LLM prompt + the MM card grid).
+_SIGNAL_KEYS = ("status", "taskType", "processingType", "site", "gshare", "ramCount", "coreCount")
+
+# Task status → card accent style (mapped to a color by the MM frontend; the CLI
+# uses it as the Rich border color). Unknown statuses fall back to neutral cyan.
+_STATUS_STYLE = {
+    "failed": "red",
+    "broken": "red",
+    "aborted": "red",
+    "exhausted": "yellow",
+    "finished": "green",
+    "done": "green",
+}
+
+
 def _format_initial_signals(task_data: dict[str, Any]) -> str:
     if not task_data:
         return "(no task_data)"
-    keys = ("status", "taskType", "processingType", "site", "gshare", "ramCount", "coreCount")
     parts = []
-    for k in keys:
+    for k in _SIGNAL_KEYS:
         v = task_data.get(k)
         if v:
             parts.append(f"  {k}: {v}")
@@ -383,6 +397,10 @@ class InvestigationOrchestrator:
         # Last intent classification, formatted for the per-turn detail message
         # (set in _classify_intent, consumed by _tool_turn). None until first turn.
         self._last_intent_meta: Optional[str] = None
+        # Session-start root-cause hypothesis card, computed in start() and posted
+        # together with the CTA at the top of run() (so the resume path still shows
+        # the CTA). None when no hypothesis was found / not yet computed.
+        self._hypothesis_card: Optional[Card] = None
         self._internal_tools_descriptors: dict = {}
         self._internal_tools_callables: dict = {}
         self._mcp_tool_descriptors: list = []
@@ -467,15 +485,23 @@ class InvestigationOrchestrator:
 
     async def run(self) -> None:
         """Plan §D — per-turn dialog loop until /done /abandon or max_turns."""
-        # Call-to-action shown once, right before the loop — so it sits directly
-        # above the prompt on the CLI (the kickoff card scrolls off above the
-        # analysis panels) and just before input on chat frontends.
-        self.io.notice(
-            "[bold]What now?[/bold] Tell me what to investigate or share a finding "
-            "in plain language.\n"
-            "[dim]Commands: /done finish · /abandon discard · /undo · "
-            "/tool <req> force a tool · /show-graph · /show-tools[/dim]"
+        # Post the session-start hypothesis (from start(), if any) together with
+        # the call-to-action as one message (a chat frontend shows them as one
+        # multi-card post; the terminal renders a panel each). Done here, before
+        # the loop, so the CTA sits right above the prompt and the resume path
+        # (which skips start()) still shows it.
+        cta = Card(
+            # No title — the body already opens with "What now?" (a title would just
+            # repeat it).
+            title=None,
+            body=(
+                "[bold]What now?[/bold] Tell me what to investigate or share a finding "
+                "in plain language.\n"
+                "[dim]Commands: /done finish · /abandon discard · /undo · "
+                "/tool <req> force a tool · /show-graph · /show-tools[/dim]"
+            ),
         )
+        self.io.cards([c for c in (self._hypothesis_card, cta) if c is not None])
         while self.session.turn < self.session.max_turns and self.session.status == "ongoing":
             try:
                 utterance = await self.io.prompt_turn()
@@ -1029,22 +1055,29 @@ class InvestigationOrchestrator:
     # ------------------------------------------------------------------
 
     def _display_kickoff_panel(self, task_data: Optional[dict[str, Any]], symptom: Optional[str]) -> None:
-        lines: list[str] = []
+        # The error message is the card body (prose); the signals are a key/value
+        # grid; the accent color reflects task status. (CLI renders this as a panel
+        # with the signals folded in as key: value lines.)
+        text_parts: list[str] = []
+        fields: list[tuple[str, str, bool]] = []
+        style = "cyan"
         if task_data:
             status = task_data.get("status")
-            err = task_data.get("errorDialog")
             if status:
-                lines.append(f"[bold]status:[/bold] {status}")
+                style = _STATUS_STYLE.get(str(status).lower(), "cyan")
+            err = task_data.get("errorDialog")
             if err:
-                short = re.sub(r"\s+", " ", str(err))[:300]
-                lines.append(f"[bold]errorDialog:[/bold] {short}{'…' if len(str(err)) > 300 else ''}")
-            top = _format_initial_signals(task_data)
-            if top and top != "(no task_data)" and top != "(no recognised signals)":
-                lines.append(f"[bold]signals:[/bold]\n{top}")
+                collapsed = re.sub(r"\s+", " ", str(err)).strip()
+                text_parts.append(collapsed[:600] + ("…" if len(collapsed) > 600 else ""))
+            fields = [(k, str(task_data[k]), True) for k in _SIGNAL_KEYS if task_data.get(k)]
         if symptom:
-            lines.append(f"[bold]symptom:[/bold] {symptom}")
-        body = "\n".join(lines) if lines else "(no task_data or symptom)"
-        self.io.panel(body, title="task under investigation", style="cyan")
+            text_parts.append(f"[bold]symptom:[/bold] {symptom}")
+        body = "\n".join(text_parts)
+        if not body and not fields:
+            body = "(no task_data or symptom)"
+        self.io.cards([
+            Card(title="Task under investigation", body=body, style=style, fields=fields or None)
+        ])
 
     async def _show_past_similar(self, task_data: Optional[dict[str, Any]], symptom: Optional[str]) -> None:
         if self.deps.reasoning_navigator is None:
@@ -1066,12 +1099,23 @@ class InvestigationOrchestrator:
         root_cause = getattr(result, "root_cause", None)
         confidence = getattr(result, "confidence", 0.0)
         if root_cause:
-            self.io.panel(
-                f"[bold]most-similar past root cause:[/bold] {root_cause}\n"
+            resolution = getattr(result, "resolution", "") or "(none)"
+            reasoning = getattr(result, "explanation", "") or ""
+            body = (
+                f"[bold]cause:[/bold]      {root_cause}\n"
                 f"[bold]confidence:[/bold] {confidence:.2f}\n"
-                f"[dim](this is a hypothesis from past incidents — confirm or chase a different lead.)[/dim]",
-                title="past similar incidents",
-                style="magenta",
+                f"[bold]resolution:[/bold] {resolution}"
+            )
+            if reasoning:
+                body += f"\n[bold]reasoning:[/bold]  {reasoning}"
+            body += (
+                "\n[dim](hypothesis from past incidents + analysis — "
+                "confirm or chase a different lead.)[/dim]"
+            )
+            # Stashed (not rendered here): posted together with the CTA at the top
+            # of run() as one multi-card message.
+            self._hypothesis_card = Card(
+                title="Root cause analysis (hypothesis)", body=body, style="magenta"
             )
         self.session.similar_past = [
             {"root_cause": root_cause, "confidence": confidence}

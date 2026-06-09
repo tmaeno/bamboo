@@ -28,7 +28,7 @@ from bamboo.frontends.mattermost.io import (
     ThreadTransport,
     to_markdown,
 )
-from bamboo.frontends.base import Column, ReviewOption
+from bamboo.frontends.base import Card, Column, ReviewOption
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +287,43 @@ def test_render_methods_post_markdown():
     assert "```python\nprint(1)\n```" in blob
     assert "| a | b |" in blob
     assert "1 new, 1 will merge — 3 edge(s)" in blob
+
+
+def test_cards_posts_one_message_with_multiple_attachments():
+    t = FakeTransport()
+    io = MattermostInteractionIO(t)
+    io.cards([
+        Card(title="task under investigation", body="[bold]status:[/bold] failed", style="cyan"),
+        Card(title="what now", body="Tell me what to investigate."),
+    ])
+    # One post, two attachment cards.
+    assert len(t.sent) == 1
+    props = t.sent_props[0]
+    attachments = props["attachments"]
+    assert len(attachments) == 2
+    assert attachments[0]["title"] == "task under investigation"
+    assert "status:" in attachments[0]["text"] and attachments[0]["color"]  # markdown + color
+    assert attachments[1]["title"] == "what now"
+
+
+def test_cards_renders_fields_as_attachment_fields():
+    t = FakeTransport()
+    io = MattermostInteractionIO(t)
+    io.cards([
+        Card(
+            title="task under investigation",
+            body="failed since no file was successfully processed",
+            style="red",
+            fields=[("status", "failed", True), ("site", "DESY-HH_TEST", True)],
+        )
+    ])
+    att = t.sent_props[0]["attachments"][0]
+    assert att["text"] == "failed since no file was successfully processed"
+    assert att["color"] == "#d9534f"  # red
+    assert att["fields"] == [
+        {"title": "status", "value": "failed", "short": True},
+        {"title": "site", "value": "DESY-HH_TEST", "short": True},
+    ]
 
 
 def test_diff_renders_mermaid_graph_with_edges():
