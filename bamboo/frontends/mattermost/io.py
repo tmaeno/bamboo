@@ -27,7 +27,13 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from bamboo.frontends.base import Column, InteractionIO
+from bamboo.frontends.base import (
+    Column,
+    DetailSink,
+    InteractionIO,
+    ReviewOption,
+    match_choice,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +244,24 @@ class _LiveMessage:
             return
         await self._flush_once(done=True)
 
+    @property
+    def post_id(self) -> Optional[str]:
+        """The id of this card's Mattermost post (None until first created)."""
+        return self._post_id
+
+    async def show_review(self, message: str, props: dict) -> None:
+        """Replace the card's content with a static review (caller-built message + card).
+
+        Used to *evolve* the live "Planning…" card into the orchestration review:
+        the streamed reasoning/answer is dropped and the caller's *message* (the
+        reply instruction) + *props* (the code-first card) take its place. One-shot
+        patch — the flusher is gone once the detail-stream context has closed.
+        """
+        if self._post_id is None:
+            self._post_id = await self._create(message, props)
+        else:
+            await self._patch(self._post_id, message, props)
+
     async def _create(self, message: str, props: Optional[dict]) -> Optional[str]:
         logger.debug("detail message posting msg_len=%d props=%s", len(message or ""), bool(props))
         try:
@@ -340,6 +364,15 @@ class MattermostInteractionIO(InteractionIO):
         # Treat the reply as the new code body; strip a surrounding fenced block.
         return strategy_type, _strip_code_fence(reply), summary, triggers
 
+    async def prompt_turn(self) -> str:
+        """Await the operator's next message — post nothing.
+
+        In chat there's no need for a ``>`` prompt each turn: the session's
+        kickoff card already told the user to just type. So this only waits for the
+        next thread reply.
+        """
+        return await self.transport.next_reply()
+
     # ------------------------------------------------------------------
     # Output (post Markdown, FIFO-ordered via transport.send)
     # ------------------------------------------------------------------
@@ -413,6 +446,49 @@ class MattermostInteractionIO(InteractionIO):
                 await flusher
             with contextlib.suppress(Exception):
                 await msg.finalize()
+
+    async def review_orchestration(
+        self,
+        *,
+        strategy_type: str,
+        summary: str,
+        triggers: list[str],
+        code: str,
+        options: list[ReviewOption],
+        sink: DetailSink | None = None,
+    ) -> str:
+        """Show the proposal + code in one card and await a typed choice.
+
+        When *sink* is the turn's live "Planning…" card, the card is **evolved in
+        place** (its streamed reasoning replaced by the proposal); otherwise a fresh
+        review message is posted. The operator replies with an option key/alias.
+        """
+        triggers_str = (
+            "\n".join(f"  - {t}" for t in triggers) if triggers else "  - (none)"
+        )
+        code_shown = code if len(code) <= 3000 else code[:3000] + "\n… (truncated)"
+        opts_line = " · ".join(f"`{o.key}` {o.label}" for o in options)
+        # The post's main text is the reply instruction (the prominent line); the
+        # card leads with the code (the thing to review), then the metadata.
+        message = f"**Review** the orchestration code, then reply — {opts_line}"
+        card = (
+            f"```python\n{code_shown}\n```\n"
+            f"**strategy:** {strategy_type}\n"
+            f"**summary:** {summary or '(none)'}\n"
+            f"**trigger:**\n{triggers_str}"
+        )
+        props = {"attachments": [{"color": "#e0a800", "text": card}]}
+        if isinstance(sink, _LiveMessage) and sink.post_id:
+            await sink.show_review(message, props)
+        else:
+            self.transport.send(message, props=props)
+        keys = ", ".join(o.key for o in options)
+        while True:
+            answer = await self.transport.next_reply()
+            choice = match_choice(answer, options)
+            if choice is not None:
+                return choice
+            self.transport.send(f"_Please reply with one of: {keys}_")
 
 
 def _strip_code_fence(text: str) -> str:

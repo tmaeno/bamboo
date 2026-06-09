@@ -1,5 +1,7 @@
 """Qdrant vector database backend implementation."""
 
+import asyncio
+import contextlib
 import logging
 from typing import Any, Optional
 
@@ -27,24 +29,46 @@ class QdrantBackend(VectorDatabaseBackend):
         self.settings = get_settings()
         self.client: Optional[AsyncQdrantClient] = None
         self.collection_name = self.settings.qdrant_collection_name
+        # Serialises the first connect so concurrent first queries connect once.
+        self._connect_lock = asyncio.Lock()
 
-    async def connect(self):
-        """Establish connection to Qdrant."""
-        try:
+    async def _ensure_connected(self):
+        """Open the client on first use (idempotent, concurrency-guarded).
+
+        Every public method calls this, so callers never have to remember to
+        :meth:`connect`. A failed connect leaves the client unset (so a later call
+        retries) and propagates, so the caller can degrade.
+        """
+        if self.client is not None:
+            return
+        async with self._connect_lock:
+            if self.client is not None:  # another coroutine won the race
+                return
             if self.settings.qdrant_api_key:
-                self.client = AsyncQdrantClient(
+                client = AsyncQdrantClient(
                     url=self.settings.qdrant_url,
                     api_key=self.settings.qdrant_api_key,
                     check_compatibility=False,
                 )
             else:
-                self.client = AsyncQdrantClient(
+                client = AsyncQdrantClient(
                     url=self.settings.qdrant_url, check_compatibility=False
                 )
-
-            await self._ensure_collection()
+            self.client = client  # set before _ensure_collection (which uses it)
+            try:
+                await self._ensure_collection()
+            except Exception:  # noqa: BLE001 — don't leave a half-open client
+                with contextlib.suppress(Exception):
+                    await client.close()
+                self.client = None
+                raise
             logger.info("Successfully connected to Qdrant")
-        except Exception as e:
+
+    async def connect(self):
+        """Establish connection to Qdrant (idempotent). Explicit callers keep working."""
+        try:
+            await self._ensure_connected()
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to connect to Qdrant: {e}")
             raise
 
@@ -52,6 +76,7 @@ class QdrantBackend(VectorDatabaseBackend):
         """Close Qdrant connection."""
         if self.client:
             await self.client.close()
+            self.client = None  # allow a later call to re-connect lazily
             logger.info("Qdrant connection closed")
 
     async def _ensure_collection(self):
@@ -77,6 +102,7 @@ class QdrantBackend(VectorDatabaseBackend):
         metadata: dict[str, Any],
     ) -> str:
         """Insert or update a document in Qdrant."""
+        await self._ensure_connected()
         point = PointStruct(
             id=vector_id,
             vector=embedding,
@@ -96,6 +122,7 @@ class QdrantBackend(VectorDatabaseBackend):
         filter_conditions: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Search for similar documents in Qdrant."""
+        await self._ensure_connected()
         query_filter = None
         if filter_conditions:
             query_filter = models.Filter(
@@ -139,6 +166,7 @@ class QdrantBackend(VectorDatabaseBackend):
         if not graph_ids:
             return []
 
+        await self._ensure_connected()
         results = []
         for graph_id in graph_ids:
             try:
@@ -182,11 +210,13 @@ class QdrantBackend(VectorDatabaseBackend):
 
     async def collection_exists(self) -> bool:
         """Return True if the Qdrant collection exists."""
+        await self._ensure_connected()
         response = await self.client.get_collections()
         return self.collection_name in {c.name for c in response.collections}
 
     async def clear_all(self) -> None:
         """Drop and recreate the Qdrant collection (all vectors deleted)."""
+        await self._ensure_connected()
         await self.client.delete_collection(self.collection_name)
         logger.info("Qdrant: collection '%s' dropped", self.collection_name)
         await self._ensure_collection()
@@ -194,6 +224,7 @@ class QdrantBackend(VectorDatabaseBackend):
 
     async def delete_document(self, doc_id: str) -> bool:
         """Delete a document by ID."""
+        await self._ensure_connected()
         try:
             await self.client.delete(
                 collection_name=self.collection_name,
@@ -206,6 +237,7 @@ class QdrantBackend(VectorDatabaseBackend):
 
     async def get_document(self, doc_id: str) -> Optional[dict[str, Any]]:
         """Retrieve a specific document by ID."""
+        await self._ensure_connected()
         try:
             points = await self.client.retrieve(
                 collection_name=self.collection_name,

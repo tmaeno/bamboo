@@ -28,7 +28,7 @@ from bamboo.frontends.mattermost.io import (
     ThreadTransport,
     to_markdown,
 )
-from bamboo.frontends.base import Column
+from bamboo.frontends.base import Column, ReviewOption
 
 
 # ---------------------------------------------------------------------------
@@ -39,10 +39,12 @@ from bamboo.frontends.base import Column
 class FakeTransport(ThreadTransport):
     def __init__(self, replies: list[str] | None = None) -> None:
         self.sent: list[str] = []
+        self.sent_props: list[dict | None] = []  # props parallel to `sent`
         self._replies = iter(replies or [])
 
     def send(self, text, *, props=None) -> None:
         self.sent.append(text)
+        self.sent_props.append(props)
 
     async def next_reply(self) -> str:
         return next(self._replies)
@@ -359,6 +361,77 @@ async def test_detail_stream_inactive_when_not_verbose():
         sink.feed("ignored")
         sink.meta("ignored")
     assert t.sent == []  # nothing posted
+
+
+# ---------------------------------------------------------------------------
+# prompt_turn / review_orchestration (consolidated review card)
+# ---------------------------------------------------------------------------
+
+_REVIEW_OPTS = [
+    ReviewOption("run", "run once", "y"),
+    ReviewOption("auto", "auto-run", "a"),
+    ReviewOption("reject", "reject", "n"),
+]
+
+
+@pytest.mark.asyncio
+async def test_prompt_turn_awaits_without_posting():
+    t = FakeTransport(["my request"])
+    io = MattermostInteractionIO(t)
+    assert await io.prompt_turn() == "my request"
+    assert t.sent == []  # no '>' prompt posted
+
+
+@pytest.mark.asyncio
+async def test_review_orchestration_fresh_card_and_typed_choice():
+    t = FakeTransport(["auto"])
+    io = MattermostInteractionIO(t)
+    choice = await io.review_orchestration(
+        strategy_type="s", summary="x", triggers=["tr"], code="c = 1", options=_REVIEW_OPTS, sink=None
+    )
+    assert choice == "auto"
+    # The post's main text is the reply instruction (no "proposed orchestration" head)…
+    assert any("Review" in m for m in t.sent)
+    assert not any("proposed orchestration" in m for m in t.sent)
+    # …and the code leads the attachment card.
+    cards = [p["attachments"][0]["text"] for p in t.sent_props if p and p.get("attachments")]
+    assert cards and "c = 1" in cards[0]
+    assert cards[0].index("```") < cards[0].index("strategy")  # code before metadata
+
+
+@pytest.mark.asyncio
+async def test_review_orchestration_reprompts_on_bad_answer():
+    t = FakeTransport(["huh", "y"])  # invalid, then "run" alias
+    io = MattermostInteractionIO(t)
+    choice = await io.review_orchestration(
+        strategy_type="s", summary="", triggers=[], code="x = 1", options=_REVIEW_OPTS
+    )
+    assert choice == "run"
+    assert any("Please reply with one of" in m for m in t.sent)
+
+
+@pytest.mark.asyncio
+async def test_review_orchestration_reuses_live_card_and_drops_reasoning():
+    from bamboo.frontends.mattermost.io import _LiveMessage
+
+    bot = _LiveBot()
+    card = _LiveMessage(bot, "chan", "root", "Planning…")
+    card.feed("secret reasoning tokens", reasoning=True)
+    await card._flush_once()  # create the live planning post
+    assert card.post_id == "lm-1"
+
+    t = FakeTransport(["run"])
+    io = MattermostInteractionIO(t)
+    choice = await io.review_orchestration(
+        strategy_type="s", summary="x", triggers=[], code="c = 1", options=_REVIEW_OPTS, sink=card
+    )
+    assert choice == "run"
+    assert t.sent == []  # reused the existing card — no new post
+    patched = bot.updated[-1]
+    assert "Review" in patched["message"]  # instruction is the post's main text
+    assert "proposed orchestration" not in patched["message"]
+    body = patched["props"]["attachments"][0]["text"]
+    assert "c = 1" in body and "secret reasoning tokens" not in body  # reasoning replaced
 
 
 def test_describe_post_failure_captures_error_id_and_sizes():

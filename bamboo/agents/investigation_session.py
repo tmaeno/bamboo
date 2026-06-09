@@ -57,7 +57,7 @@ from bamboo.agents.procedure_tools import (
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
 from bamboo.config import get_settings
 from bamboo.utils.narrator import say, step
-from bamboo.frontends.base import Column, DetailSink, InteractionIO
+from bamboo.frontends.base import Column, DetailSink, InteractionIO, ReviewOption
 from bamboo.frontends.cli import CliInteractionIO
 from bamboo.llm import (
     EMAIL_EXTRACTION_SYSTEM,
@@ -160,6 +160,24 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 # Cap on how many reusable procedure-tools (most-reused first) are exposed to the
 # planner per session — keeps the prompt focused and bounded (Phase 2a).
 _PROCEDURE_TOOL_LIMIT = 25
+
+# Review-and-policy choices shown for a proposed orchestration. Keys are the
+# clear words the operator types/clicks; single-letter aliases are also accepted.
+# The last option is the safe default (selected on a blank answer). See
+# _review_code and docs/EXECUTION_TRUST.md.
+_REVIEW_OPTIONS = [
+    ReviewOption("run", "run once", "y"),
+    ReviewOption("auto", "auto-run", "a"),
+    ReviewOption("ask", "always ask", "k"),
+    ReviewOption("edit", "edit", "e"),
+    ReviewOption("reject", "reject", "n"),
+]
+# always_ask code has opted out of the auto-run grant → only run / edit / reject.
+_REVIEW_OPTIONS_ALWAYS_ASK = [
+    ReviewOption("run", "run once", "y"),
+    ReviewOption("edit", "edit", "e"),
+    ReviewOption("reject", "reject", "n"),
+]
 
 
 def _chunk_text(chunk: Any) -> tuple[str, str]:
@@ -449,12 +467,12 @@ class InvestigationOrchestrator:
 
     async def run(self) -> None:
         """Plan §D — per-turn dialog loop until /done /abandon or max_turns."""
-        self.io.notice(
-            "[dim]Type your request or finding. Slash commands: /done /abandon /undo /tool /show-graph /show-tools[/dim]"
-        )
+        # (The call-to-action + command list is folded into the kickoff card by
+        # _display_kickoff_panel, so the loop doesn't post a separate instructions
+        # message or a redundant prompt.)
         while self.session.turn < self.session.max_turns and self.session.status == "ongoing":
             try:
-                utterance = await self.io.ask("[bold cyan]>[/bold cyan]")
+                utterance = await self.io.prompt_turn()
             except SystemExit:
                 self.session.status = "abandoned"
                 break
@@ -677,8 +695,8 @@ class InvestigationOrchestrator:
         )
         # Update the MM session Head to "planning…" (silent on the CLI), then
         # stream the planner's reasoning/answer into the per-turn detail surface.
-        step("planning…")
-        async with self.io.detail_stream(title="planning…") as sink:
+        step("Planning…")
+        async with self.io.detail_stream(title="Planning…") as sink:
             if self._last_intent_meta:
                 sink.meta(self._last_intent_meta)
             try:
@@ -714,7 +732,7 @@ class InvestigationOrchestrator:
         # metadata (does this code hit PanDA), not the gate. See docs/EXECUTION_TRUST.md.
         external_tool_names = {t["name"] for t in tool_descriptors_full if t.get("external_access")}
 
-        reviewed = await self._review_code(strategy_type, code_summary, trigger_signals, code)
+        reviewed = await self._review_code(strategy_type, code_summary, trigger_signals, code, sink=sink)
         if reviewed is None:
             self.session.intent_gap_log.append(
                 IntentGap(
@@ -762,6 +780,8 @@ class InvestigationOrchestrator:
         code_summary: str,
         trigger_signals: list[str],
         code: str,
+        *,
+        sink: Optional[DetailSink] = None,
     ) -> Optional[tuple[str, str, str, list[str]]]:
         """Review-and-policy gate.
 
@@ -798,20 +818,18 @@ class InvestigationOrchestrator:
                 say(f"↻ auto-running approved code: {strategy_type}", level=logging.DEBUG)
                 return strategy_type, code, code_summary, trigger_signals
 
-            self._display_confirmation_panel(strategy_type, code_summary, trigger_signals, code)
-            if policy == "always_ask":
-                choice = await self.io.ask(
-                    "[bold]Proceed?[/bold]", default="N", choices=["y", "N", "edit"]
-                )
-            else:
-                choice = await self.io.ask(
-                    "[bold]Review[/bold] — [y] run once / [a] auto-run / [k] always ask / "
-                    "[edit] / [N] reject",
-                    default="N",
-                    choices=["y", "a", "k", "edit", "N"],
-                )
+            # always_ask code skips the auto-run grant option (it opted out of it).
+            options = _REVIEW_OPTIONS_ALWAYS_ASK if policy == "always_ask" else _REVIEW_OPTIONS
+            choice = await self.io.review_orchestration(
+                strategy_type=strategy_type,
+                summary=code_summary,
+                triggers=trigger_signals,
+                code=code,
+                options=options,
+                sink=sink,
+            )
 
-            if choice == "N":
+            if choice == "reject":
                 return None
             if choice == "edit":
                 strategy_type, code, code_summary, trigger_signals = await self.io.edit(
@@ -821,7 +839,7 @@ class InvestigationOrchestrator:
                     triggers=trigger_signals,
                 )
                 continue  # re-review the edited code (recompute hash + re-prompt)
-            if choice == "a":
+            if choice == "auto":
                 reused = refs & proc_names
                 if refs and refs <= proc_names and reused:
                     # Pure procedure-reuse → DURABLE, cross-session grant on the
@@ -844,9 +862,9 @@ class InvestigationOrchestrator:
                     # Ad-hoc/raw-tool code has no stable durable identity → session-scoped.
                     self.session.code_policies[h] = "auto_run"
                     self.io.notice("[dim]✓ will auto-run this exact code for the rest of the session.[/dim]")
-            elif choice == "k":
+            elif choice == "ask":
                 self.session.code_policies[h] = "always_ask"
-            # choice == "y" → run once, persist nothing.
+            # choice == "run" → run once, persist nothing.
             return strategy_type, code, code_summary, trigger_signals
 
     async def _narration_turn(self, utterance: str) -> None:
@@ -1019,6 +1037,14 @@ class InvestigationOrchestrator:
                 lines.append(f"[bold]signals:[/bold]\n{top}")
         if symptom:
             lines.append(f"[bold]symptom:[/bold] {symptom}")
+        # Fold the call-to-action + command list into this card so the loop needn't
+        # post a separate instructions message or a redundant prompt.
+        lines.append(
+            "\n[bold]What now?[/bold] Tell me what to investigate or share a finding "
+            "in plain language.\n"
+            "[dim]Commands: /done finish · /abandon discard · /undo · "
+            "/tool <req> force a tool · /show-graph · /show-tools[/dim]"
+        )
         body = "\n".join(lines) if lines else "(no task_data or symptom)"
         self.io.panel(body, title="task under investigation", style="cyan")
 
@@ -1052,22 +1078,6 @@ class InvestigationOrchestrator:
         self.session.similar_past = [
             {"root_cause": root_cause, "confidence": confidence}
         ] if root_cause else []
-
-    def _display_confirmation_panel(
-        self,
-        strategy_type: str,
-        summary: str,
-        triggers: list[str],
-        code: str,
-    ) -> None:
-        triggers_str = "\n  - ".join(triggers) if triggers else "(none)"
-        header = (
-            f"[bold]strategy:[/bold]  {strategy_type}\n"
-            f"[bold]summary:[/bold]  {summary or '(none)'}\n"
-            f"[bold]trigger:[/bold]\n  - {triggers_str}"
-        )
-        self.io.panel(header, title="proposed orchestration", style="yellow")
-        self.io.code(code, lang="python")
 
     def _display_procedure_list(self) -> None:
         runs = [t.orchestration for t in self.session.turn_history if t.orchestration is not None]

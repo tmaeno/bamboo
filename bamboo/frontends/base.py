@@ -82,6 +82,38 @@ class Column:
     justify: str = "left"
 
 
+@dataclass(frozen=True)
+class ReviewOption:
+    """One choice in a :meth:`InteractionIO.review_orchestration` prompt.
+
+    Attributes:
+        key:   The canonical, human-readable answer (e.g. ``"run"``, ``"reject"``)
+               — what the operator types and what the engine compares against.
+        label: Short description shown next to the key (e.g. ``"run once"``).
+        alias: Optional one-letter shortcut also accepted (e.g. ``"y"``).
+    """
+
+    key: str
+    label: str
+    alias: str | None = None
+
+
+def match_choice(text: str, options: list[ReviewOption]) -> str | None:
+    """Resolve a typed answer to a :class:`ReviewOption` key (case-insensitive).
+
+    Matches the answer against each option's ``key`` or ``alias``. A blank answer
+    selects the **last** option (the safe default — ``reject``). Returns the
+    matched key, or ``None`` if the answer matches nothing.
+    """
+    s = (text or "").strip().lower()
+    if not s:
+        return options[-1].key if options else None
+    for o in options:
+        if s == o.key.lower() or (o.alias and s == o.alias.lower()):
+            return o.key
+    return None
+
+
 class InteractionIO(ABC):
     """Frontend-agnostic interaction surface for the interactive engines.
 
@@ -125,6 +157,16 @@ class InteractionIO(ABC):
         CLI's existing abandon-on-interrupt behavior).
         """
         ...
+
+    async def prompt_turn(self) -> str:
+        """Get the operator's next free-form turn input (the main-loop prompt).
+
+        Default delegates to :meth:`ask` with a ``>`` prompt — the terminal's
+        recurring cue (and its ``SystemExit``-on-EOF behavior). A chat frontend
+        overrides this to simply await the next message without posting a prompt
+        (the session's one-time call-to-action already told the user to type).
+        """
+        return await self.ask("[bold cyan]>[/bold cyan]")
 
     @abstractmethod
     async def confirm(self, prompt: str, *, default: bool | None = None) -> bool:
@@ -228,3 +270,54 @@ class InteractionIO(ABC):
             An ``async with``-compatible context manager yielding a ``DetailSink``.
         """
         return _null_detail_stream()
+
+    # ------------------------------------------------------------------
+    # Higher-level interactions
+    # ------------------------------------------------------------------
+
+    async def review_orchestration(
+        self,
+        *,
+        strategy_type: str,
+        summary: str,
+        triggers: list[str],
+        code: str,
+        options: list[ReviewOption],
+        sink: DetailSink | None = None,
+    ) -> str:
+        """Show a proposed orchestration + its code, and return the chosen option key.
+
+        Bundles the proposal display and the review prompt into one logical step so
+        each frontend can render it optimally (a chat frontend can consolidate it
+        into a single message, reusing *sink*'s live card). The default reproduces
+        the terminal rendering — a ``proposed orchestration`` panel, the code, then
+        an :meth:`ask` over the option keys — and **ignores** *sink*.
+
+        Args:
+            strategy_type/summary/triggers/code: the proposal to display.
+            options: the allowed choices (key/label/alias); the last is the default.
+            sink:    the turn's live detail sink, if any (used by chat frontends to
+                     reuse the same message; ignored here).
+
+        Returns:
+            The chosen option ``key`` (e.g. ``"run"``, ``"edit"``, ``"reject"``).
+        """
+        triggers_str = "\n  - ".join(triggers) if triggers else "(none)"
+        header = (
+            f"[bold]strategy:[/bold]  {strategy_type}\n"
+            f"[bold]summary:[/bold]  {summary or '(none)'}\n"
+            f"[bold]trigger:[/bold]\n  - {triggers_str}"
+        )
+        self.panel(header, title="proposed orchestration", style="yellow")
+        self.code(code, lang="python")
+        prompt = "[bold]Review[/bold] — " + " / ".join(
+            f"[{o.key}] {o.label}" for o in options
+        )
+        keys = [o.key for o in options]
+        default = options[-1].key if options else None
+        while True:
+            answer = await self.ask(prompt, default=default, choices=None)
+            choice = match_choice(answer, options)
+            if choice is not None:
+                return choice
+            self.notice(f"[dim]Please answer one of: {', '.join(keys)}[/dim]")

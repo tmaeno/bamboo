@@ -9,13 +9,14 @@ Connection is established via :meth:`Neo4jBackend.connect` (called by
 All methods require an open driver; call :meth:`Neo4jBackend.close` when done.
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 from typing import Any
 
 try:
     from neo4j import AsyncGraphDatabase
-    from neo4j.exceptions import Neo4jError
 except ImportError as e:
     raise ImportError(
         "Neo4j backend requires 'neo4j' package. " "Install it with: pip install neo4j"
@@ -93,18 +94,50 @@ class Neo4jBackend(GraphDatabaseBackend):
     def __init__(self):
         self.settings = get_settings()
         self.driver = None
+        # Serialises the first connect so concurrent first queries connect once.
+        self._connect_lock = asyncio.Lock()
 
-    async def connect(self):
-        """Open the Neo4j driver, verify connectivity, and create indexes."""
-        try:
-            self.driver = AsyncGraphDatabase.driver(
+    async def _ensure_connected(self):
+        """Open the driver on first use (idempotent, concurrency-guarded).
+
+        Every query goes through :meth:`_session`, which calls this — so callers
+        never have to remember to :meth:`connect`. A failed connect leaves the
+        driver unset (so a later call retries) and propagates, so the caller can
+        degrade.
+        """
+        if self.driver is not None:
+            return
+        async with self._connect_lock:
+            if self.driver is not None:  # another coroutine won the race
+                return
+            driver = AsyncGraphDatabase.driver(
                 self.settings.neo4j_uri,
                 auth=(self.settings.neo4j_username, self.settings.neo4j_password),
             )
-            await self.driver.verify_connectivity()
+            try:
+                await driver.verify_connectivity()
+            except Exception:  # noqa: BLE001 — don't leak the unverified driver
+                await driver.close()
+                raise
+            self.driver = driver  # set before indexes so _session is re-entrant-safe
             logger.info("Connected to Neo4j at %s", self.settings.neo4j_uri)
-            await self._create_indexes()
-        except Neo4jError as exc:
+            try:
+                await self._create_indexes()
+            except Exception as exc:  # noqa: BLE001 — indexes are best-effort
+                logger.warning("Neo4j index creation failed: %s", exc)
+
+    @contextlib.asynccontextmanager
+    async def _session(self, **kwargs):
+        """Yield a Neo4j session, lazily connecting first."""
+        await self._ensure_connected()
+        async with self.driver.session(**kwargs) as session:
+            yield session
+
+    async def connect(self):
+        """Open the Neo4j driver (idempotent). Explicit callers keep working."""
+        try:
+            await self._ensure_connected()
+        except Exception as exc:  # noqa: BLE001
             logger.error("Failed to connect to Neo4j: %s", exc)
             raise
 
@@ -112,6 +145,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         """Close the Neo4j driver and release all connections."""
         if self.driver:
             await self.driver.close()
+            self.driver = None  # allow a later call to re-connect lazily
             logger.info("Neo4j connection closed")
 
     async def _create_indexes(self):
@@ -120,7 +154,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         Idempotent — uses ``IF NOT EXISTS`` so re-running on an already
         initialised database is safe.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             for node_type in NodeType:
@@ -148,7 +182,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         """
         import uuid
 
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             properties = node.model_dump(exclude={"node_type"})
@@ -182,7 +216,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         Returns:
             The node's ID string.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -217,7 +251,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         """
         graph_id = relationship.properties.pop("graph_id", "")
         parameters = relationship.properties.pop("parameters", None)
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -284,7 +318,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             ``tgt_type``, ``rel_type``, ``occurrence_count``, ``confidence``.
             Ordered by ``occurrence_count DESC``.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -321,7 +355,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         Returns:
             Dict with ``rels_affected`` (updated or deleted) and ``nodes_removed``.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             # Step 1: update / delete relationships in one pass.
@@ -369,7 +403,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def clear_all(self) -> None:
         """Delete every node and relationship from the Neo4j database."""
-        async with self.driver.session() as session:
+        async with self._session() as session:
             await session.run("MATCH (n) DETACH DELETE n")
         logger.info("Neo4j: all nodes and relationships deleted")
 
@@ -387,7 +421,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         so causes corroborated by multiple clue types rank above those matched
         by only one.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             query = """
@@ -494,7 +528,7 @@ class Neo4jBackend(GraphDatabaseBackend):
             empty / None when the underlying Procedure / edge does not carry
             them in its JSON metadata.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -533,7 +567,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         unknown. Same enriched row shape as ``find_procedures_for_causes`` plus
         ``cause_names`` (list); ordered ``frequency DESC`` and capped at *limit*.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -566,7 +600,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         Stores a top-level boolean property ``auto_run`` on the Procedure node
         (Neo4j is schemaless, so no migration). Returns True iff a node matched.
         """
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -583,7 +617,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             query = """
@@ -595,7 +629,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def update_resolution_success_rate(self, resolution_id: str, success: bool):
         """Update resolution success rate based on feedback."""
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             query = """
@@ -614,7 +648,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def get_node_description(self, node_type: str, name: str) -> str | None:
         """Return the description of an existing node, or None if not found."""
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             result = await session.run(
@@ -628,7 +662,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         self, node_type: str, name: str, description: str
     ) -> None:
         """Set the description field on an existing node."""
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             await session.run(
@@ -641,7 +675,7 @@ class Neo4jBackend(GraphDatabaseBackend):
         """Return per-type counts of nodes and relationships in the database."""
         node_counts: dict[str, int] = {}
         edge_counts: dict[str, int] = {}
-        async with self.driver.session(
+        async with self._session(
             database=self.settings.neo4j_database
         ) as session:
             node_result = await session.run(

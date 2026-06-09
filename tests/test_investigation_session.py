@@ -29,7 +29,7 @@ from bamboo.agents.investigation_session import (
     _format_running_graph_summary,
     _parse_json_response,
 )
-from bamboo.frontends.base import InteractionIO
+from bamboo.frontends.base import InteractionIO, ReviewOption, match_choice
 from bamboo.mcp.base import McpTool
 from bamboo.models.graph_element import (
     CauseNode,
@@ -1095,3 +1095,43 @@ async def test_invoke_llm_uses_ainvoke_when_sink_absent_or_inactive():
     orch._llm = _FakeInvokeLLM()
     assert await orch._invoke_llm("sys", "user") == "plain result"
     assert await orch._invoke_llm("sys", "user", stream_sink=_InactiveSink()) == "plain result"
+
+
+# ---------------------------------------------------------------------------
+# review choices: match_choice + review_orchestration default
+# ---------------------------------------------------------------------------
+
+_OPTS = [
+    ReviewOption("run", "run once", "y"),
+    ReviewOption("auto", "auto-run", "a"),
+    ReviewOption("edit", "edit", "e"),
+    ReviewOption("reject", "reject", "n"),
+]
+
+
+def test_match_choice_keys_aliases_and_default():
+    assert match_choice("run", _OPTS) == "run"
+    assert match_choice("AUTO", _OPTS) == "auto"        # case-insensitive
+    assert match_choice("y", _OPTS) == "run"            # single-letter alias
+    assert match_choice("n", _OPTS) == "reject"
+    assert match_choice("", _OPTS) == "reject"          # blank → last (safe default)
+    assert match_choice("nonsense", _OPTS) is None
+
+
+@pytest.mark.asyncio
+async def test_review_orchestration_default_resolves_choice():
+    io = _QueueIO(["auto"])
+    choice = await io.review_orchestration(
+        strategy_type="s", summary="sum", triggers=["t1"], code="x = 1", options=_OPTS
+    )
+    assert choice == "auto"
+    assert any("Review" in p for p in io.asked)  # the proposal prompt was shown
+
+
+@pytest.mark.asyncio
+async def test_review_orchestration_default_reprompts_then_accepts_alias():
+    io = _QueueIO(["bogus", "y"])  # invalid, then the "run" alias
+    choice = await io.review_orchestration(
+        strategy_type="s", summary="", triggers=[], code="x = 1", options=_OPTS
+    )
+    assert choice == "run"

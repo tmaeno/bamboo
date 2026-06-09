@@ -178,33 +178,43 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
             return
     # Bind per-user PanDA identity for every API call in this session (no-op when
     # creds is None). ContextVars propagate across asyncio.to_thread.
-    with panda_credentials(creds):
-        # Stream the engine's progress narration into this thread (status spinner +
-        # foldable last-N detail; full firehose goes to the `bamboo.narration` log).
-        async with stream_narration(transport, verbose=command.verbose):
-            if command.kind == "investigate":
-                orch = InvestigationOrchestrator(
-                    deps=deps,
-                    allow_mutating_autorun=settings.allow_mutating_autorun,
-                )
-                await orch.start(task_id=command.task_id)
-                await orch.run()
-                await orch.finalize()
-            elif command.kind == "capture":
-                messages = await transport.thread_messages()
-                transcript = "\n".join(messages)
-                await run_capture(
-                    io,
-                    transcript=transcript,
-                    task_id=command.task_id,
-                    accumulator=deps.knowledge_accumulator,
-                    graph_db=deps.graph_db,
-                    mcp_client=deps.mcp_client,
-                )
-            elif command.kind == "analyze":
-                await run_analyze(io, task_id=command.task_id, deps=deps)
-            else:  # pragma: no cover - parse_command only emits the above
-                transport.send(f"Unknown command: {command.kind}")
+    try:
+        with panda_credentials(creds):
+            # Stream the engine's progress narration into this thread (status spinner +
+            # foldable last-N detail; full firehose goes to the `bamboo.narration` log).
+            async with stream_narration(transport, verbose=command.verbose):
+                if command.kind == "investigate":
+                    orch = InvestigationOrchestrator(
+                        deps=deps,
+                        allow_mutating_autorun=settings.allow_mutating_autorun,
+                    )
+                    await orch.start(task_id=command.task_id)
+                    await orch.run()
+                    await orch.finalize()
+                elif command.kind == "capture":
+                    messages = await transport.thread_messages()
+                    transcript = "\n".join(messages)
+                    await run_capture(
+                        io,
+                        transcript=transcript,
+                        task_id=command.task_id,
+                        accumulator=deps.knowledge_accumulator,
+                        graph_db=deps.graph_db,
+                        mcp_client=deps.mcp_client,
+                    )
+                elif command.kind == "analyze":
+                    await run_analyze(io, task_id=command.task_id, deps=deps)
+                else:  # pragma: no cover - parse_command only emits the above
+                    transport.send(f"Unknown command: {command.kind}")
+    finally:
+        # The graph/vector backends connect lazily on first use, so a command may
+        # have opened a per-session driver/client. Release them (a long-lived bot
+        # would otherwise leak one per command). Best-effort.
+        for _db in (deps.graph_db, deps.vector_db):
+            try:
+                await _db.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def serve(settings: Optional[Settings] = None) -> None:
