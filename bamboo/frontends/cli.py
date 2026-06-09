@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import asynccontextmanager
 
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from bamboo.frontends.base import Column, InteractionIO
+from bamboo.utils import narrator
 from bamboo.utils.prompts import ask as _ask, confirm as _confirm
 
 
@@ -86,6 +90,47 @@ def _parse_editor_buffer(
     if not triggers:
         triggers = list(fallback_triggers)
     return strategy, code, summary, triggers
+
+
+class _CliDetailSink:
+    """Renders streamed turn detail into a transient Rich ``Live`` panel.
+
+    Reasoning deltas render dim, answer deltas normal; only the last *max_lines*
+    rendered lines are kept so the panel can't outgrow the terminal. ``meta`` is a
+    no-op on the CLI — intent/strategy already print as persistent ``say`` lines,
+    so echoing them in the (vanishing) panel would just duplicate.
+    """
+
+    active = True
+
+    def __init__(self, title: str, *, max_lines: int = 20) -> None:
+        self._title = title
+        self._max_lines = max_lines
+        self._reasoning: list[str] = []
+        self._answer: list[str] = []
+        self._live: Live | None = None
+
+    def _render(self) -> Panel:
+        rows: list[tuple[str, str | None]] = [
+            (ln, "dim cyan") for ln in "".join(self._reasoning).splitlines()
+        ] + [(ln, None) for ln in "".join(self._answer).splitlines()]
+        rows = rows[-self._max_lines :]
+        body = Text()
+        if not rows:
+            body.append("…", style="dim")
+        for i, (line, style) in enumerate(rows):
+            if i:
+                body.append("\n")
+            body.append(line, style=style or "")
+        return Panel(body, title=self._title, border_style="dim cyan")
+
+    def feed(self, text: str, *, reasoning: bool = False) -> None:
+        (self._reasoning if reasoning else self._answer).append(text)
+        if self._live is not None:
+            self._live.update(self._render())
+
+    def meta(self, line: str) -> None:  # noqa: D102 — see class docstring
+        pass
 
 
 class CliInteractionIO(InteractionIO):
@@ -268,3 +313,27 @@ class CliInteractionIO(InteractionIO):
             f"[bold]summary:[/bold] {new_count} new, {merge_count} will merge — "
             f"{edge_count} edge(s) to write."
         )
+
+    @asynccontextmanager
+    async def detail_stream(self, *, title: str):
+        """Stream a turn's verbose detail into a transient Rich ``Live`` panel.
+
+        Active only when verbose (the same flag :func:`narrator.say` uses) and when
+        no :func:`narrator.thinking` spinner is already live (Rich allows only one
+        ``Live`` per console). Otherwise yields the inactive no-op sink so the
+        caller skips the slower streaming path. The panel is transient — it
+        vanishes on exit, leaving the persistent ``→ intent``/``→ strategy`` lines.
+        """
+        if not narrator.is_verbose() or narrator._progress is not None:
+            async with super().detail_stream(title=title) as sink:
+                yield sink
+            return
+        sink = _CliDetailSink(title)
+        with Live(
+            sink._render(), console=self.console, transient=True, refresh_per_second=12
+        ) as live:
+            sink._live = live
+            try:
+                yield sink
+            finally:
+                sink._live = None

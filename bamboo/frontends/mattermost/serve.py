@@ -128,7 +128,7 @@ async def _run_session(transport: ThreadTransport, command: Command) -> None:
     from bamboo.utils.panda_client import panda_credentials
 
     settings = get_settings()
-    io = MattermostInteractionIO(transport)
+    io = MattermostInteractionIO(transport, verbose=command.verbose)
 
     if command.kind == "help":
         io.notice(_HELP)

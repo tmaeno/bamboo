@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from bamboo.frontends.mattermost.io import ThreadTransport
+from bamboo.frontends.mattermost.io import ThreadTransport, describe_post_failure
 
 logger = logging.getLogger(__name__)
 
@@ -141,12 +141,20 @@ class _ThreadSession(ThreadTransport):
     async def _sender_loop(self) -> None:
         while True:
             text, props = await self._outbox.get()
+            logger.debug("outbox posting msg_len=%d props=%s", len(text or ""), bool(props))
             try:
                 await self._bot.create_post(
                     self.channel_id, text, root_id=self.root_id, props=props
                 )
-            except Exception:  # noqa: BLE001
-                logger.exception("failed to post to thread %s", self.root_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "%s",
+                    describe_post_failure(
+                        "outbox post failed",
+                        message=text, props=props, root_id=self.root_id, exc=exc,
+                    ),
+                )
+                logger.debug("outbox post failure traceback", exc_info=True)
             finally:
                 self._outbox.task_done()
 
@@ -166,6 +174,10 @@ class MattermostBot:
         self.run_session = run_session
         self._sessions: dict[str, _ThreadSession] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        # Per-thread (per-root) locks serialising post *creation* — Mattermost
+        # updates the thread's row on every reply, so simultaneous replies to one
+        # root can fail with `app.post.save.app_error`. See create_post.
+        self._create_locks: dict[str, asyncio.Lock] = {}
         self.bot_user_id: Optional[str] = None
         self.bot_username: Optional[str] = None
         # Name of the animated spinner custom emoji once registered, else None
@@ -182,13 +194,30 @@ class MattermostBot:
         props: Optional[dict[str, Any]] = None,
         file_ids: Optional[list[str]] = None,
     ) -> dict[str, Any]:
-        return await self.driver.posts.create_post(
-            channel_id=channel_id,
-            message=message,
-            root_id=root_id,
-            props=props,
-            file_ids=file_ids,
-        )
+        # Empty root_id = a new top-level post → no thread contention, no lock.
+        if not root_id:
+            return await self.driver.posts.create_post(
+                channel_id=channel_id,
+                message=message,
+                root_id=root_id,
+                props=props,
+                file_ids=file_ids,
+            )
+        # Serialise creates to the SAME thread: Mattermost updates the thread's row
+        # on every reply, so concurrent replies to one root can collide with
+        # `app.post.save.app_error`. The three posters (outbox sender, narration
+        # live post, per-turn detail message) otherwise race. Different threads
+        # still create concurrently. setdefault is race-free here — asyncio is
+        # single-threaded and there is no await between lookup and insert.
+        lock = self._create_locks.setdefault(root_id, asyncio.Lock())
+        async with lock:
+            return await self.driver.posts.create_post(
+                channel_id=channel_id,
+                message=message,
+                root_id=root_id,
+                props=props,
+                file_ids=file_ids,
+            )
 
     async def open_direct_channel(self, user_id: str) -> str:
         """Return the id of the bot↔user direct-message channel (created if absent)."""
@@ -450,5 +479,6 @@ class MattermostBot:
             pass
         self._sessions.pop(sess.root_id, None)
         self._tasks.pop(sess.root_id, None)
+        self._create_locks.pop(sess.root_id, None)
         if sess._sender_task is not None:
             sess._sender_task.cancel()

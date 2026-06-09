@@ -144,7 +144,12 @@ def set_narrator(console: Console, verbose: bool = False) -> Token:
     return _console.set(console)
 
 
-def say(msg: str, *, level: int = logging.INFO) -> None:
+def is_verbose() -> bool:
+    """Whether the current task context is in verbose narration mode (see :func:`set_narrator`)."""
+    return _verbose.get()
+
+
+def say(msg: str, *, level: int = logging.INFO, kind: str | None = None) -> None:
     """Emit a progress line on the narration logger; render on the CLI console.
 
     The record flows to the console/file (via logging) and to any installed
@@ -152,13 +157,31 @@ def say(msg: str, *, level: int = logging.INFO) -> None:
     stdlib logging level (``logging.INFO`` for a milestone, ``logging.DEBUG`` for
     verbose detail). On a CLI with a Rich console it also pretty-prints when
     verbose.
+
+    ``kind`` optionally tags the record's ``narration_kind`` (e.g. ``"turn_detail"``
+    for a line a chat frontend should route somewhere other than its live post).
+    It does not affect CLI rendering — the line still prints here when verbose.
     """
-    _NARRATION_LOGGER.log(level, "%s", msg)
+    extra = {"narration_kind": kind} if kind else None
+    _NARRATION_LOGGER.log(level, "%s", msg, extra=extra)
     if _verbose.get():
         c = _console.get()
         if c is not None:
             prefix = "[yellow]  ⚠[/yellow]" if level >= logging.WARNING else "[dim cyan]  →[/dim cyan]"
             c.print(f"{prefix} {msg}")
+
+
+def step(msg: str) -> None:
+    """Set the frontend status head to *msg* — a ``"step"`` record, **no** CLI spinner.
+
+    Unlike :func:`thinking`, this does not start a Rich spinner; it only updates a
+    chat frontend's status head (e.g. the Mattermost live post). On the CLI it is
+    silent — the narration logger has ``propagate=False`` and no console handler is
+    attached to it (only :func:`say` / :func:`thinking` render to the console), so
+    a bare ``step`` record prints nothing. Use it to keep a chat frontend's head
+    accurate during a phase that drives its own CLI display (e.g. a detail panel).
+    """
+    _NARRATION_LOGGER.info("%s", msg, extra={"narration_kind": "step"})
 
 
 def warn(msg: str) -> None:

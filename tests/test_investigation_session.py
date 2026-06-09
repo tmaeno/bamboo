@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -224,7 +225,7 @@ async def test_skip_returns_true_without_mutating_state():
 async def test_intent_classifier_returns_tool_on_high_confidence(monkeypatch):
     orch = _build_orch()
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return '{"intent": "tool", "confidence": 0.95, "is_close_call": false, "rationale": "imperative"}'
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -236,7 +237,7 @@ async def test_intent_classifier_returns_tool_on_high_confidence(monkeypatch):
 async def test_intent_classifier_falls_back_to_narration_on_llm_failure(monkeypatch):
     orch = _build_orch()
 
-    async def boom(_self, system, user):  # noqa: ARG001
+    async def boom(_self, system, user, **_kwargs):  # noqa: ARG001
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", boom, raising=True)
@@ -682,7 +683,7 @@ async def test_tool_turn_logs_gap_when_llm_returns_null_code(monkeypatch):
     orch = _build_orch()
     await orch._build_tool_registry()
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return '{"code": null, "reason": "no tool can open external links"}'
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -770,7 +771,7 @@ async def test_full_session_tool_narration_finalize_commit(monkeypatch):
         ']}',
     ]
 
-    async def scripted_invoke(_self, system, user):  # noqa: ARG001
+    async def scripted_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return llm_queue.pop(0)
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", scripted_invoke, raising=True)
@@ -863,7 +864,7 @@ async def test_tool_turn_auto_run_policy_persists_and_skips_prompt(monkeypatch):
     await orch._build_tool_registry()
     code = 'r = await tools.get_x()\nreturn {"r": r}'
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return _orch_plan(code)
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -885,7 +886,7 @@ async def test_tool_turn_reject_records_no_procedure(monkeypatch):
     orch = _build_orch(mcp_tools=[_readonly_tool()], io=io)
     await orch._build_tool_registry()
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return _orch_plan('return {"r": await tools.get_x()}')
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -903,7 +904,7 @@ async def test_tool_turn_run_once_does_not_persist_policy(monkeypatch):
     await orch._build_tool_registry()
     code = 'return {"r": await tools.get_x()}'
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return _orch_plan(code)
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -959,7 +960,7 @@ async def test_durable_autorun_skips_prompt_for_granted_procedure(monkeypatch):
     await orch._build_tool_registry()
     assert "proc__fetch_logs__get_jobs" in orch._durable_autorun_procs
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return _orch_plan("return await tools.proc__fetch_logs__get_jobs()")
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -979,7 +980,7 @@ async def test_grant_durable_autorun_on_procedure_reuse(monkeypatch):
     await orch._build_tool_registry()
     assert "proc__fetch_logs__get_jobs" not in orch._durable_autorun_procs  # not granted yet
 
-    async def fake_invoke(_self, system, user):  # noqa: ARG001
+    async def fake_invoke(_self, system, user, **_kwargs):  # noqa: ARG001
         return _orch_plan("return await tools.proc__fetch_logs__get_jobs()")
 
     monkeypatch.setattr(InvestigationOrchestrator, "_invoke_llm", fake_invoke, raising=True)
@@ -1012,3 +1013,85 @@ async def test_approvals_and_revoke_meta_commands():
     # Revoke all.
     assert await orch._handle_meta_command("/revoke all") is True
     assert orch.session.code_policies == {}
+
+
+# ---------------------------------------------------------------------------
+# _invoke_llm streaming path (strategy step)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSink:
+    """An active DetailSink that records what it was fed."""
+
+    active = True
+
+    def __init__(self) -> None:
+        self.answer: list[str] = []
+        self.reasoning: list[str] = []
+        self.meta_lines: list[str] = []
+
+    def feed(self, text: str, *, reasoning: bool = False) -> None:
+        (self.reasoning if reasoning else self.answer).append(text)
+
+    def meta(self, line: str) -> None:
+        self.meta_lines.append(line)
+
+
+class _InactiveSink(_RecordingSink):
+    active = False
+
+
+class _FakeStreamLLM:
+    """Fake chat model whose ``astream`` yields the given chunks."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = chunks
+        self.astream_kwargs: list[dict] = []
+
+    async def astream(self, _messages, **kwargs):
+        self.astream_kwargs.append(kwargs)
+        for c in self._chunks:
+            yield c
+
+    async def ainvoke(self, _messages, **_kwargs):
+        raise AssertionError("ainvoke must not be called when the sink is active")
+
+
+class _FakeInvokeLLM:
+    """Fake chat model with only ``ainvoke`` (the non-streaming path)."""
+
+    async def ainvoke(self, _messages, **_kwargs):
+        return SimpleNamespace(content="plain result")
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_streams_answer_and_reasoning_and_forces_ollama_reasoning(monkeypatch):
+    from bamboo.agents import investigation_session as sess
+
+    monkeypatch.setattr(sess, "get_settings", lambda: SimpleNamespace(llm_provider="ollama"))
+    orch = _build_orch()
+    orch._llm = _FakeStreamLLM(
+        [
+            SimpleNamespace(content="", additional_kwargs={"reasoning_content": "let me "}),
+            SimpleNamespace(content='{"strategy', additional_kwargs={"reasoning_content": "think"}),
+            SimpleNamespace(content='_type": "x"}', additional_kwargs={}),
+        ]
+    )
+    sink = _RecordingSink()
+    out = await orch._invoke_llm("sys", "user", stream_sink=sink)
+
+    # Returned text is the concatenated *answer* only — clean for JSON parsing.
+    assert out == '{"strategy_type": "x"}'
+    assert _parse_json_response(out) == {"strategy_type": "x"}
+    assert "".join(sink.answer) == '{"strategy_type": "x"}'
+    assert "".join(sink.reasoning) == "let me think"
+    # Reasoning is forced on for this call only (Ollama provider).
+    assert orch._llm.astream_kwargs[0].get("reasoning") is True
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_uses_ainvoke_when_sink_absent_or_inactive():
+    orch = _build_orch()
+    orch._llm = _FakeInvokeLLM()
+    assert await orch._invoke_llm("sys", "user") == "plain result"
+    assert await orch._invoke_llm("sys", "user", stream_sink=_InactiveSink()) == "plain result"

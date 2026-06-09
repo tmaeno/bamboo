@@ -21,7 +21,51 @@ terminal adapter renders it, other adapters strip it.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import AsyncIterator, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class DetailSink(Protocol):
+    """A live region for one turn's verbose detail (streamed LLM output).
+
+    Obtained from :meth:`InteractionIO.detail_stream`.  The engine feeds it the
+    model's reasoning/answer deltas as they stream and a couple of summary lines
+    (intent, strategy); each frontend renders it however suits — a transient
+    terminal panel, a live-updating chat message, or nothing.
+
+    ``active`` lets the caller skip the (slower, reasoning-enabled) streaming path
+    entirely when the sink would render nothing — e.g. a non-verbose session.
+    """
+
+    active: bool
+
+    def feed(self, text: str, *, reasoning: bool = False) -> None:
+        """Append a streamed delta — answer text, or model reasoning when *reasoning*."""
+        ...
+
+    def meta(self, line: str) -> None:
+        """Record a one-line summary fact for the turn (e.g. ``intent → tool``)."""
+        ...
+
+
+class _NullDetailSink:
+    """A do-nothing :class:`DetailSink` — the default when a frontend doesn't render detail."""
+
+    active = False
+
+    def feed(self, text: str, *, reasoning: bool = False) -> None:  # noqa: D102
+        pass
+
+    def meta(self, line: str) -> None:  # noqa: D102
+        pass
+
+
+@asynccontextmanager
+async def _null_detail_stream() -> AsyncIterator[DetailSink]:
+    """Default :meth:`InteractionIO.detail_stream` — yields an inactive no-op sink."""
+    yield _NullDetailSink()
 
 
 @dataclass
@@ -166,3 +210,21 @@ class InteractionIO(ABC):
                         them; the terminal frontend ignores them.
         """
         ...
+
+    # ------------------------------------------------------------------
+    # Streaming detail (live region for one turn's verbose detail)
+    # ------------------------------------------------------------------
+
+    def detail_stream(self, *, title: str):
+        """Open a live region for one turn's verbose detail; an async context manager.
+
+        Yields a :class:`DetailSink` the engine feeds streamed LLM reasoning/answer
+        deltas and summary lines.  Concrete frontends override to render it (a
+        transient terminal panel, a live-updating chat message, …).  The default
+        is a no-op that yields an **inactive** sink, so frontends that don't render
+        streaming detail — and test fakes — need no changes.
+
+        Returns:
+            An ``async with``-compatible context manager yielding a ``DetailSink``.
+        """
+        return _null_detail_stream()

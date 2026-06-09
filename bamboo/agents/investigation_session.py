@@ -55,8 +55,9 @@ from bamboo.agents.procedure_tools import (
     procedure_tool_name,
 )
 from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
-from bamboo.utils.narrator import say
-from bamboo.frontends.base import Column, InteractionIO
+from bamboo.config import get_settings
+from bamboo.utils.narrator import say, step
+from bamboo.frontends.base import Column, DetailSink, InteractionIO
 from bamboo.frontends.cli import CliInteractionIO
 from bamboo.llm import (
     EMAIL_EXTRACTION_SYSTEM,
@@ -159,6 +160,41 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 # Cap on how many reusable procedure-tools (most-reused first) are exposed to the
 # planner per session — keeps the prompt focused and bounded (Phase 2a).
 _PROCEDURE_TOOL_LIMIT = 25
+
+
+def _chunk_text(chunk: Any) -> tuple[str, str]:
+    """Split a streamed LLM chunk into ``(answer, reasoning)`` text (provider-agnostic).
+
+    - answer: ``chunk.content`` when a string; when a list of content blocks
+      (Anthropic), the text-type blocks joined, with thinking/reasoning blocks
+      routed to *reasoning*.
+    - reasoning: ``chunk.additional_kwargs["reasoning_content"]`` (Ollama; also
+      DeepSeek) with ``"reasoning"`` as a fallback, plus any Anthropic thinking
+      blocks. Empty strings when absent.
+    """
+    answer_parts: list[str] = []
+    reasoning_parts: list[str] = []
+
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        answer_parts.append(content)
+    elif isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                answer_parts.append(str(block))
+                continue
+            btype = block.get("type")
+            if btype in ("thinking", "reasoning", "reasoning_content"):
+                reasoning_parts.append(block.get("thinking") or block.get("text") or "")
+            else:
+                answer_parts.append(block.get("text", ""))
+
+    ak = getattr(chunk, "additional_kwargs", None) or {}
+    rc = ak.get("reasoning_content") or ak.get("reasoning")
+    if isinstance(rc, str) and rc:
+        reasoning_parts.append(rc)
+
+    return "".join(answer_parts), "".join(reasoning_parts)
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
@@ -326,6 +362,9 @@ class InvestigationOrchestrator:
         sid = session_id or uuid.uuid4().hex[:12]
         self.session = InvestigationSession(session_id=sid, max_turns=max_turns)
         self._llm = None  # lazy
+        # Last intent classification, formatted for the per-turn detail message
+        # (set in _classify_intent, consumed by _tool_turn). None until first turn.
+        self._last_intent_meta: Optional[str] = None
         self._internal_tools_descriptors: dict = {}
         self._internal_tools_callables: dict = {}
         self._mcp_tool_descriptors: list = []
@@ -588,10 +627,18 @@ class InvestigationOrchestrator:
         if intent not in ("tool", "narration"):
             intent = "narration"
 
-        say(
+        intent_line = (
             f"intent → {intent} (confidence {confidence:.2f}"
-            f"{'; close call' if is_close else ''})",
+            f"{'; close call' if is_close else ''})"
+        )
+        self._last_intent_meta = intent_line
+        # Tag the tool-turn intent line as turn_detail so it lands in the durable
+        # per-turn detail message (not the ephemeral MM Head post). Narration-turn
+        # intent stays in the Head post as before (no per-turn detail message there).
+        say(
+            intent_line,
             level=logging.DEBUG,
+            kind="turn_detail" if intent == "tool" else None,
         )
 
         if confidence < 0.7 or is_close:
@@ -628,29 +675,39 @@ class InvestigationOrchestrator:
             available_tools=_format_available_tools(tool_descriptors_full),
             utterance=utterance,
         )
-        try:
-            response = await self._invoke_llm(INVESTIGATE_ORCHESTRATION_SYSTEM, user_msg)
-        except Exception as exc:  # noqa: BLE001
-            self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
-            return
-        plan = _parse_json_response(response)
+        # Update the MM session Head to "planning…" (silent on the CLI), then
+        # stream the planner's reasoning/answer into the per-turn detail surface.
+        step("planning…")
+        async with self.io.detail_stream(title="planning…") as sink:
+            if self._last_intent_meta:
+                sink.meta(self._last_intent_meta)
+            try:
+                response = await self._invoke_llm(
+                    INVESTIGATE_ORCHESTRATION_SYSTEM, user_msg, stream_sink=sink
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
+                return
+            plan = _parse_json_response(response)
 
-        code = plan.get("code")
-        if not code or not str(code).strip():
-            reason = plan.get("reason", "(no reason returned)")
-            self.io.notice(f"[yellow]No tool fits this request: {reason}[/yellow]")
-            self.io.notice("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
-            self.session.tool_gap_log.append(
-                ToolGap(human_request_text=utterance, llm_reason=str(reason), turn=self.session.turn)
-            )
-            self.session.turn_history.append(Turn(role="system", kind="tool_gap", text=str(reason)))
-            return
+            code = plan.get("code")
+            if not code or not str(code).strip():
+                reason = plan.get("reason", "(no reason returned)")
+                self.io.notice(f"[yellow]No tool fits this request: {reason}[/yellow]")
+                self.io.notice("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
+                self.session.tool_gap_log.append(
+                    ToolGap(human_request_text=utterance, llm_reason=str(reason), turn=self.session.turn)
+                )
+                self.session.turn_history.append(Turn(role="system", kind="tool_gap", text=str(reason)))
+                return
 
-        strategy_type = str(plan.get("strategy_type") or "unnamed_strategy").strip()
-        code_summary = str(plan.get("code_summary") or "").strip()
-        trigger_signals = list(plan.get("trigger_signals") or [])
+            strategy_type = str(plan.get("strategy_type") or "unnamed_strategy").strip()
+            code_summary = str(plan.get("code_summary") or "").strip()
+            trigger_signals = list(plan.get("trigger_signals") or [])
 
-        say(f"strategy → {strategy_type}: {code_summary}", level=logging.DEBUG)
+            sink.meta(f"strategy → {strategy_type}: {code_summary}")
+
+        say(f"strategy → {strategy_type}: {code_summary}", level=logging.DEBUG, kind="turn_detail")
 
         # Every new code block is reviewed (not just state-changing ones); the human
         # sets a per-code session policy. external_tool_names → recorded as Procedure
@@ -1337,11 +1394,41 @@ class InvestigationOrchestrator:
         except Exception as exc:  # noqa: BLE001
             logger.warning("could not persist session to %s: %s", self.save_path, exc)
 
-    async def _invoke_llm(self, system_message: str, user_message: str) -> str:
-        """Single LLM round-trip helper; returns the raw content string."""
+    async def _invoke_llm(
+        self,
+        system_message: str,
+        user_message: str,
+        *,
+        stream_sink: Optional[DetailSink] = None,
+    ) -> str:
+        """Single LLM round-trip helper; returns the raw content string.
+
+        When *stream_sink* is active, stream via ``astream`` and feed each delta to
+        the sink (answer text and, for reasoning-capable providers, the model's
+        reasoning). The concatenated *answer* is returned — identical to what
+        ``ainvoke`` would produce — so JSON parsing is unaffected. With no active
+        sink this is the plain ``ainvoke`` path (fast, no reasoning).
+        """
         if self._llm is None:
             self._llm = get_extraction_llm()
-        response = await self._llm.ainvoke(
-            [SystemMessage(content=system_message), HumanMessage(content=user_message)]
-        )
-        return getattr(response, "content", "") or ""
+        messages = [SystemMessage(content=system_message), HumanMessage(content=user_message)]
+        if stream_sink is None or not stream_sink.active:
+            response = await self._llm.ainvoke(messages)
+            return getattr(response, "content", "") or ""
+
+        # Streaming path: force reasoning ON for *this* call only (overrides the
+        # global OLLAMA_REASONING). Gated to Ollama so OpenAI/Anthropic don't get
+        # an unexpected kwarg; other providers still stream answer + any reasoning
+        # they natively emit.
+        stream_kwargs: dict[str, Any] = {}
+        if get_settings().llm_provider == "ollama":
+            stream_kwargs["reasoning"] = True
+        parts: list[str] = []
+        async for chunk in self._llm.astream(messages, **stream_kwargs):
+            answer, reasoning = _chunk_text(chunk)
+            if reasoning:
+                stream_sink.feed(reasoning, reasoning=True)
+            if answer:
+                parts.append(answer)
+                stream_sink.feed(answer)
+        return "".join(parts)

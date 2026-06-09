@@ -17,11 +17,60 @@ live server needed).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from bamboo.frontends.base import Column, InteractionIO
+
+logger = logging.getLogger(__name__)
+
+
+def describe_post_failure(
+    context: str,
+    *,
+    message: str = "",
+    props: Optional[dict] = None,
+    root_id: str = "",
+    exc: Optional[BaseException] = None,
+) -> str:
+    """Build a one-line diagnostic for a failed Mattermost post.
+
+    Captures the Mattermost ``error_id``/``request_id``/``status`` (the precise
+    cause), the target thread, the message length + a head/tail snippet, and the
+    props / attachment-text sizes — enough to tell *which* post was rejected and
+    *why* (message too long, props too large, bad ``root_id``, DB save, …) without
+    dumping the whole body.
+    """
+    bits = [context]
+    if exc is not None:
+        bits.append(
+            f"status={getattr(exc, 'status_code', '?')} "
+            f"error_id={getattr(exc, 'error_id', None)!r} "
+            f"request_id={getattr(exc, 'request_id', None)!r} "
+            f"exc={type(exc).__name__}: {exc}"
+        )
+    bits.append(f"root_id={root_id!r}")
+    msg = message or ""
+    bits.append(f"msg_len={len(msg)}")
+    if isinstance(props, dict):
+        try:
+            bits.append(f"props_json_len={len(json.dumps(props))}")
+        except Exception:  # noqa: BLE001
+            pass
+        atts = props.get("attachments")
+        if isinstance(atts, list):
+            total = sum(len(a.get("text", "")) for a in atts if isinstance(a, dict))
+            bits.append(f"attachments={len(atts)} attachment_text_len={total}")
+    snippet = msg if len(msg) <= 400 else msg[:200] + " … " + msg[-200:]
+    bits.append(f"msg_snippet={snippet!r}")
+    return " | ".join(bits)
 
 # Rich-markup → Markdown / plain. We render [bold] as **, [dim]/[italic] as _,
 # and strip color tags (yellow/red/green/cyan/magenta/blue/...).
@@ -93,11 +142,139 @@ class ThreadTransport(ABC):
         raise NotImplementedError("this transport cannot open a direct-message channel")
 
 
+_DETAIL_FLUSH_INTERVAL = 1.0  # min seconds between live-message edits (coalescing)
+_DETAIL_CLIP = 1500  # max chars shown for the reasoning / answer sections
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the last *limit* chars, prefixing an ellipsis when truncated."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else "…" + text[-(limit - 1) :]
+
+
+class _LiveMessage:
+    """One live-updating, durable per-turn Mattermost message of streamed detail.
+
+    Mirrors :class:`~bamboo.frontends.mattermost.narration._LivePost` but is
+    per-turn (not per-session) and posts directly through the bot so it can be
+    *edited in place* (the FIFO outbox only creates posts). Driven on the event
+    loop by the engine coroutine — ``feed``/``meta`` just mutate state and wake the
+    flusher, which coalesces edits to one ``update_post`` per ``_DETAIL_FLUSH_INTERVAL``.
+    """
+
+    active = True
+
+    def __init__(
+        self, bot: Any, channel_id: str, root_id: str, title: str
+    ) -> None:
+        self._bot = bot
+        self._channel_id = channel_id
+        self._root_id = root_id
+        self._title = title
+        self._spinner: Optional[str] = getattr(bot, "spinner_emoji", None)
+        self._meta: list[str] = []
+        self._reasoning: list[str] = []
+        self._answer: list[str] = []
+        self._dirty = False
+        self._wake = asyncio.Event()
+        self._post_id: Optional[str] = None
+
+    # --- DetailSink (fed by the engine coroutine, same loop) ---
+    def feed(self, text: str, *, reasoning: bool = False) -> None:
+        (self._reasoning if reasoning else self._answer).append(text)
+        self._dirty = True
+        self._wake.set()
+
+    def meta(self, line: str) -> None:
+        self._meta.append(line)
+        self._dirty = True
+        self._wake.set()
+
+    # --- rendering ---
+    def _render(self, *, done: bool = False) -> tuple[str, Optional[dict]]:
+        spacer = " " * 10
+        if not done and self._spinner:
+            head = f":{self._spinner}: **{self._title}** :{self._spinner}:{spacer}"
+        else:
+            head = f"🔎 **{self._title}**{spacer}"
+        parts: list[str] = [f"**{to_markdown(m)}**" for m in self._meta]
+        reasoning = "".join(self._reasoning).strip()
+        if reasoning:
+            parts.append("> " + _clip_tail(reasoning, _DETAIL_CLIP).replace("\n", "\n> "))
+        answer = "".join(self._answer).strip()
+        if answer:
+            parts.append("```\n" + _clip_tail(answer, _DETAIL_CLIP) + "\n```")
+        body = "\n\n".join(parts)
+        if not body:
+            return head, None
+        return head, {"attachments": [{"color": "#4a90d9", "text": body}]}
+
+    # --- flusher / MM I/O (best-effort) ---
+    async def run(self) -> None:
+        last = 0.0
+        while True:
+            await self._wake.wait()
+            self._wake.clear()
+            delta = time.monotonic() - last
+            if delta < _DETAIL_FLUSH_INTERVAL:
+                await asyncio.sleep(_DETAIL_FLUSH_INTERVAL - delta)
+            await self._flush_once()
+            last = time.monotonic()
+
+    async def _flush_once(self, *, done: bool = False) -> None:
+        if not self._dirty and not done:
+            return
+        self._dirty = False
+        message, props = self._render(done=done)
+        if self._post_id is None:
+            if message or props:
+                self._post_id = await self._create(message, props)
+        else:
+            await self._patch(self._post_id, message, props)
+
+    async def finalize(self) -> None:
+        """Final flush + freeze (drop the spinner). Durable — the post is never deleted."""
+        if self._post_id is None and not (self._meta or self._reasoning or self._answer):
+            return
+        await self._flush_once(done=True)
+
+    async def _create(self, message: str, props: Optional[dict]) -> Optional[str]:
+        logger.debug("detail message posting msg_len=%d props=%s", len(message or ""), bool(props))
+        try:
+            post = await self._bot.create_post(
+                self._channel_id, message, root_id=self._root_id, props=props
+            )
+            return post.get("id") if isinstance(post, dict) else None
+        except Exception as exc:  # noqa: BLE001 — best-effort; never break the turn
+            logger.warning(
+                "%s",
+                describe_post_failure(
+                    "detail message create failed",
+                    message=message, props=props, root_id=self._root_id, exc=exc,
+                ),
+            )
+            return None
+
+    async def _patch(self, post_id: str, message: str, props: Optional[dict]) -> None:
+        logger.debug("detail message patching msg_len=%d props=%s", len(message or ""), bool(props))
+        try:
+            await self._bot.update_post(post_id, message=message, props=props)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "%s",
+                describe_post_failure(
+                    "detail message patch failed",
+                    message=message, props=props, root_id=self._root_id, exc=exc,
+                ),
+            )
+
+
 class MattermostInteractionIO(InteractionIO):
     """Chat adapter bound to one :class:`ThreadTransport`."""
 
-    def __init__(self, transport: ThreadTransport) -> None:
+    def __init__(self, transport: ThreadTransport, *, verbose: bool = False) -> None:
         self.transport = transport
+        self.verbose = verbose
 
     @property
     def supports_interaction(self) -> bool:
@@ -209,6 +386,33 @@ class MattermostInteractionIO(InteractionIO):
         # readable code block otherwise.
         diagram = _mermaid_graph(rows, edges or [])
         self.transport.send(f"{summary}\n{diagram}")
+
+    @asynccontextmanager
+    async def detail_stream(self, *, title: str):
+        """Stream a turn's verbose detail into a live-updating, durable thread message.
+
+        Active only when the session is verbose (``--verbose``) and a bot is
+        attached; otherwise yields the inactive no-op sink so the caller skips the
+        slower streaming path. The message is created on first content, edited in
+        place as reasoning/answer stream (coalesced ~1/s), and frozen at the end —
+        it stays in the thread (it is *not* the ephemeral session live post).
+        """
+        bot = getattr(self.transport, "_bot", None)
+        channel_id = getattr(self.transport, "channel_id", None)
+        if not self.verbose or bot is None or not channel_id:
+            async with super().detail_stream(title=title) as sink:
+                yield sink
+            return
+        msg = _LiveMessage(bot, channel_id, getattr(self.transport, "root_id", ""), title)
+        flusher = asyncio.ensure_future(msg.run())
+        try:
+            yield msg
+        finally:
+            flusher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await flusher
+            with contextlib.suppress(Exception):
+                await msg.finalize()
 
 
 def _strip_code_fence(text: str) -> str:

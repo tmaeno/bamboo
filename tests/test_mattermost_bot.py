@@ -304,6 +304,173 @@ def test_diff_renders_mermaid_graph_with_edges():
 
 
 # ---------------------------------------------------------------------------
+# detail_stream / _LiveMessage (per-turn live detail message)
+# ---------------------------------------------------------------------------
+
+
+class _LiveBot:
+    """Minimal bot for _LiveMessage: records create/update calls."""
+
+    def __init__(self) -> None:
+        self.spinner_emoji = "spin"
+        self.created: list[dict] = []
+        self.updated: list[dict] = []
+
+    async def create_post(self, channel_id, message, *, root_id="", props=None, file_ids=None):
+        self.created.append({"message": message, "props": props, "root_id": root_id})
+        return {"id": "lm-1"}
+
+    async def update_post(self, post_id, *, message=None, props=None, file_ids=None):
+        self.updated.append({"post_id": post_id, "message": message, "props": props})
+        return {"id": post_id}
+
+
+@pytest.mark.asyncio
+async def test_live_message_creates_updates_and_freezes():
+    from bamboo.frontends.mattermost.io import _LiveMessage
+
+    bot = _LiveBot()
+    msg = _LiveMessage(bot, "chan", "root", "planning…")
+    msg.meta("intent → tool (confidence 0.95)")
+    msg.feed("let me think", reasoning=True)
+    await msg._flush_once()
+    assert len(bot.created) == 1
+    assert ":spin:" in bot.created[0]["message"]  # spinner head while running
+    body = bot.created[0]["props"]["attachments"][0]["text"]
+    assert "intent → tool" in body and "let me think" in body
+
+    msg.feed('{"strategy_type": "x"}')
+    await msg._flush_once()
+    assert len(bot.updated) == 1  # edits in place, no new post
+
+    await msg.finalize()
+    assert len(bot.updated) == 2
+    frozen = bot.updated[-1]
+    assert ":spin:" not in frozen["message"]  # spinner dropped on freeze
+    assert '{"strategy_type": "x"}' in frozen["props"]["attachments"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_detail_stream_inactive_when_not_verbose():
+    t = FakeTransport()
+    io = MattermostInteractionIO(t, verbose=False)
+    async with io.detail_stream(title="planning…") as sink:
+        assert sink.active is False
+        sink.feed("ignored")
+        sink.meta("ignored")
+    assert t.sent == []  # nothing posted
+
+
+def test_describe_post_failure_captures_error_id_and_sizes():
+    from bamboo.frontends.mattermost.io import describe_post_failure
+    from mattermostautodriver.exceptions import UnknownMattermostError
+
+    exc = UnknownMattermostError(
+        "Unable to save the Post.",
+        500,
+        "store.sql_post.save.app_error",
+        "req-123",
+        False,
+    )
+    out = describe_post_failure(
+        "outbox post failed",
+        message="x" * 1000,
+        props={"attachments": [{"text": "y" * 50}]},
+        root_id="root-1",
+        exc=exc,
+    )
+    assert "outbox post failed" in out
+    assert "status=500" in out
+    assert "store.sql_post.save.app_error" in out
+    assert "request_id='req-123'" in out
+    assert "root_id='root-1'" in out
+    assert "msg_len=1000" in out
+    assert "attachments=1" in out and "attachment_text_len=50" in out
+
+
+class _RaisingBot:
+    """Bot whose create_post raises a Mattermost 500 (to exercise failure logging)."""
+
+    spinner_emoji = "spin"
+
+    async def create_post(self, *_a, **_k):
+        from mattermostautodriver.exceptions import UnknownMattermostError
+
+        raise UnknownMattermostError(
+            "Unable to save the Post.", 500, "store.sql_post.save.app_error", "req-9", False
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_message_create_logs_and_survives_failure(caplog):
+    import logging
+
+    from bamboo.frontends.mattermost.io import _LiveMessage
+
+    msg = _LiveMessage(_RaisingBot(), "chan", "root", "planning…")
+    msg.meta("intent → tool (confidence 0.95)")
+    with caplog.at_level(logging.WARNING, logger="bamboo.frontends.mattermost.io"):
+        await msg._flush_once()  # must not raise
+    assert msg._post_id is None  # create failed → no id, but no crash
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "detail message create failed" in blob
+    assert "store.sql_post.save.app_error" in blob
+
+
+# ---------------------------------------------------------------------------
+# create_post per-thread serialization (Mattermost thread-write contention fix)
+# ---------------------------------------------------------------------------
+
+
+class _ConcurrencyDriver:
+    """Fake driver whose create_post records the max simultaneous in-flight calls."""
+
+    def __init__(self) -> None:
+        self.posts = self
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def create_post(self, **_kwargs):
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.02)  # hold the slot so any overlap is observable
+        self.in_flight -= 1
+        return {"id": "p"}
+
+
+async def _noop_run_session(_transport, _command):
+    pass
+
+
+def _concurrency_bot():
+    driver = _ConcurrencyDriver()
+    bot = MattermostBot(driver, allowed_channels=set(), run_session=_noop_run_session)
+    return bot, driver
+
+
+@pytest.mark.asyncio
+async def test_create_post_serializes_same_thread():
+    bot, driver = _concurrency_bot()
+    await asyncio.gather(*[bot.create_post("c", f"m{i}", root_id="R") for i in range(5)])
+    assert driver.max_in_flight == 1  # one create at a time per thread
+
+
+@pytest.mark.asyncio
+async def test_create_post_concurrent_across_threads():
+    bot, driver = _concurrency_bot()
+    await asyncio.gather(*[bot.create_post("c", "m", root_id=f"R{i}") for i in range(5)])
+    assert driver.max_in_flight > 1  # different threads still create concurrently
+
+
+@pytest.mark.asyncio
+async def test_create_post_empty_root_not_serialized():
+    bot, driver = _concurrency_bot()
+    await asyncio.gather(*[bot.create_post("c", "m", root_id="") for _ in range(5)])
+    assert driver.max_in_flight > 1  # top-level posts aren't thread replies
+    assert bot._create_locks == {}  # and no lock is created for empty root_id
+
+
+# ---------------------------------------------------------------------------
 # Bot routing
 # ---------------------------------------------------------------------------
 

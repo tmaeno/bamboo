@@ -27,6 +27,28 @@ class _Capture(logging.Handler):
         self.records.append(record)
 
 
+def test_diag_is_not_the_narration_logger():
+    """Operational post-I/O diagnostics must NOT be logged on 'bamboo.narration'.
+
+    The MattermostLogHandler is attached to that logger, so logging there would
+    feed records back into the live post — a per-patch breadcrumb would re-dirty
+    the post and loop the flusher (~1 Hz update_post) in a verbose session.
+    """
+    assert narr._diag.name == "bamboo.frontends.mattermost.narration"
+
+    narration_logger = logging.getLogger("bamboo.narration")
+    prev_level = narration_logger.level
+    narration_logger.setLevel(logging.DEBUG)
+    cap_h = _Capture()
+    narration_logger.addHandler(cap_h)
+    try:
+        narr._diag.debug("operational breadcrumb must not reach the live-post handler")
+        assert cap_h.records == []  # did not propagate to bamboo.narration's handler
+    finally:
+        narration_logger.removeHandler(cap_h)
+        narration_logger.setLevel(prev_level)
+
+
 @pytest.fixture
 def cap():
     lg = logging.getLogger("bamboo.narration")

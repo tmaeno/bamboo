@@ -13,7 +13,9 @@ record's ``narration_kind`` decides its role:
 
 * ``"step"`` → the post **head** (``:bamboo_spinner: <step>``; the animated emoji
   spins client-side; frozen to ``✓ done`` / a static head at the end);
-* ``"block"`` → **ignored** (verbose detail stays in the server log only);
+* ``"block"`` / ``"turn_detail"`` → **ignored** here (``block`` is verbose detail
+  kept to the server log; ``turn_detail`` belongs to the durable per-turn detail
+  message, not this ephemeral live post);
 * otherwise → a timestamped **body line** rendered in a separate attachment **card**
   (last *N* kept, **newest first**), with a ✅/⚠️/❌ accent by level.
 
@@ -35,9 +37,15 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, Optional
 
-# Operational diagnostics for the handler itself (post create/patch failures).
-# Kept at DEBUG so they don't pollute the narration stream operators read.
-_diag = logging.getLogger("bamboo.narration")
+from bamboo.frontends.mattermost.io import describe_post_failure
+
+# Operational diagnostics for the handler itself (post create/patch I/O).
+# MUST NOT be the "bamboo.narration" logger: MattermostLogHandler is attached to
+# that logger, so logging here would feed records back into the live post — in a
+# verbose session a per-patch breadcrumb re-dirties the post and the flusher loops
+# (~1 Hz update_post forever), and the diagnostics leak into chat. Using the module
+# logger keeps these on the bot's stdout/log (propagates to root) only.
+_diag = logging.getLogger(__name__)
 
 _DETAIL_ENTRIES = 10  # most-recent body lines kept in the live post (sliding window)
 _LINE_CLIP = 200  # max chars per body line (full text still goes to the log)
@@ -144,8 +152,12 @@ class _LivePost:
         if record.levelno < self._threshold:
             return
         kind = getattr(record, "narration_kind", "line")
-        if kind == "block":
-            return  # verbose detail — server log only, never chat
+        if kind in ("block", "turn_detail"):
+            # "block": verbose detail — server log only, never chat.
+            # "turn_detail": intent/strategy lines that belong to the durable
+            #   per-turn detail message (see MattermostInteractionIO.detail_stream),
+            #   not the ephemeral session live post.
+            return
         try:
             msg = record.getMessage()
         except Exception:  # noqa: BLE001 — never let logging formatting break us
@@ -254,6 +266,7 @@ class _LivePost:
 
     # --- MM I/O helpers (best-effort) ---
     async def _create(self, message: str, *, props: Optional[dict] = None) -> Optional[str]:
+        _diag.debug("narration head posting msg_len=%d props=%s", len(message or ""), bool(props))
         try:
             post = await self._bot.create_post(
                 self._channel_id, message, root_id=self._root_id, props=props
@@ -262,15 +275,28 @@ class _LivePost:
             _diag.debug("narration: created post id=%s", pid)
             return pid
         except Exception as exc:  # noqa: BLE001
-            _diag.warning("narration: create_post failed (%s)", exc)
+            _diag.warning(
+                "%s",
+                describe_post_failure(
+                    "narration head create failed",
+                    message=message, props=props, root_id=self._root_id, exc=exc,
+                ),
+            )
             return None
 
     async def _patch(self, post_id: str, *, message: str, props: Optional[dict] = None) -> bool:
+        _diag.debug("narration head patching msg_len=%d props=%s", len(message or ""), bool(props))
         try:
             await self._bot.update_post(post_id, message=message, props=props)
             return True
         except Exception as exc:  # noqa: BLE001
-            _diag.warning("narration: update_post failed (%s)", exc)
+            _diag.warning(
+                "%s",
+                describe_post_failure(
+                    "narration head patch failed",
+                    message=message, props=props, root_id=self._root_id, exc=exc,
+                ),
+            )
             return False
 
 
