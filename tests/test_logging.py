@@ -56,6 +56,19 @@ def test_filter_condenses_notification_to_one_line():
     assert rec.args == ()
 
 
+def test_filter_dedupes_identical_notifications():
+    f = _Neo4jNotificationFilter()
+    # Same (gql_status, status_description) raised twice (e.g. two queries reading
+    # the not-yet-registered auto_run key): first shows, repeat is suppressed.
+    assert f.filter(_record(_fake_printer())) is True
+    assert f.filter(_record(_fake_printer())) is False
+
+    # A different notification (different property) still surfaces.
+    other = _fake_printer()
+    other.notification.status_description = "property key `frequency` does not exist"
+    assert f.filter(_record(other)) is True
+
+
 def test_filter_passes_through_unexpected_records():
     # A record whose arg isn't a NotificationPrinter must be left untouched.
     rec = _record("some other %s")

@@ -467,9 +467,15 @@ class InvestigationOrchestrator:
 
     async def run(self) -> None:
         """Plan §D — per-turn dialog loop until /done /abandon or max_turns."""
-        # (The call-to-action + command list is folded into the kickoff card by
-        # _display_kickoff_panel, so the loop doesn't post a separate instructions
-        # message or a redundant prompt.)
+        # Call-to-action shown once, right before the loop — so it sits directly
+        # above the prompt on the CLI (the kickoff card scrolls off above the
+        # analysis panels) and just before input on chat frontends.
+        self.io.notice(
+            "[bold]What now?[/bold] Tell me what to investigate or share a finding "
+            "in plain language.\n"
+            "[dim]Commands: /done finish · /abandon discard · /undo · "
+            "/tool <req> force a tool · /show-graph · /show-tools[/dim]"
+        )
         while self.session.turn < self.session.max_turns and self.session.status == "ongoing":
             try:
                 utterance = await self.io.prompt_turn()
@@ -1037,14 +1043,6 @@ class InvestigationOrchestrator:
                 lines.append(f"[bold]signals:[/bold]\n{top}")
         if symptom:
             lines.append(f"[bold]symptom:[/bold] {symptom}")
-        # Fold the call-to-action + command list into this card so the loop needn't
-        # post a separate instructions message or a redundant prompt.
-        lines.append(
-            "\n[bold]What now?[/bold] Tell me what to investigate or share a finding "
-            "in plain language.\n"
-            "[dim]Commands: /done finish · /abandon discard · /undo · "
-            "/tool <req> force a tool · /show-graph · /show-tools[/dim]"
-        )
         body = "\n".join(lines) if lines else "(no task_data or symptom)"
         self.io.panel(body, title="task under investigation", style="cyan")
 

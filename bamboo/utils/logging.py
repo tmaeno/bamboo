@@ -31,7 +31,19 @@ class _Neo4jNotificationFilter(logging.Filter):
     exposes ``.notification`` (``gql_status``/``status_description``/``position``/
     ``classification``) and ``.query``; if a record doesn't match that shape we
     leave it untouched. Never raises (a formatting failure must not break logging).
+
+    Identical notifications are also **de-duplicated**: a given
+    ``(gql_status, status_description)`` is emitted once and subsequent repeats are
+    dropped — so a benign notice (e.g. the not-yet-registered ``auto_run`` key,
+    raised by several queries) doesn't spam the log. The filter instance lives for
+    the process, so this is once-per-process (once-per-session for the CLI;
+    once-per-bot-run for the long-lived bot). Only *identical* notices are
+    suppressed, so a different/new property warning still surfaces.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen: set[tuple] = set()
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -39,6 +51,10 @@ class _Neo4jNotificationFilter(logging.Filter):
             note = getattr(arg, "notification", None)
             if note is None:
                 return True  # not the expected shape — leave as-is
+            key = (note.gql_status, note.status_description)
+            if key in self._seen:
+                return False  # already shown this session — suppress the repeat
+            self._seen.add(key)
             pos = getattr(note, "position", None)
             where = f" (line {pos.line}, col {pos.column})" if pos else ""
             cls = getattr(note.classification, "value", note.classification)
