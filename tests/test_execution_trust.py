@@ -18,8 +18,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from bamboo.agents.context_enricher import ContextEnricher, ExplorationResult
-from bamboo.agents.orchestration import referenced_tool_names, run_orchestration_code
-from bamboo.agents.procedure_tools import (
+from bamboo.agents.helpers.orchestration import (
+    referenced_tool_names,
+    run_orchestration_code,
+)
+from bamboo.agents.helpers.procedure_tools import (
     build_procedure_tools_registry,
     procedure_signature,
     procedure_tool_name,

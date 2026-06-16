@@ -290,7 +290,7 @@ async def populate_knowledge_interactive():
         if use_panda:
             task_id_str = _ask("Enter PanDA jediTaskID")
             try:
-                from bamboo.agents.deps import resolve_task_data
+                from bamboo.agents.helpers.deps import resolve_task_data
 
                 with console.status(
                     f"[bold green]Fetching task {task_id_str} from PanDA..."
@@ -401,7 +401,7 @@ async def analyze_task_interactive():
     if use_panda:
         task_id_str = _ask("Enter PanDA jediTaskID")
         try:
-            from bamboo.agents.deps import resolve_task_data
+            from bamboo.agents.helpers.deps import resolve_task_data
 
             with console.status(
                 f"[bold green]Fetching task {task_id_str} from PanDA..."
@@ -753,7 +753,7 @@ async def preview_log_filter_interactive():
 
 async def fetch_task_data_for_filter(task_id_str: str) -> dict:
     """Thin wrapper so preview_log_filter_interactive can fetch task data."""
-    from bamboo.agents.deps import resolve_task_data
+    from bamboo.agents.helpers.deps import resolve_task_data
 
     with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
         return await resolve_task_data(int(task_id_str))

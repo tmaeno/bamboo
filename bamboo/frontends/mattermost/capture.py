@@ -61,7 +61,7 @@ async def run_capture(
     #    not the MCP tool client.
     task_data: Optional[dict[str, Any]] = None
     if task_id is not None:
-        from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
+        from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
 
         try:
             task_data = await resolve_task_data(task_id)

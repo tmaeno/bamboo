@@ -320,7 +320,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
     set_narrator(Console(), verbose=verbose)
 
     if task_id is not None:
-        from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
+        from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
 
         try:
             task_dict = await resolve_task_data(task_id)
@@ -329,7 +329,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             sys.exit(1)
 
     from bamboo.agents.email_drafter import EmailDrafter
-    from bamboo.agents.deps import build_deps
+    from bamboo.agents.helpers.deps import build_deps
     from bamboo.agents.prescription_composer import PrescriptionComposer
 
     # Shared factory (one-shot CLI: io=None → stdin/TTY fallback for interactive tools).

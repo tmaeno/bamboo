@@ -1054,7 +1054,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         task_data: dict[str, Any] = None,
         email_text: str = "",
     ) -> dict[str, str]:
-        from bamboo.agents.context_prefetch import prefetch_panda_context  # noqa: PLC0415
+        from bamboo.agents.helpers.context_prefetch import prefetch_panda_context  # noqa: PLC0415
         from bamboo.agents.panda_doc_navigator import PandaDocNavigator  # noqa: PLC0415
         from bamboo.utils.narrator import say  # noqa: PLC0415
         hints = await prefetch_panda_context(task_data or {}, email_text)
@@ -1089,7 +1089,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
         # Field classification + errorDialog/status → Symptom; external_data → Task_Features.
         # Shared with `bamboo investigate` via bootstrap_initial_graph in
-        # bamboo.agents.task_data_bootstrap. Populate keeps the embedded-log-link
+        # bamboo.agents.helpers.task_data_bootstrap. Populate keeps the embedded-log-link
         # fetch path (extract_embedded_logs=True); investigate disables it.
         nodes, relationships = await self._bootstrap_from_task_data(
             task_data=task_data,
@@ -1144,7 +1144,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         """Deterministic field classification → initial graph skeleton.
 
         Shared between populate (via :meth:`extract`) and investigate (via
-        :func:`bamboo.agents.task_data_bootstrap.bootstrap_initial_graph`).
+        :func:`bamboo.agents.helpers.task_data_bootstrap.bootstrap_initial_graph`).
 
         Args:
             task_data:              PanDA task fields (errorDialog → Symptom,

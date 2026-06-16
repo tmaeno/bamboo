@@ -40,7 +40,7 @@ def _parse_allowed_channels(settings: Settings) -> set[str]:
 
 def _build_deps(io: MattermostInteractionIO):
     """Build a per-session ``_Deps`` via the shared factory (IO is the only diff)."""
-    from bamboo.agents.deps import build_deps
+    from bamboo.agents.helpers.deps import build_deps
 
     return build_deps(io=io)
 

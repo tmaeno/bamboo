@@ -15,7 +15,7 @@ investigation session. See plan §C-§F for the design rationale:
   ``INVESTIGATE_ORCHESTRATION`` prompt. **Every new code block is reviewed** by the
   human before it runs (``_review_code``), who sets a per-code session policy
   (run-once / auto-run / always-ask); approved code executes via the shared
-  :func:`bamboo.agents.orchestration.run_orchestration_code`. Each block becomes
+  :func:`bamboo.agents.helpers.orchestration.run_orchestration_code`. Each block becomes
   ONE atomic_action with stored code + summary + signals on the Procedure (per the
   §G replayability schema). See docs/EXECUTION_TRUST.md for the trust model.
 * The **narration branch** runs the parameterised email-extraction prompt
@@ -44,17 +44,17 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
 
-from bamboo.agents.orchestration import (
+from bamboo.agents.helpers.orchestration import (
     analyze_code_side_effects,
     referenced_tool_names,
     run_orchestration_code,
 )
-from bamboo.agents.procedure_tools import (
+from bamboo.agents.helpers.procedure_tools import (
     build_procedure_tools_registry,
     procedure_signature,
     procedure_tool_name,
 )
-from bamboo.agents.task_data_bootstrap import bootstrap_initial_graph
+from bamboo.agents.helpers.task_data_bootstrap import bootstrap_initial_graph
 from bamboo.config import get_settings
 from bamboo.utils.narrator import say, step
 from bamboo.frontends.base import Card, Column, DetailSink, InteractionIO, ReviewOption
@@ -432,7 +432,7 @@ class InvestigationOrchestrator:
         #    same one analyze/capture/populate use (input acquisition lives at the
         #    entry point; the agent's contract is just "give me a task_data dict").
         if task_id is not None and task_data is None:
-            from bamboo.agents.deps import resolve_task_data  # noqa: PLC0415
+            from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
 
             try:
                 task_data = await resolve_task_data(task_id)
@@ -931,7 +931,7 @@ class InvestigationOrchestrator:
         self._mcp_tool_descriptors = mcp_tools
         self._task_data_tool_names = self.deps.mcp_client.task_data_tools()
 
-        from bamboo.agents.internal_tools import build_internal_tools_registry  # noqa: PLC0415
+        from bamboo.agents.helpers.internal_tools import build_internal_tools_registry  # noqa: PLC0415
 
         descs, calls = build_internal_tools_registry(
             graph_db=self.deps.graph_db,

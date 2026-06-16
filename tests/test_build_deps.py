@@ -16,7 +16,7 @@ import builtins
 import pytest
 
 from bamboo.agents.context_enricher import ContextEnricher
-from bamboo.agents.deps import build_deps, resolve_task_data
+from bamboo.agents.helpers.deps import build_deps, resolve_task_data
 from bamboo.mcp.interactive_mcp_client import InteractiveMcpClient
 
 

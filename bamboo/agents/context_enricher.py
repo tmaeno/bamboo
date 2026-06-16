@@ -21,7 +21,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.agents.knowledge_reviewer import _build_task_summary, _join_doc_hints
-from bamboo.agents.orchestration import (
+from bamboo.agents.helpers.orchestration import (
     SAFE_BUILTINS as _SAFE_BUILTINS,  # noqa: F401  (re-exported for any back-compat callers)
     ToolProxy as _SharedToolProxy,
     run_orchestration_code as _shared_run_orchestration_code,
@@ -434,7 +434,7 @@ class ContextEnricher:
         """Execute LLM-generated orchestration code in a sandboxed namespace.
 
         Thin delegate to
-        :func:`bamboo.agents.orchestration.run_orchestration_code` so the
+        :func:`bamboo.agents.helpers.orchestration.run_orchestration_code` so the
         sandbox/proxy/exec mechanics are shared with ``bamboo investigate``.
 
         The explorer runs in **automatic** phases (populate, and the navigator's
@@ -442,7 +442,7 @@ class ContextEnricher:
         is confined to **read-only** tools: ``allowed_tools`` is the read-only
         subset of the client's tools, and any state-changing call — whether from
         regenerated code, an aliased reference, or a replayed stored procedure —
-        is refused at the :class:`~bamboo.agents.orchestration.ToolProxy`
+        is refused at the :class:`~bamboo.agents.helpers.orchestration.ToolProxy`
         boundary. External PanDA *reads* are allowed (fetching data is the job);
         only ``read_only=False`` tools are blocked. (State changes only ever
         happen in investigate's interactive turn loop. See docs/EXECUTION_TRUST.md.)
@@ -499,12 +499,14 @@ class ContextEnricher:
     ):
         """Return the coroutine for one planned tool call.
 
-        Thin delegate to :func:`bamboo.agents.tool_dispatch.dispatch_tool_call`
+        Thin delegate to :func:`bamboo.agents.helpers.tool_dispatch.dispatch_tool_call`
         so the routing logic (source-navigator special-case, ``task_data`` arg
         injection, fall-through to ``client.execute``) lives in one place
         shared with ``bamboo investigate``.
         """
-        from bamboo.agents.tool_dispatch import dispatch_tool_call  # noqa: PLC0415
+        from bamboo.agents.helpers.tool_dispatch import (  # noqa: PLC0415
+            dispatch_tool_call,
+        )
 
         return dispatch_tool_call(
             tc,

@@ -145,7 +145,7 @@ async def _run(
     # Local imports keep module load fast for `bamboo --help`.
     from rich.console import Console
 
-    from bamboo.agents.deps import build_deps
+    from bamboo.agents.helpers.deps import build_deps
     from bamboo.frontends.cli import CliInteractionIO
     from bamboo.utils.narrator import set_narrator
 

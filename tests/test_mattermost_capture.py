@@ -118,7 +118,7 @@ async def test_run_capture_handles_empty_extraction():
 async def test_run_capture_fetches_task_data_when_task_id_given(monkeypatch):
     acc = _accumulator_with_graph([ResolutionNode(name="r", description="d")])
     # Capture fetches via the shared seam (resolve_task_data), not an MCP tool.
-    import bamboo.agents.deps as deps
+    import bamboo.agents.helpers.deps as deps
 
     monkeypatch.setattr(
         deps,
@@ -140,7 +140,7 @@ async def test_run_capture_fetches_task_data_when_task_id_given(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_capture_continues_when_task_data_fetch_fails(monkeypatch):
     acc = _accumulator_with_graph([CauseNode(name="c", description="d")])
-    import bamboo.agents.deps as deps
+    import bamboo.agents.helpers.deps as deps
 
     monkeypatch.setattr(
         deps, "resolve_task_data", AsyncMock(side_effect=RuntimeError("boom"))

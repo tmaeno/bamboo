@@ -34,7 +34,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.agents.context_enricher import ExplorationResult
-from bamboo.agents.orchestration import analyze_code_side_effects
+from bamboo.agents.helpers.orchestration import analyze_code_side_effects
 from bamboo.agents.extractors.knowledge_graph_extractor import KnowledgeGraphExtractor
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient

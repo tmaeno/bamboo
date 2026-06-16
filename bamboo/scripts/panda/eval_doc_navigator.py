@@ -145,7 +145,7 @@ async def eval_one(
     use_judge: bool,
     llm,
 ) -> dict[str, Any]:
-    from bamboo.agents.context_prefetch import prefetch_panda_docs  # noqa: PLC0415
+    from bamboo.agents.helpers.context_prefetch import prefetch_panda_docs  # noqa: PLC0415
     from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
 
     exc_msg: str | None = None
