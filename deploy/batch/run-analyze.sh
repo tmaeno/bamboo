@@ -107,7 +107,7 @@ fi
 # Restore KB into writable scratch
 # --------------------------------------------------------------------------- #
 log "restoring Neo4j dump…"
-# VERIFY: Neo4j 5 admin syntax + dump filename (<db>.dump) produced by build-kb-snapshot.sh.
+# VERIFY: Neo4j 5 admin syntax + dump filename (<db>.dump). See the /kb contract in docs/BATCH.md.
 NEO4J_CONF="${WORK}/neo4j/conf"
 cp -r "${NEO4J_HOME}/conf/." "${NEO4J_CONF}/" 2>/dev/null || true
 cat >>"${NEO4J_CONF}/neo4j.conf" <<EOF
@@ -125,7 +125,7 @@ neo4j-admin database load "${NEO4J_DATABASE}" \
   --from-path="${KB_DIR}" --overwrite-destination=true
 
 log "restoring Qdrant storage…"
-# build-kb-snapshot.sh ships the whole storage dir as a tarball (simplest robust path).
+# The KB snapshot ships the whole Qdrant storage dir as a tarball (see docs/BATCH.md).
 if   [[ -f "${KB_DIR}/qdrant_storage.tar.zst" ]]; then tar --use-compress-program=unzstd -xf "${KB_DIR}/qdrant_storage.tar.zst" -C "${WORK}/qdrant/storage"
 elif [[ -f "${KB_DIR}/qdrant_storage.tar.gz"  ]]; then tar -xzf "${KB_DIR}/qdrant_storage.tar.gz" -C "${WORK}/qdrant/storage"
 else die "no qdrant storage tarball under ${KB_DIR}"; fi

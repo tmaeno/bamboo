@@ -32,15 +32,62 @@ apptainer build bamboo-batch-analyze.sif docker-daemon://bamboo-batch-analyze:la
 # 2. Stage the LLM model onto shared storage (mounted read-only at /models)
 SHARED=/shared MODEL=llama3.2:3b deploy/batch/stage-model.sh
 
-# 3. Build & stage the KB snapshot (mounted read-only at /kb)
-#    Edit the populate step inside the script for your inputs.
-SHARED=/shared deploy/batch/build-kb-snapshot.sh
+# 3. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
 ```
 
+### Build the KB snapshot
+
+The batch container restores the KB from three files under `/kb`. Produce them from your
+existing, populated Neo4j + Qdrant deployment and stage them to the shared path mounted
+read-only at `/kb`:
+
+| File | What it is | Restored by `run-analyze.sh` |
+|------|------------|------------------------------|
+| `graph_db.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `graph_db`) | `neo4j-admin database load graph_db --from-path=/kb` |
+| `qdrant_storage.tar.zst` (or `.tar.gz`) | tar of the Qdrant storage-dir **contents** | untarred into the storage path |
+| `metadata.json` | embedding model/dimension + component versions | the embedding-consistency guard |
+
+**Neo4j dump** (offline — the database must be stopped). With `neo4j-admin` on the deployment host:
+
+```bash
+neo4j-admin database dump neo4j --to-path=/tmp/kb   # writes <db>.dump
+mv /tmp/kb/neo4j.dump /tmp/kb/graph_db.dump         # rename to the batch NEO4J_DATABASE
+```
+
+The dump can equally come from a version-matched `neo4j` container over the data dir, the Neo4j
+Desktop **Dump** menu, or a managed-console export. Two rules hold regardless: the file must be
+named `graph_db.dump` (`database load` finds it by target name), and the Neo4j version must match
+the batch image's `NEO4J_VERSION` (dump/load is version-sensitive).
+
+**Qdrant storage** (quiesce/stop the service for a consistent copy):
+
+```bash
+tar --use-compress-program=zstd -cf /tmp/kb/qdrant_storage.tar.zst -C <qdrant-storage-dir> .
+```
+
+**metadata.json** — values must match how the KB was populated:
+
+```bash
+cat >/tmp/kb/metadata.json <<'EOF'
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "neo4j_version": "5.26",
+  "neo4j_database": "graph_db",
+  "qdrant_version": "v1"
+}
+EOF
+```
+
+Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
+
+> Initial recipe — refine once the restore round-trip (`load` + untar + query) is verified on
+> your deployment.
+
 **Embedding consistency (critical):** the embedding model + dimension baked into the
-image (`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` build args) MUST match those used in
-`build-kb-snapshot.sh`. The snapshot's `metadata.json` records them and the entry
-script refuses to run on a mismatch — vector search silently degrades otherwise.
+image (`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` build args) MUST match the values in the
+snapshot's `metadata.json` — i.e. how the deployment that produced the dump was populated.
+The entry script refuses to run on a mismatch; vector search silently degrades otherwise.
 
 ## Submitting a job
 
@@ -75,7 +122,6 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 |------|---------|
 | [Dockerfile](../Dockerfile) | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
 | [deploy/batch/run-analyze.sh](batch/run-analyze.sh) | In-container entry: boot stack, restore KB, run batch, tear down |
-| [deploy/batch/build-kb-snapshot.sh](batch/build-kb-snapshot.sh) | Build + stage the KB snapshot |
 | [deploy/batch/stage-model.sh](batch/stage-model.sh) | Pull the Ollama model into shared storage |
 | [deploy/batch/submit.sh](batch/submit.sh) | Example Apptainer submission (CPU/GPU) |
 | [.github/workflows/build-images.yml](../.github/workflows/build-images.yml) | CI: build + push images, optional `.sif` |

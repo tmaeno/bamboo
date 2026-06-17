@@ -15,8 +15,8 @@ ARG PYTHON_VERSION=3.12
 ARG NEO4J_VERSION=5.26
 ARG QDRANT_VERSION=v1
 ARG OLLAMA_VERSION=latest
-# Local embedding model baked into Image 2. MUST match the model used to build the
-# KB snapshot (build-kb-snapshot.sh) or vector search silently degrades.
+# Local embedding model baked into Image 2. MUST match the model recorded in the
+# KB snapshot's metadata.json (see docs/BATCH.md) or vector search silently degrades.
 ARG EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ARG EMBEDDING_DIMENSION=384
 
