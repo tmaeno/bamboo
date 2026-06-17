@@ -661,56 +661,32 @@ def get_cached_config(key: str) -> Any:
 4. **Monitoring**: Add logging and metrics
 5. **Security**: Secure database connections, use secrets management
 
-### Docker Deployment
+### Container images
 
-```dockerfile
-# Dockerfile
-FROM python:3.11-slim
+The repository ships one multi-stage [`Dockerfile`](../Dockerfile) with two targets:
 
-WORKDIR /app
+- **`bamboo`** — the application image, configured entirely by environment variables
+  (`NEO4J_URI`, `QDRANT_URL`, `LLM_PROVIDER` + key or `OLLAMA_BASE_URL`,
+  `EMBEDDINGS_*`). It talks to *external* Neo4j / Qdrant / LLM services. This is the
+  artifact for a normal Docker deployment where the services run elsewhere.
 
-COPY pyproject.toml .
-COPY bamboo/ bamboo/
+  ```bash
+  docker build --target bamboo -t bamboo .
+  docker run --rm --env-file .env bamboo analyze --task-data task.json --output out.json
+  ```
 
-RUN pip install --no-cache-dir .
+- **`bamboo-batch-analyze`** — `FROM bamboo`, additionally bundles Neo4j + Qdrant +
+  Ollama so a single container is self-sufficient on an air-gapped batch node. It is
+  converted to an Apptainer `.sif` for offline batch execution.
 
-CMD ["bamboo", "interactive"]
-```
+CI builds and pushes both images to GHCR on tags / manual dispatch — see
+[`.github/workflows/build-images.yml`](../.github/workflows/build-images.yml).
 
-### Production Docker Compose
+For the air-gapped Apptainer batch deployment (KB/model staging on the shared
+filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](BATCH.md)**.
 
-```yaml
-# docker-compose.prod.yml
-version: '3.8'
-
-services:
-  bamboo:
-    build: .
-    env_file: .env
-    depends_on:
-      - neo4j
-      - qdrant
-    volumes:
-      - ./data:/app/data
-  
-  neo4j:
-    image: neo4j:5.16.0
-    environment:
-      - NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD}
-    volumes:
-      - neo4j_data:/data
-    restart: unless-stopped
-  
-  qdrant:
-    image: qdrant/qdrant:v1.7.4
-    volumes:
-      - qdrant_data:/vector_db/storage
-    restart: unless-stopped
-
-volumes:
-  neo4j_data:
-  qdrant_data:
-```
+> The legacy `docker-compose.yml` at the repo root is a dev-only convenience for
+> standing up Neo4j + Qdrant locally; it is not used for deployment.
 
 ## Contributing
 

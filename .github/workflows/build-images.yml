@@ -1,0 +1,83 @@
+name: build-images
+
+# Builds the two-target image (see Dockerfile / docs/BATCH.md) and pushes to
+# ghcr.io. The .sif for the air-gapped cluster is built from the pushed image on
+# a networked host (or via the optional job below), then copied to the cluster —
+# compute nodes never touch the registry.
+#
+# ⚠ SCAFFOLD — UNVERIFIED. Heavy multi-GB build; only runs on tags / manual dispatch.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      build_sif:
+        description: "Also build and upload the .sif artifact"
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Image 1 — bamboo app (standalone Docker artifact)
+      - name: Build & push bamboo (app)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: bamboo
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}-app:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Image 2 — bamboo-batch-analyze (FROM bamboo; → .sif)
+      - name: Build & push bamboo-batch-analyze
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: bamboo-batch-analyze
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}-batch-analyze:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  sif:
+    # Optional: produce a downloadable .sif. Mind multi-GB artifact limits.
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_sif }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: eWaterCycle/setup-apptainer@v2
+      - name: Build .sif from the pushed image
+        run: |
+          apptainer build bamboo-batch-analyze.sif \
+            "docker://${{ env.REGISTRY }}/${{ env.IMAGE }}-batch-analyze:latest"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bamboo-batch-analyze-sif
+          path: bamboo-batch-analyze.sif
+          retention-days: 7

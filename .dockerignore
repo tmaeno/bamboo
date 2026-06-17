@@ -1,0 +1,25 @@
+# Keep the build context small and reproducible.
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+build
+dist
+
+# Local data / runtime artifacts that must never leak into an image.
+.env
+data/
+drafts/
+approved_email_drafts/
+*.sif
+
+# Editor / OS noise
+.idea
+.vscode
+.DS_Store

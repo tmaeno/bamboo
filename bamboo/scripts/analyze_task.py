@@ -139,7 +139,9 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
     setup_logging()
 
     if rebuild_docs:
-        from bamboo.agents.panda_doc_navigator import invalidate_doc_cache  # noqa: PLC0415
+        from bamboo.agents.panda_doc_navigator import (
+            invalidate_doc_cache,  # noqa: PLC0415
+        )
         deleted = invalidate_doc_cache()
         click.echo(
             "✓ Doc index cache cleared — will rebuild on next use." if deleted
@@ -309,13 +311,52 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
         await graph_db.close()
 
 
+async def analyze_one(
+    deps,
+    task_dict,
+    external_dict=None,
+    *,
+    debug_trace=None,
+    drafts_dir="drafts",
+):
+    """Run the reasoning pipeline for ONE task using already-built, connected deps.
+
+    Unlike :func:`_analyze_task`, this does **not** build/connect/close ``deps`` and
+    does **not** call ``sys.exit`` — the caller owns the lifecycle and error handling.
+    That makes it safe to call in a loop with ``deps`` built once, which is exactly
+    what ``bamboo batch-analyze`` does to amortize service + model startup.
+
+    Returns ``(result, prescription, email_content, draft_path)`` where exactly one of
+    ``email_content`` / ``draft_path`` is set (``draft_path`` for novel incidents).
+    """
+    from bamboo.agents.email_drafter import EmailDrafter  # noqa: PLC0415
+    from bamboo.agents.prescription_composer import (
+        PrescriptionComposer,  # noqa: PLC0415
+    )
+
+    result = await deps.reasoning_navigator.analyze_task(
+        task_data=task_dict,
+        external_data=external_dict,
+        debug_trace=debug_trace,
+    )
+
+    prescription = await PrescriptionComposer(deps.mcp_client).compose(task_dict, result)
+
+    if result.unmatched_symptoms:
+        draft_path = await _write_novel_draft(task_dict, result, prescription, drafts_dir)
+        return result, prescription, None, draft_path
+
+    email_content = await EmailDrafter().draft(task_dict, result, prescription)
+    return result, prescription, email_content, None
+
+
 async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_report=None, drafts_dir="drafts"):
     """Run the async reasoning pipeline and return results."""
     import uuid
 
     from rich.console import Console
 
-    from bamboo.utils.narrator import set_narrator, thinking
+    from bamboo.utils.narrator import set_narrator
 
     set_narrator(Console(), verbose=verbose)
 
@@ -328,9 +369,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             click.echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
-    from bamboo.agents.email_drafter import EmailDrafter
     from bamboo.agents.helpers.deps import build_deps
-    from bamboo.agents.prescription_composer import PrescriptionComposer
 
     # Shared factory (one-shot CLI: io=None → stdin/TTY fallback for interactive tools).
     deps = build_deps()
@@ -341,16 +380,11 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
         await graph_db.connect()
         await vector_db.connect()
 
-        _mcp = deps.mcp_client
-        agent = deps.reasoning_navigator
-
         debug_trace: dict | None = {} if debug_report else None
 
         click.echo("Analyzing task...")
-        result = await agent.analyze_task(
-            task_data=task_dict,
-            external_data=external_dict,
-            debug_trace=debug_trace,
+        result, prescription, email_content, draft_path = await analyze_one(
+            deps, task_dict, external_dict, debug_trace=debug_trace, drafts_dir=drafts_dir
         )
 
         if debug_report and debug_trace is not None:
@@ -381,17 +415,9 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             )
             click.echo(f"\n✓ Debug report saved to {debug_report}")
 
-        click.echo("Composing prescription...")
-        prescription = await PrescriptionComposer(_mcp).compose(task_dict, result)
-
-        if result.unmatched_symptoms:
-            click.echo("Novel incident — writing seed draft instead of email...")
-            draft_path = await _write_novel_draft(task_dict, result, prescription, drafts_dir)
-            return result, prescription, None, draft_path
-        else:
-            click.echo("Drafting email...")
-            email_content = await EmailDrafter().draft(task_dict, result, prescription)
-            return result, prescription, email_content, None
+        if draft_path is not None:
+            click.echo("Novel incident — wrote seed draft instead of email.")
+        return result, prescription, email_content, draft_path
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)

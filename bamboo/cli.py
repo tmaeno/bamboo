@@ -903,6 +903,9 @@ cli.add_command(_populate_main, "populate")
 from bamboo.scripts.analyze_task import main as _analyze_main
 cli.add_command(_analyze_main, "analyze")
 
+from bamboo.scripts.batch_analyze import main as _batch_analyze_main
+cli.add_command(_batch_analyze_main, "batch-analyze")
+
 from bamboo.scripts.investigate import main as _investigate_main
 cli.add_command(_investigate_main, "investigate")
 
