@@ -1220,8 +1220,9 @@ def _tool_descs(n: int) -> list[dict]:
 def _small_settings():
     # tiny context window forces the over-budget retrieval path
     return SimpleNamespace(
-        tool_context_window=200,
+        llm_context_window=200,
         tool_budget_margin=0,
+        tool_max_full_schemas=5,
         mcp_servers_config="",
         llm_provider="ollama",
     )
@@ -1235,8 +1236,9 @@ async def test_render_available_tools_under_budget_renders_all_no_selector(monke
     # generous window => everything fits => selector never consulted
     monkeypatch.setattr(
         ist, "get_settings",
-        lambda: SimpleNamespace(tool_context_window=100000, tool_budget_margin=0,
-                                mcp_servers_config="", llm_provider="ollama"),
+        lambda: SimpleNamespace(llm_context_window=100000, tool_budget_margin=0,
+                                tool_max_full_schemas=100, mcp_servers_config="",
+                                llm_provider="ollama"),
     )
     selector = MagicMock()
     selector.select = AsyncMock()

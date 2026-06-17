@@ -772,9 +772,13 @@ class InvestigationOrchestrator:
         :class:`~bamboo.agents.helpers.tool_selection.RetrievalUnavailable` when over
         budget and the vector store is unreachable — the caller aborts the turn.
         """
+        from bamboo.llm.llm_client import resolve_context_window  # noqa: PLC0415
+
         tok = self._tokenizer()
         settings = get_settings()
-        budget = max(0, settings.tool_context_window - tok(base_text) - settings.tool_budget_margin)
+        budget = max(
+            0, resolve_context_window(settings) - tok(base_text) - settings.tool_budget_margin
+        )
         all_names = {t["name"] for t in tool_descriptors_full}
 
         text, omitted = render_tools(
@@ -785,7 +789,10 @@ class InvestigationOrchestrator:
             count_tokens=tok,
         )
         selector = self.deps.tool_selector
-        if not omitted or selector is None:
+        # Run selection when the block overflows the budget OR the catalogue exceeds the
+        # relevance cap (too many full schemas hurts accuracy/cost even when they fit).
+        needs_selection = bool(omitted) or len(tool_descriptors_full) > settings.tool_max_full_schemas
+        if not needs_selection or selector is None:
             return text, all_names - set(omitted), list(omitted)
 
         await self._ensure_tool_index_once(tool_descriptors_full)
@@ -809,14 +816,16 @@ class InvestigationOrchestrator:
             count_tokens=tok,
         )
         shown = {d["name"] for d in ordered} - set(omitted)
+        full_shown = sorted(selection.full_schema_names & shown)
         dropped = sorted(all_names - shown)
-        if dropped:
-            say(
-                f"tool selection: showing {len(shown)}/{len(all_names)} tools; "
-                f"{len(dropped)} omitted",
-                level=logging.DEBUG,
-                kind="turn_detail",
-            )
+        say(
+            f"tool selection: {len(shown)}/{len(all_names)} shown "
+            f"({len(full_shown)} full, {len(shown) - len(full_shown)} compact), "
+            f"{len(dropped)} omitted (budget={budget} tok). full={full_shown}"
+            + (f" dropped={dropped}" if dropped else ""),
+            level=logging.DEBUG,
+            kind="turn_detail",
+        )
         return text, shown, dropped
 
     async def _index_approved_run(

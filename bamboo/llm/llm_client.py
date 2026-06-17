@@ -45,8 +45,9 @@ SDK client is constructed only once per process.
 
 import contextlib
 import io
+import logging
 from functools import lru_cache
-from typing import Callable
+from typing import Any, Callable, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
@@ -54,6 +55,86 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from bamboo.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+# Cloud windows are large enough that the tool budget rarely binds, and the provider
+# APIs don't reliably expose the value, so a built-in constant is used. Ollama's
+# *served* window is auto-detected at runtime instead.
+_CLOUD_CONTEXT_WINDOW = {"openai": 128_000, "anthropic": 200_000}
+# Conservative fallback when an Ollama probe fails or the model isn't loaded yet.
+_OLLAMA_FALLBACK_CONTEXT = 8192
+# Detected Ollama context windows, keyed by (base_url, model). Only successful
+# detections are cached (a not-yet-loaded model self-corrects on the next turn).
+_CTX_CACHE: dict[tuple[str, str], int] = {}
+
+
+def _ollama_model_matches(entry_name: str, model: str) -> bool:
+    """Match an ``/api/ps`` entry name to ``llm_model``, tolerating an implicit
+    ``:latest`` tag on either side (e.g. ``qwen3.6`` vs ``qwen3.6:latest``)."""
+    if not entry_name:
+        return False
+    return entry_name == model or entry_name.split(":")[0] == model.split(":")[0]
+
+
+def _detect_ollama_context_window(settings: Any) -> int:
+    base_url = (
+        getattr(settings, "ollama_base_url", "") or "http://localhost:11434"
+    ).rstrip("/")
+    model = getattr(settings, "llm_model", "") or ""
+    key = (base_url, model)
+    if key in _CTX_CACHE:
+        return _CTX_CACHE[key]
+    try:
+        import httpx  # noqa: PLC0415
+
+        resp = httpx.get(f"{base_url}/api/ps", timeout=2.0)
+        resp.raise_for_status()
+        for entry in (resp.json() or {}).get("models", []):
+            if _ollama_model_matches(entry.get("model") or entry.get("name") or "", model):
+                ctx = int(entry.get("context_length") or 0)
+                if ctx > 0:
+                    _CTX_CACHE[key] = ctx
+                    logger.debug(
+                        "resolve_context_window: ollama served context_length=%d for %r",
+                        ctx, model,
+                    )
+                    return ctx
+        logger.debug(
+            "resolve_context_window: %r not loaded in /api/ps; fallback %d",
+            model, _OLLAMA_FALLBACK_CONTEXT,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to fallback, never break a turn
+        logger.debug(
+            "resolve_context_window: /api/ps probe failed (%s); fallback %d",
+            exc, _OLLAMA_FALLBACK_CONTEXT,
+        )
+    return _OLLAMA_FALLBACK_CONTEXT
+
+
+def resolve_context_window(settings: Optional[Any] = None) -> int:
+    """Return the model's usable context window in tokens.
+
+    ``settings.llm_context_window > 0`` is an explicit override. Otherwise it is
+    auto-detected per provider:
+
+    * ``ollama`` — the *served* window from ``GET {ollama_base_url}/api/ps`` for the
+      loaded ``llm_model`` (cached). If the model isn't loaded yet or the server is
+      unreachable, a conservative fallback is returned and the next call self-corrects.
+    * ``openai`` / ``anthropic`` — a built-in constant (their windows are large enough
+      that the tool budget rarely binds, and the APIs don't expose the value reliably).
+
+    Model-scoped on purpose: the tool-selection budget and (later) a generic
+    truncation guard consume the same value, so it lives here, not in tool selection.
+    """
+    settings = settings or get_settings()
+    override = int(getattr(settings, "llm_context_window", 0) or 0)
+    if override > 0:
+        return override
+    provider = getattr(settings, "llm_provider", "openai")
+    if provider == "ollama":
+        return _detect_ollama_context_window(settings)
+    return _CLOUD_CONTEXT_WINDOW.get(provider, _OLLAMA_FALLBACK_CONTEXT)
 
 
 def _build_llm(temperature: float) -> BaseChatModel:

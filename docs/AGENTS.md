@@ -205,18 +205,24 @@ of tools — too many to dump (with full JSON schemas) into every orchestration
 prompt, especially for a small-context local LLM. `bamboo.agents.helpers.tool_selection`
 bounds it:
 
-- **Budget-gated, no behaviour change when small.** The tool block is rendered to
-  fit `tool_context_window − (rest of the prompt) − tool_budget_margin`, measured
-  greedily against the *real* assembled prompt with the model's tokenizer
-  (`get_token_counter`). If everything fits, all tools are shown with full schemas
-  exactly as before — no retrieval, no vector writes.
-- **Over budget → two-source retrieval** (`ToolSelector.select`). Source #1: tools
+- **Two controls (see `config.py`), no behaviour change when small.** (1) *Truncation
+  backstop* — the tool block is rendered to fit `resolve_context_window(settings) −
+  (rest of the prompt) − tool_budget_margin`, measured greedily against the *real*
+  assembled prompt with the model's tokenizer (`get_token_counter`). `llm_context_window`
+  is auto-detected (Ollama: the *served* window from `/api/ps`; cloud: a constant; `0`
+  = auto). (2) *Relevance cap* — at most `tool_max_full_schemas` tools get full schemas
+  **even when the whole catalogue fits**, because too many full schemas hurt selection
+  accuracy and cost. Selection runs when the block is over budget **or** the catalogue
+  exceeds the cap; for a small catalogue under the cap all tools are shown full exactly
+  as before — no retrieval, no vector writes.
+- **When triggered → two-source retrieval** (`ToolSelector.select`). Source #1: tools
   used by *similar human-approved past investigations* (the `ProcedureTriggers`
   vector section, keyed on the originating prompt + `trigger_signals`); source #2:
-  tools whose descriptions match the symptom (`ToolCatalogue`). The most relevant
-  get full schemas, the rest a compact one-liner, the overflow is omitted (logged).
-  A `tool_reserved_explore` quota guarantees source #2 some slots so newly-added
-  tools are never crowded out.
+  tools whose descriptions match the symptom (`ToolCatalogue`). The top
+  `tool_max_full_schemas` get full schemas, the rest a compact one-liner, the overflow
+  is omitted (logged). `tool_retrieval_candidate_k` (auto = `max(40, 3 ×
+  tool_max_full_schemas)`) sizes the ranking pool; a `tool_reserved_explore` quota
+  guarantees source #2 some slots so newly-added tools are never crowded out.
 - **Selection trims the *prompt* only — never the runtime allow-set.** The
   `ToolProxy` still permits any contextually-valid tool, so a tool omitted from the
   prompt is never *refused* if the LLM names it. No extra LLM call on the common

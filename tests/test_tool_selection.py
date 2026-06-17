@@ -9,10 +9,12 @@ exceeds the budget and reports what it omitted.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from bamboo.agents.context_enricher import _build_tools_description
+from bamboo.agents.helpers.deps import derive_selector_params
 from bamboo.agents.helpers.tool_selection import (
     RetrievalUnavailable,
     Selection,
@@ -375,3 +377,39 @@ async def test_select_budget_limits_full_schemas_and_drops_overflow():
     assert len(out.full_schema_names) < 20  # not all full
     assert out.dropped  # overflow dropped
     assert set(out.ordered).isdisjoint(out.dropped)
+
+
+async def test_select_max_full_schemas_caps_full_tier_under_generous_budget():
+    # The relevance cap binds even when the token budget would allow far more full
+    # schemas: only `max_full_schemas` get full, the rest fall through to compact.
+    tools = _many_tools(20)
+    rows = [_cat_row(f"tool_{i}", score=1.0 - i * 0.01) for i in range(20)]
+    vdb = _FakeVectorDB(search_results={"ToolCatalogue": rows})
+    sel = _selector(vdb, max_full_schemas=3)
+    out = await sel.select("symptom", tools, budget=1_000_000, config_namespace="ns", count_tokens=len)
+    assert len(out.full_schema_names) == 3  # capped, not budget-limited
+    compact = [n for n in out.ordered if n not in out.full_schema_names]
+    assert compact  # candidates beyond the cap are compact, not dropped
+    assert not out.dropped  # generous budget => nothing dropped
+
+
+# --- derive_selector_params (the single primary-knob → pool/clamp derivation) ---
+
+
+def test_derive_selector_params_auto_pool_and_clamp():
+    s = SimpleNamespace(tool_max_full_schemas=25, tool_retrieval_candidate_k=0, tool_reserved_explore=4)
+    candidate_k, reserved_explore, max_full = derive_selector_params(s)
+    assert (candidate_k, reserved_explore, max_full) == (75, 4, 25)  # 3×25, clamp no-op
+
+
+def test_derive_selector_params_small_cap_hits_floor_and_clamps_reserved():
+    s = SimpleNamespace(tool_max_full_schemas=2, tool_retrieval_candidate_k=0, tool_reserved_explore=4)
+    candidate_k, reserved_explore, max_full = derive_selector_params(s)
+    assert candidate_k == 40  # max(40, 3×2) floor
+    assert reserved_explore == 2  # clamped to <= max_full_schemas
+
+
+def test_derive_selector_params_explicit_candidate_k_overrides():
+    s = SimpleNamespace(tool_max_full_schemas=25, tool_retrieval_candidate_k=120, tool_reserved_explore=4)
+    candidate_k, _, _ = derive_selector_params(s)
+    assert candidate_k == 120

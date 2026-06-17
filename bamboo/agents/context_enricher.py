@@ -178,14 +178,26 @@ class ContextEnricher:
         aborting (unlike the human-facing investigate path).
         """
         from bamboo.config import get_settings  # noqa: PLC0415
+        from bamboo.llm.llm_client import resolve_context_window  # noqa: PLC0415
 
         tok = self._tokenizer()
         settings = get_settings()
-        budget = max(0, settings.tool_context_window - tok(base_text) - settings.tool_budget_margin)
+        budget = max(
+            0, resolve_context_window(settings) - tok(base_text) - settings.tool_budget_margin
+        )
+        all_names = {t.name for t in tools}
         text, omitted = render_tools(
             tools, full_schema_for=set(), style="explorer", token_budget=budget, count_tokens=tok
         )
-        if not omitted or self._tool_selector is None:
+        if not omitted:
+            return text
+        if self._tool_selector is None:
+            # Budget-truncated with no selector — surface it instead of dropping silently.
+            say(
+                f"explorer tools: {len(all_names) - len(omitted)}/{len(all_names)} shown, "
+                f"{len(omitted)} truncated to fit budget={budget} tok (no selector)",
+                level=logging.DEBUG,
+            )
             return text
         try:
             await self._ensure_tool_index_once(tools)
@@ -199,8 +211,16 @@ class ContextEnricher:
             )
             by_name = {t.name: t for t in tools}
             ordered = [by_name[n] for n in selection.ordered if n in by_name]
-            text, _ = render_tools(
+            text, omitted = render_tools(
                 ordered, full_schema_for=set(), style="explorer", token_budget=budget, count_tokens=tok
+            )
+            shown = {d.name for d in ordered} - set(omitted)
+            dropped = sorted(all_names - shown)
+            say(
+                f"explorer tool selection: {len(shown)}/{len(all_names)} shown, "
+                f"{len(dropped)} omitted (budget={budget} tok)"
+                + (f" dropped={dropped}" if dropped else ""),
+                level=logging.DEBUG,
             )
         except RetrievalUnavailable:
             warn("tool retrieval unavailable — using a budget-truncated tool list")

@@ -17,6 +17,21 @@ from __future__ import annotations
 from typing import Any, Optional
 
 
+def derive_selector_params(settings: Any) -> tuple[int, int, int]:
+    """Derive ``(candidate_k, reserved_explore, max_full_schemas)`` from the primary
+    ``tool_max_full_schemas`` knob.
+
+    Keeps the invariant ``reserved_explore <= max_full_schemas <= candidate_k``:
+    ``candidate_k`` auto-derives to ``max(40, 3 × max_full_schemas)`` (ranking-pool
+    headroom) unless an explicit ``tool_retrieval_candidate_k > 0`` overrides it, and
+    ``reserved_explore`` is clamped to the cap.
+    """
+    max_full_schemas = settings.tool_max_full_schemas
+    candidate_k = settings.tool_retrieval_candidate_k or max(40, 3 * max_full_schemas)
+    reserved_explore = min(settings.tool_reserved_explore, max_full_schemas)
+    return candidate_k, reserved_explore, max_full_schemas
+
+
 def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
     """Build and return a ``_Deps`` collaborator bundle.
 
@@ -53,11 +68,15 @@ def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
     # Tool selector bounds the orchestration prompt for large MCP catalogues.
     # ``get_embeddings`` is passed as a lazy factory (resolved on first retrieval)
     # so a run that never goes over budget doesn't load a local embedding model.
+    # `tool_max_full_schemas` is the primary knob; `candidate_k` auto-derives from it
+    # and `reserved_explore` is clamped (see `derive_selector_params`).
+    candidate_k, reserved_explore, max_full_schemas = derive_selector_params(settings)
     tool_selector = ToolSelector(
         vector_db,
         get_embeddings,
-        candidate_k=settings.tool_retrieval_candidate_k,
-        reserved_explore=settings.tool_reserved_explore,
+        candidate_k=candidate_k,
+        reserved_explore=reserved_explore,
+        max_full_schemas=max_full_schemas,
         catalogue_section=settings.tool_catalogue_section,
         triggers_section=settings.tool_procedure_triggers_section,
     )

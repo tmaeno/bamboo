@@ -99,19 +99,20 @@ HF_TOKEN=
 
 ### Tool selection for large MCP catalogues
 
-When external MCP servers add up to hundreds of tools, the orchestration prompt is
-**budget-gated** so it fits the model's context (vital for a small-context local
-LLM). Below the budget nothing changes; over it, the relevant tools are retrieved
-(reusing Qdrant + the configured embeddings) and the rest omitted. Tune via:
+When external MCP servers add up to hundreds of tools, the orchestration tool list is
+bounded two ways: a **truncation backstop** (it must fit the model's context) and a
+**relevance cap** (only the most relevant tools get full JSON schemas even when the
+whole catalogue fits — too many hurts selection accuracy and cost). Below both limits
+nothing changes; otherwise the relevant tools are retrieved (reusing Qdrant + the
+configured embeddings) and the rest shown compact or omitted. Tune via:
 
 ```env
-# Usable context window (tokens) of the orchestration LLM — set to your local
-# model's num_ctx. The tool block is bounded by
-# tool_context_window − (rest of the prompt) − TOOL_BUDGET_MARGIN.
-TOOL_CONTEXT_WINDOW=8192
+# Model context window in tokens. 0 = auto-detect: Ollama reads the served window
+# from /api/ps; OpenAI/Anthropic use a built-in constant. Set a value to override.
+LLM_CONTEXT_WINDOW=0
 TOOL_BUDGET_MARGIN=1024          # tokens reserved for the response + headroom
-TOOL_RETRIEVAL_CANDIDATE_K=40    # tools the description search returns
-TOOL_RESERVED_EXPLORE=4          # full-schema slots reserved for new/unseen tools
+TOOL_MAX_FULL_SCHEMAS=25         # primary knob: max tools shown with a full schema
+#TOOL_RETRIEVAL_CANDIDATE_K=0    # advanced: ranking pool; 0 = max(40, 3×the cap)
 ```
 
 Tool vectors live in two sections of the existing Qdrant collection

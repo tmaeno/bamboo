@@ -281,6 +281,7 @@ class ToolSelector:
         *,
         candidate_k: int = 40,
         reserved_explore: int = 4,
+        max_full_schemas: int = 25,
         catalogue_section: str = "ToolCatalogue",
         triggers_section: str = "ProcedureTriggers",
     ):
@@ -291,6 +292,9 @@ class ToolSelector:
         self._embeddings = embeddings
         self._candidate_k = candidate_k
         self._reserved_explore = reserved_explore
+        # Relevance cap: at most this many tools get full schemas, even if more fit
+        # the token budget (large catalogues hurt selection accuracy / cost).
+        self._max_full_schemas = max_full_schemas
         self._catalogue_section = catalogue_section
         self._triggers_section = triggers_section
 
@@ -436,6 +440,10 @@ class ToolSelector:
         used = 0
         full: list[str] = []
         for name in priority:
+            # Relevance cap: stop promoting to full once we've shown enough, even if
+            # more would fit the token budget (the rest fall through to compact).
+            if self._max_full_schemas is not None and len(full) >= self._max_full_schemas:
+                break
             cost = count(_STYLES[style]["full"](descs[name])) + (sep_cost if full else 0)
             if used + cost <= remaining:
                 full.append(name)

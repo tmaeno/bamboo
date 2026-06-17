@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     # Ollama-specific: set to False to disable chain-of-thought reasoning mode
     # (strongly recommended for Qwen3+ models — reasoning adds 1-2 min per call)
     ollama_reasoning: bool = True
+    # Ollama server base URL — used to auto-detect the served context window via
+    # /api/ps (see llm_context_window) and by ``bamboo verify``.
+    ollama_base_url: str = "http://localhost:11434"
+    # The model's usable context window, in tokens. ``0`` = auto-detect: for Ollama
+    # the *served* window is read from ``/api/ps``; for OpenAI/Anthropic a built-in
+    # constant is used (the gate rarely binds for cloud windows). A positive value
+    # overrides. Bounds the orchestration tool block (and, later, a generic
+    # truncation guard) — see :func:`bamboo.llm.llm_client.resolve_context_window`.
+    llm_context_window: int = 0
     # Summarization temperature — lower = more consistent across runs.
     # Set to 0.0 for fully deterministic summaries; 0.7 for creative prose.
     llm_summary_temperature: float = 0.3
@@ -206,19 +215,26 @@ class Settings(BaseSettings):
     mcp_servers_config: str = ""
 
     # Tool selection (bounding the orchestration prompt for large MCP catalogues).
-    # When the rendered tool block fits the budget, all tools are shown with full
-    # schemas (no change for small catalogues). Over budget, retrieval picks which
-    # tools get full schemas; the rest are compact or omitted. See docs/AGENTS.md.
-    #   tool_context_window: usable context window (tokens) of the orchestration
-    #     LLM — set to match the local model's num_ctx. The tool block is bounded by
-    #     tool_context_window − (measured rest of prompt) − tool_budget_margin.
+    # Two independent controls — see docs/AGENTS.md:
+    #   * truncation backstop: the tool block is bounded to fit
+    #     ``llm_context_window − (measured rest of prompt) − tool_budget_margin``.
+    #   * relevance cap: even when the whole catalogue fits, only the top
+    #     ``tool_max_full_schemas`` tools (ranked by retrieval) get full JSON schemas;
+    #     the rest render as compact one-liners (overflow omitted but still callable).
+    #     This keeps tool-selection accurate and cheap on large catalogues.
+    # Retrieval funnel: retrieve ``tool_retrieval_candidate_k`` tools → promote the top
+    # ``tool_max_full_schemas`` to full (≥ ``tool_reserved_explore`` reserved for fresh
+    # description matches) → the rest compact.
+    #   tool_max_full_schemas: max tools rendered with a full schema (the primary knob).
     #   tool_budget_margin: tokens reserved for the model's response + headroom.
-    #   tool_retrieval_candidate_k: how many tools the description search returns.
+    #   tool_retrieval_candidate_k: ranking-pool size. ``0`` = auto =
+    #     ``max(40, 3 × tool_max_full_schemas)`` so the pool keeps headroom over the cap.
     #   tool_reserved_explore: full-schema slots reserved for description retrieval
-    #     (source #2) so newly-added tools aren't crowded out by validated past ones.
-    tool_context_window: int = 8192
+    #     (source #2) so newly-added tools aren't crowded out by validated past ones
+    #     (clamped to ≤ tool_max_full_schemas).
+    tool_max_full_schemas: int = 25
     tool_budget_margin: int = 1024
-    tool_retrieval_candidate_k: int = 40
+    tool_retrieval_candidate_k: int = 0
     tool_reserved_explore: int = 4
     tool_catalogue_section: str = "ToolCatalogue"
     tool_procedure_triggers_section: str = "ProcedureTriggers"
