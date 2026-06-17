@@ -12,7 +12,6 @@ Any tool failure is handled defensively: exceptions are logged and skipped so
 the pipeline never stalls.
 """
 
-import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -34,8 +33,6 @@ from bamboo.agents.helpers.tool_selection import (
 from bamboo.llm import (
     EXPLORATION_GAP_ANALYSIS_SYSTEM,
     EXPLORATION_GAP_ANALYSIS_USER,
-    EXPLORER_TOOL_SELECTION_SYSTEM,
-    EXPLORER_TOOL_SELECTION_USER,
     PROCEDURE_ORCHESTRATION_CODE_SYSTEM,
     PROCEDURE_ORCHESTRATION_CODE_USER,
     TOOL_ORCHESTRATION_CODE_SYSTEM,
@@ -46,6 +43,19 @@ from bamboo.mcp.base import McpClient, McpTool  # noqa: F401 (McpTool used in ty
 from bamboo.utils.narrator import error, say, show_block, thinking, warn
 
 logger = logging.getLogger(__name__)
+
+
+class ExplorationError(RuntimeError):
+    """Raised when orchestration-code generation fails outright.
+
+    Distinct from a legitimate "nothing to explore" outcome (no review issues, no
+    available tools, or no actionable gaps), which returns an empty
+    :class:`ExplorationResult`. The explorer raises this so a genuine
+    planning/LLM/parse failure surfaces loudly — failing the current task —
+    rather than silently continuing with incomplete data. Every ``explore()``
+    caller catches it at a per-invocation boundary (e.g. ``bamboo populate`` marks
+    the task failed and continues with the rest of the batch).
+    """
 
 
 @dataclass
@@ -94,8 +104,10 @@ class ContextEnricher:
 
     The orchestration-code path supports dependent tool chains natively (e.g.
     ``find_similar_successful_tasks`` → ``get_successful_job_logs(task_id=…)``).
-    Falls back to :meth:`_select_tools` (single-wave LLM-driven selection) if
-    code generation fails.
+    A legitimate "nothing to explore" outcome (no issues, no tools, or no
+    actionable gaps) returns an empty :class:`ExplorationResult`; a genuine
+    code-generation failure raises :class:`ExplorationError` (fail-hard, no
+    silent degradation).
 
     Args:
         mcp_client:       The :class:`~bamboo.mcp.base.McpClient` that provides
@@ -265,17 +277,19 @@ class ContextEnricher:
         doc_hints: dict[str, str] | None = None,
         skip_gap_analysis: bool = False,
     ) -> ExplorationResult:
-        """Single select-and-fetch pass.
+        """Single generate-and-fetch pass via the orchestration-code path.
 
         1. List available tools from the MCP client.
-        2. One LLM call to select which tools to invoke (or generate
-           orchestration code, or build a static plan, depending on path).
-        3. Execute selected tools concurrently with ``asyncio.gather``.
-        4. Merge results into an :class:`ExplorationResult`.
+        2. Generate orchestration code (gap analysis + code generation).
+        3. Execute the code in a sandbox; merge results into an
+           :class:`ExplorationResult`.
 
-        Returns an empty :class:`ExplorationResult` (no tool calls) if the
-        LLM returns an empty selection, if no issues are provided, or if any
-        internal error occurs (fail-open).
+        Returns an empty :class:`ExplorationResult` (no tool calls) when there is
+        legitimately nothing to explore — no issues/task data, no available tools,
+        or the planner finds no actionable gaps. Raises :class:`ExplorationError`
+        on a genuine code-generation failure (malformed/empty LLM response or an
+        exception during planning), so callers fail hard rather than continue with
+        incomplete data.
 
         Args:
             task_data:         Structured task fields from PanDA.
@@ -320,24 +334,29 @@ class ContextEnricher:
                 except Exception as exc:
                     warn(f"request_human_input failed — {exc}")
                     result = exc
-                self._merge_tool_result("request_human_input", result, out, task_data=task_data)
+                if result and isinstance(result, str):
+                    out.task_logs["human_input:procedures"] = result
             elif procedure_issues:
                 say("  Procedure gap: request_human_input not available.", level=logging.DEBUG)
 
             if not other_issues:
                 return out
 
-            # ── Primary path: orchestration code (handles both exploratory and
+            # ── Orchestration-code path (handles both exploratory and
             #     procedure-driven flows; the mode parameter switches prompts).
+            #     Raises ExplorationError on a genuine generation failure.
             result = await self._generate_orchestration_code(
                 task_data, other_issues, tools,
                 doc_hints=doc_hints,
                 mode="procedure" if skip_gap_analysis else "exploratory",
                 skip_gap_analysis=skip_gap_analysis,
             )
-            if result is not None:
-                code, capability_gaps = result
-                out.capability_gaps = capability_gaps
+            if result is None:
+                # Legitimate no-op: the planner found nothing actionable to fetch.
+                return out
+            code, capability_gaps = result
+            out.capability_gaps = capability_gaps
+            if code:
                 raw, called = await self._run_orchestration_code(
                     code, task_data, task_data_tool_names
                 )
@@ -348,31 +367,6 @@ class ContextEnricher:
                     out.external_data[label] = value
                     if isinstance(value, str) and value:
                         show_block(label, value[:2000])
-                return out
-            say("Explorer: code generation failed — falling back to direct tool selection.")
-
-            # ── Fallback: single-wave concurrent path ─
-            tool_calls = await self._select_tools(task_data, other_issues, tools)
-            if not tool_calls:
-                say("no tools selected — nothing to explore")
-                return out
-
-            tool_names = [tc["tool"] for tc in tool_calls]
-            say(f"Explorer fetching from {len(tool_calls)} tool(s): {', '.join(tool_names)}.")
-
-            coros = [self._tool_coro(tc, task_data, task_data_tool_names) for tc in tool_calls]
-            results = await asyncio.gather(*coros, return_exceptions=True)
-
-            out.tool_calls.extend(tool_calls)
-            for tc, result in zip(tool_calls, results):
-                if isinstance(result, BaseException):
-                    say(f"  {tc['tool']}: failed — {result}", level=logging.DEBUG)
-                else:
-                    say(f"  {tc['tool']}: done.", level=logging.DEBUG)
-                    if isinstance(result, str) and result:
-                        show_block(tc["tool"], result)
-                self._merge_tool_result(tc["tool"], result, out, task_data=task_data)
-
             return out
         finally:
             await self._client.close()
@@ -442,8 +436,18 @@ class ContextEnricher:
         ``"procedure"`` uses :data:`PROCEDURE_ORCHESTRATION_CODE_SYSTEM`
         (execute procedure verbatim, no speculation).
 
-        Returns ``(code, capability_gaps)`` on success, or ``None`` on any
-        failure (fail-open — caller falls back to :meth:`_select_tools`).
+        Returns:
+            ``(code, capability_gaps)`` on success. ``code`` may be ``""`` when
+            the planner produced only capability gaps (every gap needs a tool
+            that does not exist) — a legitimate outcome with nothing to run.
+            ``None`` when there is legitimately nothing to do (no issues/tools,
+            or no actionable gaps).
+
+        Raises:
+            ExplorationError: on a genuine generation failure — the LLM returned
+                neither runnable code nor any capability gap (malformed/empty
+                response), or an exception occurred during planning. Fail-hard so
+                the caller surfaces it rather than continuing with incomplete data.
         """
         if not review_issues or not tools:
             say("Explorer: no review issues or no tools available — skipping orchestration.")
@@ -488,22 +492,35 @@ class ContextEnricher:
                 response = await self.llm.ainvoke(messages)
 
             code, capability_gaps = _parse_orchestration_response(response.content)
-            if not code:
-                return None
-            show_block("planner: orchestration code", code)
-            if capability_gaps:
-                show_block(
-                    "planner: capability gaps",
-                    "\n".join(
-                        f"• {g.get('investigation', '')} "
-                        f"[needs: {g.get('suggested_tool_capability', '')}]"
-                        for g in capability_gaps
-                    ),
+            if not code and not capability_gaps:
+                # Genuine generation failure: neither runnable code nor a single
+                # capability gap came back (malformed / empty response or parse
+                # failure). Fail hard rather than silently degrade. (Empty code
+                # *with* capability gaps is a legitimate "no tool can help"
+                # outcome and falls through below.)
+                raise ExplorationError(
+                    "orchestration code generation produced no code and no "
+                    "capability gaps"
                 )
+            if code:
+                show_block("planner: orchestration code", code)
+                if capability_gaps:
+                    show_block(
+                        "planner: capability gaps",
+                        "\n".join(
+                            f"• {g.get('investigation', '')} "
+                            f"[needs: {g.get('suggested_tool_capability', '')}]"
+                            for g in capability_gaps
+                        ),
+                    )
             return code, capability_gaps
+        except ExplorationError:
+            raise
         except Exception as exc:
             warn(f"code generation failed — {type(exc).__name__}: {exc}")
-            return None
+            raise ExplorationError(
+                f"orchestration code generation failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -545,185 +562,23 @@ class ContextEnricher:
             log_prefix="orchestration",
         )
 
-    async def _select_tools(
-        self,
-        task_data: dict[str, Any],
-        review_issues: list[str],
-        tools: list[McpTool],
-    ) -> list[dict[str, Any]]:
-        """Ask the LLM which tools to call; return parsed list or [] on error."""
-        task_summary = _build_task_summary(task_data)
-        issues_text = "\n".join(f"- {i}" for i in review_issues)
-        base_text = EXPLORER_TOOL_SELECTION_SYSTEM + "\n" + EXPLORER_TOOL_SELECTION_USER.format(
-            review_issues=issues_text, task_summary=task_summary, tools_description=""
-        )
-        tools_description = await self._render_tools_description(
-            tools, base_text=base_text, query=issues_text
-        )
-
-        user_content = EXPLORER_TOOL_SELECTION_USER.format(
-            review_issues=issues_text,
-            task_summary=task_summary,
-            tools_description=tools_description,
-        )
-        messages = [
-            SystemMessage(content=EXPLORER_TOOL_SELECTION_SYSTEM),
-            HumanMessage(content=user_content),
-        ]
-
-        try:
-            say("Selecting additional data sources to fetch...")
-            with thinking("Selecting tools"):
-                response = await self.llm.ainvoke(messages)
-            return _parse_tool_calls(response.content)
-        except Exception:
-            warn("LLM tool-selection call failed — failing open")
-            return []
-
-    def _tool_coro(
-        self,
-        tc: dict,
-        task_data: dict[str, Any],
-        task_data_tool_names: frozenset[str],
-    ):
-        """Return the coroutine for one planned tool call.
-
-        Thin delegate to :func:`bamboo.agents.helpers.tool_dispatch.dispatch_tool_call`
-        so the routing logic (source-navigator special-case, ``task_data`` arg
-        injection, fall-through to ``client.execute``) lives in one place
-        shared with ``bamboo investigate``.
-        """
-        from bamboo.agents.helpers.tool_dispatch import (  # noqa: PLC0415
-            dispatch_tool_call,
-        )
-
-        return dispatch_tool_call(
-            tc,
-            client=self._client,
-            source_navigator=self._source_navigator,
-            task_data=task_data,
-            task_data_tool_names=task_data_tool_names,
-        )
-
-    def _merge_tool_result(
-        self,
-        tool_name: str,
-        result: Any,
-        out: ExplorationResult,
-        task_data: dict[str, Any] | None = None,
-    ) -> None:
-        """Route one tool result into the correct :class:`ExplorationResult` field."""
-        if isinstance(result, BaseException):
-            logger.warning(
-                "ContextEnricher: tool %r raised %s — skipped", tool_name, result
-            )
-            return
-
-        if tool_name == "fetch_linked_log_files":
-            if isinstance(result, dict):
-                for url, content in result.items():
-                    key = f"explorer:error_dialog:{url}"
-                    out.task_logs[key] = content
-        elif tool_name == "fetch_brokerage_context":
-            if isinstance(result, dict):
-                out.external_data["tool:fetch_brokerage_context"] = result
-                # Parse logs into a structured summary and surface at top level so the
-                # final analysis LLM sees the key facts (terminal filter, per-site fates)
-                # without having to synthesize them from dense raw log text.
-                from bamboo.utils.log_filters import parse_brokerage_summary  # noqa: PLC0415
-                sites_of_interest: list[str] = []
-                td = task_data or {}
-                site = (td.get("site") or "").strip() if isinstance(td.get("site"), str) else ""
-                if site:
-                    sites_of_interest.append(site)
-                included = td.get("includedSite") or []
-                if isinstance(included, str):
-                    included = [s.strip() for s in included.split(",") if s.strip()]
-                for s in included:
-                    if s and s not in sites_of_interest:
-                        sites_of_interest.append(s)
-                summaries: dict[str, dict] = {}
-                for url, log_text in (result.get("logs") or {}).items():
-                    if not isinstance(log_text, str):
-                        continue
-                    parsed = parse_brokerage_summary(
-                        log_text, sites_of_interest=sites_of_interest
-                    )
-                    if parsed:
-                        summaries[url] = parsed
-                if summaries:
-                    out.external_data["brokerage_summary"] = summaries
-        elif tool_name == "get_parent_task":
-            if result is not None:
-                out.external_data["parent_task"] = result
-        elif tool_name == "get_retry_chain":
-            if isinstance(result, list):
-                out.external_data["retry_chain"] = result
-        elif tool_name == "get_task_jobs_summary":
-            if isinstance(result, dict):
-                out.external_data["jobs_summary"] = result
-        elif tool_name == "get_scout_job_details":
-            if isinstance(result, list):
-                out.external_data["representative_jobs"] = result
-        elif tool_name == "get_task_input_datasets":
-            if isinstance(result, list) and result:
-                out.task_logs["jedi:input_datasets"] = json.dumps(result, indent=2, default=str)
-        elif tool_name == "search_panda_server_source":
-            if isinstance(result, str) and result:
-                out.task_logs["panda_server:source_search"] = result
-            elif isinstance(result, list) and result:
-                out.task_logs["panda_server:source_search"] = json.dumps(result, indent=2)
-        elif tool_name == "search_panda_docs":
-            if isinstance(result, list) and result:
-                out.task_logs["panda_docs:search"] = json.dumps(result, indent=2)
-        elif tool_name == "request_human_input":
-            if result and isinstance(result, str):
-                out.task_logs["human_input:procedures"] = result
-        else:
-            # Unknown tool — likely from an external MCP server.
-            # Store raw result in external_data so the LLM extractor receives
-            # it as additional unstructured context on the next attempt.
-            logger.debug(
-                "ContextEnricher: storing raw result for unrecognised tool %r",
-                tool_name,
-            )
-            out.external_data[f"tool:{tool_name}"] = result
-
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
 
 
-
 def _build_tools_description(tools: list[McpTool]) -> str:
-    """Format tool descriptors for the LLM tool-selection prompt.
+    """Format tool descriptors for the gap-analysis prompt.
 
     Delegates to the shared :func:`~bamboo.agents.helpers.tool_selection.render_tools`
     with ``full_schema_for=set()`` (every tool rendered compact, schema-free — the
-    historical explorer behaviour). Phase 1 passes a budget + ``full_schema_for`` to
-    bound the prompt for large catalogues.
+    historical explorer behaviour). The code-generation prompt instead uses
+    :meth:`_render_tools_description`, which budget-gates the list for large
+    catalogues.
     """
     text, _ = render_tools(tools, full_schema_for=set(), style="explorer")
     return text
-
-
-def _parse_tool_calls(response: str) -> list[dict[str, Any]]:
-    """Parse the LLM's JSON tool-selection response, failing open on any error."""
-    text = _strip_fences(response)
-    try:
-        data = json.loads(text)
-        if not isinstance(data, list):
-            logger.warning("ContextEnricher: LLM returned non-list JSON — ignoring")
-            return []
-        valid = []
-        for item in data:
-            if isinstance(item, dict) and "tool" in item:
-                valid.append(item)
-        return valid
-    except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning("ContextEnricher: failed to parse tool-selection response: %s", exc)
-        return []
 
 
 def _strip_fences(text: str) -> str:

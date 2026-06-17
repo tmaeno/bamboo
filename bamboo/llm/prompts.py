@@ -69,11 +69,6 @@ Prompt constants
     Used by :class:`~bamboo.agents.extractors.panda_knowledge_extractor.PandaKnowledgeExtractor`
     before storing job error diagnostics as ``TaskContextNode``.
 
-``EXPLORER_TOOL_SELECTION_SYSTEM`` + ``EXPLORER_TOOL_SELECTION_USER``
-    Given a reviewer's issue list and available MCP tools, selects which
-    tools to call to fill data gaps before a re-extraction attempt.
-    Used by :class:`~bamboo.agents.context_enricher.ContextEnricher`.
-
 ``KNOWLEDGE_REVIEW_SYSTEM`` + ``KNOWLEDGE_REVIEW_USER``
     Reviews an extracted knowledge graph for completeness, accuracy, and
     consistency against the original sources.  Returns a structured JSON
@@ -717,46 +712,6 @@ DESCRIPTION_CANONICALIZE_USER = """Input: {descriptions_json}
 Output exactly {n} lines — one per input description.
 """
 
-EXPLORER_TOOL_SELECTION_SYSTEM = """You are a diagnostic data-collection agent for a PanDA computing task.
-
-Your job is to select the minimal set of tools whose results are most likely to resolve the reviewer's issues.
-
-Selection rules:
-- Only select a tool if at least one reviewer issue directly implies that the tool's data is missing.
-- Do NOT select a tool speculatively — if the issues do not suggest its data is needed, omit it.
-- A tool that requires a field (e.g. retryID, errorDialog) that is absent or empty in the task context MUST NOT be selected.
-- Prefer fewer tools. One or two targeted calls is better than calling everything.
-- If no tool would help, output an empty array.
-
-Output a JSON array. Each element has exactly three keys:
-  "tool"   — the tool name exactly as listed in AVAILABLE TOOLS
-  "args"   — a JSON object matching the tool's parameters schema
-  "reason" — one sentence explaining which reviewer issue this call addresses
-
-Output ONLY the JSON array — no markdown, no explanation outside the JSON.
-
-Example (do not copy literally — populate args from the actual task context):
-[
-  {
-    "tool": "fetch_linked_log_files",
-    "args": {"task_id": 12345, "error_dialog": "<a href=\\"http://...\\">log</a>"},
-    "reason": "Reviewer noted Symptom nodes are too vague; log content will provide specific error codes."
-  }
-]
-"""
-
-EXPLORER_TOOL_SELECTION_USER = """A knowledge reviewer has found the following issues with the extracted knowledge graph:
-
-REVIEWER ISSUES:
-{review_issues}
-
-TASK CONTEXT (key fields only):
-{task_summary}
-
-AVAILABLE TOOLS:
-{tools_description}
-"""
-
 KNOWLEDGE_REVIEW_SYSTEM = """You are an incident knowledge graph gap analyzer for PanDA computing tasks.
 
 Your job is to identify information that is MISSING from the graph — information that would be
@@ -970,6 +925,9 @@ Produce TWO outputs:
    - Tools that accept task_data receive it automatically — do not pass task_data.
    - Check for empty / error results before passing them to downstream calls.
    - Return a dict mapping descriptive labels to fetched values.
+   - When a tool returns a structured dict, return its WHOLE result under one
+     label — do not cherry-pick sub-fields — so any summary/derived fields the
+     tool already computed are preserved for downstream consumers.
    - Only call tools in AVAILABLE TOOLS. No imports, no open(), no exec().
 
 2) A list of capability gaps — procedures that no available tool can satisfy.
@@ -1351,6 +1309,9 @@ Produce TWO outputs:
    - Check for empty / error results before passing them to downstream calls.
    - Return a dict mapping descriptive labels to fetched values:
        return {"failed_job_log": failed, "successful_job_log": successful}
+   - When a tool returns a structured dict, return its WHOLE result under one
+     label — do not cherry-pick sub-fields — so any summary/derived fields the
+     tool already computed are preserved for downstream consumers.
    - Only call tools in AVAILABLE TOOLS. No imports, no open(), no exec().
 
 2) A list of capability gaps — investigation directions that no available tool

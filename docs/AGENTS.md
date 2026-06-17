@@ -59,7 +59,8 @@ extract → KnowledgeReviewer
               │ approved          → store
               │ rejected (pass 0) → ContextEnricher
               │                          │ code+gaps OK → execute code → re-extract
-              │                          │ code None    → _select_tools fallback → re-extract
+              │                          │ nothing to do → empty result → re-extract
+              │                          │ gen failure  → raise ExplorationError (fail-hard)
               │                     → KnowledgeReviewer
               │ rejected (pass N) → store best result (with warning)
 ```
@@ -253,11 +254,21 @@ code is still reviewed per turn; no durable auto-run.)
   each entry has `"investigation"` and `"suggested_tool_capability"`. Empty
   when the LLM did not flag any gap.
 
-**Fallback (`_select_tools`):**  
-If `_generate_orchestration_code` returns `None` (parse error, empty code, or
-LLM exception), `explore()` falls back to a single LLM call
-(`EXPLORER_TOOL_SELECTION_SYSTEM` + `EXPLORER_TOOL_SELECTION_USER`) that picks a flat list of tools to call
-concurrently. No chaining; no capability_gaps. Used as a safety net only.
+**Failure contract (no fallback path):**  
+`explore()` has a single path — the orchestration-code path. It distinguishes
+*nothing to do* from *failure*:
+
+- **Nothing to do** → empty `ExplorationResult` (re-extraction proceeds
+  unenriched): no review issues / task data, no available tools, or the planner
+  found no actionable gaps. Empty code accompanied by `capability_gaps` (every
+  gap needs a tool that does not exist) is also legitimate — gaps are recorded,
+  nothing runs.
+- **Genuine generation failure** → raises `ExplorationError`: the LLM returned
+  neither runnable code nor any capability gap (malformed/empty/parse failure),
+  or an exception occurred during planning. The explorer **fails hard** rather
+  than silently degrade. Every caller catches it at a per-invocation boundary
+  (`bamboo populate` marks the task failed and continues the batch; `analyze`/
+  `investigate` report the error for that run).
 
 **Hard-routed branches:**  
 The reviewer issue marker `"no investigation procedure captured"` is routed
@@ -427,16 +438,18 @@ run without changing the default.
 
 ## Failure Handling
 
-All agents follow a **fail-open** policy: if an optional sub-component errors, the pipeline
-continues with what it has rather than aborting.
+Most agents follow a **fail-open** policy: if an optional sub-component errors, the pipeline
+continues with what it has rather than aborting. The exception is the explorer's
+code-generation step, which **fails hard** (see `ContextEnricher.explore`'s failure
+contract above) so a genuine generation failure is surfaced rather than masked by a
+thin result.
 
 | Component | On failure |
 |---|---|
 | `KnowledgeReviewer` LLM call | Returns `approved=True`, logs exception |
-| `ContextEnricher._analyse_gaps` LLM call | Returns `[]` → orchestration-code generation skipped, fall back to `_select_tools` |
-| `ContextEnricher._generate_orchestration_code` LLM call | Returns `None` → fall back to `_select_tools` |
+| `ContextEnricher._analyse_gaps` LLM call | Returns `[]` → no actionable gaps → empty `ExplorationResult` (re-extract unenriched) |
+| `ContextEnricher._generate_orchestration_code` | Legitimate no-op (no gaps / no tools) → `None` → empty result; genuine failure (no code and no capability gaps, or an exception) → **raises `ExplorationError`** |
 | `ContextEnricher._run_orchestration_code` (syntax / runtime / timeout) | Logs warning, returns `{}` — no tool results that round |
-| `ContextEnricher._select_tools` LLM call (fallback) | Returns empty `ExplorationResult`, logs exception |
 | `ReasoningNavigator._run_exploratory_investigation()` (no explorer) | Returns `(None, [])`, skips exploratory investigation silently |
 | Individual MCP tool call | Logs warning, skips that tool's result |
 | `ExternalMcpClient` connect (server down) | Logs warning, contributes zero tools; built-in tools still available |

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
+from bamboo.utils.log_filters import parse_brokerage_summary
 from bamboo.utils.narrator import say
 from bamboo.utils.panda_client import (
     async_fetch_log_content,
@@ -54,6 +55,46 @@ _task_params_table: dict[str, str] | None = None
 # Parsed gdpconfig parameter table from docs/source/advanced/gdpconfig.rst.
 # Maps UPPERCASE_KEY (and base form without wildcard suffixes) to description.
 _gdpconfig_table: dict[str, str] | None = None
+
+
+def _brokerage_sites_of_interest(task_data: dict[str, Any] | None) -> list[str]:
+    """Build the ordered, de-duplicated site list for brokerage-summary parsing.
+
+    Combines the task's ``site`` and ``includedSite`` fields (the latter may be a
+    comma-separated string). Used to annotate per-site fates in the funnel summary.
+    """
+    sites: list[str] = []
+    td = task_data or {}
+    site = td.get("site")
+    site = site.strip() if isinstance(site, str) else ""
+    if site:
+        sites.append(site)
+    included = td.get("includedSite") or []
+    if isinstance(included, str):
+        included = [s.strip() for s in included.split(",") if s.strip()]
+    for s in included:
+        if s and s not in sites:
+            sites.append(s)
+    return sites
+
+
+def _parse_brokerage_summaries(
+    logs: dict[str, str],
+    task_data: dict[str, Any] | None,
+) -> dict[str, dict]:
+    """Parse each fetched brokerage log into a structured summary, keyed by URL.
+
+    URLs whose log has no recognisable brokerage-summary section are omitted.
+    """
+    sites_of_interest = _brokerage_sites_of_interest(task_data)
+    summaries: dict[str, dict] = {}
+    for url, log_text in (logs or {}).items():
+        if not isinstance(log_text, str):
+            continue
+        parsed = parse_brokerage_summary(log_text, sites_of_interest=sites_of_interest)
+        if parsed:
+            summaries[url] = parsed
+    return summaries
 
 
 async def _fetch_task_params_table() -> dict[str, str]:
@@ -1159,6 +1200,12 @@ class PandaMcpClient(McpClient):
 
         Unlike ``fetch_linked_log_files``, no log filter is applied so the
         complete site-selection funnel is visible to the LLM.
+
+        Each fetched log is also parsed into a structured ``summary`` (terminal
+        filter, per-site fates) via :func:`~bamboo.utils.log_filters.parse_brokerage_summary`,
+        keyed by URL, so consumers receive the key facts without re-deriving them
+        from dense raw log text. ``sites_of_interest`` is built from the task's
+        ``site`` and ``includedSite`` fields.
         """
         error_dialog: str = (task_data or {}).get("errorDialog") or ""
         urls = extract_log_urls(error_dialog)[:_MAX_ERROR_DIALOG_LOGS]
@@ -1174,7 +1221,13 @@ class PandaMcpClient(McpClient):
         }
         say(f"fetched {len(logs)}/{len(urls)} brokerage log(s)")
         brokerage_doc, doc_path = await self._fetch_brokerage_doc()
-        return {"logs": logs, "brokerage_doc": brokerage_doc, "doc_path": doc_path}
+        summary = _parse_brokerage_summaries(logs, task_data)
+        return {
+            "logs": logs,
+            "brokerage_doc": brokerage_doc,
+            "doc_path": doc_path,
+            "summary": summary,
+        }
 
     async def _fetch_cli_options(self, component: str) -> dict[str, Any]:
         """Return the --help output for prun or pathena."""
