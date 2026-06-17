@@ -25,6 +25,17 @@ Every `McpTool` carries two **orthogonal** flags (see `bamboo/mcp/base.py`):
   operate on bamboo's own state? It is **not** a mutation flag — an external PanDA *read* is
   `read_only=True, external_access=True`. (Formerly the single, overloaded `has_side_effects`.)
 
+## Tool selection ≠ execution authorization
+
+For large MCP catalogues, `investigate`/`explore` may show the LLM only a
+*relevance-filtered subset* of tools in the prompt (see [AGENTS.md](AGENTS.md),
+"Bounding the tool list"). This is a **prompt-budget optimization only** and is
+fully decoupled from this trust model: the `ToolProxy` allow-set — not what the
+prompt happens to list — is the execution boundary. Selecting fewer tools never
+grants new authorization, and it never *refuses* a contextually-valid call the LLM
+names from a tool the prompt omitted. The automatic-phase read-only guard is
+unchanged.
+
 ## Principles
 
 1. **A captured procedure is *knowledge*, not *authorization*.** Re-running a state-changing

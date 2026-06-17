@@ -1501,11 +1501,19 @@ Your output is a JSON object with these fields:
                         generically (no task IDs, no literal incident-only
                         values).
   - "reason":           ONLY include this field instead of all of the above
-                        when no tool in the registry can satisfy the request
-                        — set `code` to null and explain why no tool fits.
+                        when no listed tool can satisfy the request — set
+                        `code` to null and explain why. Do this rather than
+                        forcing an ill-fitting tool: the registry below may be a
+                        *relevance-filtered subset* of a larger catalogue, so if
+                        nothing shown fits, declining is the right move (the
+                        system can then surface more tools).
 
-The unified tool registry is enumerated in the user message. Each entry shows
-``name``, ``description``, ``args_schema``, and two flags in brackets:
+The unified tool registry is enumerated in the user message. For large
+catalogues it may be a **relevance-ranked subset** — the most relevant tools are
+shown with their full ``args_schema``; less-relevant ones may appear as a compact
+one-liner (name + description, no schema) or be omitted entirely. Use the
+full-schema tools by preference; if only a compact tool fits, you may still call
+it. Each entry shows ``name``, ``description``, and two flags in brackets:
 ``external`` (calls a PanDA server) vs ``internal`` (bamboo's own state); and
 ``read-only`` vs ``MODIFIES-STATE`` (changes PanDA or bamboo state, e.g. a
 kill/retry action). Prefer read-only tools; only use a ``MODIFIES-STATE`` tool

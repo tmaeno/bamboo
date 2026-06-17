@@ -205,6 +205,24 @@ class Settings(BaseSettings):
     # Example: MCP_SERVERS_CONFIG=/path/to/mcp_servers.json
     mcp_servers_config: str = ""
 
+    # Tool selection (bounding the orchestration prompt for large MCP catalogues).
+    # When the rendered tool block fits the budget, all tools are shown with full
+    # schemas (no change for small catalogues). Over budget, retrieval picks which
+    # tools get full schemas; the rest are compact or omitted. See docs/AGENTS.md.
+    #   tool_context_window: usable context window (tokens) of the orchestration
+    #     LLM — set to match the local model's num_ctx. The tool block is bounded by
+    #     tool_context_window − (measured rest of prompt) − tool_budget_margin.
+    #   tool_budget_margin: tokens reserved for the model's response + headroom.
+    #   tool_retrieval_candidate_k: how many tools the description search returns.
+    #   tool_reserved_explore: full-schema slots reserved for description retrieval
+    #     (source #2) so newly-added tools aren't crowded out by validated past ones.
+    tool_context_window: int = 8192
+    tool_budget_margin: int = 1024
+    tool_retrieval_candidate_k: int = 40
+    tool_reserved_explore: int = 4
+    tool_catalogue_section: str = "ToolCatalogue"
+    tool_procedure_triggers_section: str = "ProcedureTriggers"
+
     # Mattermost frontend (optional — requires the ``bamboo[mattermost]`` extra).
     # Core bamboo never imports the Mattermost client; these are only read when
     # the chat frontend is used.

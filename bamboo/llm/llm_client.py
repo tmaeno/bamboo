@@ -46,6 +46,7 @@ SDK client is constructed only once per process.
 import contextlib
 import io
 from functools import lru_cache
+from typing import Callable
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
@@ -203,3 +204,46 @@ def get_reranker():
     _sink = io.StringIO()
     with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
         return CrossEncoder(settings.reranker_model)
+
+
+@lru_cache
+def get_token_counter() -> Callable[[str], int]:
+    """Return a ``text -> token count`` function for the configured chat model.
+
+    Used to bound the orchestration prompt's tool block against the model's
+    context window (see :mod:`bamboo.agents.helpers.tool_selection`). It tries the
+    model's real tokenizer and falls back to a deliberately *over*-counting char
+    heuristic, so the budget never under-counts and overflows a small local
+    context.
+
+    - ``openai``     → ``tiktoken`` for the model (or ``cl100k_base``).
+    - other providers → a Hugging Face tokenizer for ``LLM_MODEL`` when it
+      resolves to a loadable repo; short Ollama names that aren't repos fall
+      through to the heuristic.
+    - fallback       → ``ceil(len(text) / 3)`` (conservative over-count).
+    """
+    settings = get_settings()
+
+    if settings.llm_provider == "openai":
+        try:
+            import tiktoken
+
+            try:
+                enc = tiktoken.encoding_for_model(settings.llm_model)
+            except Exception:  # noqa: BLE001 — unknown model name
+                enc = tiktoken.get_encoding("cl100k_base")
+            return lambda s: len(enc.encode(s))
+        except Exception:  # noqa: BLE001 — tiktoken unavailable
+            pass
+
+    try:
+        from transformers import AutoTokenizer
+
+        _sink = io.StringIO()
+        with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
+            tok = AutoTokenizer.from_pretrained(settings.llm_model)
+        return lambda s: len(tok.encode(s))
+    except Exception:  # noqa: BLE001 — not a loadable repo / transformers absent
+        pass
+
+    return lambda s: (len(s) + 2) // 3

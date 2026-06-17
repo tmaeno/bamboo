@@ -26,6 +26,11 @@ from bamboo.agents.helpers.orchestration import (
     ToolProxy as _SharedToolProxy,
     run_orchestration_code as _shared_run_orchestration_code,
 )
+from bamboo.agents.helpers.tool_selection import (
+    RetrievalUnavailable,
+    config_namespace,
+    render_tools,
+)
 from bamboo.llm import (
     EXPLORATION_GAP_ANALYSIS_SYSTEM,
     EXPLORATION_GAP_ANALYSIS_USER,
@@ -104,6 +109,7 @@ class ContextEnricher:
         mcp_client: McpClient,
         source_navigator=None,
         io=None,
+        tool_selector=None,
     ) -> None:
         self._client = mcp_client
         self._source_navigator = source_navigator
@@ -111,12 +117,82 @@ class ContextEnricher:
         # request_human_input) are offered; falls back to TTY detection when None.
         self._io = io
         self._llm = None  # lazy — same pattern as KnowledgeAccumulator
+        # Optional ToolSelector for budget-gating the prompt on large catalogues
+        # (None => render all tools, the historical behaviour). The explorer is
+        # automatic, so it *reads* the validated source #1 index but never writes it.
+        self._tool_selector = tool_selector
+        self._tok = None
+        self._cfg_ns = None
+        self._tool_index_built = False
 
     @property
     def llm(self):
         if self._llm is None:
             self._llm = get_extraction_llm()  # temperature=0, deterministic JSON
         return self._llm
+
+    def _tokenizer(self):
+        if self._tok is None:
+            from bamboo.llm.llm_client import get_token_counter  # noqa: PLC0415
+
+            self._tok = get_token_counter()
+        return self._tok
+
+    def _config_namespace(self) -> str:
+        if self._cfg_ns is None:
+            from bamboo.config import get_settings  # noqa: PLC0415
+
+            self._cfg_ns = config_namespace(get_settings())
+        return self._cfg_ns
+
+    async def _ensure_tool_index_once(self, tools) -> None:
+        if self._tool_index_built or self._tool_selector is None:
+            return
+        try:
+            await self._tool_selector.ensure_index(
+                tools, config_namespace=self._config_namespace()
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade rather than break exploration
+            warn(f"tool-catalogue index build failed: {exc}")
+        finally:
+            self._tool_index_built = True
+
+    async def _render_tools_description(self, tools, *, base_text: str, query: str) -> str:
+        """Budget-gated compact tool list for the explorer's codegen prompts.
+
+        Mirrors the investigate path but explorer-style (compact, schema-free) and
+        source-#2-led. The explorer is automatic/best-effort, so on retrieval
+        failure it **degrades** to a budget-truncated compact list rather than
+        aborting (unlike the human-facing investigate path).
+        """
+        from bamboo.config import get_settings  # noqa: PLC0415
+
+        tok = self._tokenizer()
+        settings = get_settings()
+        budget = max(0, settings.tool_context_window - tok(base_text) - settings.tool_budget_margin)
+        text, omitted = render_tools(
+            tools, full_schema_for=set(), style="explorer", token_budget=budget, count_tokens=tok
+        )
+        if not omitted or self._tool_selector is None:
+            return text
+        try:
+            await self._ensure_tool_index_once(tools)
+            selection = await self._tool_selector.select(
+                query,
+                tools,
+                budget=budget,
+                count_tokens=tok,
+                config_namespace=self._config_namespace(),
+                style="explorer",
+            )
+            by_name = {t.name: t for t in tools}
+            ordered = [by_name[n] for n in selection.ordered if n in by_name]
+            text, _ = render_tools(
+                ordered, full_schema_for=set(), style="explorer", token_budget=budget, count_tokens=tok
+            )
+        except RetrievalUnavailable:
+            warn("tool retrieval unavailable — using a budget-truncated tool list")
+        return text
 
     def _filtered_tools(self) -> list[McpTool]:
         """Return the read-only tools the explorer's planner may use.
@@ -387,10 +463,18 @@ class ContextEnricher:
             else:
                 system_content = TOOL_ORCHESTRATION_CODE_SYSTEM
                 user_template = TOOL_ORCHESTRATION_CODE_USER
+            gaps_text = "\n".join(f"- {g}" for g in gaps)
+            task_summary = _build_task_summary(task_data)
+            base_text = system_content + "\n" + user_template.format(
+                gaps=gaps_text, task_summary=task_summary, tools_description=""
+            )
+            tools_description = await self._render_tools_description(
+                tools, base_text=base_text, query=gaps_text
+            )
             user_content = user_template.format(
-                gaps="\n".join(f"- {g}" for g in gaps),
-                task_summary=_build_task_summary(task_data),
-                tools_description=_build_tools_description(tools),
+                gaps=gaps_text,
+                task_summary=task_summary,
+                tools_description=tools_description,
             )
             messages = [
                 SystemMessage(content=system_content),
@@ -469,8 +553,13 @@ class ContextEnricher:
     ) -> list[dict[str, Any]]:
         """Ask the LLM which tools to call; return parsed list or [] on error."""
         task_summary = _build_task_summary(task_data)
-        tools_description = _build_tools_description(tools)
         issues_text = "\n".join(f"- {i}" for i in review_issues)
+        base_text = EXPLORER_TOOL_SELECTION_SYSTEM + "\n" + EXPLORER_TOOL_SELECTION_USER.format(
+            review_issues=issues_text, task_summary=task_summary, tools_description=""
+        )
+        tools_description = await self._render_tools_description(
+            tools, base_text=base_text, query=issues_text
+        )
 
         user_content = EXPLORER_TOOL_SELECTION_USER.format(
             review_issues=issues_text,
@@ -608,12 +697,15 @@ class ContextEnricher:
 
 
 def _build_tools_description(tools: list[McpTool]) -> str:
-    """Format tool descriptors for the LLM tool-selection prompt."""
-    parts = []
-    for t in tools:
-        params = ", ".join(t.parameters_schema.get("properties", {}).keys())
-        parts.append(f"- {t.name}({params})\n  {t.description}")
-    return "\n\n".join(parts)
+    """Format tool descriptors for the LLM tool-selection prompt.
+
+    Delegates to the shared :func:`~bamboo.agents.helpers.tool_selection.render_tools`
+    with ``full_schema_for=set()`` (every tool rendered compact, schema-free — the
+    historical explorer behaviour). Phase 1 passes a budget + ``full_schema_for`` to
+    bound the prompt for large catalogues.
+    """
+    text, _ = render_tools(tools, full_schema_for=set(), style="explorer")
+    return text
 
 
 def _parse_tool_calls(response: str) -> list[dict[str, Any]]:

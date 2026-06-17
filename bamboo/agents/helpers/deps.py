@@ -34,12 +34,14 @@ def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
     from bamboo.agents.extractors.panda_knowledge_extractor import (  # noqa: PLC0415
         ErrorCategoryClassifier,
     )
+    from bamboo.agents.helpers.tool_selection import ToolSelector  # noqa: PLC0415
     from bamboo.agents.investigation_session import _Deps  # noqa: PLC0415
     from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator  # noqa: PLC0415
     from bamboo.agents.reasoning_navigator import ReasoningNavigator  # noqa: PLC0415
     from bamboo.config import get_settings  # noqa: PLC0415
     from bamboo.database.graph_database_client import GraphDatabaseClient  # noqa: PLC0415
     from bamboo.database.vector_database_client import VectorDatabaseClient  # noqa: PLC0415
+    from bamboo.llm.llm_client import get_embeddings  # noqa: PLC0415
     from bamboo.mcp.factory import build_mcp_client  # noqa: PLC0415
 
     settings = settings or get_settings()
@@ -48,8 +50,22 @@ def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
     mcp_client = build_mcp_client(settings, strategy, io=io)
     graph_db = GraphDatabaseClient()
     vector_db = VectorDatabaseClient()
+    # Tool selector bounds the orchestration prompt for large MCP catalogues.
+    # ``get_embeddings`` is passed as a lazy factory (resolved on first retrieval)
+    # so a run that never goes over budget doesn't load a local embedding model.
+    tool_selector = ToolSelector(
+        vector_db,
+        get_embeddings,
+        candidate_k=settings.tool_retrieval_candidate_k,
+        reserved_explore=settings.tool_reserved_explore,
+        catalogue_section=settings.tool_catalogue_section,
+        triggers_section=settings.tool_procedure_triggers_section,
+    )
     explorer = ContextEnricher(
-        mcp_client, source_navigator=strategy.source_navigator(), io=io
+        mcp_client,
+        source_navigator=strategy.source_navigator(),
+        io=io,
+        tool_selector=tool_selector,
     )
     # KnowledgeAccumulator/ReasoningNavigator self-create their own
     # KnowledgeGraphExtractor() — do NOT pass extractor= (it isn't a parameter).
@@ -68,6 +84,7 @@ def build_deps(*, io: Any = None, settings: Optional[Any] = None) -> Any:
         knowledge_accumulator=accumulator,
         error_classifier=ErrorCategoryClassifier(),
         io=io,
+        tool_selector=tool_selector,
     )
 
 

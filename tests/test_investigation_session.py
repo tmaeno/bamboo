@@ -1197,3 +1197,132 @@ def test_display_kickoff_panel_builds_fields_card():
     assert ("status", "failed", True) in card.fields
     assert ("taskType", "anal", True) in card.fields
     assert ("site", "DESY-HH_TEST", True) in card.fields
+
+
+# ---------------------------------------------------------------------------
+# Tool-selection budget gating (_render_available_tools)
+# ---------------------------------------------------------------------------
+
+
+def _tool_descs(n: int) -> list[dict]:
+    return [
+        {
+            "name": f"t{i}",
+            "description": "d" * 60,
+            "parameters_schema": {"properties": {"x": {}}},
+            "external_access": True,
+            "read_only": True,
+        }
+        for i in range(n)
+    ]
+
+
+def _small_settings():
+    # tiny context window forces the over-budget retrieval path
+    return SimpleNamespace(
+        tool_context_window=200,
+        tool_budget_margin=0,
+        mcp_servers_config="",
+        llm_provider="ollama",
+    )
+
+
+async def test_render_available_tools_under_budget_renders_all_no_selector(monkeypatch):
+    import bamboo.agents.investigation_session as ist
+
+    orch = _build_orch()
+    orch._tok = len
+    # generous window => everything fits => selector never consulted
+    monkeypatch.setattr(
+        ist, "get_settings",
+        lambda: SimpleNamespace(tool_context_window=100000, tool_budget_margin=0,
+                                mcp_servers_config="", llm_provider="ollama"),
+    )
+    selector = MagicMock()
+    selector.select = AsyncMock()
+    orch.deps.tool_selector = selector
+
+    descs = _tool_descs(5)
+    text, shown, dropped = await orch._render_available_tools(
+        descs, base_text="", utterance="why", error_dialog="err"
+    )
+    assert shown == {d["name"] for d in descs}
+    assert dropped == []
+    selector.select.assert_not_awaited()
+
+
+async def test_render_available_tools_over_budget_uses_selector(monkeypatch):
+    import bamboo.agents.investigation_session as ist
+    from bamboo.agents.helpers.tool_selection import Selection
+
+    orch = _build_orch()
+    orch._tok = len
+    monkeypatch.setattr(ist, "get_settings", _small_settings)
+
+    descs = _tool_descs(10)
+    names = [d["name"] for d in descs][:5]
+    selector = MagicMock()
+    selector.ensure_index = AsyncMock()
+    selector.select = AsyncMock(
+        return_value=Selection(ordered=names, full_schema_names=set(names[:2]))
+    )
+    orch.deps.tool_selector = selector
+
+    text, shown, dropped = await orch._render_available_tools(
+        descs, base_text="", utterance="why", error_dialog="err"
+    )
+    selector.ensure_index.assert_awaited()
+    selector.select.assert_awaited()
+    assert shown  # a subset is shown
+    assert set(shown) <= set(names)  # only retrieved candidates
+    assert dropped  # some of the 10 omitted under the tiny budget
+
+
+async def test_render_available_tools_fail_hard_on_retrieval_unavailable(monkeypatch):
+    import bamboo.agents.investigation_session as ist
+    from bamboo.agents.helpers.tool_selection import RetrievalUnavailable
+
+    orch = _build_orch()
+    orch._tok = len
+    monkeypatch.setattr(ist, "get_settings", _small_settings)
+
+    selector = MagicMock()
+    selector.ensure_index = AsyncMock()
+    selector.select = AsyncMock(side_effect=RetrievalUnavailable("vector store down"))
+    orch.deps.tool_selector = selector
+
+    with pytest.raises(RetrievalUnavailable):
+        await orch._render_available_tools(
+            _tool_descs(10), base_text="", utterance="q", error_dialog="e"
+        )
+
+
+async def test_index_approved_run_indexes_and_logs(monkeypatch):
+    orch = _build_orch()
+    selector = MagicMock()
+    selector.index_procedure_run = AsyncMock()
+    orch.deps.tool_selector = selector
+
+    run = OrchestrationRun(
+        strategy_type="s",
+        code="x = await tools.get_parent_task(task_id=task_id)\nreturn {'x': x}",
+        utterance="who is the parent",
+        call_log=["get_parent_task"],
+    )
+    await orch._index_approved_run(run, error_dialog="boom", shown_names={"get_parent_task"})
+    selector.index_procedure_run.assert_awaited_once()
+    kwargs = selector.index_procedure_run.await_args.kwargs
+    assert "get_parent_task" in kwargs["tool_names"]
+    assert "who is the parent" in kwargs["prompt_text"]
+    # the approved (prompt -> tools) example is stashed for finalize upweight
+    assert orch._approved_run_prompts
+
+
+async def test_index_approved_run_skips_errored_runs(monkeypatch):
+    orch = _build_orch()
+    selector = MagicMock()
+    selector.index_procedure_run = AsyncMock()
+    orch.deps.tool_selector = selector
+    run = OrchestrationRun(strategy_type="s", code="...", error="boom", utterance="q")
+    await orch._index_approved_run(run, error_dialog="e", shown_names=set())
+    selector.index_procedure_run.assert_not_awaited()

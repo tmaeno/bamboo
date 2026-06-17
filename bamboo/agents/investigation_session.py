@@ -55,6 +55,11 @@ from bamboo.agents.helpers.procedure_tools import (
     procedure_tool_name,
 )
 from bamboo.agents.helpers.task_data_bootstrap import bootstrap_initial_graph
+from bamboo.agents.helpers.tool_selection import (
+    RetrievalUnavailable,
+    config_namespace,
+    render_tools,
+)
 from bamboo.config import get_settings
 from bamboo.utils.narrator import say, step
 from bamboo.frontends.base import Card, Column, DetailSink, InteractionIO, ReviewOption
@@ -119,6 +124,9 @@ class OrchestrationRun(BaseModel):
     atomic_action_id: str = ""
     error: Optional[str] = None
     executed_at: str = ""
+    # The human prompt that produced this run — captured so the validated
+    # (prompt -> tools) mapping can seed tool-selection retrieval (source #1).
+    utterance: str = ""
 
 
 class Turn(BaseModel):
@@ -234,20 +242,15 @@ def _format_doc_hints(doc_hints: dict[str, str]) -> str:
 
 
 def _format_available_tools(tools: list[dict[str, Any]]) -> str:
-    """Render a unified-tool descriptor list for the orchestration prompt."""
-    if not tools:
-        return "(none)"
-    lines = []
-    for t in tools:
-        access = "external" if t.get("external_access") else "internal"
-        # read_only defaults True (a tool only modifies state when explicitly tagged).
-        rw = "read-only" if t.get("read_only", True) else "MODIFIES-STATE"
-        schema = json.dumps(t.get("parameters_schema") or {}, indent=None)
-        lines.append(
-            f"- {t['name']} [{access}, {rw}]: {t.get('description', '').strip()}\n"
-            f"    args schema: {schema}"
-        )
-    return "\n".join(lines)
+    """Render a unified-tool descriptor list for the orchestration prompt.
+
+    Delegates to the shared :func:`~bamboo.agents.helpers.tool_selection.render_tools`
+    (``full_schema_for=None`` => every tool rendered with its full schema, the
+    historical behaviour). Phase 1 passes a budget + ``full_schema_for`` to bound
+    the prompt for large catalogues.
+    """
+    text, _ = render_tools(tools, style="investigate")
+    return text
 
 
 # Task-data keys surfaced as the kickoff "signals" (LLM prompt + the MM card grid).
@@ -364,6 +367,7 @@ class _Deps:
     error_classifier: Any = None
     console: Optional[Console] = None
     io: Optional[InteractionIO] = None  # frontend; defaults to the Rich terminal
+    tool_selector: Optional[Any] = None  # ToolSelector; None => no budget gating
 
 
 class InvestigationOrchestrator:
@@ -409,6 +413,13 @@ class InvestigationOrchestrator:
         self._procedure_tool_callables: dict = {}
         # Procedure tool-names with a durable (cross-session) auto-run grant.
         self._durable_autorun_procs: set[str] = set()
+        # Tool-selection (large-catalogue budget gating) — lazily initialised.
+        self._tok: Optional[Any] = None
+        self._cfg_ns: Optional[str] = None
+        self._tool_index_built: bool = False
+        # (tool_names, prompt_text) of approved runs this session — re-indexed at a
+        # higher weight when the session finalises with a Cause (source #1 upweight).
+        self._approved_run_prompts: list[tuple[list[str], str]] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -567,6 +578,10 @@ class InvestigationOrchestrator:
             resolution_text = resolution_text or None
 
         self._wire_finalization_edges(cause_text, resolution_text)
+        # Source #1 upweight: a Cause means this session's approved runs are part of
+        # a confirmed investigation — re-index them at a higher retrieval weight.
+        if cause_text:
+            await self._upweight_finalized_runs()
         await self._show_diff_and_commit()
 
     # ------------------------------------------------------------------
@@ -709,6 +724,145 @@ class InvestigationOrchestrator:
             intent = "tool" if chosen == "t" else "narration"
         return intent
 
+    # ------------------------------------------------------------------
+    # Tool-selection helpers (large-catalogue budget gating)
+    # ------------------------------------------------------------------
+
+    def _tokenizer(self) -> Any:
+        if self._tok is None:
+            from bamboo.llm.llm_client import get_token_counter  # noqa: PLC0415
+
+            self._tok = get_token_counter()
+        return self._tok
+
+    def _config_namespace(self) -> str:
+        """Stable id for the active (MCP catalogue + provider) so a shared vector
+        store isn't thrashed by instances configured differently."""
+        if self._cfg_ns is None:
+            self._cfg_ns = config_namespace(get_settings())
+        return self._cfg_ns
+
+    async def _ensure_tool_index_once(self, descriptors: list[dict[str, Any]]) -> None:
+        """Build the ToolCatalogue index once per session (only reached over budget)."""
+        if self._tool_index_built or self.deps.tool_selector is None:
+            return
+        try:
+            await self.deps.tool_selector.ensure_index(
+                descriptors, config_namespace=self._config_namespace()
+            )
+        except Exception as exc:  # noqa: BLE001 — select() is the fail-hard point
+            logger.warning("tool-catalogue index build failed: %s", exc)
+        finally:
+            self._tool_index_built = True
+
+    async def _render_available_tools(
+        self,
+        tool_descriptors_full: list[dict[str, Any]],
+        *,
+        base_text: str,
+        utterance: str,
+        error_dialog: str,
+        exclude: frozenset[str] = frozenset(),
+    ) -> tuple[str, set[str], list[str]]:
+        """Render the tool block within the model's context budget.
+
+        Returns ``(text, shown_names, dropped_names)``. If every tool fits (or no
+        selector is configured) all tools are rendered full-schema, unchanged. Over
+        budget, retrieval picks the subset. Raises
+        :class:`~bamboo.agents.helpers.tool_selection.RetrievalUnavailable` when over
+        budget and the vector store is unreachable — the caller aborts the turn.
+        """
+        tok = self._tokenizer()
+        settings = get_settings()
+        budget = max(0, settings.tool_context_window - tok(base_text) - settings.tool_budget_margin)
+        all_names = {t["name"] for t in tool_descriptors_full}
+
+        text, omitted = render_tools(
+            tool_descriptors_full,
+            full_schema_for=None,
+            style="investigate",
+            token_budget=budget,
+            count_tokens=tok,
+        )
+        selector = self.deps.tool_selector
+        if not omitted or selector is None:
+            return text, all_names - set(omitted), list(omitted)
+
+        await self._ensure_tool_index_once(tool_descriptors_full)
+        query = f"{error_dialog} {utterance}".strip()
+        selection = await selector.select(
+            query,
+            tool_descriptors_full,
+            budget=budget,
+            count_tokens=tok,
+            config_namespace=self._config_namespace(),
+            style="investigate",
+            exclude_names=exclude,
+        )
+        by_name = {t["name"]: t for t in tool_descriptors_full}
+        ordered = [by_name[n] for n in selection.ordered if n in by_name]
+        text, omitted = render_tools(
+            ordered,
+            full_schema_for=selection.full_schema_names,
+            style="investigate",
+            token_budget=budget,
+            count_tokens=tok,
+        )
+        shown = {d["name"] for d in ordered} - set(omitted)
+        dropped = sorted(all_names - shown)
+        if dropped:
+            say(
+                f"tool selection: showing {len(shown)}/{len(all_names)} tools; "
+                f"{len(dropped)} omitted",
+                level=logging.DEBUG,
+                kind="turn_detail",
+            )
+        return text, shown, dropped
+
+    async def _index_approved_run(
+        self, run: OrchestrationRun, *, error_dialog: str, shown_names: set[str]
+    ) -> None:
+        """Feed source #1: index the validated (prompt -> tools) mapping, and log
+        the online recall of the shown set vs. the tools the code actually used."""
+        selector = self.deps.tool_selector
+        if selector is None or run.error:
+            return
+        used = referenced_tool_names(run.code) or list(run.call_log)
+        if shown_names and used:
+            in_shown = sum(1 for t in used if t in shown_names)
+            say(
+                f"tool recall: {in_shown}/{len(used)} used tools were in the shown set",
+                level=logging.DEBUG,
+                kind="turn_detail",
+            )
+        prompt_text = f"{run.utterance} {error_dialog}".strip()
+        if not used or not prompt_text:
+            return
+        try:
+            await selector.index_procedure_run(
+                tool_names=used,
+                prompt_text=prompt_text,
+                config_namespace=self._config_namespace(),
+            )
+            self._approved_run_prompts.append((used, prompt_text))
+        except Exception as exc:  # noqa: BLE001 — indexing must not break the turn
+            logger.warning("failed to index approved run for tool selection: %s", exc)
+
+    async def _upweight_finalized_runs(self) -> None:
+        """Re-index this session's approved (prompt -> tools) examples at a higher
+        weight once the investigation finalises with a Cause (source #1 upweight)."""
+        selector = self.deps.tool_selector
+        if selector is None:
+            return
+        ns = self._config_namespace()
+        for used, prompt_text in self._approved_run_prompts:
+            try:
+                await selector.index_procedure_run(
+                    tool_names=used, prompt_text=prompt_text, config_namespace=ns, weight=2.0
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to upweight finalized run: %s", exc)
+
     async def _tool_turn(self, utterance: str) -> None:
         """Plan §D tool branch — generate code, review (per-code policy), execute, record."""
         task_id = (self.session.initial_inputs.get("task_id"))
@@ -716,32 +870,70 @@ class InvestigationOrchestrator:
         error_dialog = (task_data.get("errorDialog") if task_data else None) or self.session.initial_inputs.get("symptom") or ""
 
         tool_descriptors_full = self._unified_tool_descriptors()
-        user_msg = INVESTIGATE_ORCHESTRATION_USER.format(
-            domain_hints=_format_doc_hints(self.session.doc_hints),
-            task_id=task_id or "(none)",
-            error_dialog=error_dialog or "(none)",
-            initial_signals=_format_initial_signals(task_data),
-            prior_turn_results=_format_prior_results(self.session.turn_history),
-            available_tools=_format_available_tools(tool_descriptors_full),
-            utterance=utterance,
-        )
+
+        def make_user(tools_text: str) -> str:
+            return INVESTIGATE_ORCHESTRATION_USER.format(
+                domain_hints=_format_doc_hints(self.session.doc_hints),
+                task_id=task_id or "(none)",
+                error_dialog=error_dialog or "(none)",
+                initial_signals=_format_initial_signals(task_data),
+                prior_turn_results=_format_prior_results(self.session.turn_history),
+                available_tools=tools_text,
+                utterance=utterance,
+            )
+
+        # Token budget for the tool block = context window minus the rest of the
+        # assembled prompt minus headroom (see _render_available_tools).
+        base_text = INVESTIGATE_ORCHESTRATION_SYSTEM + "\n" + make_user("")
+
         # Update the MM session Head to "planning…" (silent on the CLI), then
         # stream the planner's reasoning/answer into the per-turn detail surface.
         step("Planning…")
+        plan: dict[str, Any] = {}
+        code: Any = None
+        shown: set[str] = set()
+        exclude: set[str] = set()
         async with self.io.detail_stream(title="Planning…") as sink:
             if self._last_intent_meta:
                 sink.meta(self._last_intent_meta)
-            try:
-                response = await self._invoke_llm(
-                    INVESTIGATE_ORCHESTRATION_SYSTEM, user_msg, stream_sink=sink
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
-                return
-            plan = _parse_json_response(response)
-
-            code = plan.get("code")
-            if not code or not str(code).strip():
+            # Plan §D: at most two attempts — the initial render, then (only if the
+            # model declines AND tools were omitted over budget) one reactive
+            # escalation showing a fresh page of candidates. See docs/AGENTS.md.
+            for attempt in range(2):
+                try:
+                    tools_text, shown, dropped = await self._render_available_tools(
+                        tool_descriptors_full,
+                        base_text=base_text,
+                        utterance=utterance,
+                        error_dialog=error_dialog,
+                        exclude=frozenset(exclude),
+                    )
+                except RetrievalUnavailable as exc:
+                    self.io.notice(
+                        "[red]Tool catalogue exceeds the context budget and "
+                        f"tool-retrieval is unavailable: {exc}[/red]"
+                    )
+                    return
+                if dropped:
+                    sink.meta(f"tools: showing {len(shown)}, {len(dropped)} omitted (budget)")
+                try:
+                    response = await self._invoke_llm(
+                        INVESTIGATE_ORCHESTRATION_SYSTEM, make_user(tools_text), stream_sink=sink
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
+                    return
+                plan = _parse_json_response(response)
+                code = plan.get("code")
+                if code and str(code).strip():
+                    break
+                # No tool fit. If tools were omitted (over budget) and we can show
+                # more, escalate once before giving up.
+                if attempt == 0 and dropped and self.deps.tool_selector is not None:
+                    exclude |= shown
+                    say("no shown tool fit — escalating with a fresh candidate page",
+                        level=logging.DEBUG, kind="turn_detail")
+                    continue
                 reason = plan.get("reason", "(no reason returned)")
                 self.io.notice(f"[yellow]No tool fits this request: {reason}[/yellow]")
                 self.io.notice("[dim]Tip: rephrase, or call request_human_input via a follow-up turn to paste the info.[/dim]")
@@ -798,9 +990,13 @@ class InvestigationOrchestrator:
             atomic_action_id=atomic_action_id,
             error=error,
             executed_at=_now_iso(),
+            utterance=utterance,
         )
         self._record_atomic_action(run, raw_result=result)
         self.session.turn_history.append(Turn(role="system", kind="tool", text=strategy_type, orchestration=run))
+        # Source #1: index this human-approved (prompt -> tools) mapping, and log
+        # the online recall of the shown tool set against what the code actually used.
+        await self._index_approved_run(run, error_dialog=error_dialog, shown_names=shown)
         if error:
             self.io.notice(f"[red]Tool execution error: {error}[/red]")
         else:

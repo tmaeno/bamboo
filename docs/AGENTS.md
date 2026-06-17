@@ -197,6 +197,40 @@ state-changing (`read_only=False`) call at the call site (alias-proof) — exter
 PanDA *reads* are still allowed. State changes only ever happen in `investigate`'s
 interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
+### Bounding the tool list for large catalogues
+
+When many external MCP servers are configured the catalogue can grow to hundreds
+of tools — too many to dump (with full JSON schemas) into every orchestration
+prompt, especially for a small-context local LLM. `bamboo.agents.helpers.tool_selection`
+bounds it:
+
+- **Budget-gated, no behaviour change when small.** The tool block is rendered to
+  fit `tool_context_window − (rest of the prompt) − tool_budget_margin`, measured
+  greedily against the *real* assembled prompt with the model's tokenizer
+  (`get_token_counter`). If everything fits, all tools are shown with full schemas
+  exactly as before — no retrieval, no vector writes.
+- **Over budget → two-source retrieval** (`ToolSelector.select`). Source #1: tools
+  used by *similar human-approved past investigations* (the `ProcedureTriggers`
+  vector section, keyed on the originating prompt + `trigger_signals`); source #2:
+  tools whose descriptions match the symptom (`ToolCatalogue`). The most relevant
+  get full schemas, the rest a compact one-liner, the overflow is omitted (logged).
+  A `tool_reserved_explore` quota guarantees source #2 some slots so newly-added
+  tools are never crowded out.
+- **Selection trims the *prompt* only — never the runtime allow-set.** The
+  `ToolProxy` still permits any contextually-valid tool, so a tool omitted from the
+  prompt is never *refused* if the LLM names it. No extra LLM call on the common
+  path: the codegen LLM picks from what it sees. If it declines ("no tool fits")
+  while tools were omitted, `investigate` escalates once with a fresh candidate page.
+- **Self-healing source #1.** Each human-approved investigate run is indexed as a
+  `(prompt → tools)` example (`_index_approved_run`); runs finalised with a Cause are
+  re-indexed at a higher weight. So a tool that source #2 surfaced and the operator
+  approved seeds source #1 for next time.
+- **Failure modes:** over budget + vector store unreachable → `investigate` aborts
+  the turn with a clear error (no degraded continuation); the automatic explorer
+  instead degrades to a budget-truncated compact list (it is best-effort). All
+  vectors are namespaced by `config_namespace` (hash of `MCP_SERVERS_CONFIG` +
+  provider) so a shared Qdrant isn't thrashed by differently-configured instances.
+
 **Reusable procedures as tools** (`bamboo/agents/procedure_tools.py`): a captured
 `ProcedureNode` is identified by a **tool-call signature** (`procedure_signature` /
 `procedure_tool_name`) — the set of `tools.<name>` its code calls — which is its

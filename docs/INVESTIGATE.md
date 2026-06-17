@@ -93,6 +93,17 @@ A procedure is identified by a **stable tool-call signature** — the set of too
 
 When `bamboo analyze` later encounters a similar task and Phase 2 retrieves the Procedure for the matched Cause, it **replays the stored code** — the exact bytes that worked last time run this time, more reproducibly than regenerating from a description. But `analyze` is an **automatic, read-only** phase (no operator watching), so a stored procedure whose code would call a state-changing (`read_only=False`) tool is **not** replayed there — it is skipped and surfaced as a *suggestion* to run in the interactive `investigate` loop. External PanDA *reads* replay fine; state changes only ever happen inside the interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
 
+**Tool selection for large catalogues.** When many MCP tools are configured the
+planner's prompt is **budget-gated**: it shows the most relevant tools (with full
+schemas) that fit the model's context, the rest compact, and omits the overflow
+with a one-line notice. Relevance comes partly from *this very capture loop* — each
+human-approved turn is indexed as a `(prompt → tools)` example, so similar future
+prompts surface the tools that worked (a fresh page is shown if you decline because
+nothing fit). If the catalogue is over budget and the vector store is unreachable,
+the turn aborts with a clear message rather than silently truncating. See
+[AGENTS.md](AGENTS.md) ("Bounding the tool list") and
+[EXECUTION_TRUST.md](EXECUTION_TRUST.md) (selection never changes what code may run).
+
 The full design rationale is in [the plan file](../.claude/plans/i-m-planning-to-evolve-bubbly-blossom.md).
 
 ## Safety model

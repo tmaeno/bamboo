@@ -9,6 +9,8 @@ parent :mod:`bamboo.agents` package and from the generic, app-wide helpers in
 * :mod:`~bamboo.agents.helpers.orchestration` — the LLM-authored code sandbox
   (``ToolProxy``, ``run_orchestration_code``).
 * :mod:`~bamboo.agents.helpers.tool_dispatch` — single MCP tool-call dispatch.
+* :mod:`~bamboo.agents.helpers.tool_selection` — shared tool-list renderer
+  (``render_tools``) and budget-gated retrieval selection for orchestration prompts.
 * :mod:`~bamboo.agents.helpers.internal_tools` /
   :mod:`~bamboo.agents.helpers.procedure_tools` — tool registries.
 * :mod:`~bamboo.agents.helpers.context_prefetch` /

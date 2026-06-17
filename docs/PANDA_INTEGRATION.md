@@ -28,6 +28,16 @@ export PANDA_API_URL_SSL=https://mypanda.example.org:25443/api/v1
 Refer to the [PanDA client setup guide](https://panda-wms.readthedocs.io/en/latest/client/panda-client.html#setup)
 for authentication setup (obtaining an OIDC token or X.509 proxy).
 
+### Large external tool catalogues
+
+Additional MCP servers (via `MCP_SERVERS_CONFIG`) can bring hundreds of tools.
+Bamboo bounds the orchestration prompt automatically by relevance-retrieving the
+tools that fit the model's context budget — see
+[QUICKSTART.md](QUICKSTART.md#tool-selection-for-large-mcp-catalogues) for the
+`TOOL_*` settings and [AGENTS.md](AGENTS.md) ("Bounding the tool list") for the
+mechanism. Note that with a large catalogue, Qdrant + embeddings become required
+during `investigate`.
+
 ---
 
 ## Usage

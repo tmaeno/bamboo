@@ -97,6 +97,29 @@ EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
 HF_TOKEN=
 ```
 
+### Tool selection for large MCP catalogues
+
+When external MCP servers add up to hundreds of tools, the orchestration prompt is
+**budget-gated** so it fits the model's context (vital for a small-context local
+LLM). Below the budget nothing changes; over it, the relevant tools are retrieved
+(reusing Qdrant + the configured embeddings) and the rest omitted. Tune via:
+
+```env
+# Usable context window (tokens) of the orchestration LLM — set to your local
+# model's num_ctx. The tool block is bounded by
+# tool_context_window − (rest of the prompt) − TOOL_BUDGET_MARGIN.
+TOOL_CONTEXT_WINDOW=8192
+TOOL_BUDGET_MARGIN=1024          # tokens reserved for the response + headroom
+TOOL_RETRIEVAL_CANDIDATE_K=40    # tools the description search returns
+TOOL_RESERVED_EXPLORE=4          # full-schema slots reserved for new/unseen tools
+```
+
+Tool vectors live in two sections of the existing Qdrant collection
+(`ToolCatalogue`, `ProcedureTriggers`), namespaced per `MCP_SERVERS_CONFIG`+provider
+so multiple bamboo instances can share one store. With a large catalogue, Qdrant +
+embeddings become **required** during `investigate` (the turn aborts with a clear
+message if the store is unreachable while over budget).
+
 
 > **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
 
