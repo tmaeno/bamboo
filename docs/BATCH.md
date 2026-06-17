@@ -1,13 +1,7 @@
-# Air-gapped batch analysis (Apptainer)
+# Batch Analysis via Container
 
-Run `bamboo analyze` as a **self-contained batch job** on a compute slot that is
-air-gapped, has no pre-deployed services, and only offers Apptainer — on either a
-CPU-only or a GPU queue, from one artifact.
-
-> **Status: scaffold — not yet validated on a cluster.** The container/deploy files
-> are best-effort and gated behind a feasibility spike (see *Phase 0* below). Grep
-> the scripts/Dockerfile for `VERIFY:` for the spots to confirm. The `bamboo
-> batch-analyze` command itself is implemented and unit-tested.
+Run `bamboo analyze` as a **self-contained batch job** on a compute slot that has no pre-deployed services,
+and only offers non-root container execution — on either a CPU-only or a GPU queue, from one container.
 
 ## How it works
 
@@ -26,19 +20,6 @@ you can't precompute it. The design:
 - **`bamboo batch-analyze`** processes many tasks per container invocation so the
   costly service + model startup is paid **once**, not per task.
 
-## Phase 0 — feasibility spike (do first)
-
-Before relying on the full pipeline, confirm on the target cluster:
-
-1. **Neo4j rootless under Apptainer + restore timing.** Non-root Neo4j is officially
-   supported (needs write `data`/`logs`, read `conf`; `conf` is copied from the mount at
-   startup). Confirm it comes up as your arbitrary cluster uid (watch for a uid missing
-   from `/etc/passwd` → "I have no name!"), APOC loads, and **time a real-KB dump
-   restore + JVM start** — restore time paces every batch.
-2. **CPU vs GPU model latency *and* answer quality** with the candidate model(s).
-
-If restore is too slow to amortize or CPU quality is unacceptable, revisit embedded
-stores or restrict to the GPU queue before building the rest.
 
 ## One-time setup (on a networked host)
 
