@@ -1,4 +1,6 @@
-# Extraction Strategy Plugin System
+---
+title: "Extraction Strategy Plugin System"
+---
 
 ## Overview
 
@@ -11,7 +13,7 @@ navigator to use during exploration.
 
 | Name | Class | Best for |
 |---|---|---|
-| `panda` *(default)* | `PandaKnowledgeExtractor` | PanDA WMS task data — see [PanDA Integration](PANDA_INTEGRATION.md) |
+| `panda` *(default)* | `PandaKnowledgeExtractor` | PanDA WMS task data — see [PanDA Integration](/bamboo/integrations/panda-integration/) |
 | `llm` | `LLMBasedKnowledgeExtractor` | Unstructured data, email threads, natural language text |
 | `rule_based` / `jira` | `RuleBasedExtractionStrategy` | Structured key-value data without a dedicated strategy |
 
@@ -190,5 +192,5 @@ flowchart TD
 
 ---
 
-For the PanDA strategy implementation details see [PanDA Integration](PANDA_INTEGRATION.md).  
+For the PanDA strategy implementation details see [PanDA Integration](/bamboo/integrations/panda-integration/).  
 For the extractor source see `bamboo/agents/extractors/`.

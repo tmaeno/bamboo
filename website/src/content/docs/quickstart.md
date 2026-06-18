@@ -1,8 +1,14 @@
-# Quick Start Guide
+---
+title: "Quick Start Guide"
+---
 
 **BAMBOO**: **B**olstered **A**ssistance for **M**anaging and **B**uilding **O**perations and **O**versight
 
 This guide will help you get started with Bamboo quickly.
+
+:::tip[New to Bamboo?]
+Follow the steps in order. After setup, run `bamboo verify` to confirm your databases, API keys, and embedding model are all reachable before running an agent.
+:::
 
 ## Prerequisites
 
@@ -102,7 +108,7 @@ HF_TOKEN=
 > **Many external MCP servers?** When configured MCP servers add up to hundreds of tools, the
 > orchestration tool list is budgeted (a truncation backstop plus a relevance cap) and tunable via
 > `LLM_CONTEXT_WINDOW` / `TOOL_MAX_FULL_SCHEMAS` and related settings. See
-> [Agent Reference → Bounding the tool list for large catalogues](AGENTS.md).
+> [Agent Reference → Bounding the tool list for large catalogues](/bamboo/architecture/agents/).
 
 > **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
 
@@ -250,11 +256,11 @@ pip install -e .
 
 ## Learn more
 
-- **Architecture, agents, and MCP tool budgeting** → [Agent Reference](AGENTS.md)
-- **Graph schema** (node & relationship types) → [Graph Schema](SCHEMA.md)
-- **Extending Bamboo** (custom node types, queries, prompts), testing, and deployment → [Development Guide](DEVELOPMENT.md)
-- **Fetching tasks from PanDA** → [PanDA Integration](PANDA_INTEGRATION.md)
-- **Live human-in-the-loop investigation** → [Co-Investigation Mode](INVESTIGATE.md)
+- **Architecture, agents, and MCP tool budgeting** → [Agent Reference](/bamboo/architecture/agents/)
+- **Graph schema** (node & relationship types) → [Graph Schema](/bamboo/architecture/schema/)
+- **Extending Bamboo** (custom node types, queries, prompts), testing, and deployment → [Development Guide](/bamboo/development/)
+- **Fetching tasks from PanDA** → [PanDA Integration](/bamboo/integrations/panda-integration/)
+- **Live human-in-the-loop investigation** → [Co-Investigation Mode](/bamboo/guides/investigate/)
 
 ## Next Steps
 

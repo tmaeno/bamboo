@@ -1,4 +1,6 @@
-# Mattermost Integration
+---
+title: "Mattermost Integration"
+---
 
 Bamboo ships an **ops-facing chat frontend**: a Mattermost bot that runs the same
 engines as the CLI, so operators who don't install bamboo locally can drive it
@@ -46,15 +48,15 @@ same way as any bamboo command:
 - the **shell environment** where you launch the daemon, or
 - **systemd** `EnvironmentFile=` / a container `--env-file`.
 
-See [QUICKSTART.md](QUICKSTART.md) for the base environment (LLM keys, Neo4j,
-Qdrant) and [PANDA_INTEGRATION.md](PANDA_INTEGRATION.md) for PanDA settings.
+See [QUICKSTART.md](/bamboo/quickstart/) for the base environment (LLM keys, Neo4j,
+Qdrant) and [PANDA_INTEGRATION.md](/bamboo/integrations/panda-integration/) for PanDA settings.
 
 ---
 
 ## Prerequisites
 
 - A working bamboo install with its databases and LLM configured
-  ([QUICKSTART.md](QUICKSTART.md)).
+  ([QUICKSTART.md](/bamboo/quickstart/)).
 - The Mattermost extra:
 
   ```bash
@@ -76,7 +78,7 @@ Qdrant) and [PANDA_INTEGRATION.md](PANDA_INTEGRATION.md) for PanDA settings.
 2. Create a bot account for bamboo and **copy its access token** — this is
    `MATTERMOST_TOKEN`.
 3. **Add the bot to the channel(s)** the ops team will use. Channel membership is
-   your first access-control layer (see [Authorization](#authorization-security)).
+   your first access-control layer (see [Authorization](#authorization--security)).
 4. Get the **channel IDs** for the allow-list: open a channel → *View Info* (the
    ID is shown), or query the Mattermost API. These go in
    `MATTERMOST_ALLOWED_CHANNELS`.
@@ -96,7 +98,7 @@ It's important not to conflate the two credentials involved:
 
 - **Service identity** — the bot *process* holds one PanDA OIDC token via the
   usual environment (`PANDA_AUTH=oidc`, `PANDA_AUTH_ID_TOKEN`, `PANDA_AUTH_VO`;
-  see [PANDA_INTEGRATION.md](PANDA_INTEGRATION.md)). Every action runs as that
+  see [PANDA_INTEGRATION.md](/bamboo/integrations/panda-integration/)). Every action runs as that
   single identity. This is the default fallback when a user hasn't logged in.
 
 - **Per-user identity** — an operator runs **`login`** in a channel and the bot
@@ -192,7 +194,7 @@ auto-run skips the prompt for that exact code for the rest of the session. Addin
 `--verbose`/`-v` streams behind-the-scenes detail (intent, strategy, per-tool calls)
 into the live post. At the end it asks for the cause and resolution, shows the commit
 diff (a **Mermaid** graph on instances that support it), and asks you to confirm
-before writing to the knowledge base. (Full model: [EXECUTION_TRUST.md](EXECUTION_TRUST.md).)
+before writing to the knowledge base. (Full model: [EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).)
 
 **Capture.** The bot reads the thread transcript, asks for the cause and
 resolution, extracts the knowledge, shows the commit diff for review, and stores
@@ -287,7 +289,7 @@ Two layers:
 runs (not only state-changing ones), and runs only on your reply — unless you have
 granted that exact code auto-run for the session. Side effects only ever happen in
 the interactive loop; the automatic `analyze` phase is read-only. See
-[EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+[EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
 ---
 

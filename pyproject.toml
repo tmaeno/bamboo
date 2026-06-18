@@ -69,12 +69,8 @@ dev = [
     "ruff>=0.1.9",
     "mypy>=1.8.0",
 ]
-# Documentation site (Material for MkDocs → GitHub Pages).
-# `mkdocs` itself is pulled in transitively by mkdocs-material.
-docs = [
-    "mkdocs-material>=9.5",
-    "pymdown-extensions>=10.0",
-]
+# Documentation lives in website/ and is built with Astro Starlight (Node toolchain,
+# not Python). See website/README and .github/workflows/docs.yml.
 
 [project.scripts]
 bamboo = "bamboo.cli:cli"

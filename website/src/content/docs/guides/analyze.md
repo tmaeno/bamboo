@@ -1,4 +1,6 @@
-# Task Analysis
+---
+title: "Task Analysis"
+---
 
 Diagnose a failing task against the accumulated knowledge base. Where `bamboo
 investigate` co-drives a *live* investigation turn-by-turn, `bamboo analyze` is
@@ -9,7 +11,7 @@ resolution — replaying stored investigation procedures along the way when a
 known cause matches. Because it is automatic (no operator watching), `analyze` is
 strictly **read-only**: it never executes state-changing code, even from a stored
 procedure (those are surfaced as suggestions to run in `investigate`). See
-[EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+[EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
 ## Quick start
 
@@ -75,7 +77,7 @@ The structured result (`AnalysisResult`) carries: `root_cause`, `confidence`
    a stored procedure whose code would call a state-changing (`read_only=False`) tool is *not* run —
    it is skipped and surfaced as a suggestion (the explorer's tools are filtered to
    read-only, with a `ToolProxy` allow-set as the runtime backstop). See
-   [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+   [EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
 ## Known vs. novel incidents
 
@@ -87,7 +89,7 @@ The structured result (`AnalysisResult`) carries: `root_cause`, `confidence`
   draft** JSON to `--drafts-dir` (default `drafts/`) tagged `reviewed: false` with
   a review hint. Promote it into the knowledge base with the standard curation
   flow — `bamboo review-drafts` then `bamboo batch-populate` (see
-  [KNOWLEDGE_POPULATION.md](KNOWLEDGE_POPULATION.md)).
+  [KNOWLEDGE_POPULATION.md](/bamboo/guides/knowledge-population/)).
 
 ## Comparing tasks (pattern mode)
 
@@ -123,20 +125,20 @@ reads their stored graphs, it does not analyze them afresh.
 ## Inputs & prerequisites
 
 - **Task input**: `--task-id` fetches live from PanDA (needs the PanDA
-  environment set — see [PANDA_INTEGRATION.md](PANDA_INTEGRATION.md)), or
+  environment set — see [PANDA_INTEGRATION.md](/bamboo/integrations/panda-integration/)), or
   `--task-data` reads a local JSON file.
 - **Knowledge base**: analyze *queries* the graph + vector databases, so results
   are only as good as what's been populated. A single-task analyze runs against an
   empty KB but will simply find no precedent (→ novel-incident path). Populate the
-  KB first with [`bamboo populate`](KNOWLEDGE_POPULATION.md) or capture live
-  investigations with [`bamboo investigate`](INVESTIGATE.md).
+  KB first with [`bamboo populate`](/bamboo/guides/knowledge-population/) or capture live
+  investigations with [`bamboo investigate`](/bamboo/guides/investigate/).
 
 ## Posting to chat
 
 Add `--post-to-mattermost <channelID>` to also publish the analysis as a
 Mattermost card (colored by confidence). Requires the `bamboo[mattermost]` extra
 and `MATTERMOST_URL` / `MATTERMOST_TOKEN` — see
-[MATTERMOST.md](MATTERMOST.md).
+[MATTERMOST.md](/bamboo/integrations/mattermost/).
 
 ## Debugging
 

@@ -1,4 +1,6 @@
-# Development Guide
+---
+title: "Development Guide"
+---
 
 This guide covers development setup, code organization, and extension points for the Bamboo project.
 
@@ -68,7 +70,7 @@ cp "$(python -c "import importlib.resources; print(importlib.resources.files('ba
 > databases.  If the reviewer rejects the graph, `ContextEnricher` fires once to fetch
 > additional PanDA data sources (parent task, retry chain, job diagnostics, error-dialog logs)
 > and the extraction is retried with the enriched context and reviewer feedback (up to 2
-> retries total).  See [Agent Reference](AGENTS.md) for the full pipeline.
+> retries total).  See [Agent Reference](/bamboo/architecture/agents/) for the full pipeline.
 
 ### 4. Verify Setup
 
@@ -94,12 +96,12 @@ to edit for each kind of extension — read the current code there for the exact
 
 | To add… | Edit | Notes |
 |---|---|---|
-| A node or relationship type | [`bamboo/models/graph_element.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/models/graph_element.py) | Defines the `NodeType` and `RelationType` enums and node models. See [Graph Schema](SCHEMA.md) for the existing catalogue. |
+| A node or relationship type | [`bamboo/models/graph_element.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/models/graph_element.py) | Defines the `NodeType` and `RelationType` enums and node models. See [Graph Schema](/bamboo/architecture/schema/) for the existing catalogue. |
 | Extraction behaviour for a node type | [`bamboo/agents/extractors/knowledge_graph_extractor.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/agents/extractors/knowledge_graph_extractor.py) | The dispatcher that selects the active strategy and assigns node UUIDs. |
-| A new extraction **strategy** | see [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) | Register a custom extractor (`panda`, `llm`, `rule_based`, …) without touching the dispatcher. |
+| A new extraction **strategy** | see [Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) | Register a custom extractor (`panda`, `llm`, `rule_based`, …) without touching the dispatcher. |
 | Custom LLM prompts | [`bamboo/llm/prompts.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/llm/prompts.py) | Includes the extraction prompt with the canonical relationship list. |
-| Custom database queries | [`bamboo/database/backends/neo4j_backend.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/database/backends/neo4j_backend.py) | Backend implementation; the higher-level client is `bamboo/database/graph_database_client.py`. See [Database Plugin System](database-plugins/INDEX.md) to add a whole new backend. |
-| A new database backend | see [Database Plugin System](database-plugins/INDEX.md) | Plugin architecture for graph/vector backends. |
+| Custom database queries | [`bamboo/database/backends/neo4j_backend.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/database/backends/neo4j_backend.py) | Backend implementation; the higher-level client is `bamboo/database/graph_database_client.py`. See [Database Plugin System](/bamboo/database-plugins/) to add a whole new backend. |
+| A new database backend | see [Database Plugin System](/bamboo/database-plugins/) | Plugin architecture for graph/vector backends. |
 | A LangGraph workflow | [`bamboo/workflows/`](https://github.com/tmaeno/bamboo/tree/master/bamboo/workflows) | Existing workflows are the best template. |
 
 ## Testing
@@ -170,7 +172,7 @@ CI builds and pushes both images to GHCR on tags / manual dispatch — see
 `.github/workflows/build-images.yml`.
 
 For the air-gapped Apptainer batch deployment (KB/model staging on the shared
-filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](BATCH.md)**.
+filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](/bamboo/guides/batch/)**.
 
 > The legacy `docker-compose.yml` at the repo root is a dev-only convenience for
 > standing up Neo4j + Qdrant locally; it is not used for deployment.
@@ -200,4 +202,4 @@ filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](BATCH.md)*
 ## Graph Schema
 
 The knowledge graph node and relationship types have moved to a dedicated reference:
-**[Graph Schema](SCHEMA.md)**.
+**[Graph Schema](/bamboo/architecture/schema/)**.

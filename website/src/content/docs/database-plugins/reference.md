@@ -1,4 +1,6 @@
-# Database Plugin Architecture
+---
+title: "Database Plugin Architecture"
+---
 
 The Bamboo project now supports a plugin-based architecture for database backends, allowing you to easily swap between different database implementations or add new ones.
 

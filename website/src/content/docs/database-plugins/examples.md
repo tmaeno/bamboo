@@ -1,4 +1,6 @@
-# Database Plugin Examples
+---
+title: "Database Plugin Examples"
+---
 
 This document provides practical examples of using and extending the database plugin system.
 

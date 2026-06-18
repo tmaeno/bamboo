@@ -1,4 +1,6 @@
-# Batch Analysis via Container
+---
+title: "Batch Analysis via Container"
+---
 
 Run `bamboo analyze` as a **self-contained batch job** on a compute slot that has no pre-deployed services,
 and only offers non-root container execution — on either a CPU-only or a GPU queue, from one container.

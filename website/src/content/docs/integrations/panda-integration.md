@@ -1,4 +1,6 @@
-# PanDA Integration
+---
+title: "PanDA Integration"
+---
 
 Bamboo can fetch task data directly from a live **PanDA** (Production and Distributed Analysis)
 server via `pandaserver.api.v1.http_client.HttpClient`, eliminating the need to prepare a local
@@ -33,7 +35,7 @@ for authentication setup (obtaining an OIDC token or X.509 proxy).
 Additional MCP servers (via `MCP_SERVERS_CONFIG`) can bring hundreds of tools.
 Bamboo bounds the orchestration prompt automatically by relevance-retrieving the
 tools that fit the model's context budget — see
-[AGENTS.md](AGENTS.md#bounding-the-tool-list-for-large-catalogues) for the mechanism
+[AGENTS.md](/bamboo/architecture/agents/#bounding-the-tool-list-for-large-catalogues) for the mechanism
 and the `TOOL_*` / `LLM_CONTEXT_WINDOW` settings. Note that with a large catalogue,
 Qdrant + embeddings become required during `investigate`.
 

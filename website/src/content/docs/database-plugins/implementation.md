@@ -1,4 +1,6 @@
-# Database Plugin System - Implementation Summary
+---
+title: "Database Plugin System - Implementation Summary"
+---
 
 ## ✅ What Has Been Completed
 

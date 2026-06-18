@@ -1,4 +1,6 @@
-# Database Plugin System - Complete Documentation Index
+---
+title: "Database Plugin System - Complete Documentation Index"
+---
 
 ## 📚 Documentation Overview
 

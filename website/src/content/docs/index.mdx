@@ -1,0 +1,97 @@
+---
+title: Bamboo
+description: Bolstered Assistance for Managing and Building Operations and Oversight
+template: splash
+hero:
+  tagline: Bolstered Assistance for Managing and Building Operations and Oversight — agentic incident analysis for PanDA operations.
+  image:
+    file: ../../assets/bamboo.png
+  actions:
+    - text: Get Started
+      link: /bamboo/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/tmaeno/bamboo
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Explore the docs
+
+<CardGrid>
+	<LinkCard
+		title="Quick Start"
+		href="/bamboo/quickstart/"
+		description="Install Bamboo, configure databases and API keys, and run your first agent."
+	/>
+	<LinkCard
+		title="Task Analysis"
+		href="/bamboo/guides/analyze/"
+		description="bamboo analyze — diagnose a failing task against the accumulated knowledge base."
+	/>
+	<LinkCard
+		title="Co-Investigation"
+		href="/bamboo/guides/investigate/"
+		description="bamboo investigate — live, human-in-the-loop incident dialog that captures replayable procedures."
+	/>
+	<LinkCard
+		title="Knowledge Population"
+		href="/bamboo/guides/knowledge-population/"
+		description="Populate the graph and vector databases individually or in bulk."
+	/>
+	<LinkCard
+		title="PanDA Integration"
+		href="/bamboo/integrations/panda-integration/"
+		description="Fetch task and job data live from PanDA — no local JSON file required."
+	/>
+	<LinkCard
+		title="Mattermost Integration"
+		href="/bamboo/integrations/mattermost/"
+		description="The ops-facing chat frontend: drive investigate / capture / analyze from chat."
+	/>
+	<LinkCard
+		title="Agent Reference"
+		href="/bamboo/architecture/agents/"
+		description="Every agent and sub-agent — responsibilities, I/O, configuration, failure handling."
+	/>
+	<LinkCard
+		title="Database Plugins"
+		href="/bamboo/database-plugins/"
+		description="Graph + vector database plugin architecture and how to add new backends."
+	/>
+	<LinkCard
+		title="API Reference"
+		href="/bamboo/api/"
+		description="OpenAPI reference rendered with Redocly (pilot sample)."
+	/>
+</CardGrid>
+
+## Reading paths
+
+<Tabs>
+	<TabItem label="New users">
+		1. [Quick Start Guide](/bamboo/quickstart/) — set up the environment
+		2. Run `bamboo verify`
+	</TabItem>
+	<TabItem label="PanDA operators">
+		1. [Quick Start Guide](/bamboo/quickstart/) — environment setup
+		2. [PanDA Integration](/bamboo/integrations/panda-integration/) — fetch tasks directly from PanDA
+		3. [Knowledge Population](/bamboo/guides/knowledge-population/) — populate databases from live tasks or CSV batches
+		4. [Co-Investigation Mode](/bamboo/guides/investigate/) — live investigation; captured procedures auto-replay on similar incidents
+		5. [Task Analysis](/bamboo/guides/analyze/) — diagnose a failing task against the populated knowledge base
+	</TabItem>
+	<TabItem label="Ops (Mattermost)">
+		1. [Mattermost Integration](/bamboo/integrations/mattermost/) — use bamboo from chat: `investigate`, `capture`, and per-user `login` (no local install required)
+	</TabItem>
+	<TabItem label="Developers">
+		1. [Quick Start Guide](/bamboo/quickstart/) — environment setup
+		2. [Agent Reference](/bamboo/architecture/agents/) — the pipeline and each agent's role
+		3. [Graph Schema](/bamboo/architecture/schema/) — node and relationship types
+		4. [Development Guide](/bamboo/development/) — project structure, conventions, extension points
+		5. [Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) — adding extraction strategies
+		6. [Database Plugin System](/bamboo/database-plugins/) — adding database backends
+	</TabItem>
+</Tabs>

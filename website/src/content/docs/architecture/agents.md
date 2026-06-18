@@ -1,4 +1,6 @@
-# 🤖 Agent Reference
+---
+title: "Agent Reference"
+---
 
 Bamboo is built around two main pipelines, each composed of several cooperating agents.
 The **Knowledge Accumulation** pipeline learns from resolved incidents and builds the knowledge
@@ -101,9 +103,9 @@ UUID to every returned node.  Neither the accumulator nor the reasoning navigato
 extraction strategy directly — they always go through this class.
 
 **Configuration:** `EXTRACTION_STRATEGY` env var (default: `"panda"`).  See
-[Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) for adding custom strategies.
+[Extraction Strategy Plugin System](/bamboo/architecture/extraction-plugin-system/) for adding custom strategies.
 
-The default strategy (`"panda"`) is `PandaKnowledgeExtractor` — see [PanDA Integration](PANDA_INTEGRATION.md) for its input routing and canonicalisation details.
+The default strategy (`"panda"`) is `PandaKnowledgeExtractor` — see [PanDA Integration](/bamboo/integrations/panda-integration/) for its input routing and canonicalisation details.
 
 ---
 
@@ -187,7 +189,7 @@ filtered to `read_only=True` tools (`_filtered_tools`) *and* it passes
 `allowed_tools = <read_only names>` to the `ToolProxy`, which refuses any
 state-changing (`read_only=False`) call at the call site (alias-proof) — external
 PanDA *reads* are still allowed. State changes only ever happen in `investigate`'s
-interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+interactive loop. See [EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
 ### Bounding the tool list for large catalogues
 
@@ -303,7 +305,7 @@ with one or more `ExternalMcpClient` instances.
 
 A **built-in MCP client** is always included by `build_mcp_client()`.  It exposes
 system-specific tools (task data fetching, log retrieval, documentation search, source
-navigation).  See [PanDA Integration](PANDA_INTEGRATION.md) for the full tool catalogue when
+navigation).  See [PanDA Integration](/bamboo/integrations/panda-integration/) for the full tool catalogue when
 using the PanDA strategy.
 
 #### `ExternalMcpClient`
