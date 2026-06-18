@@ -21,17 +21,20 @@ The bot is **not** a Mattermost plugin and does **not** run inside Mattermost. I
 is a standalone process (`bamboo serve-mattermost`) that you run on your own host
 or container and that *connects out to* Mattermost:
 
-```
-  Mattermost server                bamboo bot process                backends
-  (run by your IT)                 (run by you)                      (your infra)
-  ┌───────────────┐   WebSocket    ┌────────────────────┐           ┌───────────┐
-  │  channels,    │◀──────────────▶│ bamboo             │──────────▶│ Neo4j     │
-  │  bot account  │   + REST API   │ serve-mattermost   │           │ Qdrant    │
-  └───────────────┘                │  (reads env/.env)  │──────────▶│ LLM API   │
-                                   └─────────┬──────────┘           │ PanDA     │
-                                             │ device-flow (OIDC)   └───────────┘
-                                             ▼
-                                            IAM
+```mermaid
+flowchart LR
+    subgraph IT["Mattermost server (run by your IT)"]
+        MM["channels, bot account"]
+    end
+    subgraph YOU["bamboo bot process (run by you)"]
+        BOT["bamboo serve-mattermost<br/>(reads env/.env)"]
+    end
+    subgraph INFRA["backends (your infra)"]
+        BE["Neo4j<br/>Qdrant<br/>LLM API<br/>PanDA"]
+    end
+    MM <-->|"WebSocket + REST API"| BOT
+    BOT --> BE
+    BOT -->|"device-flow (OIDC)"| IAM[IAM]
 ```
 
 **Configuration is read by the bot process — never sent to Mattermost.** The bot

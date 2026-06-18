@@ -778,16 +778,16 @@ User Relationships:
 
 ### Graph Example
 
-```
-User (operator) ──[performed_by]──> Action ──[affects]──> System
-                                        ↑
-                                   ──[approved_by]──> User (admin)
-
-Metric ──[signals]──> Anomaly ──[leads_to]──> Issue ──[reported_by]──> User
-   ↓
-Symptom ──[indicate]──> Cause ──[solved_by]──>     Resolution
-                           │
-                           └──[investigated_by]──> Procedure
-                           ↑
-                      Component ──[originated_from]──> System
+```mermaid
+flowchart LR
+    UO["User (operator)"] -->|performed_by| Action
+    Action -->|affects| System
+    Action -->|approved_by| UA["User (admin)"]
+    Metric -->|signals| Anomaly
+    Anomaly -->|leads_to| Issue
+    Issue -->|reported_by| User
+    Symptom -->|indicate| Cause
+    Cause -->|solved_by| Resolution
+    Cause -->|investigated_by| Procedure
+    Component -->|originated_from| Cause
 ```

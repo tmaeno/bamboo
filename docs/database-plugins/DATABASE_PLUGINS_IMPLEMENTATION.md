@@ -8,39 +8,19 @@ A complete **plugin-based architecture** for database backends has been implemen
 
 ### Core Components
 
-```
-┌─────────────────────────────────────┐
-│  Application Code (CLI, Agents)     │
-└─────────────┬───────────────────────┘
-              │
-┌─────────────▼───────────────────────┐
-│  Client Wrappers                    │
-│  • GraphDatabaseClient              │
-│  • VectorDatabaseClient             │
-└─────────────┬───────────────────────┘
-              │
-┌─────────────▼───────────────────────┐
-│  Factory & Registry (factory.py)    │
-│  • get_graph_backend()              │
-│  • get_vector_backend()             │
-│  • register_*_backend()             │
-│  • list_*_backends()                │
-└─────────────┬───────────────────────┘
-              │
-    ┌─────────┴─────────┐
-    │                   │
-┌───▼──────┐       ┌───▼──────┐
-│ Graph DB │       │ Vector DB│
-│ Backend  │       │ Backend  │
-└──────────┘       └──────────┘
-    │                   │
-    └────────┬──────────┘
-             │
-    ┌────────▼───────────┐
-    │ External Libraries │
-    │ • neo4j driver     │
-    │ • qdrant-client    │
-    └────────────────────┘
+```mermaid
+flowchart TD
+    APP["Application Code (CLI, Agents)"]
+    WRAP["Client Wrappers<br/>• GraphDatabaseClient<br/>• VectorDatabaseClient"]
+    FAC["Factory & Registry (factory.py)<br/>• get_graph_backend()<br/>• get_vector_backend()<br/>• register_*_backend()<br/>• list_*_backends()"]
+    GDB["Graph DB Backend"]
+    VDB["Vector DB Backend"]
+    LIB["External Libraries<br/>• neo4j driver<br/>• qdrant-client"]
+    APP --> WRAP --> FAC
+    FAC --> GDB
+    FAC --> VDB
+    GDB --> LIB
+    VDB --> LIB
 ```
 
 ### Files Created/Modified

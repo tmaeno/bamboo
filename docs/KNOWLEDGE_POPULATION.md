@@ -49,24 +49,17 @@ burden by:
 3. **`bamboo batch-populate`** — reading every approved draft and calling the
    standard `process_knowledge` pipeline to store graphs and vectors.
 
-```
-CSV of tasks
-     │
-     ▼
-bamboo seed-drafts
-     │
-     ├─── DB-covered ──────────────────────────► skip (already in DBs)
-     ├─── Approved-matched ────────────────────► drafts/ (pre-filled, quick check)
-     └─── New ─────────────────────────────────► drafts/ (LLM draft, full review)
-                                                         │
-                                          bamboo review-drafts
-                                          (or edit JSON by hand)
-                                                         │
-                                                         ▼
-                                              bamboo batch-populate
-                                                         │
-                                                         ├──► graph + vector databases
-                                                         └──► approved_email_drafts/
+```mermaid
+flowchart TD
+    CSV[CSV of tasks] --> SEED[bamboo seed-drafts]
+    SEED -->|DB-covered| SKIP["skip (already in DBs)"]
+    SEED -->|Approved-matched| D1["drafts/ (pre-filled, quick check)"]
+    SEED -->|New| D2["drafts/ (LLM draft, full review)"]
+    D1 --> REVIEW["bamboo review-drafts<br/>(or edit JSON by hand)"]
+    D2 --> REVIEW
+    REVIEW --> POP[bamboo batch-populate]
+    POP --> DBS[graph + vector databases]
+    POP --> APPROVED["approved_email_drafts/"]
 ```
 
 ---

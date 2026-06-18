@@ -163,14 +163,13 @@ EXTRACTION_STRATEGY=mysystem
 
 ## Architecture
 
-```
-KnowledgeGraphExtractor
-    │
-    └─ ExtractionStrategy  (resolved once at construction)
-            ├─ prefetch_hints()      → doc_hints → passed to extract()
-            ├─ extract()             → KnowledgeGraph
-            ├─ source_navigator()    → ContextEnricher(source_navigator=...)
-            └─ builtin_mcp_clients() → build_mcp_client() prepends these
+```mermaid
+flowchart TD
+    KGE[KnowledgeGraphExtractor] --> ES["ExtractionStrategy (resolved once at construction)"]
+    ES --> PH["prefetch_hints() → doc_hints → passed to extract()"]
+    ES --> EX["extract() → KnowledgeGraph"]
+    ES --> SN["source_navigator() → ContextEnricher(source_navigator=...)"]
+    ES --> BMC["builtin_mcp_clients() → build_mcp_client() prepends these"]
 ```
 
 ## Factory Functions

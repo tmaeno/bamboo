@@ -10,59 +10,50 @@ includes an optional quality-gate loop.
 
 ## Pipeline Overview
 
+```mermaid
+flowchart TD
+    IN[incident data] --> KA[KnowledgeAccumulator]
+    KA --> KGE[KnowledgeGraphExtractor]
+    KGE --> ES[ExtractionStrategy]
+    ES --> PH["prefetch_hints()"]
+    ES --> EX["extract()"]
+    KA --> KR[KnowledgeReviewer]
+    KA --> CE[ContextEnricher]
+    CE --> G1["gap analysis (LLM call 1)"]
+    CE --> G2["orchestration code (LLM call 2)"]
+    CE --> G3[sandboxed code execution]
+    CE --> G4["source_navigator()"]
+    CE --> MCP[MCP client layer]
+    MCP --> M1["builtin clients (strategy)"]
+    MCP --> M2["ExternalMcpClient (HTTP)"]
+    MCP --> M3["StdioMcpClient (stdio)"]
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Knowledge Accumulation                                          │
-│                                                                  │
-│  incident data ──► KnowledgeAccumulator                          │
-│                         │                                        │
-│                         ├─ KnowledgeGraphExtractor               │
-│                         │      └─ ExtractionStrategy             │
-│                         │            ├─ prefetch_hints()         │
-│                         │            └─ extract()                │
-│                         │                                        │
-│                         ├─ KnowledgeReviewer                     │
-│                         │                                        │
-│                         └─ ContextEnricher                       │
-│                                ├─ gap analysis (LLM call 1)      │
-│                                ├─ orchestration code (LLM call 2)│
-│                                ├─ sandboxed code execution       │
-│                                ├─ source_navigator()             │
-│                                └─ MCP client layer               │
-│                                     ├─ builtin clients (strategy)│
-│                                     ├─ ExternalMcpClient (HTTP)  │
-│                                     └─ StdioMcpClient  (stdio)   │
-└──────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────┐
-│  Reasoning Navigation                                                │
-│                                                                      │
-│  task data ──► ReasoningNavigator                                    │
-│                    │                                                 │
-│                    ├─ KnowledgeGraphExtractor  (read-only)           │
-│                    │      └─ ExtractionStrategy                      │
-│                    │            ├─ prefetch_hints()                  │
-│                    │            └─ extract()                         │
-│                    │                                                 │
-│                    ├─ Exploratory investigation  (low-confidence)    │
-│                    │      └─ ContextEnricher (exploratory mode)      │
-│                    │                                                 │
-│                    └─ Procedure-driven investigation  (Phase 2)      │
-│                           └─ ContextEnricher (procedure mode)        │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    TD2[task data] --> RN[ReasoningNavigator]
+    RN --> KGE2["KnowledgeGraphExtractor (read-only)"]
+    KGE2 --> ES2[ExtractionStrategy]
+    ES2 --> PH2["prefetch_hints()"]
+    ES2 --> EX2["extract()"]
+    RN --> EXP["Exploratory investigation (low-confidence)"]
+    EXP --> CE1["ContextEnricher (exploratory mode)"]
+    RN --> PROC["Procedure-driven investigation (Phase 2)"]
+    PROC --> CE2["ContextEnricher (procedure mode)"]
 ```
 
 The **review–explore loop** inside `KnowledgeAccumulator` always runs:
 
-```
-extract → KnowledgeReviewer
-              │ approved          → store
-              │ rejected (pass 0) → ContextEnricher
-              │                          │ code+gaps OK → execute code → re-extract
-              │                          │ nothing to do → empty result → re-extract
-              │                          │ gen failure  → raise ExplorationError (fail-hard)
-              │                     → KnowledgeReviewer
-              │ rejected (pass N) → store best result (with warning)
+```mermaid
+flowchart TD
+    EX["extract()"] --> KR[KnowledgeReviewer]
+    KR -->|approved| STORE[store]
+    KR -->|"rejected (pass 0)"| CE[ContextEnricher]
+    KR -->|"rejected (pass N)"| BEST["store best result (with warning)"]
+    CE -->|"code + gaps OK"| RUN["execute code → re-extract"]
+    CE -->|nothing to do| EMPTY["empty result → re-extract"]
+    CE -->|gen failure| ERR["raise ExplorationError (fail-hard)"]
+    RUN --> KR
+    EMPTY --> KR
 ```
 
 ---

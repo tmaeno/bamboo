@@ -235,15 +235,16 @@ The Reasoning Agent analyzes tasks in these steps:
 Both agents are implemented as LangGraph workflows:
 
 ### Knowledge Workflow
-```
-[Start] → [Extract Knowledge] → [Validate] → [End]
+```mermaid
+flowchart LR
+    A[Start] --> B[Extract Knowledge] --> C[Validate] --> D[End]
 ```
 
 ### Reasoning Workflow
-```
-[Start] → [Analyze Task] → [Human Review] → [Send/Revise]
-                              ↑                    |
-                              └────────────────────┘
+```mermaid
+flowchart LR
+    A[Start] --> B[Analyze Task] --> C[Human Review] --> D[Send/Revise]
+    D --> C
 ```
 
 ## Sub-Agents
@@ -264,13 +265,15 @@ The system includes specialized sub-agents:
 
 The core knowledge graph schema used by the incident-analysis pipeline:
 
-```
-Symptom       -[indicate]->        Cause  -[solved_by]->      Resolution
-Environment   -[associated_with]-> Cause
-Task_Feature  -[contribute_to]->   Cause
-Task_Context  -[contribute_to]->   Cause
-Component     -[originated_from]-> Cause
-Cause         -[investigated_by]-> Procedure
+```mermaid
+flowchart LR
+    Symptom -->|indicate| Cause
+    Cause -->|solved_by| Resolution
+    Environment -->|associated_with| Cause
+    Task_Feature -->|contribute_to| Cause
+    Task_Context -->|contribute_to| Cause
+    Component -->|originated_from| Cause
+    Cause -->|investigated_by| Procedure
 ```
 
 ### Core Node Types

@@ -562,7 +562,7 @@ Node types to extract:
   semantic similarity search across incidents.  Do NOT dump the entire log.
 
 Relationships to emit (between extracted nodes only):
-- Component -[originated_from]-> Symptom  (when the component is clearly the source)
+- Component -[originated_from]-> Cause  (when the component is clearly the source)
 - Task_Context -[contribute_to]-> Symptom  (when the context directly precedes or explains a symptom)
 
 Canonicalization:

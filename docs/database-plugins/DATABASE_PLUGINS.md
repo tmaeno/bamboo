@@ -12,39 +12,19 @@ The Bamboo project now supports a plugin-based architecture for database backend
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Application Code (CLI, Workflows, Agents)              │
-│  Uses GraphDatabaseClient & VectorDatabaseClient         │
-└─────────────────┬───────────────────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────────────────┐
-│  Client Wrappers (Factory Pattern)                       │
-│  - GraphDatabaseClient                                   │
-│  - VectorDatabaseClient                                  │
-└─────────────────┬───────────────────────────────────────┘
-                  │
-┌─────────────────▼───────────────────────────────────────┐
-│  Factory & Registry                                      │
-│  - get_graph_backend()                                   │
-│  - get_vector_backend()                                  │
-│  - Backend registration                                  │
-└─────────────────┬───────────────────────────────────────┘
-                  │
-        ┌─────────┴─────────┐
-        │                   │
-┌───────▼──────┐    ┌──────▼────────┐
-│ Graph DB     │    │ Vector DB      │
-│ Backend      │    │ Backend        │
-└──────────────┘    └────────────────┘
-        │                   │
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼──────────────┐
-        │ Database Implementations│
-        │ - Graph DB Driver      │
-        │ - Vector DB SDK        │
-        └────────────────────────┘
+```mermaid
+flowchart TD
+    APP["Application Code (CLI, Workflows, Agents)<br/>Uses GraphDatabaseClient & VectorDatabaseClient"]
+    WRAP["Client Wrappers (Factory Pattern)<br/>- GraphDatabaseClient<br/>- VectorDatabaseClient"]
+    FAC["Factory & Registry<br/>- get_graph_backend()<br/>- get_vector_backend()<br/>- Backend registration"]
+    GDB["Graph DB Backend"]
+    VDB["Vector DB Backend"]
+    IMPL["Database Implementations<br/>- Graph DB Driver<br/>- Vector DB SDK"]
+    APP --> WRAP --> FAC
+    FAC --> GDB
+    FAC --> VDB
+    GDB --> IMPL
+    VDB --> IMPL
 ```
 
 ## Configuration
