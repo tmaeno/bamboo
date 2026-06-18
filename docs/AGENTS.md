@@ -229,6 +229,15 @@ bounds it:
   vectors are namespaced by `config_namespace` (hash of `MCP_SERVERS_CONFIG` +
   provider) so a shared Qdrant isn't thrashed by differently-configured instances.
 
+**Tuning (`.env`):**
+
+```env
+LLM_CONTEXT_WINDOW=0          # 0 = auto-detect (Ollama: served window from /api/ps; cloud: a constant)
+TOOL_BUDGET_MARGIN=1024       # tokens reserved for the response + headroom
+TOOL_MAX_FULL_SCHEMAS=25      # primary knob: max tools shown with a full schema
+#TOOL_RETRIEVAL_CANDIDATE_K=0 # advanced: ranking pool; 0 = max(40, 3×the cap)
+```
+
 **Reusable procedures as tools** (`bamboo/agents/procedure_tools.py`): a captured
 `ProcedureNode` is identified by a **tool-call signature** (`procedure_signature` /
 `procedure_tool_name`) — the set of `tools.<name>` its code calls — which is its

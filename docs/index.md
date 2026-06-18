@@ -52,6 +52,9 @@ investigate / analyze / populate / Mattermost.
 ### 🤖 [Agent Reference](AGENTS.md)
 All agents and sub-agents — responsibilities, inputs/outputs, configuration, and failure handling for `KnowledgeAccumulator`, `KnowledgeReviewer`, `ContextEnricher`, `ReasoningNavigator`, and their components.
 
+### 🕸️ [Graph Schema](SCHEMA.md)
+The knowledge graph schema — core node and relationship types used by the incident-analysis pipeline, plus the extended catalogue for future extraction strategies.
+
 ### 👨‍💻 [Development Guide](DEVELOPMENT.md)
 Development setup, code style, extension points (agents, node types, relationships, prompts), testing, and deployment.
 
@@ -82,6 +85,7 @@ Development setup, code style, extension points (agents, node types, relationshi
 ### Developers
 1. [Quick Start Guide](QUICKSTART.md) — environment setup
 2. [Agent Reference](AGENTS.md) — understand the pipeline and each agent's role
-3. [Development Guide](DEVELOPMENT.md) — architecture and code conventions
-4. [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) — adding extraction strategies
-5. [Database Plugin System](database-plugins/INDEX.md) — adding database backends
+3. [Graph Schema](SCHEMA.md) — node and relationship types
+4. [Development Guide](DEVELOPMENT.md) — project structure, code conventions, extension points
+5. [Extraction Strategy Plugin System](EXTRACTION_PLUGIN_SYSTEM.md) — adding extraction strategies
+6. [Database Plugin System](database-plugins/INDEX.md) — adding database backends

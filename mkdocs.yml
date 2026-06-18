@@ -8,6 +8,8 @@ edit_uri: edit/master/docs/
 
 theme:
   name: material
+  logo: assets/bamboo.png
+  favicon: assets/bamboo.png
   icon:
     repo: fontawesome/brands/github
   features:
@@ -76,6 +78,7 @@ nav:
       - Mattermost: MATTERMOST.md
   - Architecture:
       - Agent Reference: AGENTS.md
+      - Graph Schema: SCHEMA.md
       - Execution Trust: EXECUTION_TRUST.md
       - Extraction Plugins: EXTRACTION_PLUGIN_SYSTEM.md
   - Database Plugins:

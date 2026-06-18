@@ -21,8 +21,10 @@ source .venv/bin/activate
 # Install the package
 pip install .
 
-# For development (includes pytest, black, ruff, mypy)
-pip install ".[dev]"
+# For development — editable install with dev tools (pytest, black, ruff, mypy).
+# Use this (not the plain install above) if you intend to run the test suite;
+# see the Development Guide.
+pip install -e ".[dev]"
 ```
 
 ### 2. Verify the Installation
@@ -97,30 +99,10 @@ EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL
 HF_TOKEN=
 ```
 
-### Tool selection for large MCP catalogues
-
-When external MCP servers add up to hundreds of tools, the orchestration tool list is
-bounded two ways: a **truncation backstop** (it must fit the model's context) and a
-**relevance cap** (only the most relevant tools get full JSON schemas even when the
-whole catalogue fits — too many hurts selection accuracy and cost). Below both limits
-nothing changes; otherwise the relevant tools are retrieved (reusing Qdrant + the
-configured embeddings) and the rest shown compact or omitted. Tune via:
-
-```env
-# Model context window in tokens. 0 = auto-detect: Ollama reads the served window
-# from /api/ps; OpenAI/Anthropic use a built-in constant. Set a value to override.
-LLM_CONTEXT_WINDOW=0
-TOOL_BUDGET_MARGIN=1024          # tokens reserved for the response + headroom
-TOOL_MAX_FULL_SCHEMAS=25         # primary knob: max tools shown with a full schema
-#TOOL_RETRIEVAL_CANDIDATE_K=0    # advanced: ranking pool; 0 = max(40, 3×the cap)
-```
-
-Tool vectors live in two sections of the existing Qdrant collection
-(`ToolCatalogue`, `ProcedureTriggers`), namespaced per `MCP_SERVERS_CONFIG`+provider
-so multiple bamboo instances can share one store. With a large catalogue, Qdrant +
-embeddings become **required** during `investigate` (the turn aborts with a clear
-message if the store is unreachable while over budget).
-
+> **Many external MCP servers?** When configured MCP servers add up to hundreds of tools, the
+> orchestration tool list is budgeted (a truncation backstop plus a relevance cap) and tunable via
+> `LLM_CONTEXT_WINDOW` / `TOOL_MAX_FULL_SCHEMAS` and related settings. See
+> [Agent Reference → Bounding the tool list for large catalogues](AGENTS.md).
 
 > **Contributing?** If you are working inside the project source tree and haven't installed yet, you can also run `python verify_installation.py` from the project root as a fallback.
 
@@ -207,157 +189,6 @@ The interactive mode provides:
 - Knowledge graph querying
 - Human-in-the-loop review
 
-## Architecture Overview
-
-### Knowledge Extraction Agent
-
-The Knowledge Extraction Agent processes input data in several steps:
-
-1. **Extraction**: Uses LLM to extract structured graph from unstructured data
-2. **Canonicalization**: Normalizes node names to avoid duplicates
-3. **Graph Storage**: Stores nodes and relationships in the graph database
-4. **Summarization**: Generates summary using LLM
-5. **Vector Storage**: Stores summary and key insights in the vector database
-
-### Reasoning Agent
-
-The Reasoning Agent analyzes tasks in these steps:
-
-1. **Feature Extraction**: Extracts key features from task data
-2. **Graph Query**: Queries the graph database for matching causes and resolutions
-3. **Vector Search**: Finds similar cases in the vector database
-4. **Analysis**: Uses LLM to determine root cause
-5. **Email Generation**: Creates human-readable explanation
-6. **Human Review**: Allows operator to review and provide feedback
-
-## LangGraph Workflows
-
-Both agents are implemented as LangGraph workflows:
-
-### Knowledge Workflow
-```mermaid
-flowchart LR
-    A[Start] --> B[Extract Knowledge] --> C[Validate] --> D[End]
-```
-
-### Reasoning Workflow
-```mermaid
-flowchart LR
-    A[Start] --> B[Analyze Task] --> C[Human Review] --> D[Send/Revise]
-    D --> C
-```
-
-## Sub-Agents
-
-The system includes specialized sub-agents:
-
-### In Knowledge Accumulation Agent:
-- **Knowledge Extraction** - Extracts knowledge graph from structured and unstructured data
-- **Graph Summarization** - Summarizes graph data for quick insights
-- **Node Canonicalization** - Transforms diverse node data into a canonical format
-- **Feature Classification** - Classifies node features for better reasoning
-
-### In Reasoning Navigation Agent:
-- **Knowledge Extraction** - Extracts features from task data for querying
-- **Output Synthesis** - Synthesizes outputs from various agents into coherent responses
-
-## Graph Schema
-
-The core knowledge graph schema used by the incident-analysis pipeline:
-
-```mermaid
-flowchart LR
-    Symptom -->|indicate| Cause
-    Cause -->|solved_by| Resolution
-    Environment -->|associated_with| Cause
-    Task_Feature -->|contribute_to| Cause
-    Task_Context -->|contribute_to| Cause
-    Component -->|originated_from| Cause
-    Cause -->|investigated_by| Procedure
-```
-
-### Core Node Types
-| Node | Description |
-|------|-------------|
-| `Symptom` | Observed failure class (e.g. error message category) |
-| `Cause` | Root cause of the incident |
-| `Resolution` | Solution or fix applied |
-| `Procedure` | Investigation strategy for a cause type, extracted from email threads |
-| `Environment` | External factor contributing to the cause (e.g. OS, runtime version) |
-| `Task_Feature` | Discrete task *configuration* attribute stored as `attribute=value` (e.g. `coreCount=8`) |
-| `Component` | System component where the cause originated |
-| `Task_Context` | Free-form prose context — stored in vector database only, not in graph |
-
-### Core Relationships
-| Relationship | From → To | Description |
-|---|---|---|
-| `indicate` | Symptom → Cause | Symptom points to a root cause |
-| `solved_by` | Cause → Resolution | Cause is resolved by a resolution |
-| `investigated_by` | Cause → Procedure | Cause is investigated by a procedure |
-| `contribute_to` | Task_Feature / Task_Context → Cause | Feature or context contributes to a cause |
-| `originated_from` | Component → Cause | Cause originated in a component |
-| `associated_with` | Environment → Cause | Cause associated with an external factor |
-
-### Log-level distinction
-
-Task-level logs from orchestration services (JEDI, Harvester, …) are accepted as `task_logs`, keyed by source name. Each source is filtered and analysed by the LLM independently; every extracted node is tagged with `log_source` in its metadata.
-
-> Extended node types (Metric, Anomaly, Issue, System, Pattern, Optimization, Event, Action, Dependency, User) and relationships are available for future extraction strategies.
-
-## Customization
-
-### Adding Custom Node Types
-
-Edit `bamboo/models/graph.py` to add new node types:
-
-```python
-class CustomNode(BaseNode):
-    node_type: NodeType = NodeType.CUSTOM
-    custom_field: str
-```
-
-### Custom LLM Prompts
-
-Edit `bamboo/llm/prompts.py` to customize prompts:
-
-```python
-CUSTOM_PROMPT = """
-Your custom prompt here...
-{variable_placeholder}
-"""
-```
-
-### Custom Database Queries
-
-Extend the graph database client in `bamboo/database/backends/neo4j_backend.py`:
-
-```python
-async def custom_query(self, params):
-    async with self.driver.session() as session:
-        query = "MATCH (n) WHERE ... RETURN n"
-        result = await session.run(query, **params)
-        return await result.values()
-```
-
-## Testing
-
-The `tests/` directory is part of the **source tree**, not the installed package, so tests must always be run from the **project root** with an editable install:
-
-```bash
-# 1. Clone / cd into the source tree
-cd /path/to/bamboo
-
-# 2. Install in editable mode with dev dependencies
-pip install -e ".[dev]"
-
-# 3. Run tests
-pytest
-```
-
-`pytest` with no arguments reads `pyproject.toml` from the current directory, which sets `testpaths = ["tests"]` and `asyncio_mode = "auto"`. Running `pytest tests/ -v` from any other directory will fail with `file or directory not found: tests/`.
-
-Note: Some tests require actual API keys and database connections.
-
 ## Troubleshooting
 
 ### Database Connection Issues
@@ -392,18 +223,6 @@ print('embeddings_api_key  :', 'set' if s.effective_embeddings_api_key else 'MIS
 
 # Test that the LLM client can be constructed (does not make a network call)
 python -c "from bamboo.llm.llm_client import get_llm; print(get_llm())"
-
-# Test a real API call (requires a valid key and network access)
-python -c "
-import asyncio
-from bamboo.llm.llm_client import get_llm
-from langchain_core.messages import HumanMessage
-async def test():
-    llm = get_llm()
-    response = await llm.ainvoke([HumanMessage(content='Say hello.')])
-    print('LLM response:', response.content[:80])
-asyncio.run(test())
-"
 ```
 
 Common errors:
@@ -428,6 +247,14 @@ pip install .
 # Or in editable/development mode
 pip install -e .
 ```
+
+## Learn more
+
+- **Architecture, agents, and MCP tool budgeting** → [Agent Reference](AGENTS.md)
+- **Graph schema** (node & relationship types) → [Graph Schema](SCHEMA.md)
+- **Extending Bamboo** (custom node types, queries, prompts), testing, and deployment → [Development Guide](DEVELOPMENT.md)
+- **Fetching tasks from PanDA** → [PanDA Integration](PANDA_INTEGRATION.md)
+- **Live human-in-the-loop investigation** → [Co-Investigation Mode](INVESTIGATE.md)
 
 ## Next Steps
 
