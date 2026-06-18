@@ -26,7 +26,7 @@ An intelligent multi-agent AI framework for system automation and operations, le
 
 ## LLM-Driven Pipelines and Sub-Agents
 
-See [Agents](docs/AGENTS.md) for the full agent reference — responsibilities, inputs/outputs, configuration, and failure handling for every agent in the knowledge accumulation and reasoning navigation pipelines.
+See [Agents](website/src/content/docs/architecture/agents.md) for the full agent reference — responsibilities, inputs/outputs, configuration, and failure handling for every agent in the knowledge accumulation and reasoning navigation pipelines.
 
 ## Agents to Come
 - **Automation Agent** - Plans and executes operational workflows
@@ -51,14 +51,22 @@ docker-compose up -d
 bamboo interactive
 ```
 
-For detailed setup: see [Quick Start](docs/QUICKSTART.md).
+For detailed setup: see [Quick Start](website/src/content/docs/quickstart.md).
 
 
 ## Documentation
 
 📖 **[Read the documentation site](https://tmaeno.github.io/bamboo/)** — full index, navigation, and search.
 
-Or browse the [docs source](docs/index.md) for the index and recommended reading paths.
+The docs are an [Astro Starlight](https://starlight.astro.build) site under [`website/`](website/).
+To work on them locally:
+
+```bash
+cd website
+npm install
+npm run dev      # local dev server with live reload
+npm run build    # production build (also validates links + generates the OpenAPI reference)
+```
 
 ## License
 

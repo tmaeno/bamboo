@@ -1,4 +1,6 @@
-# Graph Schema
+---
+title: "Graph Schema"
+---
 
 The knowledge graph schema used by the incident-analysis pipeline. Node and relationship
 types are defined in `bamboo/models/graph_element.py` (`NodeType` and `RelationType`).

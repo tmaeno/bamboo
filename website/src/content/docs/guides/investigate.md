@@ -1,4 +1,6 @@
-# Co-Investigation Mode
+---
+title: "Co-Investigation Mode"
+---
 
 Live, human-driven dialog for investigating an ongoing incident. Where `bamboo populate` ingests a *retrospective* (the investigation already happened, captured as an email), `bamboo investigate` co-drives a *live* investigation turn-by-turn with a human, capturing each step as executable orchestration code that future analyze runs can re-execute deterministically.
 
@@ -89,9 +91,9 @@ Review — [y] run once / [a] auto-run / [k] always ask / [edit] / [N] reject: a
 
 Each tool turn produces **one orchestration block** — a small async Python function body that calls one or more MCP tools. When the session commits, each block becomes a `Procedure` node with the source code stored on `metadata.orchestration_code` along with `code_summary`, `external_access` (whether the code hits PanDA), and the per-incident `trigger_signals`.
 
-A procedure is identified by a **stable tool-call signature** — the set of tools its code calls — rather than the free-text strategy name, so the *same investigation step* captured under different phrasings (or different causes) dedups to one node (the cause is carried by an edge, and reuse frequency accumulates across causes). Approved, **non-trivial (≥2-tool), read-only** procedures are then offered back to the planner as reusable `proc__…` tools: in a later session the planner can call one to **reuse** proven prior work instead of re-deriving the logic. (Reuse is still reviewed per turn like any code — no auto-run yet.) See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+A procedure is identified by a **stable tool-call signature** — the set of tools its code calls — rather than the free-text strategy name, so the *same investigation step* captured under different phrasings (or different causes) dedups to one node (the cause is carried by an edge, and reuse frequency accumulates across causes). Approved, **non-trivial (≥2-tool), read-only** procedures are then offered back to the planner as reusable `proc__…` tools: in a later session the planner can call one to **reuse** proven prior work instead of re-deriving the logic. (Reuse is still reviewed per turn like any code — no auto-run yet.) See [EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
-When `bamboo analyze` later encounters a similar task and Phase 2 retrieves the Procedure for the matched Cause, it **replays the stored code** — the exact bytes that worked last time run this time, more reproducibly than regenerating from a description. But `analyze` is an **automatic, read-only** phase (no operator watching), so a stored procedure whose code would call a state-changing (`read_only=False`) tool is **not** replayed there — it is skipped and surfaced as a *suggestion* to run in the interactive `investigate` loop. External PanDA *reads* replay fine; state changes only ever happen inside the interactive loop. See [EXECUTION_TRUST.md](EXECUTION_TRUST.md).
+When `bamboo analyze` later encounters a similar task and Phase 2 retrieves the Procedure for the matched Cause, it **replays the stored code** — the exact bytes that worked last time run this time, more reproducibly than regenerating from a description. But `analyze` is an **automatic, read-only** phase (no operator watching), so a stored procedure whose code would call a state-changing (`read_only=False`) tool is **not** replayed there — it is skipped and surfaced as a *suggestion* to run in the interactive `investigate` loop. External PanDA *reads* replay fine; state changes only ever happen inside the interactive loop. See [EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/).
 
 **Tool selection for large catalogues.** When many MCP tools are configured the
 planner's prompt is **budget-gated**: it shows the most relevant tools (with full
@@ -101,13 +103,13 @@ human-approved turn is indexed as a `(prompt → tools)` example, so similar fut
 prompts surface the tools that worked (a fresh page is shown if you decline because
 nothing fit). If the catalogue is over budget and the vector store is unreachable,
 the turn aborts with a clear message rather than silently truncating. See
-[AGENTS.md](AGENTS.md) ("Bounding the tool list") and
-[EXECUTION_TRUST.md](EXECUTION_TRUST.md) (selection never changes what code may run).
+[AGENTS.md](/bamboo/architecture/agents/) ("Bounding the tool list") and
+[EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/) (selection never changes what code may run).
 
 ## Safety model
 
 The full model — including the unattended (`analyze`/startup) read-only boundary — is in
-[EXECUTION_TRUST.md](EXECUTION_TRUST.md). In the interactive loop:
+[EXECUTION_TRUST.md](/bamboo/architecture/execution-trust/). In the interactive loop:
 
 - **Every new code block is reviewed before it runs** — the proposed code + summary + trigger signals are shown, regardless of whether it only reads or changes state (a read is *not* a free pass). You choose a per-code policy: `y` runs it once; `a` runs it and **auto-runs** the same code for the rest of the session without prompting; `k` runs it but keeps asking each time; `edit` opens it in `$EDITOR`; `N` rejects.
 - **Two auto-run scopes.** For ad-hoc/raw-tool code, `a` is **session-scoped**, keyed on the exact (whitespace-normalized) code. When the turn *reuses* a saved procedure (`proc__…` tool), `a` instead grants that procedure **durable, cross-session** auto-run (`ProcedureNode.metadata.auto_run`, per-deployment); a later turn that calls only durably-granted procedures runs with no prompt. Durable auto-run is **read-only by default** — state-changing procedures require `--allow-mutating-autorun` (interactive loop only). `/approvals` lists both; `/revoke` clears them.

@@ -1,4 +1,6 @@
-# Code-Execution Trust Model
+---
+title: "Code-Execution Trust Model"
+---
 
 Bamboo's agents run **LLM-generated** (and previously **captured**) Python orchestration code that
 calls MCP tools — some of which mutate PanDA. This document is the single source of truth for *when
@@ -28,7 +30,7 @@ Every `McpTool` carries two **orthogonal** flags (see `bamboo/mcp/base.py`):
 ## Tool selection ≠ execution authorization
 
 For large MCP catalogues, `investigate`/`explore` may show the LLM only a
-*relevance-filtered subset* of tools in the prompt (see [AGENTS.md](AGENTS.md),
+*relevance-filtered subset* of tools in the prompt (see [AGENTS.md](/bamboo/architecture/agents/),
 "Bounding the tool list"). This is a **prompt-budget optimization only** and is
 fully decoupled from this trust model: the `ToolProxy` allow-set — not what the
 prompt happens to list — is the execution boundary. Selecting fewer tools never
@@ -163,7 +165,7 @@ visibility only, never what is allowed to run.
 
 (Distinct from the bot's *launch* flag `serve-mattermost -v`, which is a server-side knob — full
 DEBUG to the console/log for the whole process, not the per-command Mattermost reply; see
-[MATTERMOST.md](MATTERMOST.md). It too only affects visibility.)
+[MATTERMOST.md](/bamboo/integrations/mattermost/). It too only affects visibility.)
 
 ## Where this is implemented
 

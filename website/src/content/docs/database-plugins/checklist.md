@@ -1,4 +1,6 @@
-# Database Plugin System - Final Checklist
+---
+title: "Database Plugin System - Final Checklist"
+---
 
 ## ✅ Implementation Checklist
 

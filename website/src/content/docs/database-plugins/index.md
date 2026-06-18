@@ -1,24 +1,26 @@
-# Database Plugin Documentation
+---
+title: "Database Plugin Documentation"
+---
 
 This directory contains comprehensive documentation for the Bamboo database plugin system.
 
 ## Quick Navigation
 
 ### Getting Started (5 minutes)
-- **[Quick Reference Guide](DATABASE_PLUGINS_QUICK_REFERENCE.md)** - Fast introduction to the plugin system
+- **[Quick Reference Guide](/bamboo/database-plugins/quick-reference/)** - Fast introduction to the plugin system
 
 ### Complete Documentation (30 minutes)
-- **[Full Technical Reference](DATABASE_PLUGINS.md)** - Comprehensive architecture and implementation guide
+- **[Full Technical Reference](/bamboo/database-plugins/reference/)** - Comprehensive architecture and implementation guide
 
 ### Learning by Example (20 minutes)
-- **[Practical Examples](DATABASE_PLUGINS_EXAMPLES.md)** - Working code examples and patterns
+- **[Practical Examples](/bamboo/database-plugins/examples/)** - Working code examples and patterns
 
 ### Understanding the Design
-- **[Implementation Details](DATABASE_PLUGINS_IMPLEMENTATION.md)** - What was built and why
-- **[Navigation Guide](DATABASE_PLUGINS_INDEX.md)** - Cross-referenced index of all topics
+- **[Implementation Details](/bamboo/database-plugins/implementation/)** - What was built and why
+- **[Navigation Guide](/bamboo/database-plugins/topic-index/)** - Cross-referenced index of all topics
 
 ### Verification & Status
-- **[Final Checklist](DATABASE_PLUGINS_FINAL_CHECKLIST.md)** - Implementation verification and quality metrics
+- **[Final Checklist](/bamboo/database-plugins/checklist/)** - Implementation verification and quality metrics
 
 ## File Organization
 
@@ -63,6 +65,6 @@ The plugin system enables:
 
 ---
 
-**Start Here:** Read [DATABASE_PLUGINS_QUICK_REFERENCE.md](DATABASE_PLUGINS_QUICK_REFERENCE.md)
+**Start Here:** Read [DATABASE_PLUGINS_QUICK_REFERENCE.md](/bamboo/database-plugins/quick-reference/)
 
 

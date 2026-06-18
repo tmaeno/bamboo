@@ -1,4 +1,6 @@
-# Database Backend Plugin System - Quick Reference
+---
+title: "Database Backend Plugin System - Quick Reference"
+---
 
 ## 🎯 Overview
 
