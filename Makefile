@@ -1,4 +1,4 @@
-.PHONY: help install dev-install test lint format clean docker-up docker-down
+.PHONY: help install dev-install test lint format clean docker-up docker-down docs-install docs-serve docs-build
 
 help:
 	@echo "Bamboo - Bolstered Assistance for Managing and Building Operations and Oversight"
@@ -12,6 +12,9 @@ help:
 	@echo "  make clean        - Clean up generated files"
 	@echo "  make docker-up    - Start Docker services (Neo4j, Qdrant)"
 	@echo "  make docker-down  - Stop Docker services"
+	@echo "  make docs-install - Install documentation dependencies"
+	@echo "  make docs-serve   - Serve the docs locally with live reload"
+	@echo "  make docs-build   - Build the docs site (strict)"
 
 install:
 	pip install -e .
@@ -45,4 +48,13 @@ docker-up:
 
 docker-down:
 	docker-compose down
+
+docs-install:
+	pip install -e ".[docs]"
+
+docs-serve:
+	mkdocs serve
+
+docs-build:
+	mkdocs build --strict
 

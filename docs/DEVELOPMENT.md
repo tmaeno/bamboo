@@ -663,7 +663,7 @@ def get_cached_config(key: str) -> Any:
 
 ### Container images
 
-The repository ships one multi-stage [`Dockerfile`](../Dockerfile) with two targets:
+The repository ships one multi-stage `Dockerfile` with two targets:
 
 - **`bamboo`** — the application image, configured entirely by environment variables
   (`NEO4J_URI`, `QDRANT_URL`, `LLM_PROVIDER` + key or `OLLAMA_BASE_URL`,
@@ -680,7 +680,7 @@ The repository ships one multi-stage [`Dockerfile`](../Dockerfile) with two targ
   converted to an Apptainer `.sif` for offline batch execution.
 
 CI builds and pushes both images to GHCR on tags / manual dispatch — see
-[`.github/workflows/build-images.yml`](../.github/workflows/build-images.yml).
+`.github/workflows/build-images.yml`.
 
 For the air-gapped Apptainer batch deployment (KB/model staging on the shared
 filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](BATCH.md)**.

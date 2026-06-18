@@ -1,0 +1,89 @@
+site_name: Bamboo
+site_description: Bolstered Assistance for Managing and Building Operations and Oversight
+site_url: https://tmaeno.github.io/bamboo/
+
+repo_url: https://github.com/tmaeno/bamboo
+repo_name: tmaeno/bamboo
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+validation:
+  links:
+    unrecognized_links: warn
+    anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting Started: QUICKSTART.md
+  - Guides:
+      - Task Analysis: ANALYZE.md
+      - Co-Investigation: INVESTIGATE.md
+      - Knowledge Population: KNOWLEDGE_POPULATION.md
+      - Batch Analysis: BATCH.md
+  - Integrations:
+      - PanDA: PANDA_INTEGRATION.md
+      - Mattermost: MATTERMOST.md
+  - Architecture:
+      - Agent Reference: AGENTS.md
+      - Execution Trust: EXECUTION_TRUST.md
+      - Extraction Plugins: EXTRACTION_PLUGIN_SYSTEM.md
+  - Database Plugins:
+      - database-plugins/INDEX.md
+      - Quick Reference: database-plugins/DATABASE_PLUGINS_QUICK_REFERENCE.md
+      - Full Reference: database-plugins/DATABASE_PLUGINS.md
+      - Examples: database-plugins/DATABASE_PLUGINS_EXAMPLES.md
+      - Implementation: database-plugins/DATABASE_PLUGINS_IMPLEMENTATION.md
+      - Topic Index: database-plugins/DATABASE_PLUGINS_INDEX.md
+      - Checklist: database-plugins/DATABASE_PLUGINS_FINAL_CHECKLIST.md
+  - Development: DEVELOPMENT.md

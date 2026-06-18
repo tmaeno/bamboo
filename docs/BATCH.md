@@ -9,7 +9,7 @@ and only offers non-root container execution — on either a CPU-only or a GPU q
 retrieval mid-run), so the knowledge base must live **on the node** next to the LLM —
 you can't precompute it. The design:
 
-- **One lean image, two targets** ([Dockerfile](../Dockerfile)):
+- **One lean image, two targets** (`Dockerfile`):
   - `bamboo` — the app, configured by env, talks to external services (also the
     standalone Docker artifact).
   - `bamboo-batch-analyze` — `FROM bamboo`, adds Neo4j + Qdrant + Ollama (copied from
@@ -101,7 +101,7 @@ SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out LLM_MODEL=llama3.2:3b \
 
 One result JSON is written per task to `OUT_DIR`; a failing task gets a
 `*.error.json` sidecar and the job exits non-zero (the batch still completes the
-others). A SLURM wrapper example is in [submit.sh](batch/submit.sh).
+others). A SLURM wrapper example is in `deploy/batch/submit.sh`.
 
 ### Live PanDA fetch (optional)
 
@@ -120,8 +120,8 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 
 | File | Purpose |
 |------|---------|
-| [Dockerfile](../Dockerfile) | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
-| [deploy/batch/run-analyze.sh](batch/run-analyze.sh) | In-container entry: boot stack, restore KB, run batch, tear down |
-| [deploy/batch/stage-model.sh](batch/stage-model.sh) | Pull the Ollama model into shared storage |
-| [deploy/batch/submit.sh](batch/submit.sh) | Example Apptainer submission (CPU/GPU) |
-| [.github/workflows/build-images.yml](../.github/workflows/build-images.yml) | CI: build + push images, optional `.sif` |
+| `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
+| `deploy/batch/run-analyze.sh` | In-container entry: boot stack, restore KB, run batch, tear down |
+| `deploy/batch/stage-model.sh` | Pull the Ollama model into shared storage |
+| `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU) |
+| `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |

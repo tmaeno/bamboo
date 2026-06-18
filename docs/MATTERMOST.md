@@ -73,7 +73,7 @@ Qdrant) and [PANDA_INTEGRATION.md](PANDA_INTEGRATION.md) for PanDA settings.
 2. Create a bot account for bamboo and **copy its access token** — this is
    `MATTERMOST_TOKEN`.
 3. **Add the bot to the channel(s)** the ops team will use. Channel membership is
-   your first access-control layer (see [Authorization](#authorization--security)).
+   your first access-control layer (see [Authorization](#authorization-security)).
 4. Get the **channel IDs** for the allow-list: open a channel → *View Info* (the
    ID is shown), or query the Mattermost API. These go in
    `MATTERMOST_ALLOWED_CHANNELS`.

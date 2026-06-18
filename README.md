@@ -54,9 +54,11 @@ bamboo interactive
 For detailed setup: see [Quick Start](docs/QUICKSTART.md).
 
 
-## Documentation Map
+## Documentation
 
-See [Documentation Map](docs/README.md) for a full index of all documentation and recommended reading paths.
+📖 **[Read the documentation site](https://tmaeno.github.io/bamboo/)** — full index, navigation, and search.
+
+Or browse the [docs source](docs/index.md) for the index and recommended reading paths.
 
 ## License
 

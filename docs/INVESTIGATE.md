@@ -104,8 +104,6 @@ the turn aborts with a clear message rather than silently truncating. See
 [AGENTS.md](AGENTS.md) ("Bounding the tool list") and
 [EXECUTION_TRUST.md](EXECUTION_TRUST.md) (selection never changes what code may run).
 
-The full design rationale is in [the plan file](../.claude/plans/i-m-planning-to-evolve-bubbly-blossom.md).
-
 ## Safety model
 
 The full model — including the unattended (`analyze`/startup) read-only boundary — is in
