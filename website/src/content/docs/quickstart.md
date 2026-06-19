@@ -14,7 +14,7 @@ Follow the steps in order. After setup, run `bamboo verify` to confirm your data
 
 - Python 3.10 or higher
 - Docker and Docker Compose (for local databases)
-- OpenAI API key (or Anthropic API key)
+- LLM API key (unless local LLM is used) — OpenAI, Anthropic, Gemini, and Ollama
 
 ## Setup Steps
 
