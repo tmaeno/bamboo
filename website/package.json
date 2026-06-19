@@ -8,7 +8,8 @@
     "start": "npm run docs:api && astro dev",
     "build": "npm run docs:api && astro build",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "postinstall": "astro sync"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.40.0",
