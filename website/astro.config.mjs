@@ -18,6 +18,8 @@ export default defineConfig({
 			logo: { src: './src/assets/bamboo.png' },
 			favicon: '/bamboo.png',
 			customCss: ['./src/styles/custom.css'],
+			// Force code blocks to a single dark theme in both light and dark mode
+			expressiveCode: { themes: ['dracula'] },
 			// Override <Head> to inject the Mermaid zoom/pan runtime site-wide
 			components: { Head: './src/components/Head.astro' },
 			plugins: [
@@ -73,6 +75,7 @@ export default defineConfig({
 					],
 				},
 				{ label: 'Development', slug: 'development' },
+				{ label: 'Contributing to the Docs', slug: 'contributing' },
 				// Redocly-generated OpenAPI reference, hosted as static HTML under public/api/
 				{ label: 'API Reference', link: '/bamboo/api/', attrs: { target: '_blank' } },
 			],
