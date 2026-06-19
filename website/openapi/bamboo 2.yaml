@@ -1,0 +1,81 @@
+# Pilot sample OpenAPI spec.
+# This repo has no real REST API spec; this representative spec exists only to validate
+# the Redocly-CLI -> static-HTML -> Starlight hosting pipeline for the fleet evaluation.
+# In a real fleet repo, point the `docs:api` script at that repo's actual OpenAPI spec.
+openapi: 3.1.0
+info:
+  title: Bamboo API (pilot sample)
+  version: 0.1.0
+  description: |
+    Representative API surface used only to exercise the Redocly → hosted-HTML pipeline.
+servers:
+  - url: https://example.org/api/v1
+paths:
+  /analyze:
+    post:
+      summary: Run a root-cause analysis on a task
+      operationId: analyzeTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalyzeRequest'
+      responses:
+        '200':
+          description: Analysis result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResult'
+  /tasks/{taskId}:
+    get:
+      summary: Fetch a task's status and signals
+      operationId: getTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Task record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          description: Task not found
+components:
+  schemas:
+    AnalyzeRequest:
+      type: object
+      required: [taskId]
+      properties:
+        taskId:
+          type: integer
+          description: PanDA jediTaskID
+        readOnly:
+          type: boolean
+          default: true
+          description: Whether to suppress state-changing procedures
+    AnalyzeResult:
+      type: object
+      properties:
+        rootCause:
+          type: string
+        confidence:
+          type: number
+          format: float
+        resolution:
+          type: string
+    Task:
+      type: object
+      properties:
+        taskId:
+          type: integer
+        status:
+          type: string
+        errorDialog:
+          type: string
