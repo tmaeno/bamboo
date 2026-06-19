@@ -1,4 +1,4 @@
-.PHONY: help install dev-install test lint format clean docker-up docker-down docs-install docs-serve docs-build
+.PHONY: help install dev-install test lint format clean clean-all docker-up docker-down docs-install docs-serve docs-build
 
 help:
 	@echo "Bamboo - Bolstered Assistance for Managing and Building Operations and Oversight"
@@ -9,12 +9,13 @@ help:
 	@echo "  make test         - Run tests"
 	@echo "  make lint         - Run linters"
 	@echo "  make format       - Format code"
-	@echo "  make clean        - Clean up generated files"
+	@echo "  make clean        - Clean up generated files and caches"
+	@echo "  make clean-all    - Clean, plus remove website/node_modules"
 	@echo "  make docker-up    - Start Docker services (Neo4j, Qdrant)"
 	@echo "  make docker-down  - Stop Docker services"
-	@echo "  make docs-install - Install documentation dependencies"
-	@echo "  make docs-serve   - Serve the docs locally with live reload"
-	@echo "  make docs-build   - Build the docs site (strict)"
+	@echo "  make docs-install - Install documentation dependencies (npm)"
+	@echo "  make docs-serve   - Serve the docs locally (Astro dev server)"
+	@echo "  make docs-build   - Build the docs site (validates internal links)"
 
 install:
 	pip install -e .
@@ -37,7 +38,12 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
 	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
-	rm -rf build/ dist/ .pytest_cache/ .mypy_cache/ .ruff_cache/
+	find . -type f -name ".DS_Store" -delete
+	rm -rf build/ dist/ .pytest_cache/ .mypy_cache/ .ruff_cache/ .coverage htmlcov/
+	rm -rf website/dist/ website/.astro/ website/public/api/
+
+clean-all: clean
+	rm -rf website/node_modules/
 
 docker-up:
 	docker-compose up -d
@@ -50,11 +56,11 @@ docker-down:
 	docker-compose down
 
 docs-install:
-	pip install -e ".[docs]"
+	cd website && npm install
 
 docs-serve:
-	mkdocs serve
+	cd website && npm run dev
 
 docs-build:
-	mkdocs build --strict
+	cd website && npm run build
 
