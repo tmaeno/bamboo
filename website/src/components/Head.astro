@@ -1,0 +1,115 @@
+---
+// Starlight <Head> override: render the default head, then add a small client
+// runtime that makes every Mermaid diagram zoomable (inline CSS-transform zoom +
+// fullscreen pan/zoom). See website/src/styles/custom.css for the matching styles.
+import Default from '@astrojs/starlight/components/Head.astro';
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<script>
+	function enhanceAll() {
+		document.querySelectorAll('pre.mermaid[data-processed]').forEach(enhance);
+	}
+
+	function enhance(pre) {
+		if (!pre.querySelector('svg')) return;
+		// astro-mermaid wipes innerHTML on (re)render, so detect by the toolbar's
+		// presence, NOT a dataset flag (the <pre> persists but its children are
+		// replaced on theme switch / view transitions).
+		if (!pre.querySelector('.mermaid-zoom-toolbar')) addToolbar(pre);
+	}
+
+	function addToolbar(pre) {
+		const bar = document.createElement('div');
+		bar.className = 'mermaid-zoom-toolbar';
+		const expand = mkBtn('⛶', 'Expand diagram', () => openFullscreen(pre));
+		bar.append(expand);
+		pre.appendChild(bar); // absolutely positioned over the svg (see custom.css)
+	}
+
+	function mkBtn(label, title, onClick) {
+		const b = document.createElement('button');
+		b.type = 'button';
+		b.className = 'mermaid-zoom-btn';
+		b.textContent = label;
+		b.title = title;
+		b.setAttribute('aria-label', title);
+		b.addEventListener('click', onClick);
+		return b;
+	}
+
+	async function openFullscreen(pre) {
+		const src = pre.querySelector('svg');
+		if (!src) return;
+		// Loaded only on first use, so diagram-free pages stay light.
+		const { default: svgPanZoom } = await import('svg-pan-zoom');
+
+		const overlay = document.createElement('div');
+		overlay.className = 'mermaid-zoom-overlay';
+		overlay.setAttribute('role', 'dialog');
+		overlay.setAttribute('aria-modal', 'true');
+
+		const stage = document.createElement('div');
+		stage.className = 'mermaid-zoom-stage';
+
+		const close = mkBtn('✕', 'Close', () => destroy());
+		close.classList.add('mermaid-zoom-close');
+
+		const clone = src.cloneNode(true);
+		clone.style.maxWidth = 'none';
+		clone.style.width = '100%';
+		clone.style.height = '100%';
+
+		stage.append(clone);
+		overlay.append(close, stage);
+		document.body.append(overlay);
+		document.body.style.overflow = 'hidden';
+
+		let pz;
+		// The svg must be laid out before svg-pan-zoom reads its size.
+		requestAnimationFrame(() => {
+			pz = svgPanZoom(clone, {
+				zoomEnabled: true,
+				panEnabled: true,
+				controlIconsEnabled: true,
+				mouseWheelZoomEnabled: true,
+				dblClickZoomEnabled: true,
+				fit: true,
+				center: true,
+				minZoom: 0.2,
+				maxZoom: 20,
+			});
+		});
+
+		function destroy() {
+			try {
+				pz?.destroy();
+			} catch {
+				/* svg-pan-zoom may not have initialised yet */
+			}
+			overlay.remove();
+			document.body.style.overflow = '';
+			document.removeEventListener('keydown', onKey);
+		}
+		function onKey(e) {
+			if (e.key === 'Escape') destroy();
+		}
+		document.addEventListener('keydown', onKey);
+		overlay.addEventListener('click', (e) => {
+			if (e.target === overlay) destroy();
+		});
+	}
+
+	// Catch diagrams as astro-mermaid finishes / re-runs rendering (it toggles
+	// data-processed), plus initial load and Astro view transitions.
+	const obs = new MutationObserver(() => enhanceAll());
+	obs.observe(document.documentElement, {
+		subtree: true,
+		childList: true,
+		attributes: true,
+		attributeFilter: ['data-processed'],
+	});
+	enhanceAll();
+	document.addEventListener('astro:after-swap', enhanceAll);
+</script>

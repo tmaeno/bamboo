@@ -1,0 +1,115 @@
+/* Quieter warm-paper light mode + bamboo-green brand accent */
+
+:root[data-theme='light'] {
+	/* Warm off-white surfaces (was pure #ffffff) */
+	--sl-color-bg: #f4f1ea;            /* main page */
+	--sl-color-bg-sidebar: #ece8df;    /* left sidebar */
+	--sl-color-bg-nav: #ece8df;        /* top nav bar */
+	--sl-color-bg-inline-code: #e8e3d6;
+
+	/* Borders/hairlines tuned to the warm tone */
+	--sl-color-hairline-shade: #e0dacd;
+	--sl-color-gray-5: #d9d2c4;        /* card/table borders */
+
+	/* Bamboo-green accent (dark-enough green for contrast on cream) */
+	--sl-color-accent-low: #d8e8c9;
+	--sl-color-accent: #4a7d3b;
+	--sl-color-accent-high: #2d5223;
+	--sl-color-text-accent: #3c6e2e;   /* links — ~5:1 on #f4f1ea */
+}
+
+/* Bamboo-green accent for dark mode too, so brand color is consistent */
+:root[data-theme='dark'] {
+	--sl-color-accent-low: #1b3314;
+	--sl-color-accent: #5ca64a;
+	--sl-color-accent-high: #c3e3b3;
+	--sl-color-text-accent: #8fce77;   /* links — light green on dark */
+}
+
+/* ---------------------------------------------------------------------------
+ * Mermaid diagram zoom (see src/components/Head.astro for the runtime)
+ * ------------------------------------------------------------------------- */
+
+/* Anchor the hover toolbar (the ⛶ button is positioned against this). */
+pre.mermaid {
+	position: relative;
+}
+
+.mermaid-zoom-toolbar {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	z-index: 1;
+	display: flex;
+	gap: 0.25rem;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+
+/* Reveal on hover, and keep visible while a button has keyboard focus. */
+pre.mermaid:hover .mermaid-zoom-toolbar,
+.mermaid-zoom-toolbar:focus-within {
+	opacity: 1;
+}
+
+.mermaid-zoom-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.75rem;
+	height: 1.75rem;
+	padding: 0;
+	font-size: 0.9rem;
+	line-height: 1;
+	color: var(--sl-color-text);
+	background: var(--sl-color-bg);
+	border: 1px solid var(--sl-color-gray-5);
+	border-radius: 0.25rem;
+	cursor: pointer;
+}
+
+.mermaid-zoom-btn:hover {
+	background: var(--sl-color-gray-6);
+}
+
+/* Fullscreen overlay */
+.mermaid-zoom-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 9999;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2rem;
+	background: rgba(0, 0, 0, 0.7);
+}
+
+.mermaid-zoom-stage {
+	width: 92vw;
+	height: 88vh;
+	overflow: hidden;
+	background: var(--sl-color-bg);
+	border-radius: 0.5rem;
+}
+
+.mermaid-zoom-stage svg {
+	width: 100%;
+	height: 100%;
+	max-width: none;
+}
+
+.mermaid-zoom-close {
+	position: absolute;
+	top: 1rem;
+	right: 1rem;
+	z-index: 1;
+}
+
+/* svg-pan-zoom's built-in control icons default to dark gray; keep them legible
+ * on a dark page background. */
+:root[data-theme='dark'] .svg-pan-zoom-control rect {
+	fill: var(--sl-color-gray-5);
+}
+:root[data-theme='dark'] .svg-pan-zoom-control path {
+	fill: var(--sl-color-text);
+}
