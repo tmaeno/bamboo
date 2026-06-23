@@ -8,65 +8,9 @@
 
 An intelligent multi-agent AI framework for system automation and operations, leveraging graph and vector databases for knowledge management.
 
-## Key Features
-
-✅ **Multi-Agent Architecture**  
-✅ **Dual Database** - Graph database + Vector database  
-✅ **LLM-Powered** - Intelligent extraction, analysis, reasoning, decision-making  
-✅ **Knowledge Graph** - Modeling of operational dynamics in scientific computing workforce  
-✅ **Hierarchical Workload Insights** - Full visibility across tasks, jobs, and their dependencies  
-✅ **PanDA Integration** - Fetch relevant information live from PanDA  
-✅ **MCP Tools** - Domain-specific Model Context Protocol tools for both reasoning and source exploration  
-✅ **Human-in-Loop** - Safety through human oversight
-
-## Main Agents
-- **Knowledge Accumulation** - Learns from operational data, builds knowledge database
-- **Reasoning Navigation** - Analyzes issues, finds root causes, suggests resolutions
-- **Co-Investigation** (`bamboo investigate`) - Live human-in-the-loop dialog for ongoing incidents; captures each MCP-tool invocation as executable orchestration code stored on Procedure nodes for deterministic replay on future similar incidents
-
-## LLM-Driven Pipelines and Sub-Agents
-
-See [Agents](website/src/content/docs/architecture/agents.md) for the full agent reference — responsibilities, inputs/outputs, configuration, and failure handling for every agent in the knowledge accumulation and reasoning navigation pipelines.
-
-## Agents to Come
-- **Automation Agent** - Plans and executes operational workflows
-- **Anomaly Detection Agent** - Monitors metrics, detects anomalies
-- **Proactive Mitigation Agent** - Predicts failures, applies preventive measures
-- **System Enhancement Agent** - Identifies optimization opportunities
-
-
-## Quick Start
-
-```bash
-# 1. Install
-pip install .
-
-# 2. Verify the installation
-bamboo verify
-
-# 3. Start databases
-docker-compose up -d
-
-# 4. Try it
-bamboo interactive
-```
-
-For detailed setup: see [Quick Start](website/src/content/docs/quickstart.md).
-
-
 ## Documentation
 
 📖 **[Read the documentation site](https://tmaeno.github.io/bamboo/)** — full index, navigation, and search.
-
-The docs are an [Astro Starlight](https://starlight.astro.build) site under [`website/`](website/).
-To work on them locally:
-
-```bash
-cd website
-npm install
-npm run dev      # local dev server with live reload
-npm run build    # production build (also validates links + generates the OpenAPI reference)
-```
 
 ## License
 
