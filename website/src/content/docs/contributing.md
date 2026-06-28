@@ -21,9 +21,6 @@ npm run build     # production build → dist/ (also validates all internal link
 npm run preview   # serve the production build locally
 ```
 
-The `dev` and `build` scripts first run `docs:api`, which regenerates the OpenAPI
-reference (see [API reference](#api-reference) below).
-
 ## Where pages live
 
 ```
@@ -113,12 +110,6 @@ flowchart TD
 Code blocks use a single dark theme (`dracula`) in **both** light and dark mode, so a
 fenced block always renders dark regardless of the reader's theme. There is nothing to
 configure per page — just write a normal fenced code block with a language hint.
-
-## API reference
-
-`npm run docs:api` runs the Redocly CLI to build `openapi/bamboo.yaml` into
-`public/api/index.html`, served at `/bamboo/api/` and linked from the sidebar. The `dev`
-and `build` scripts run this automatically.
 
 ## Editing and publishing
 

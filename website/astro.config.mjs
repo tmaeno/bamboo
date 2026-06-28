@@ -77,8 +77,6 @@ export default defineConfig({
 				},
 				{ label: 'Development', slug: 'development' },
 				{ label: 'Contributing to the Docs', slug: 'contributing' },
-				// Redocly-generated OpenAPI reference, hosted as static HTML under public/api/
-				{ label: 'API Reference', link: '/bamboo/api/', attrs: { target: '_blank' } },
 			],
 		}),
 	],
