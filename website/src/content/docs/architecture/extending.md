@@ -20,7 +20,8 @@ thing being analysed — today a PanDA task, in future a job, a system component
 flowchart LR
     S[Subject<br/>kind + id] --> A["acquire<br/>(MCP tools / sub-agents)"]
     A --> R["reason<br/>(LLM)"]
-    R --> E["emit<br/>(notify / persist)"]
+    R -->|need more evidence| A
+    R -->|done| E["emit<br/>(notify / persist)"]
 ```
 
 - **acquire** — gather the evidence the LLM will reason over, by calling MCP tools and sub-agents.
@@ -31,6 +32,12 @@ flowchart LR
   [`bamboo/llm/llm_client.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/llm/llm_client.py).
 - **emit** — do something with the result: post to Mattermost, draft an email, or persist to the
   knowledge databases.
+
+The `acquire ⇄ reason` arrow is a **loop**, not a single pass: the LLM reasons over what it has and
+may go back for more evidence — calling further tools or sub-agents — before it emits. The loop is
+shallow for thin pipelines and deeper for full ones; Bamboo realizes it through orchestration-code
+tool chaining and the review–explore / exploratory-investigation loops shown in the
+[Agent Reference](/bamboo/architecture/agents/).
 
 What differs between pipelines is **how deep the `reason` stage goes** and **what `emit` produces**.
 That difference is the next section, and it is the most important thing to understand before you
