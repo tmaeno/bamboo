@@ -103,6 +103,7 @@ to edit for each kind of extension — read the current code there for the exact
 | Custom database queries | [`bamboo/database/backends/neo4j_backend.py`](https://github.com/tmaeno/bamboo/blob/master/bamboo/database/backends/neo4j_backend.py) | Backend implementation; the higher-level client is `bamboo/database/graph_database_client.py`. See [Database Plugin System](/bamboo/database-plugins/) to add a whole new backend. |
 | A new database backend | see [Database Plugin System](/bamboo/database-plugins/) | Plugin architecture for graph/vector backends. |
 | A LangGraph workflow | [`bamboo/workflows/`](https://github.com/tmaeno/bamboo/tree/master/bamboo/workflows) | Existing workflows are the best template. |
+| A new agent pipeline, tool, or sub-agent | see [Extending the Agent System](/bamboo/architecture/extending/) | Choose the thin vs full pipeline shape, then add an MCP tool/sub-agent or wire a new CLI command. |
 
 ## Testing
 

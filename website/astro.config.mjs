@@ -57,6 +57,7 @@ export default defineConfig({
 					label: 'Architecture',
 					items: [
 						{ label: 'Agent Reference', slug: 'architecture/agents' },
+						{ label: 'Extending the System', slug: 'architecture/extending' },
 						{ label: 'Graph Schema', slug: 'architecture/schema' },
 						{ label: 'Execution Trust', slug: 'architecture/execution-trust' },
 						{ label: 'Extraction Plugins', slug: 'architecture/extraction-plugin-system' },
