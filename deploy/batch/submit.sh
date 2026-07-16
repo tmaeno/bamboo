@@ -68,7 +68,7 @@ apptainer "${apptainer_args[@]}" "${SIF}"
 # SLURM example (CPU queue):
 #   #!/bin/bash
 #   #SBATCH -p cpu -c 8 --mem=24G -t 02:00:00
-#   export SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out LLM_MODEL=llama3.2:3b
+#   export SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out   # LLM_MODEL from .env, or set it
 #   srun deploy/batch/submit.sh
 # GPU queue: add `#SBATCH -p gpu --gres=gpu:1` and `export USE_GPU=1`.
 # ---------------------------------------------------------------------------

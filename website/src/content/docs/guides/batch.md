@@ -31,8 +31,11 @@ docker build --target bamboo               -t bamboo .
 docker build --target bamboo-batch-analyze -t bamboo-batch-analyze .
 apptainer build bamboo-batch-analyze.sif docker-daemon://bamboo-batch-analyze:latest
 
-# 2. Stage the LLM model onto shared storage (mounted read-only at /models)
-SHARED=/shared MODEL=llama3.2:3b deploy/batch/stage-model.sh
+# 2. Stage the LLM model onto shared storage (mounted read-only at /models).
+#    MODEL defaults to LLM_MODEL from your local .env (Ollama config) — this host needs
+#    the bamboo repo + .env importable. Pass MODEL to override.
+SHARED=/shared deploy/batch/stage-model.sh
+# or, explicitly: SHARED=/shared MODEL=llama3.2:3b deploy/batch/stage-model.sh
 
 # 3. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
 ```
@@ -95,8 +98,8 @@ real gate). `bamboo dump-kb` stamps all these values for you.
 Stage task-data `*.json` files into an input dir, then:
 
 ```bash
-SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out LLM_MODEL=llama3.2:3b \
-  deploy/batch/submit.sh          # CPU queue
+SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out \
+  deploy/batch/submit.sh          # CPU queue (LLM_MODEL from your .env; set it to override)
 # GPU queue: also export USE_GPU=1   (adds --nv; Ollama auto-detects the GPU)
 ```
 
