@@ -927,6 +927,9 @@ cli.add_command(_serve_mattermost_main, "serve-mattermost")
 from bamboo.scripts.dump_kb import main as _dump_kb_main
 cli.add_command(_dump_kb_main, "dump-kb")
 
+from bamboo.scripts.stage_model import main as _stage_model_main
+cli.add_command(_stage_model_main, "stage-model")
+
 
 if __name__ == "__main__":
     cli()

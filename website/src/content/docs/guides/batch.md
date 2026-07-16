@@ -32,10 +32,11 @@ docker build --target bamboo-batch-analyze -t bamboo-batch-analyze .
 apptainer build bamboo-batch-analyze.sif docker-daemon://bamboo-batch-analyze:latest
 
 # 2. Stage the LLM model onto shared storage (mounted read-only at /models).
-#    MODEL defaults to LLM_MODEL from your local .env (Ollama config) — this host needs
-#    the bamboo repo + .env importable. Pass MODEL to override.
-SHARED=/shared deploy/batch/stage-model.sh
-# or, explicitly: SHARED=/shared MODEL=llama3.2:3b deploy/batch/stage-model.sh
+#    Ships with `pip install bamboo`. --model defaults to LLM_MODEL from your config
+#    (Ollama), else llama3.2:3b; out dir = $MODELS_OUT or ${SHARED:-/shared}/bamboo/ollama.
+SHARED=/shared bamboo stage-model
+# explicit model:       SHARED=/shared bamboo stage-model --model llama3.2:3b
+# from the repo (shim): SHARED=/shared deploy/batch/stage-model.sh
 
 # 3. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
 ```
