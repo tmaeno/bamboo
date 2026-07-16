@@ -6,8 +6,9 @@ with `pip install bamboo` (no repo checkout needed) and resolves the model from 
 bamboo config so you never have to repeat it. The batch container mounts the output dir
 read-only at ``/models`` (``OLLAMA_MODELS``).
 
-Uses a local ``ollama`` binary when present, otherwise a throwaway ``ollama/ollama``
-Docker container that writes into the mounted output dir.
+Runs a *dedicated transient* Ollama server pointed at the output dir (a local ``ollama``
+binary when present, else a throwaway ``ollama/ollama`` Docker container), so the model
+lands in that dir regardless of any Ollama daemon already running on the host.
 
 See ``website/src/content/docs/guides/batch.md``.
 """
@@ -55,10 +56,61 @@ def _resolve_out(explicit: str | None) -> str:
     return os.path.join(shared, "bamboo", "ollama")
 
 
+def _free_port() -> int:
+    """Return an ephemeral free TCP port on localhost."""
+    import socket
+
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
 def _pull_with_local_ollama(model: str, out: str) -> None:
-    """Pull with a local ``ollama`` binary, writing into *out* (OLLAMA_MODELS)."""
-    env = {**os.environ, "OLLAMA_MODELS": out}
-    subprocess.run(["ollama", "pull", model], env=env, check=True)
+    """Pull with a *dedicated transient* ``ollama serve`` writing into *out*.
+
+    ``ollama pull`` is a client that delegates to a server, and ``OLLAMA_MODELS`` is read
+    by the **server**, not the client. Pulling against an already-running daemon (e.g. the
+    Ollama.app) therefore ignores it and lands the model in that daemon's default store.
+    So we start our own server on a free port with ``OLLAMA_MODELS=<out>`` and pull against
+    it, then shut it down — guaranteeing the files land in *out*.
+    """
+    port = _free_port()
+    env = {**os.environ, "OLLAMA_MODELS": out, "OLLAMA_HOST": f"127.0.0.1:{port}"}
+    server = subprocess.Popen(
+        ["ollama", "serve"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(60):
+            if server.poll() is not None:
+                raise click.ClickException(
+                    "transient 'ollama serve' exited before becoming ready"
+                )
+            ready = subprocess.run(
+                ["ollama", "list"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise click.ClickException(
+                "transient 'ollama serve' did not become ready in time"
+            )
+        subprocess.run(["ollama", "pull", model], env=env, check=True)
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            server.kill()
 
 
 def _pull_with_docker(model: str, out: str) -> None:
@@ -115,7 +167,9 @@ def main(model, out_dir):
     """
     setup_logging()
     model = _resolve_model(model)
-    out = _resolve_out(out_dir)
+    # Absolutise: the transient `ollama serve` runs with its own cwd, and Docker's -v
+    # treats a non-absolute source as a named volume rather than a host path.
+    out = os.path.abspath(_resolve_out(out_dir))
     os.makedirs(out, exist_ok=True)
 
     click.echo(f"[stage-model] pulling '{model}' into {out}")

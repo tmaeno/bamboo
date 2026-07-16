@@ -52,8 +52,13 @@ async def _neo4j_version(settings) -> str:
     )
     try:
         async with driver.session(database=settings.neo4j_database) as session:
+            # Select the kernel component explicitly: dbms.components() can return more
+            # than one row (extra components), which would both warn on .single() and
+            # risk returning a non-kernel version.
             result = await session.run(
-                "CALL dbms.components() YIELD versions RETURN versions[0] AS v"
+                "CALL dbms.components() YIELD name, versions "
+                "WHERE name = 'Neo4j Kernel' "
+                "RETURN versions[0] AS v"
             )
             record = await result.single()
             return str(record["v"]) if record and record.get("v") else ""

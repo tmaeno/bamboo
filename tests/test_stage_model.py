@@ -74,21 +74,55 @@ def test_resolve_out_default(monkeypatch):
 
 # --- pull-path selection --------------------------------------------------------------
 
-def test_pull_uses_local_ollama_when_present(tmp_path, monkeypatch):
+class _FakeServer:
+    """Stand-in for the transient `ollama serve` Popen handle."""
+
+    def __init__(self):
+        self.terminated = False
+
+    def poll(self):
+        return None  # stays "alive" through the readiness loop
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):  # pragma: no cover - only on wait timeout
+        self.terminated = True
+
+
+def test_pull_starts_transient_server_and_pulls_into_out(tmp_path, monkeypatch):
+    """The local path must run its OWN `ollama serve` with OLLAMA_MODELS=<out>.
+
+    Regression guard: pulling against a pre-existing daemon ignores the client's
+    OLLAMA_MODELS and lands the model in the daemon's default store.
+    """
+    out = str(tmp_path / "models")
     monkeypatch.setattr(
-        stage_model.shutil, "which", lambda name: "/usr/bin/ollama" if name == "ollama" else None
+        stage_model.shutil,
+        "which",
+        lambda name: "/usr/bin/ollama" if name == "ollama" else None,
     )
-    run = MagicMock()
+    monkeypatch.setattr(stage_model, "_free_port", lambda: 12345)
+    server = _FakeServer()
+    monkeypatch.setattr(stage_model.subprocess, "Popen", lambda *a, **k: server)
+    run = MagicMock(return_value=SimpleNamespace(returncode=0))
     monkeypatch.setattr(stage_model.subprocess, "run", run)
 
-    result = CliRunner().invoke(
-        stage_model.main, ["--model", "llama3.2:1b", "--out", str(tmp_path / "models")]
-    )
+    result = CliRunner().invoke(stage_model.main, ["--model", "llama3.2:1b", "--out", out])
     assert result.exit_code == 0, result.output
-    run.assert_called_once()
-    args, kwargs = run.call_args
+
+    pull_calls = [c for c in run.call_args_list if c.args[0][:2] == ["ollama", "pull"]]
+    assert len(pull_calls) == 1
+    args, kwargs = pull_calls[0]
     assert args[0] == ["ollama", "pull", "llama3.2:1b"]
-    assert kwargs["env"]["OLLAMA_MODELS"] == str(tmp_path / "models")
+    # The pull runs against OUR transient server, writing into <out>.
+    assert kwargs["env"]["OLLAMA_MODELS"] == out
+    assert kwargs["env"]["OLLAMA_HOST"] == "127.0.0.1:12345"
+    # And the server is torn down.
+    assert server.terminated
 
 
 def test_pull_errors_when_no_runtime(tmp_path, monkeypatch):
