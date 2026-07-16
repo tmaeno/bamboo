@@ -924,6 +924,9 @@ cli.add_command(_verify_cmd, "verify")
 from bamboo.scripts.serve_mattermost import main as _serve_mattermost_main
 cli.add_command(_serve_mattermost_main, "serve-mattermost")
 
+from bamboo.scripts.dump_kb import main as _dump_kb_main
+cli.add_command(_dump_kb_main, "dump-kb")
+
 
 if __name__ == "__main__":
     cli()

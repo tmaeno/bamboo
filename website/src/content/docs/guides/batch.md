@@ -39,57 +39,56 @@ SHARED=/shared MODEL=llama3.2:3b deploy/batch/stage-model.sh
 
 ### Build the KB snapshot
 
-The batch container restores the KB from three files under `/kb`. Produce them from your
-existing, populated Neo4j + Qdrant deployment and stage them to the shared path mounted
-read-only at `/kb`:
+The batch container restores the KB from three files under `/kb`. Produce `qdrant.snapshot`
+and `metadata.json` with **`bamboo dump-kb`** — it reads your Qdrant/Neo4j/embedding config from
+the same `.env` your populated deployment uses, so the snapshot matches it exactly. The Neo4j
+graph dump stays a separate offline step (it needs a stopped DB + data-dir access, which a bolt
+URL can't provide). Stage all three files to the shared path mounted read-only at `/kb`.
 
 | File | What it is | Restored by `run-analyze.sh` |
 |------|------------|------------------------------|
 | `graph_db.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `graph_db`) | `neo4j-admin database load graph_db --from-path=/kb` |
-| `qdrant_storage.tar.zst` (or `.tar.gz`) | tar of the Qdrant storage-dir **contents** | untarred into the storage path |
-| `metadata.json` | embedding model/dimension + component versions | the embedding-consistency guard |
+| `qdrant.snapshot` | Qdrant Snapshot-API export of the collection | recovered on startup (`qdrant --snapshot <file>:<collection>`) |
+| `metadata.json` | embedding model/dimension, collection, Neo4j/Qdrant versions | the KB metadata guard (embeddings + versions) |
 
-**Neo4j dump** (offline — the database must be stopped). With `neo4j-admin` on the deployment host:
+**Qdrant snapshot + metadata.json** — from a host that can reach your Qdrant (and Neo4j, for the
+version stamp):
 
 ```bash
-neo4j-admin database dump neo4j --to-path=/tmp/kb   # writes <db>.dump
-mv /tmp/kb/neo4j.dump /tmp/kb/graph_db.dump         # rename to the batch NEO4J_DATABASE
+bamboo dump-kb --out /tmp/kb   # writes qdrant.snapshot + metadata.json from your .env
+```
+
+`dump-kb` uses the Qdrant **Snapshot API** (only `QDRANT_URL`/collection/api-key — never Qdrant's
+on-disk storage dir), so it works against a local Docker Qdrant or a managed instance, with no
+service stop. `metadata.json` is filled entirely from real state: `embedding_model`/
+`embedding_dimension`/`neo4j_database`/`qdrant_collection` from your config, plus
+`neo4j_version`/`qdrant_version` read live from the servers.
+
+**Neo4j dump** (offline — the database must be stopped). `dump-kb` prints this command with your
+DB name filled in; with `neo4j-admin` on the deployment host:
+
+```bash
+neo4j-admin database dump graph_db --to-path=/tmp/kb   # writes graph_db.dump
 ```
 
 The dump can equally come from a version-matched `neo4j` container over the data dir, the Neo4j
 Desktop **Dump** menu, or a managed-console export. Two rules hold regardless: the file must be
-named `graph_db.dump` (`database load` finds it by target name), and the Neo4j version must match
-the batch image's `NEO4J_VERSION` (dump/load is version-sensitive).
-
-**Qdrant storage** (quiesce/stop the service for a consistent copy):
-
-```bash
-tar --use-compress-program=zstd -cf /tmp/kb/qdrant_storage.tar.zst -C <qdrant-storage-dir> .
-```
-
-**metadata.json** — values must match how the KB was populated:
-
-```bash
-cat >/tmp/kb/metadata.json <<'EOF'
-{
-  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-  "embedding_dimension": 384,
-  "neo4j_version": "5.26",
-  "neo4j_database": "graph_db",
-  "qdrant_version": "v1"
-}
-EOF
-```
+named to match the batch `NEO4J_DATABASE` (default `graph_db`, i.e. `graph_db.dump` — rename it if
+your source DB differs), and the Neo4j version must match the batch image's `NEO4J_VERSION`
+(dump/load is version-sensitive).
 
 Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
 
-> Initial recipe — refine once the restore round-trip (`load` + untar + query) is verified on
-> your deployment.
+> Initial recipe — refine once the restore round-trip (`load` + snapshot-recover + query) is
+> verified on your deployment.
 
-**Embedding consistency (critical):** the embedding model + dimension baked into the
-image (`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` build args) MUST match the values in the
-snapshot's `metadata.json` — i.e. how the deployment that produced the dump was populated.
-The entry script refuses to run on a mismatch; vector search silently degrades otherwise.
+**Metadata guard (critical):** `run-analyze.sh` refuses to run on a mismatch between the
+snapshot's `metadata.json` and the batch image. The embedding model + dimension
+(`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` build args) MUST match how the KB was populated — vector
+search silently degrades otherwise. The Neo4j version must match the image's `NEO4J_VERSION`
+(dump/load is version-strict → hard fail); the Qdrant major version is checked best-effort against
+the image's `QDRANT_VERSION` (a mismatch only warns, since the boot-time snapshot recover is the
+real gate). `bamboo dump-kb` stamps all these values for you.
 
 ## Submitting a job
 

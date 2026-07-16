@@ -12,7 +12,7 @@
 #   Grep for "VERIFY:" for the spots to check on the cluster.
 
 ARG PYTHON_VERSION=3.12
-ARG NEO4J_VERSION=5.26
+ARG NEO4J_VERSION=5.26.28
 ARG QDRANT_VERSION=v1
 ARG OLLAMA_VERSION=latest
 # Local embedding model baked into Image 2. MUST match the model recorded in the
@@ -65,9 +65,16 @@ CMD ["--help"]
 # =========================================================================== #
 FROM bamboo AS bamboo-batch-analyze
 
+# Re-declare (no default) to inherit the values from the global ARGs above.
 ARG NEO4J_VERSION
+ARG QDRANT_VERSION
 ARG EMBEDDING_MODEL
 ARG EMBEDDING_DIMENSION
+
+# Surface the baked service versions at runtime so run-analyze.sh can guard the KB
+# snapshot against a version-incompatible Neo4j dump / Qdrant snapshot (see docs/BATCH.md).
+ENV NEO4J_VERSION=${NEO4J_VERSION} \
+    QDRANT_VERSION=${QDRANT_VERSION}
 
 # --- JRE + Neo4j (VERIFY: paths in the neo4j:5.x image; it is eclipse-temurin based) ---
 ENV JAVA_HOME=/opt/java/openjdk

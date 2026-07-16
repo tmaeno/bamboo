@@ -13,6 +13,22 @@ SHARED="${SHARED:-/shared}"
 SCRATCH="${SCRATCH:-${TMPDIR:-/tmp}/bamboo.$$}"     # node-local scratch
 IN_DIR="${IN_DIR:-$PWD/in}"                          # staged task-data *.json
 OUT_DIR="${OUT_DIR:-$PWD/out}"
+
+# Absent an explicit LLM_MODEL, adopt it from the local bamboo config (LLM_MODEL in
+# .env, via get_settings()) — only for an Ollama config — so the submitted model
+# matches what stage-model.sh staged. Point BAMBOO_PY at the interpreter that runs
+# bamboo locally (default: python). See deploy/batch/stage-model.sh.
+if [ -z "${LLM_MODEL:-}" ]; then
+  BAMBOO_PY="${BAMBOO_PY:-python}"
+  _derived="$("${BAMBOO_PY}" - <<'PY' 2>/dev/null || true
+from bamboo.config import get_settings
+s = get_settings()
+if s.llm_provider == "ollama":
+    print(s.llm_model)
+PY
+)"
+  [ -n "${_derived}" ] && LLM_MODEL="${_derived}"
+fi
 LLM_MODEL="${LLM_MODEL:-llama3.2:3b}"
 USE_GPU="${USE_GPU:-0}"                              # 1 on a GPU queue
 

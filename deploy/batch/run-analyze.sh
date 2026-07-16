@@ -9,7 +9,7 @@
 # Mounts (see deploy/batch/submit.sh):
 #   /in      (ro)  directory of task-data *.json files
 #   /out     (rw)  one result JSON per task is written here
-#   /kb      (ro)  KB snapshot: <db>.dump + qdrant_storage.tar.zst + metadata.json
+#   /kb      (ro)  KB snapshot: <db>.dump + qdrant.snapshot + metadata.json
 #   /models  (ro)  Ollama models dir (OLLAMA_MODELS)
 #   /work    (rw)  node-local scratch (optional; falls back to $TMPDIR)
 #
@@ -75,26 +75,56 @@ export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
 log "ports: bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT}"
 
 # --------------------------------------------------------------------------- #
-# Embedding-consistency guard — refuse to run if the baked embedding model/dim
-# differs from what built the KB (else vector search silently returns garbage).
+# KB metadata guard — refuse to run on an incompatible snapshot. Embedding model/dim
+# mismatch silently corrupts vector search; Neo4j dump/load is version-strict; Qdrant
+# snapshot recover is major-version sensitive (image pins the rolling 'v1' tag).
+# EMBEDDING_MODEL/DIMENSION and NEO4J_VERSION/QDRANT_VERSION are baked into the image
+# (Dockerfile) and compared against the values stamped by `bamboo dump-kb`.
 # --------------------------------------------------------------------------- #
 META="${KB_DIR}/metadata.json"
 if [[ -f "${META}" ]]; then
-  python - "$META" <<'PY' || die "KB embedding metadata mismatch — rebuild the snapshot or image"
+  python - "$META" <<'PY' || die "KB metadata mismatch — rebuild the snapshot or image"
 import json, os, sys
 meta = json.load(open(sys.argv[1]))
-want_model = os.environ.get("EMBEDDING_MODEL", "")
-want_dim = str(os.environ.get("EMBEDDING_DIMENSION", ""))
-got_model = str(meta.get("embedding_model", ""))
-got_dim = str(meta.get("embedding_dimension", ""))
-if want_model and got_model and want_model != got_model:
-    print(f"model mismatch: image={want_model} kb={got_model}", file=sys.stderr); sys.exit(1)
-if want_dim and got_dim and want_dim != got_dim:
-    print(f"dim mismatch: image={want_dim} kb={got_dim}", file=sys.stderr); sys.exit(1)
+
+def _diff(want, got):
+    return bool(want) and bool(got) and str(want) != str(got)
+
+# Embedding model + dimension — hard requirement (vector search silently degrades).
+if _diff(os.environ.get("EMBEDDING_MODEL", ""), meta.get("embedding_model", "")):
+    print(f"embedding model mismatch: image={os.environ.get('EMBEDDING_MODEL')} kb={meta.get('embedding_model')}", file=sys.stderr); sys.exit(1)
+if _diff(os.environ.get("EMBEDDING_DIMENSION", ""), meta.get("embedding_dimension", "")):
+    print(f"embedding dim mismatch: image={os.environ.get('EMBEDDING_DIMENSION')} kb={meta.get('embedding_dimension')}", file=sys.stderr); sys.exit(1)
+
+# Neo4j — dump/load is version-strict → hard fail on mismatch.
+if _diff(os.environ.get("NEO4J_VERSION", ""), meta.get("neo4j_version", "")):
+    print(f"neo4j version mismatch: image={os.environ.get('NEO4J_VERSION')} kb={meta.get('neo4j_version')}", file=sys.stderr); sys.exit(1)
+
+# Qdrant — image pins the rolling 'v1' tag, so compare MAJOR only and WARN (the boot-
+# time snapshot recover is the hard gate).
+def _major(v):
+    return str(v).lstrip("v").split(".")[0] if v else ""
+wq, gq = _major(os.environ.get("QDRANT_VERSION", "")), _major(meta.get("qdrant_version", ""))
+if wq and gq and wq != gq:
+    print(f"WARNING: qdrant major mismatch: image={wq} kb={gq} — snapshot recover may fail", file=sys.stderr)
 PY
-  log "embedding-consistency check passed"
+  log "KB metadata checks passed"
 else
-  log "WARNING: no ${META} — skipping embedding-consistency check (recommend stamping it)"
+  log "WARNING: no ${META} — skipping KB metadata checks (recommend stamping it)"
+fi
+
+# Collection name comes from the snapshot's metadata (falls back to the env default),
+# so the populate-time and batch-time collections — and the --snapshot target — match.
+if [[ -f "${META}" ]]; then
+  COLL="$(python - "$META" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("qdrant_collection", "") or "")
+except Exception:
+    pass
+PY
+)"
+  [[ -n "${COLL}" ]] && export QDRANT_COLLECTION_NAME="${COLL}"
 fi
 
 # Sanity: scratch has room (best-effort; df may be absent in minimal images).
@@ -124,11 +154,12 @@ neo4j-admin dbms set-initial-password "${NEO4J_PASSWORD}" >/dev/null 2>&1 || tru
 neo4j-admin database load "${NEO4J_DATABASE}" \
   --from-path="${KB_DIR}" --overwrite-destination=true
 
-log "restoring Qdrant storage…"
-# The KB snapshot ships the whole Qdrant storage dir as a tarball (see docs/BATCH.md).
-if   [[ -f "${KB_DIR}/qdrant_storage.tar.zst" ]]; then tar --use-compress-program=unzstd -xf "${KB_DIR}/qdrant_storage.tar.zst" -C "${WORK}/qdrant/storage"
-elif [[ -f "${KB_DIR}/qdrant_storage.tar.gz"  ]]; then tar -xzf "${KB_DIR}/qdrant_storage.tar.gz" -C "${WORK}/qdrant/storage"
-else die "no qdrant storage tarball under ${KB_DIR}"; fi
+log "locating Qdrant snapshot…"
+# The KB snapshot ships a Qdrant Snapshot-API file (produced by `bamboo dump-kb`, see
+# docs/BATCH.md); Qdrant recovers it into the fresh storage dir on startup via the
+# --snapshot flag below — no extraction needed here.
+QDRANT_SNAPSHOT="${KB_DIR}/qdrant.snapshot"
+[[ -f "${QDRANT_SNAPSHOT}" ]] || die "no Qdrant snapshot at ${QDRANT_SNAPSHOT}"
 
 # --------------------------------------------------------------------------- #
 # Launch services (each in its own process group via setsid for clean teardown)
@@ -136,10 +167,11 @@ else die "no qdrant storage tarball under ${KB_DIR}"; fi
 log "starting neo4j…"
 setsid neo4j console >"${WORK}/neo4j/console.log" 2>&1 & PIDS+=($!)
 
-log "starting qdrant…"
+log "starting qdrant (recovering snapshot for '${QDRANT_COLLECTION_NAME}')…"
 QDRANT__SERVICE__HTTP_PORT="${QDRANT_PORT}" \
 QDRANT__STORAGE__STORAGE_PATH="${WORK}/qdrant/storage" \
-  setsid qdrant >"${WORK}/qdrant/qdrant.log" 2>&1 & PIDS+=($!)
+  setsid qdrant --snapshot "${QDRANT_SNAPSHOT}:${QDRANT_COLLECTION_NAME}" \
+  >"${WORK}/qdrant/qdrant.log" 2>&1 & PIDS+=($!)
 
 log "starting ollama…"
 OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" HOME="${WORK}/ollama" \

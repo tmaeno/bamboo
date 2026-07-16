@@ -5,6 +5,8 @@ import contextlib
 import logging
 from typing import Any, Optional
 
+import httpx
+
 try:
     from qdrant_client import AsyncQdrantClient
     from qdrant_client import models
@@ -259,3 +261,75 @@ class QdrantBackend(VectorDatabaseBackend):
         except Exception as e:
             logger.error(f"Failed to retrieve document {doc_id}: {e}")
         return None
+
+    async def export_snapshot(self, out_path: str) -> dict[str, Any]:
+        """Create a snapshot of the collection and download it to *out_path*.
+
+        Uses only the connection info in :attr:`settings` (URL / API key /
+        collection) via the Qdrant Snapshot API — no access to the server's on-disk
+        storage dir — so it works against any reachable Qdrant (local Docker or a
+        managed instance). The server-side snapshot is deleted after a successful
+        download. Used by ``bamboo dump-kb`` to stage the batch KB (see
+        ``docs/BATCH.md``); the batch container recovers it on startup with
+        ``qdrant --snapshot <file>:<collection>``.
+
+        Returns metadata for the KB manifest: the collection name, the snapshot
+        filename, and the Qdrant server version.
+        """
+        await self._ensure_connected()
+
+        server_version = await self._server_version()
+
+        snapshot = await self.client.create_snapshot(
+            collection_name=self.collection_name
+        )
+        name = getattr(snapshot, "name", "")
+        if not name:
+            raise RuntimeError(
+                f"Qdrant returned no snapshot for collection {self.collection_name!r}"
+            )
+
+        base = self.settings.qdrant_url.rstrip("/")
+        url = f"{base}/collections/{self.collection_name}/snapshots/{name}"
+        headers = {}
+        if self.settings.qdrant_api_key:
+            headers["api-key"] = self.settings.qdrant_api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=None) as http:
+                async with http.stream("GET", url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with open(out_path, "wb") as fh:
+                        async for chunk in resp.aiter_bytes():
+                            fh.write(chunk)
+        finally:
+            with contextlib.suppress(Exception):
+                await self.client.delete_snapshot(
+                    collection_name=self.collection_name, snapshot_name=name
+                )
+
+        logger.info(
+            "Exported Qdrant snapshot for collection '%s' → %s",
+            self.collection_name,
+            out_path,
+        )
+        return {
+            "qdrant_collection": self.collection_name,
+            "qdrant_snapshot": name,
+            "qdrant_version": server_version,
+        }
+
+    async def _server_version(self) -> str:
+        """Return the Qdrant server version string (best-effort; ``""`` on failure)."""
+        base = self.settings.qdrant_url.rstrip("/")
+        headers = {}
+        if self.settings.qdrant_api_key:
+            headers["api-key"] = self.settings.qdrant_api_key
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(f"{base}/", headers=headers)
+                resp.raise_for_status()
+                return str(resp.json().get("version", ""))
+        except Exception as exc:  # noqa: BLE001 — version is informational metadata
+            logger.warning("Could not read Qdrant server version: %s", exc)
+            return ""
