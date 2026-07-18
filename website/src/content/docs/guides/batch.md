@@ -94,6 +94,34 @@ search silently degrades otherwise. The Neo4j version must match the image's `NE
 the image's `QDRANT_VERSION` (a mismatch only warns, since the boot-time snapshot recover is the
 real gate). `bamboo dump-kb` stamps all these values for you.
 
+## Testing locally
+
+Before queuing on a cluster, dress-rehearse the **exact container** on your workstation — it runs
+the same ENTRYPOINT (`run-analyze.sh`) SLURM will, so it catches the batch-specific failures (KB
+`metadata.json` mismatch, Neo4j/Qdrant version skew, a bad snapshot, a mis-staged model) where
+they're cheap to debug. Reuse the `bamboo-batch-analyze` image, staged model, and KB snapshot you
+built above; point the mounts at your local paths and run it under Docker:
+
+```bash
+docker run --rm \
+  -v $PWD/in:/in:ro \
+  -v $PWD/out:/out \
+  -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
+  -e LLM_MODEL=llama3.2:3b \
+  bamboo-batch-analyze      # use the model you staged; add --gpus all to exercise GPU
+```
+
+`run-analyze.sh` runs its full sequence — the KB metadata guard, `neo4j-admin database load`,
+Qdrant snapshot recover, `ollama serve`, then `bamboo batch-analyze` over `/in` — and tears the
+stack down on exit. Success is one result JSON per task in `./out`; a `*.error.json` sidecar plus a
+non-zero exit flags a failing task. This is the same round-trip `submit.sh` performs, minus the
+Apptainer launcher.
+
+> A Docker run won't reproduce every Apptainer detail — rootless arbitrary-uid execution, the
+> shared host netns (why `run-analyze.sh` allocates free ports), and `--nv` GPU wiring. Treat it as
+> a functional dress rehearsal, and still do one real cluster smoke test before relying on the queue.
+
 ## Submitting a job
 
 Stage task-data `*.json` files into an input dir, then:
