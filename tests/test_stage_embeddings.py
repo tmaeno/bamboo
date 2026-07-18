@@ -55,22 +55,14 @@ def test_resolve_model_default_when_config_unavailable(monkeypatch):
     assert _resolve_model(None) == DEFAULT_MODEL
 
 
-# --- reranker precedence: --reranker > reranker_model (non-empty) > None --------------
-
-def test_resolve_reranker_explicit_wins(monkeypatch):
-    monkeypatch.setattr(
-        "bamboo.config.get_settings",
-        lambda: SimpleNamespace(reranker_model="from-config"),
-    )
-    assert _resolve_reranker("explicit") == "explicit"
-
+# --- reranker: config reranker_model (non-empty) else None (no CLI flag) --------------
 
 def test_resolve_reranker_from_config_when_set(monkeypatch):
     monkeypatch.setattr(
         "bamboo.config.get_settings",
         lambda: SimpleNamespace(reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2"),
     )
-    assert _resolve_reranker(None) == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert _resolve_reranker() == "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 def test_resolve_reranker_none_when_config_empty(monkeypatch):
@@ -78,7 +70,15 @@ def test_resolve_reranker_none_when_config_empty(monkeypatch):
         "bamboo.config.get_settings",
         lambda: SimpleNamespace(reranker_model=""),
     )
-    assert _resolve_reranker(None) is None
+    assert _resolve_reranker() is None
+
+
+def test_resolve_reranker_none_when_config_unavailable(monkeypatch):
+    def _boom():
+        raise RuntimeError("no config")
+
+    monkeypatch.setattr("bamboo.config.get_settings", _boom)
+    assert _resolve_reranker() is None
 
 
 # --- out-dir precedence: --out > $EMBEDDINGS_OUT > ${SHARED:-/shared}/bamboo/embeddings
@@ -134,15 +134,17 @@ def test_warm_downloads_embedding_and_writes_manifest(tmp_path, monkeypatch):
 
 
 def test_warm_stages_reranker_too(tmp_path, monkeypatch):
-    """--reranker warms a CrossEncoder into the same dir and records it in the manifest."""
+    """A configured reranker warms a CrossEncoder into the same dir and lands in the manifest."""
     out = str(tmp_path / "emb")
     run = MagicMock(return_value=SimpleNamespace(returncode=0))
     monkeypatch.setattr(stage_embeddings.subprocess, "run", run)
-
-    result = CliRunner().invoke(
-        stage_embeddings.main,
-        ["--model", "m", "--reranker", "cross-encoder/r", "--out", out],
+    # Reranking is opt-in via config (RERANKER_MODEL), not a CLI flag.
+    monkeypatch.setattr(
+        "bamboo.config.get_settings",
+        lambda: SimpleNamespace(reranker_model="cross-encoder/r"),
     )
+
+    result = CliRunner().invoke(stage_embeddings.main, ["--model", "m", "--out", out])
     assert result.exit_code == 0, result.output
 
     assert run.call_count == 2

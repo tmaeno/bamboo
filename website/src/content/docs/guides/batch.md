@@ -42,11 +42,10 @@ SHARED=/shared bamboo stage-model
 # 3. Stage the local embedding model onto shared storage (mounted read-only at /embeddings).
 #    Needs the `[local]` extra (sentence-transformers). --model defaults to EMBEDDING_MODEL
 #    from your config when EMBEDDINGS_PROVIDER=local, else all-MiniLM-L6-v2; out dir =
-#    $EMBEDDINGS_OUT or ${SHARED:-/shared}/bamboo/embeddings. Add --reranker to also stage a
-#    cross-encoder for RERANKER_MODEL.
+#    $EMBEDDINGS_OUT or ${SHARED:-/shared}/bamboo/embeddings. If RERANKER_MODEL is set in your
+#    config, that cross-encoder is staged alongside the embedding model too.
 SHARED=/shared bamboo stage-embeddings
 # explicit model:  SHARED=/shared bamboo stage-embeddings --model all-mpnet-base-v2
-# with reranker:   SHARED=/shared bamboo stage-embeddings --reranker cross-encoder/ms-marco-MiniLM-L-6-v2
 
 # 4. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
 ```

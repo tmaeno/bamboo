@@ -12,10 +12,12 @@ The model files are warmed into the output dir by a *dedicated child process* ru
 subprocess is the only reliable way to land the cache in that dir (this also mirrors the
 Dockerfile's old bake command byte-for-byte, so the on-disk layout matches).
 
-A tiny ``bamboo-embeddings.json`` manifest is written alongside the cache recording what was
-staged, so ``deploy/batch/run-analyze.sh`` can derive ``RERANKER_MODEL`` from it (the
-embedding model itself is derived from the KB snapshot's ``metadata.json`` — the KB is its
-source of truth). See ``website/src/content/docs/guides/batch.md``.
+If ``RERANKER_MODEL`` is set in your config, its cross-encoder is staged alongside the
+embedding model (the reranker is opt-in and configured, not a CLI flag). A tiny
+``bamboo-embeddings.json`` manifest is written alongside the cache recording what was staged,
+so ``deploy/batch/run-analyze.sh`` can derive ``RERANKER_MODEL`` from it (the embedding model
+itself is derived from the KB snapshot's ``metadata.json`` — the KB is its source of truth).
+See ``website/src/content/docs/guides/batch.md``.
 """
 
 from __future__ import annotations
@@ -53,14 +55,14 @@ def _resolve_model(explicit: str | None) -> str:
     return DEFAULT_MODEL
 
 
-def _resolve_reranker(explicit: str | None) -> str | None:
-    """Reranker precedence: ``--reranker`` > config ``reranker_model`` (when set) > ``None``.
+def _resolve_reranker() -> str | None:
+    """Reranker from config ``reranker_model`` (i.e. ``RERANKER_MODEL``), else ``None``.
 
-    Reranking is opt-in — there is no default cross-encoder, so ``None`` means "don't stage
-    a reranker" (and the batch run leaves reranking off).
+    Reranking is opt-in and configured — there is no ``--reranker`` flag and no default
+    cross-encoder. ``None`` means "don't stage a reranker" (and the batch run leaves reranking
+    off). The reranker is not KB-bound; whatever you configure here is what a batch run uses
+    (``run-analyze.sh`` derives ``RERANKER_MODEL`` from the manifest this writes).
     """
-    if explicit:
-        return explicit
     try:
         from bamboo.config import get_settings
 
@@ -116,30 +118,26 @@ def _warm(model: str, out: str, loader: str) -> None:
     "EMBEDDINGS_PROVIDER=local, else sentence-transformers/all-MiniLM-L6-v2.",
 )
 @click.option(
-    "--reranker",
-    default=None,
-    help="Optional cross-encoder reranker to stage alongside. Default: RERANKER_MODEL from "
-    "config when set, else none.",
-)
-@click.option(
     "--out",
     "out_dir",
     default=None,
     type=click.Path(file_okay=False),
     help="Embeddings output dir. Default: $EMBEDDINGS_OUT or ${SHARED:-/shared}/bamboo/embeddings.",
 )
-def main(model, reranker, out_dir):
+def main(model, out_dir):
     """Stage the local embedding model into shared storage (mounted read-only at /embeddings).
 
+    Set RERANKER_MODEL in your config to also stage that cross-encoder alongside the embedding
+    model (reranking is opt-in and configured — there is no --reranker flag).
+
     \b
-      bamboo stage-embeddings                                  # model from your bamboo config
-      bamboo stage-embeddings --model all-mpnet-base-v2        # explicit
-      bamboo stage-embeddings --reranker cross-encoder/ms-marco-MiniLM-L-6-v2
-      SHARED=/shared bamboo stage-embeddings                   # out = /shared/bamboo/embeddings
+      bamboo stage-embeddings                             # model from your bamboo config
+      bamboo stage-embeddings --model all-mpnet-base-v2   # explicit
+      SHARED=/shared bamboo stage-embeddings              # out = /shared/bamboo/embeddings
     """
     setup_logging()
     model = _resolve_model(model)
-    reranker = _resolve_reranker(reranker)
+    reranker = _resolve_reranker()
     # Absolutise: the child process inherits its own cwd; a relative HF_HOME would land the
     # cache under that cwd rather than the intended shared path.
     out = os.path.abspath(_resolve_out(out_dir))
