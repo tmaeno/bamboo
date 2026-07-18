@@ -25,9 +25,9 @@ def test_resolve_model_explicit_wins(monkeypatch):
 def test_resolve_model_from_config_when_ollama(monkeypatch):
     monkeypatch.setattr(
         "bamboo.config.get_settings",
-        lambda: SimpleNamespace(llm_provider="ollama", llm_model="llama3.2:1b"),
+        lambda: SimpleNamespace(llm_provider="ollama", llm_model="qwen3.6:1b"),
     )
-    assert _resolve_model(None) == "llama3.2:1b"
+    assert _resolve_model(None) == "qwen3.6:1b"
 
 
 def test_resolve_model_default_when_not_ollama(monkeypatch):
@@ -111,13 +111,13 @@ def test_pull_starts_transient_server_and_pulls_into_out(tmp_path, monkeypatch):
     run = MagicMock(return_value=SimpleNamespace(returncode=0))
     monkeypatch.setattr(stage_model.subprocess, "run", run)
 
-    result = CliRunner().invoke(stage_model.main, ["--model", "llama3.2:1b", "--out", out])
+    result = CliRunner().invoke(stage_model.main, ["--model", "qwen3.6:1b", "--out", out])
     assert result.exit_code == 0, result.output
 
     pull_calls = [c for c in run.call_args_list if c.args[0][:2] == ["ollama", "pull"]]
     assert len(pull_calls) == 1
     args, kwargs = pull_calls[0]
-    assert args[0] == ["ollama", "pull", "llama3.2:1b"]
+    assert args[0] == ["ollama", "pull", "qwen3.6:1b"]
     # The pull runs against OUR transient server, writing into <out>.
     assert kwargs["env"]["OLLAMA_MODELS"] == out
     assert kwargs["env"]["OLLAMA_HOST"] == "127.0.0.1:12345"

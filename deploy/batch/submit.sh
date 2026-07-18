@@ -29,7 +29,7 @@ PY
 )"
   [ -n "${_derived}" ] && LLM_MODEL="${_derived}"
 fi
-LLM_MODEL="${LLM_MODEL:-llama3.2:3b}"
+LLM_MODEL="${LLM_MODEL:-qwen3.6}"
 USE_GPU="${USE_GPU:-0}"                              # 1 on a GPU queue
 
 mkdir -p "${SCRATCH}" "${OUT_DIR}"

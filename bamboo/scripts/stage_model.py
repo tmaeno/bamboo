@@ -24,11 +24,11 @@ import click
 
 from bamboo.utils.logging import setup_logging
 
-DEFAULT_MODEL = "llama3.2:3b"
+DEFAULT_MODEL = "qwen3.6"
 
 
 def _resolve_model(explicit: str | None) -> str:
-    """Model precedence: ``--model`` > ``LLM_MODEL`` (Ollama only) > ``llama3.2:3b``.
+    """Model precedence: ``--model`` > ``LLM_MODEL`` (Ollama only) > ``qwen3.6``.
 
     The config is consulted only for an Ollama setup, since the batch path is
     Ollama-only; an OpenAI/Anthropic ``llm_model`` is not a valid ``ollama pull`` tag.
@@ -148,7 +148,7 @@ def _pull_with_docker(model: str, out: str) -> None:
     "--model",
     default=None,
     help="Ollama model tag. Default: LLM_MODEL from config when LLM_PROVIDER=ollama, "
-    "else llama3.2:3b.",
+    "else qwen3.6.",
 )
 @click.option(
     "--out",
@@ -162,7 +162,7 @@ def main(model, out_dir):
 
     \b
       bamboo stage-model                      # model from your bamboo config
-      bamboo stage-model --model llama3.2:3b  # explicit
+      bamboo stage-model --model qwen3.6  # explicit
       SHARED=/shared bamboo stage-model       # out = /shared/bamboo/ollama
     """
     setup_logging()

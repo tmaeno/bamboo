@@ -85,7 +85,7 @@ No API keys required at all.
 ```bash
 # 1. Install Ollama: https://ollama.com
 # 2. Pull a model (one-time download, ~2-8GB depending on model)
-ollama pull llama3.2
+ollama pull qwen3.6
 # 3. Keep the server running in a separate terminal
 ollama serve
 # 4. Install the extra dependencies for local LLM and Ollama
@@ -96,7 +96,7 @@ pip install sentence-transformers langchain-huggingface
 
 ```env
 LLM_PROVIDER=ollama
-LLM_MODEL=llama3.2          # or mistral, gemma3, etc.
+LLM_MODEL=qwen3.6          # or mistral, gemma3, etc.
 EMBEDDINGS_PROVIDER=local   # runs sentence-transformers in-process, no API key
 EMBEDDING_MODEL=all-MiniLM-L6-v2   # fast (384-dim); or all-mpnet-base-v2 (768-dim)
 EMBEDDING_DIMENSION=384            # must match EMBEDDING_MODEL

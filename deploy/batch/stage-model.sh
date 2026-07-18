@@ -4,8 +4,8 @@
 # ships with `pip install bamboo` (no repo checkout needed).
 #
 # Usage:  ./stage-model.sh                    # model from your bamboo config (Ollama)
-#         MODEL=llama3.2:3b ./stage-model.sh   # explicit (env)
-#         ./stage-model.sh llama3.2:3b         # explicit (positional)
+#         MODEL=qwen3.6 ./stage-model.sh   # explicit (env)
+#         ./stage-model.sh qwen3.6         # explicit (positional)
 #         (MODELS_OUT / SHARED flow through to the CLI via env; set BAMBOO to override
 #          the interpreter/entrypoint, default `bamboo`)
 #

@@ -17,7 +17,7 @@ SDK client is constructed only once per process.
   - ``"ollama"``           — Local models served by Ollama (e.g. ``llama3``,
     ``mistral``, ``gemma3``).  Completely free, no API key required.
     Requires Ollama to be installed and running (``ollama serve``).
-    Set ``LLM_MODEL`` to the pulled model name (e.g. ``llama3.2``).
+    Set ``LLM_MODEL`` to the pulled model name (e.g. ``qwen3.6``).
     Requires ``pip install langchain-ollama``.
 
 **Embeddings providers** (``EMBEDDINGS_PROVIDER``):
@@ -34,7 +34,7 @@ SDK client is constructed only once per process.
 **Fully free setup** (no API keys at all)::
 
     LLM_PROVIDER=ollama
-    LLM_MODEL=llama3.2
+    LLM_MODEL=qwen3.6
     EMBEDDINGS_PROVIDER=local
     EMBEDDING_MODEL=all-MiniLM-L6-v2
     EMBEDDING_DIMENSION=384
