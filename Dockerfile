@@ -12,7 +12,7 @@
 #   Grep for "VERIFY:" for the spots to check on the cluster.
 
 ARG PYTHON_VERSION=3.12
-ARG NEO4J_VERSION=5.26.28
+ARG NEO4J_VERSION=2026.06.0
 ARG QDRANT_VERSION=v1
 ARG OLLAMA_VERSION=latest
 

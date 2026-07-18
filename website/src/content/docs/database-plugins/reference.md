@@ -42,9 +42,9 @@ VECTOR_DATABASE_BACKEND=qdrant
 
 # Graph Database Configuration
 NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=graph_db
+NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=password
-NEO4J_DATABASE=graph_db
+NEO4J_DATABASE=neo4j
 
 # Vector Database Configuration
 QDRANT_URL=http://localhost:6333

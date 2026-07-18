@@ -44,8 +44,10 @@ export LLM_PROVIDER="${LLM_PROVIDER:-ollama}"
 export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-local}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
-export NEO4J_DATABASE="${NEO4J_DATABASE:-graph_db}"
-export NEO4J_USERNAME="${NEO4J_USERNAME:-graph_db}"
+# NEO4J_DATABASE is derived from the KB metadata.json below (falling back to the
+# built-in `neo4j`) so the load target always matches the dump the KB was built
+# with. An explicit NEO4J_DATABASE env still wins.
+export NEO4J_USERNAME="${NEO4J_USERNAME:-neo4j}"
 export NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
 
 # LLM_MODEL: an explicit env wins; otherwise derive it from the staged /models manifest
@@ -94,19 +96,25 @@ export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
 log "ports: bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT}"
 
 # --------------------------------------------------------------------------- #
-# KB metadata guard — refuse to run on an incompatible snapshot. Neo4j dump/load is
-# version-strict; Qdrant snapshot recover is major-version sensitive (image pins the rolling
-# 'v1' tag). NEO4J_VERSION/QDRANT_VERSION are baked into the image (Dockerfile) and compared
-# against the values `bamboo dump-kb` stamps. The embedding model/dim are NOT compared here:
-# they are DERIVED from metadata.json below (the KB is their source of truth), so query
-# embeddings match the stored vectors by construction. We only cross-check the staged
-# /embeddings manifest against the KB so a mis-staged model fails here with a clear message
-# rather than as a cryptic offline HF load error later.
+# KB metadata guard. Two different rigor levels on purpose:
+#   • Embedding model — HARD FAIL. Correctness-critical: a mismatched model means query
+#     vectors won't match the stored vectors (silent garbage / dimension errors), and it's a
+#     staging mistake, not engine drift. The model/dim themselves are DERIVED from
+#     metadata.json below (the KB is their source of truth); this only cross-checks the staged
+#     /embeddings manifest so a mis-staged dir fails here with a clear message rather than as a
+#     cryptic offline HF load error later.
+#   • Neo4j / Qdrant engine versions — WARN only. The real gates are the boot-time
+#     `neo4j-admin database load` and Qdrant `--snapshot` recover, which run under
+#     `set -euo pipefail` and fail the job loudly on a genuine incompatibility. We can't verify
+#     the exact cross-version behavior here (this file is a scaffold), so we surface drift as a
+#     warning rather than block on a version-string that may well be compatible.
+# NEO4J_VERSION/QDRANT_VERSION are baked into the image (Dockerfile); the KB values are what
+# `bamboo dump-kb` stamps into metadata.json.
 # --------------------------------------------------------------------------- #
 META="${KB_DIR}/metadata.json"
 EMB_MANIFEST="${HF_HOME}/bamboo-embeddings.json"
 if [[ -f "${META}" ]]; then
-  python - "$META" "$EMB_MANIFEST" <<'PY' || die "KB metadata / staged embeddings mismatch — rebuild the snapshot or re-stage"
+  python - "$META" "$EMB_MANIFEST" <<'PY' || die "staged embeddings do not match the KB — re-stage the embedding model"
 import json, os, sys
 meta = json.load(open(sys.argv[1]))
 try:
@@ -117,22 +125,17 @@ except Exception:
 def _diff(want, got):
     return bool(want) and bool(got) and str(want) != str(got)
 
-# Staged embedding model must match the KB's (both derived from the same source at populate
-# time). Catches a mis-staged /embeddings dir early with a clear message.
+# Embedding model — correctness-critical (query vs stored vectors must agree). HARD FAIL.
 if _diff(meta.get("embedding_model", ""), man.get("embedding_model", "")):
     print(f"staged embedding model {man.get('embedding_model')!r} != KB {meta.get('embedding_model')!r}", file=sys.stderr); sys.exit(1)
 
-# Neo4j — dump/load is version-strict → hard fail on mismatch.
+# Engine versions — the boot-time `neo4j-admin database load` and Qdrant `--snapshot` recover
+# are the real gates (they fail loudly on a genuine incompatibility). We can't verify exact
+# cross-version behavior here, so WARN on drift rather than block.
 if _diff(os.environ.get("NEO4J_VERSION", ""), meta.get("neo4j_version", "")):
-    print(f"neo4j version mismatch: image={os.environ.get('NEO4J_VERSION')} kb={meta.get('neo4j_version')}", file=sys.stderr); sys.exit(1)
-
-# Qdrant — image pins the rolling 'v1' tag, so compare MAJOR only and WARN (the boot-
-# time snapshot recover is the hard gate).
-def _major(v):
-    return str(v).lstrip("v").split(".")[0] if v else ""
-wq, gq = _major(os.environ.get("QDRANT_VERSION", "")), _major(meta.get("qdrant_version", ""))
-if wq and gq and wq != gq:
-    print(f"WARNING: qdrant major mismatch: image={wq} kb={gq} — snapshot recover may fail", file=sys.stderr)
+    print(f"WARNING: neo4j version drift: image={os.environ.get('NEO4J_VERSION')} kb={meta.get('neo4j_version')} — dump load may fail at boot", file=sys.stderr)
+if _diff(os.environ.get("QDRANT_VERSION", ""), meta.get("qdrant_version", "")):
+    print(f"WARNING: qdrant version drift: image={os.environ.get('QDRANT_VERSION')} kb={meta.get('qdrant_version')} — snapshot recover may fail at boot", file=sys.stderr)
 PY
   log "KB metadata checks passed"
 else
@@ -151,8 +154,11 @@ fi
 : "${EMBEDDING_DIMENSION:=$(_json_get "${META}" embedding_dimension)}"
 : "${QDRANT_COLLECTION_NAME:=$(_json_get "${META}" qdrant_collection)}"
 : "${QDRANT_COLLECTION_NAME:=bamboo_knowledge}"
+: "${NEO4J_DATABASE:=$(_json_get "${META}" neo4j_database)}"
+: "${NEO4J_DATABASE:=neo4j}"
 : "${RERANKER_MODEL:=$(_json_get "${EMB_MANIFEST}" reranker_model)}"
 export QDRANT_COLLECTION_NAME
+export NEO4J_DATABASE
 [[ -n "${EMBEDDING_MODEL:-}" ]]    && export EMBEDDING_MODEL
 [[ -n "${EMBEDDING_DIMENSION:-}" ]] && export EMBEDDING_DIMENSION
 [[ -n "${RERANKER_MODEL:-}" ]]    && export RERANKER_MODEL
@@ -168,17 +174,27 @@ fi
 # --------------------------------------------------------------------------- #
 log "restoring Neo4j dump…"
 # VERIFY: Neo4j 5 admin syntax + dump filename (<db>.dump). See the /kb contract in docs/BATCH.md.
-NEO4J_CONF="${WORK}/neo4j/conf"
+# The Neo4j 5 CLI (`neo4j`, `neo4j-admin`) reads its conf dir from $NEO4J_CONF —
+# export it so both the offline `database load` and `neo4j console` pick up the
+# scratch neo4j.conf below (without it they use $NEO4J_HOME/conf and write to the
+# default /opt/neo4j/data, an image symlink -> /data that isn't writable here).
+export NEO4J_CONF="${WORK}/neo4j/conf"
 cp -r "${NEO4J_HOME}/conf/." "${NEO4J_CONF}/" 2>/dev/null || true
+# The stock image conf ships an active `server.http.enabled=true`; appending our
+# own value below would make Neo4j 5 reject the file ("declared multiple times").
+# Strip any active declaration of every key we override, then append ours. The
+# regex is anchored at line start (with optional leading whitespace), so commented
+# `#server.…` lines are left untouched.
+sed -i -E '/^[[:space:]]*(server\.directories\.data|server\.directories\.logs|server\.directories\.run|server\.directories\.transaction\.logs\.root|server\.bolt\.listen_address|server\.http\.enabled|dbms\.security\.procedures\.unrestricted)[[:space:]]*=/d' "${NEO4J_CONF}/neo4j.conf"
 cat >>"${NEO4J_CONF}/neo4j.conf" <<EOF
 server.directories.data=${WORK}/neo4j/data
 server.directories.logs=${WORK}/neo4j/logs
 server.directories.run=${WORK}/neo4j/run
+server.directories.transaction.logs.root=${WORK}/neo4j/data/transactions
 server.bolt.listen_address=:${BOLT_PORT}
 server.http.enabled=false
 dbms.security.procedures.unrestricted=apoc.*
 EOF
-export NEO4J_CONF_DIR="${NEO4J_CONF}"   # VERIFY: env name neo4j honours for conf dir
 
 neo4j-admin dbms set-initial-password "${NEO4J_PASSWORD}" >/dev/null 2>&1 || true
 neo4j-admin database load "${NEO4J_DATABASE}" \

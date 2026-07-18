@@ -204,10 +204,10 @@ The interactive mode provides:
 docker ps
 
 # Check graph database logs
-docker logs bamboo-graph_db-1
+docker logs bamboo-neo4j-1
 
 # Check vector database logs
-docker logs bamboo-vector_db-1
+docker logs bamboo-qdrant-1
 ```
 
 ### API Key Issues

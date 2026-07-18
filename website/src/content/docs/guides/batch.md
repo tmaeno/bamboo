@@ -60,7 +60,7 @@ URL can't provide). Stage all three files to the shared path mounted read-only a
 
 | File | What it is | Restored by `run-analyze.sh` |
 |------|------------|------------------------------|
-| `graph_db.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `graph_db`) | `neo4j-admin database load graph_db --from-path=/kb` |
+| `neo4j.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `neo4j`) | `neo4j-admin database load neo4j --from-path=/kb` |
 | `qdrant.snapshot` | Qdrant Snapshot-API export of the collection | recovered on startup (`qdrant --snapshot <file>:<collection>`) |
 | `metadata.json` | embedding model/dimension, collection, Neo4j/Qdrant versions | the KB metadata guard (embeddings + versions) |
 
@@ -81,14 +81,20 @@ service stop. `metadata.json` is filled entirely from real state: `embedding_mod
 DB name filled in; with `neo4j-admin` on the deployment host:
 
 ```bash
-neo4j-admin database dump graph_db --to-path=/tmp/kb   # writes graph_db.dump
+# If you are running Neo4j Desktop, the DBMS may use the default block store format
+# (Enterprise Edition). Neo4j Community Edition does not support the block format,
+# so you must first convert the database store format to aligned before dumping it.
+# First navigate to the DBMS directory, then run:
+neo4j-admin database migrate neo4j --to-format=aligned
+
+neo4j-admin database dump neo4j --to-path=/tmp/kb   # writes neo4j.dump
 ```
 
 The dump can equally come from a version-matched `neo4j` container over the data dir, the Neo4j
 Desktop **Dump** menu, or a managed-console export. Two rules hold regardless: the file must be
-named to match the batch `NEO4J_DATABASE` (default `graph_db`, i.e. `graph_db.dump` — rename it if
-your source DB differs), and the Neo4j version must match the batch image's `NEO4J_VERSION`
-(dump/load is version-sensitive).
+named to match the batch `NEO4J_DATABASE` (default `neo4j`, i.e. `neo4j.dump` — rename it if
+your source DB differs), and the Neo4j version must match or lower than the batch image's `NEO4J_VERSION`
+(Downgrade is not supported).
 
 Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
 
