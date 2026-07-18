@@ -98,9 +98,6 @@ your source DB differs), and the Neo4j version must match or lower than the batc
 
 Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
 
-> Initial recipe — refine once the restore round-trip (`load` + snapshot-recover + query) is
-> verified on your deployment.
-
 **Metadata guard (critical):** `run-analyze.sh` derives the embedding model + dimension
 (`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION`) straight from the snapshot's `metadata.json`, so query
 embeddings match how the KB was populated *by construction* — no silent vector degradation. It

@@ -13,7 +13,10 @@
 
 ARG PYTHON_VERSION=3.12
 ARG NEO4J_VERSION=2026.06.0
-ARG QDRANT_VERSION=v1
+# Pin explicitly (not a floating `v1`): a Qdrant snapshot is not portable across
+# minor versions, so the image's Qdrant must match the version that built the KB
+# snapshot (`bamboo dump-kb`). Bump this and rebuild the KB together.
+ARG QDRANT_VERSION=v1.18.3
 ARG OLLAMA_VERSION=latest
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +87,14 @@ RUN curl -fsSL -o "${NEO4J_HOME}/plugins/apoc-${NEO4J_VERSION}-core.jar" \
       "https://github.com/neo4j/apoc/releases/download/${NEO4J_VERSION}/apoc-${NEO4J_VERSION}-core.jar"
 
 # --- Qdrant + Ollama binaries (VERIFY: source paths) ---
+# The Qdrant binary is dynamically linked against libunwind (used for backtraces);
+# the slim base lacks it, so the copied binary dies at startup with
+# "libunwind-ptrace.so.0: cannot open shared object file". libunwind8 provides both
+# libunwind-ptrace.so.0 and the arch variant (libunwind-<arch>.so.8), on amd64 and
+# arm64 alike. Ollama is a static Go binary and needs nothing extra.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libunwind8 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=qdrant-src /qdrant/qdrant /usr/local/bin/qdrant
 COPY --from=ollama-src /usr/bin/ollama /usr/local/bin/ollama
 

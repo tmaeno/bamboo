@@ -59,6 +59,9 @@ export LLM_MODEL
 
 log() { printf '[run-analyze] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
+# Print the tail of a service log so a readiness failure is diagnosable *before*
+# the EXIT trap's `rm -rf "${WORK}"` wipes it.
+dump_tail() { log "---- last 60 lines of $1 ----"; tail -n 60 "$1" 2>/dev/null | sed 's/^/  | /' >&2; log "---- end $1 ----"; }
 
 # --------------------------------------------------------------------------- #
 # Scratch + teardown (must survive SIGKILL/walltime: kill the process group,
@@ -125,6 +128,14 @@ except Exception:
 def _diff(want, got):
     return bool(want) and bool(got) and str(want) != str(got)
 
+# Engine-version comparison only: the image bakes the Docker tag form (`v1.18.3`)
+# while the engine/metadata reports it bare (`1.18.3`), so drop a leading `v` on
+# both sides before comparing — otherwise the drift warning mis-fires even when the
+# versions match. NOT applied to model names (a leading 'v' there is significant).
+def _diffver(want, got):
+    strip = lambda s: str(s)[1:] if str(s)[:1] == "v" else str(s)
+    return _diff(strip(want), strip(got))
+
 # Embedding model — correctness-critical (query vs stored vectors must agree). HARD FAIL.
 if _diff(meta.get("embedding_model", ""), man.get("embedding_model", "")):
     print(f"staged embedding model {man.get('embedding_model')!r} != KB {meta.get('embedding_model')!r}", file=sys.stderr); sys.exit(1)
@@ -132,9 +143,9 @@ if _diff(meta.get("embedding_model", ""), man.get("embedding_model", "")):
 # Engine versions — the boot-time `neo4j-admin database load` and Qdrant `--snapshot` recover
 # are the real gates (they fail loudly on a genuine incompatibility). We can't verify exact
 # cross-version behavior here, so WARN on drift rather than block.
-if _diff(os.environ.get("NEO4J_VERSION", ""), meta.get("neo4j_version", "")):
+if _diffver(os.environ.get("NEO4J_VERSION", ""), meta.get("neo4j_version", "")):
     print(f"WARNING: neo4j version drift: image={os.environ.get('NEO4J_VERSION')} kb={meta.get('neo4j_version')} — dump load may fail at boot", file=sys.stderr)
-if _diff(os.environ.get("QDRANT_VERSION", ""), meta.get("qdrant_version", "")):
+if _diffver(os.environ.get("QDRANT_VERSION", ""), meta.get("qdrant_version", "")):
     print(f"WARNING: qdrant version drift: image={os.environ.get('QDRANT_VERSION')} kb={meta.get('qdrant_version')} — snapshot recover may fail at boot", file=sys.stderr)
 PY
   log "KB metadata checks passed"
@@ -229,9 +240,10 @@ OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" HOME="${WORK}/ollama" \
 wait_tcp()  { for _ in $(seq "${2:-120}"); do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 1; done; return 1; }
 wait_http() { for _ in $(seq "${3:-120}"); do curl -fsS "$2" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
 
-wait_tcp  "${BOLT_PORT}" 180                                  || die "neo4j not ready (see ${WORK}/neo4j/console.log)"
-wait_http "${QDRANT_PORT}" "http://127.0.0.1:${QDRANT_PORT}/readyz" 120 || die "qdrant not ready"
-wait_http "${OLLAMA_PORT}" "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 120 || die "ollama not ready"
+log "waiting for services (bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT})…"
+wait_tcp  "${BOLT_PORT}" 180 || { dump_tail "${WORK}/neo4j/console.log"; die "neo4j not ready"; }
+wait_http "${QDRANT_PORT}" "http://127.0.0.1:${QDRANT_PORT}/readyz" 120 || { dump_tail "${WORK}/qdrant/qdrant.log"; die "qdrant not ready"; }
+wait_http "${OLLAMA_PORT}" "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 120 || { dump_tail "${WORK}/ollama/ollama.log"; die "ollama not ready"; }
 log "all services ready"
 
 # --------------------------------------------------------------------------- #
