@@ -17,8 +17,8 @@ you can't precompute it. The design:
   - `bamboo-batch-analyze` — `FROM bamboo`, adds Neo4j + Qdrant + Ollama (copied from
     official images) + the entry script. Converted to a `.sif`.
 - **Large, changing artifacts stay out of the image**, staged on the shared filesystem
-  and mounted read-only: the **Ollama model** (`/models`) and the **KB snapshot**
-  (`/kb`). Update them without rebuilding the image.
+  and mounted read-only: the **Ollama model** (`/models`), the **local embedding model**
+  (`/embeddings`), and the **KB snapshot** (`/kb`). Update them without rebuilding the image.
 - **`bamboo batch-analyze`** processes many tasks per container invocation so the
   costly service + model startup is paid **once**, not per task.
 
@@ -34,11 +34,21 @@ apptainer build bamboo-batch-analyze.sif docker-daemon://bamboo-batch-analyze:la
 # 2. Stage the LLM model onto shared storage (mounted read-only at /models).
 #    Ships with `pip install bamboo`. --model defaults to LLM_MODEL from your config
 #    (Ollama), else qwen3.6; out dir = $MODELS_OUT or ${SHARED:-/shared}/bamboo/ollama.
+#    Writes a bamboo-model.json manifest so LLM_MODEL is derived at run time — you do NOT
+#    set it at submit.
 SHARED=/shared bamboo stage-model
-# explicit model:       SHARED=/shared bamboo stage-model --model qwen3.6
-# from the repo (shim): SHARED=/shared deploy/batch/stage-model.sh
+# explicit model:  SHARED=/shared bamboo stage-model --model qwen3.6
 
-# 3. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
+# 3. Stage the local embedding model onto shared storage (mounted read-only at /embeddings).
+#    Needs the `[local]` extra (sentence-transformers). --model defaults to EMBEDDING_MODEL
+#    from your config when EMBEDDINGS_PROVIDER=local, else all-MiniLM-L6-v2; out dir =
+#    $EMBEDDINGS_OUT or ${SHARED:-/shared}/bamboo/embeddings. Add --reranker to also stage a
+#    cross-encoder for RERANKER_MODEL.
+SHARED=/shared bamboo stage-embeddings
+# explicit model:  SHARED=/shared bamboo stage-embeddings --model all-mpnet-base-v2
+# with reranker:   SHARED=/shared bamboo stage-embeddings --reranker cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# 4. Build & stage the KB snapshot (mounted read-only at /kb) — see "Build the KB snapshot" below
 ```
 
 ### Build the KB snapshot
@@ -86,13 +96,16 @@ Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
 > Initial recipe — refine once the restore round-trip (`load` + snapshot-recover + query) is
 > verified on your deployment.
 
-**Metadata guard (critical):** `run-analyze.sh` refuses to run on a mismatch between the
-snapshot's `metadata.json` and the batch image. The embedding model + dimension
-(`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` build args) MUST match how the KB was populated — vector
-search silently degrades otherwise. The Neo4j version must match the image's `NEO4J_VERSION`
-(dump/load is version-strict → hard fail); the Qdrant major version is checked best-effort against
-the image's `QDRANT_VERSION` (a mismatch only warns, since the boot-time snapshot recover is the
-real gate). `bamboo dump-kb` stamps all these values for you.
+**Metadata guard (critical):** `run-analyze.sh` derives the embedding model + dimension
+(`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION`) straight from the snapshot's `metadata.json`, so query
+embeddings match how the KB was populated *by construction* — no silent vector degradation. It
+cross-checks that against the staged `/embeddings` manifest and fails early on a mismatch; a
+`/embeddings` dir missing that model then fails loudly at offline load. `RERANKER_MODEL` is
+derived from the `/embeddings` manifest and `LLM_MODEL` from the `/models` manifest, so no model
+name is set at submit time (export one to override for a run). Still *compared* against the image:
+the Neo4j version must match `NEO4J_VERSION` (dump/load is version-strict → hard fail), and the
+Qdrant major version is checked best-effort against `QDRANT_VERSION` (a mismatch only warns, since
+the boot-time snapshot recover is the real gate). `bamboo dump-kb` stamps all these values for you.
 
 ## Testing locally
 
@@ -107,9 +120,10 @@ docker run --rm \
   -v $PWD/in:/in:ro \
   -v $PWD/out:/out \
   -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
-  -e LLM_MODEL=qwen3.6 \
-  bamboo-batch-analyze      # use the model you staged; add --gpus all to exercise GPU
+  bamboo-batch-analyze      # models derived from the staged manifests/KB; add --gpus all for GPU
+# override a model for a one-off run with e.g. -e LLM_MODEL=qwen3.6
 ```
 
 `run-analyze.sh` runs its full sequence — the KB metadata guard, `neo4j-admin database load`,
@@ -128,7 +142,7 @@ Stage task-data `*.json` files into an input dir, then:
 
 ```bash
 SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out \
-  deploy/batch/submit.sh          # CPU queue (LLM_MODEL from your .env; set it to override)
+  deploy/batch/submit.sh          # CPU queue (models derived from staged artifacts; export LLM_MODEL to override)
 # GPU queue: also export USE_GPU=1   (adds --nv; Ollama auto-detects the GPU)
 ```
 
@@ -155,6 +169,6 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 |------|---------|
 | `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
 | `deploy/batch/run-analyze.sh` | In-container entry: boot stack, restore KB, run batch, tear down |
-| `deploy/batch/stage-model.sh` | Pull the Ollama model into shared storage |
+| `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
 | `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |

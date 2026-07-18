@@ -4,6 +4,7 @@ Pure-function precedence is asserted directly; the command's ollama-vs-docker br
 exercised with `shutil.which` / `subprocess.run` mocked (no real pull), so it runs in CI.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -123,6 +124,9 @@ def test_pull_starts_transient_server_and_pulls_into_out(tmp_path, monkeypatch):
     assert kwargs["env"]["OLLAMA_HOST"] == "127.0.0.1:12345"
     # And the server is torn down.
     assert server.terminated
+    # A manifest records the staged tag so run-analyze.sh can derive LLM_MODEL.
+    manifest = json.loads((tmp_path / "models" / "bamboo-model.json").read_text())
+    assert manifest == {"llm_model": "qwen3.6:1b"}
 
 
 def test_pull_errors_when_no_runtime(tmp_path, monkeypatch):

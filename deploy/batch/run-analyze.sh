@@ -7,15 +7,28 @@
 # Apptainer (you are an arbitrary uid; the .sif and /models /kb are read-only).
 #
 # Mounts (see deploy/batch/submit.sh):
-#   /in      (ro)  directory of task-data *.json files
-#   /out     (rw)  one result JSON per task is written here
-#   /kb      (ro)  KB snapshot: <db>.dump + qdrant.snapshot + metadata.json
-#   /models  (ro)  Ollama models dir (OLLAMA_MODELS)
-#   /work    (rw)  node-local scratch (optional; falls back to $TMPDIR)
+#   /in         (ro)  directory of task-data *.json files
+#   /out        (rw)  one result JSON per task is written here
+#   /kb         (ro)  KB snapshot: <db>.dump + qdrant.snapshot + metadata.json
+#   /models     (ro)  Ollama models dir (OLLAMA_MODELS) + bamboo-model.json manifest
+#   /embeddings (ro)  local HF cache (HF_HOME): embedding model + optional reranker + manifest
+#   /work       (rw)  node-local scratch (optional; falls back to $TMPDIR)
 #
 # ⚠ SCAFFOLD — UNVERIFIED. Grep "VERIFY:" for spots the Phase 0 spike must confirm
 #   (rootless Neo4j wiring, admin subcommand syntax, readiness probes).
 set -euo pipefail
+
+# Read a top-level string field from a JSON file; empty if the file/field is absent. Used to
+# derive model identities from the staged artifacts (stage manifests + KB metadata.json).
+_json_get() {
+  python - "$1" "$2" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2], "") or "")
+except Exception:
+    pass
+PY
+}
 
 # --------------------------------------------------------------------------- #
 # Config (override via env / APPTAINERENV_*)
@@ -24,9 +37,9 @@ IN_DIR="${BAMBOO_IN:-/in}"
 OUT_DIR="${BAMBOO_OUT:-/out}"
 KB_DIR="${BAMBOO_KB:-/kb}"
 WORK_ROOT="${BAMBOO_WORK:-${TMPDIR:-/tmp}}"
-: "${LLM_MODEL:?set LLM_MODEL to a model present under /models (OLLAMA_MODELS)}"
 
 export OLLAMA_MODELS="${OLLAMA_MODELS:-/models}"
+export HF_HOME="${HF_HOME:-/embeddings}"
 export LLM_PROVIDER="${LLM_PROVIDER:-ollama}"
 export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-local}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
@@ -34,7 +47,13 @@ export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export NEO4J_DATABASE="${NEO4J_DATABASE:-graph_db}"
 export NEO4J_USERNAME="${NEO4J_USERNAME:-graph_db}"
 export NEO4J_PASSWORD="${NEO4J_PASSWORD:-password}"
-export QDRANT_COLLECTION_NAME="${QDRANT_COLLECTION_NAME:-bamboo_knowledge}"
+
+# LLM_MODEL: an explicit env wins; otherwise derive it from the staged /models manifest
+# (bamboo stage-model writes bamboo-model.json), so the model choice travels with the staged
+# files and nothing needs to be set at submit time.
+: "${LLM_MODEL:=$(_json_get "${OLLAMA_MODELS}/bamboo-model.json" llm_model)}"
+: "${LLM_MODEL:?no LLM_MODEL and no ${OLLAMA_MODELS}/bamboo-model.json — stage a model with 'bamboo stage-model'}"
+export LLM_MODEL
 
 log() { printf '[run-analyze] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -75,26 +94,33 @@ export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
 log "ports: bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT}"
 
 # --------------------------------------------------------------------------- #
-# KB metadata guard — refuse to run on an incompatible snapshot. Embedding model/dim
-# mismatch silently corrupts vector search; Neo4j dump/load is version-strict; Qdrant
-# snapshot recover is major-version sensitive (image pins the rolling 'v1' tag).
-# EMBEDDING_MODEL/DIMENSION and NEO4J_VERSION/QDRANT_VERSION are baked into the image
-# (Dockerfile) and compared against the values stamped by `bamboo dump-kb`.
+# KB metadata guard — refuse to run on an incompatible snapshot. Neo4j dump/load is
+# version-strict; Qdrant snapshot recover is major-version sensitive (image pins the rolling
+# 'v1' tag). NEO4J_VERSION/QDRANT_VERSION are baked into the image (Dockerfile) and compared
+# against the values `bamboo dump-kb` stamps. The embedding model/dim are NOT compared here:
+# they are DERIVED from metadata.json below (the KB is their source of truth), so query
+# embeddings match the stored vectors by construction. We only cross-check the staged
+# /embeddings manifest against the KB so a mis-staged model fails here with a clear message
+# rather than as a cryptic offline HF load error later.
 # --------------------------------------------------------------------------- #
 META="${KB_DIR}/metadata.json"
+EMB_MANIFEST="${HF_HOME}/bamboo-embeddings.json"
 if [[ -f "${META}" ]]; then
-  python - "$META" <<'PY' || die "KB metadata mismatch — rebuild the snapshot or image"
+  python - "$META" "$EMB_MANIFEST" <<'PY' || die "KB metadata / staged embeddings mismatch — rebuild the snapshot or re-stage"
 import json, os, sys
 meta = json.load(open(sys.argv[1]))
+try:
+    man = json.load(open(sys.argv[2]))
+except Exception:
+    man = {}
 
 def _diff(want, got):
     return bool(want) and bool(got) and str(want) != str(got)
 
-# Embedding model + dimension — hard requirement (vector search silently degrades).
-if _diff(os.environ.get("EMBEDDING_MODEL", ""), meta.get("embedding_model", "")):
-    print(f"embedding model mismatch: image={os.environ.get('EMBEDDING_MODEL')} kb={meta.get('embedding_model')}", file=sys.stderr); sys.exit(1)
-if _diff(os.environ.get("EMBEDDING_DIMENSION", ""), meta.get("embedding_dimension", "")):
-    print(f"embedding dim mismatch: image={os.environ.get('EMBEDDING_DIMENSION')} kb={meta.get('embedding_dimension')}", file=sys.stderr); sys.exit(1)
+# Staged embedding model must match the KB's (both derived from the same source at populate
+# time). Catches a mis-staged /embeddings dir early with a clear message.
+if _diff(meta.get("embedding_model", ""), man.get("embedding_model", "")):
+    print(f"staged embedding model {man.get('embedding_model')!r} != KB {meta.get('embedding_model')!r}", file=sys.stderr); sys.exit(1)
 
 # Neo4j — dump/load is version-strict → hard fail on mismatch.
 if _diff(os.environ.get("NEO4J_VERSION", ""), meta.get("neo4j_version", "")):
@@ -113,19 +139,23 @@ else
   log "WARNING: no ${META} — skipping KB metadata checks (recommend stamping it)"
 fi
 
-# Collection name comes from the snapshot's metadata (falls back to the env default),
-# so the populate-time and batch-time collections — and the --snapshot target — match.
-if [[ -f "${META}" ]]; then
-  COLL="$(python - "$META" <<'PY' 2>/dev/null || true
-import json, sys
-try:
-    print(json.load(open(sys.argv[1])).get("qdrant_collection", "") or "")
-except Exception:
-    pass
-PY
-)"
-  [[ -n "${COLL}" ]] && export QDRANT_COLLECTION_NAME="${COLL}"
-fi
+# --------------------------------------------------------------------------- #
+# Derive model identities from the staged artifacts (an explicit env value wins for each):
+#   EMBEDDING_MODEL / EMBEDDING_DIMENSION / QDRANT_COLLECTION_NAME ← KB metadata.json
+#   RERANKER_MODEL                                                 ← /embeddings manifest
+# Deriving the collection from the snapshot keeps the populate-time and batch-time
+# collections — and the --snapshot target — matched. HF resolves the on-disk model files via
+# HF_HOME=/embeddings; a missing model then fails loudly offline.
+# --------------------------------------------------------------------------- #
+: "${EMBEDDING_MODEL:=$(_json_get "${META}" embedding_model)}"
+: "${EMBEDDING_DIMENSION:=$(_json_get "${META}" embedding_dimension)}"
+: "${QDRANT_COLLECTION_NAME:=$(_json_get "${META}" qdrant_collection)}"
+: "${QDRANT_COLLECTION_NAME:=bamboo_knowledge}"
+: "${RERANKER_MODEL:=$(_json_get "${EMB_MANIFEST}" reranker_model)}"
+export QDRANT_COLLECTION_NAME
+[[ -n "${EMBEDDING_MODEL:-}" ]]    && export EMBEDDING_MODEL
+[[ -n "${EMBEDDING_DIMENSION:-}" ]] && export EMBEDDING_DIMENSION
+[[ -n "${RERANKER_MODEL:-}" ]]    && export RERANKER_MODEL
 
 # Sanity: scratch has room (best-effort; df may be absent in minimal images).
 if command -v df >/dev/null 2>&1; then

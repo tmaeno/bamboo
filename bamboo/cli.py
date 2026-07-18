@@ -930,6 +930,9 @@ cli.add_command(_dump_kb_main, "dump-kb")
 from bamboo.scripts.stage_model import main as _stage_model_main
 cli.add_command(_stage_model_main, "stage-model")
 
+from bamboo.scripts.stage_embeddings import main as _stage_embeddings_main
+cli.add_command(_stage_embeddings_main, "stage-embeddings")
+
 
 if __name__ == "__main__":
     cli()

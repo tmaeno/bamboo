@@ -1,20 +1,22 @@
 #!/usr/bin/env python
 """Pull the Ollama LLM model into shared storage for the batch pipeline.
 
-`bamboo stage-model` is the CLI counterpart to `deploy/batch/stage-model.sh` — it ships
-with `pip install bamboo` (no repo checkout needed) and resolves the model from your
-bamboo config so you never have to repeat it. The batch container mounts the output dir
-read-only at ``/models`` (``OLLAMA_MODELS``).
+`bamboo stage-model` ships with `pip install bamboo` (no repo checkout needed) and resolves
+the model from your bamboo config so you never have to repeat it. The batch container mounts
+the output dir read-only at ``/models`` (``OLLAMA_MODELS``).
 
 Runs a *dedicated transient* Ollama server pointed at the output dir (a local ``ollama``
 binary when present, else a throwaway ``ollama/ollama`` Docker container), so the model
 lands in that dir regardless of any Ollama daemon already running on the host.
 
-See ``website/src/content/docs/guides/batch.md``.
+A tiny ``bamboo-model.json`` manifest is written alongside the model recording the pulled
+tag, so ``deploy/batch/run-analyze.sh`` can derive ``LLM_MODEL`` from the staged files —
+nothing needs to be repeated at submit time. See ``website/src/content/docs/guides/batch.md``.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -25,6 +27,7 @@ import click
 from bamboo.utils.logging import setup_logging
 
 DEFAULT_MODEL = "qwen3.6"
+MANIFEST_NAME = "bamboo-model.json"
 
 
 def _resolve_model(explicit: str | None) -> str:
@@ -187,9 +190,14 @@ def main(model, out_dir):
             f"model pull failed (exit {exc.returncode})"
         ) from exc
 
-    click.echo(
-        f"[stage-model] ✓ '{model}' staged. Set LLM_MODEL={model} at submit time."
-    )
+    # Manifest last: its presence implies the model landed. run-analyze.sh reads llm_model
+    # from it to derive LLM_MODEL, so the model choice travels with the staged files.
+    manifest = os.path.join(out, MANIFEST_NAME)
+    with open(manifest, "w", encoding="utf-8") as fh:
+        json.dump({"llm_model": model}, fh, indent=2)
+        fh.write("\n")
+
+    click.echo(f"[stage-model] ✓ '{model}' staged to {out}")
 
 
 if __name__ == "__main__":

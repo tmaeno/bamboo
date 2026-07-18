@@ -15,10 +15,6 @@ ARG PYTHON_VERSION=3.12
 ARG NEO4J_VERSION=5.26.28
 ARG QDRANT_VERSION=v1
 ARG OLLAMA_VERSION=latest
-# Local embedding model baked into Image 2. MUST match the model recorded in the
-# KB snapshot's metadata.json (see docs/BATCH.md) or vector search silently degrades.
-ARG EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-ARG EMBEDDING_DIMENSION=384
 
 # --------------------------------------------------------------------------- #
 # Binary source stages — we COPY official binaries out of these (no hand-built
@@ -68,8 +64,6 @@ FROM bamboo AS bamboo-batch-analyze
 # Re-declare (no default) to inherit the values from the global ARGs above.
 ARG NEO4J_VERSION
 ARG QDRANT_VERSION
-ARG EMBEDDING_MODEL
-ARG EMBEDDING_DIMENSION
 
 # Surface the baked service versions at runtime so run-analyze.sh can guard the KB
 # snapshot against a version-incompatible Neo4j dump / Qdrant snapshot (see docs/BATCH.md).
@@ -93,17 +87,16 @@ RUN curl -fsSL -o "${NEO4J_HOME}/plugins/apoc-${NEO4J_VERSION}-core.jar" \
 COPY --from=qdrant-src /qdrant/qdrant /usr/local/bin/qdrant
 COPY --from=ollama-src /usr/bin/ollama /usr/local/bin/ollama
 
-# --- Bake the local embedding model into an offline HF cache ---
-ENV HF_HOME=/opt/hf-cache \
+# --- Local embeddings resolve from a read-only HF cache mounted at /embeddings ---
+# The embedding model is NOT baked: it is staged onto shared storage with
+# `bamboo stage-embeddings` and mounted at /embeddings (HF_HOME), like the Ollama model at
+# /models. EMBEDDING_MODEL/EMBEDDING_DIMENSION are derived at runtime from the KB snapshot's
+# metadata.json (see deploy/batch/run-analyze.sh) so query embeddings always match the KB.
+ENV HF_HOME=/embeddings \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     EMBEDDINGS_PROVIDER=local \
-    EMBEDDING_MODEL=${EMBEDDING_MODEL} \
-    EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION} \
     LLM_PROVIDER=ollama
-# Download while HF_HUB_OFFLINE is temporarily off (build host has network).
-RUN HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL}')"
 
 # --- Entry script (orchestrates the localhost stack per job) ---
 COPY deploy/batch/run-analyze.sh /opt/bamboo/run-analyze.sh
