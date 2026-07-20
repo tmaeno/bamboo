@@ -60,13 +60,13 @@ the doc-navigator's `panda_docs` / `panda_docs_meta` — travel with the KB, not
 The Neo4j graph dump stays a separate offline step (it needs a stopped DB + data-dir access, which
 a bolt URL can't provide). Stage all of them to the shared path mounted read-only at `/kb`.
 
-| File | What it is | Restored by `run-analyze.sh` |
+| File | What it is | Restored by `entrypoint.sh` |
 |------|------------|------------------------------|
 | `neo4j.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `neo4j`) | `neo4j-admin database load neo4j --from-path=/kb` |
 | `qdrant-<collection>.snapshot` | Qdrant Snapshot-API export, one file per collection (all collections, incl. the doc-navigator's `panda_docs` / `panda_docs_meta`) | each recovered on startup (a repeated `qdrant --snapshot <file>:<collection>`) |
 | `metadata.json` | embedding model/dimension, the collection list + primary collection, Neo4j/Qdrant versions | the KB metadata guard (embeddings + versions) |
 
-The doc-navigator index is served **as-is** in the container: `run-analyze.sh` sets
+The doc-navigator index is served **as-is** in the container: `entrypoint.sh` sets
 `DOC_INDEX_FREEZE=1`, so the navigator never reaches out to GitHub or the LLM to rebuild doc
 summaries — it loads the staged `panda_docs` / `panda_docs_meta` collections directly. (Set
 `DOC_INDEX_FREEZE=0` to allow an in-container rebuild if you ever need one.)
@@ -106,7 +106,7 @@ your source DB differs), and the Neo4j version must match or lower than the batc
 
 Then stage `/tmp/kb` to the shared filesystem path you mount read-only at `/kb`.
 
-**Metadata guard (critical):** `run-analyze.sh` derives the embedding model + dimension
+**Metadata guard (critical):** `entrypoint.sh` derives the embedding model + dimension
 (`EMBEDDING_MODEL`/`EMBEDDING_DIMENSION`) straight from the snapshot's `metadata.json`, so query
 embeddings match how the KB was populated *by construction* — no silent vector degradation. It
 cross-checks that against the staged `/embeddings` manifest and fails early on a mismatch; a
@@ -120,7 +120,7 @@ the boot-time snapshot recover is the real gate). `bamboo dump-kb` stamps all th
 ## Testing locally
 
 Before queuing on a cluster, dress-rehearse the **exact container** on your workstation — it runs
-the same ENTRYPOINT (`run-analyze.sh`) SLURM will, so it catches the batch-specific failures (KB
+the same ENTRYPOINT (`entrypoint.sh`) SLURM will, so it catches the batch-specific failures (KB
 `metadata.json` mismatch, Neo4j/Qdrant version skew, a bad snapshot, a mis-staged model) where
 they're cheap to debug. Reuse the `bamboo-batch-analyze` image, staged model, and KB snapshot you
 built above; point the mounts at your local paths and run it under Docker:
@@ -136,15 +136,53 @@ docker run --rm \
 # override a model for a one-off run with e.g. -e LLM_MODEL=qwen3.6
 ```
 
-`run-analyze.sh` runs its full sequence — the KB metadata guard, `neo4j-admin database load`,
-Qdrant snapshot recover, `ollama serve`, then `bamboo batch-analyze` over `/in` — and tears the
-stack down on exit. Success is one result JSON per task in `./out`; a `*.error.json` sidecar plus a
-non-zero exit flags a failing task. This is the same round-trip `submit.sh` performs, minus the
-Apptainer launcher.
+With no subcommand, `entrypoint.sh` runs its full sequence — the KB metadata guard,
+`neo4j-admin database load`, Qdrant snapshot recover, `ollama serve`, then `bamboo batch-analyze`
+over `/in` — and tears the stack down on exit. Success is one result JSON per task in `./out`; a
+`*.error.json` sidecar plus a non-zero exit flags a failing task. This is the same round-trip
+`submit.sh` performs, minus the Apptainer launcher.
 
 > A Docker run won't reproduce every Apptainer detail — rootless arbitrary-uid execution, the
-> shared host netns (why `run-analyze.sh` allocates free ports), and `--nv` GPU wiring. Treat it as
+> shared host netns (why `entrypoint.sh` allocates free ports), and `--nv` GPU wiring. Treat it as
 > a functional dress rehearsal, and still do one real cluster smoke test before relying on the queue.
+
+### Interactive debugging
+
+To poke at `bamboo` by hand against the real staged KB — the fastest way to validate the
+scaffolded pieces or to debug RAG/agent behavior — split the boot phase from the batch phase with
+`entrypoint.sh`'s subcommands. The simplest entry boots the stack and drops you into a shell (add
+`-it` for a TTY); the exported env already points `bamboo` at the live services, and the stack is
+torn down when you `exit`:
+
+```bash
+docker run -it --rm \
+  -v $PWD/in:/in:ro -v $PWD/out:/out \
+  -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
+  -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
+  bamboo-batch-analyze shell
+# inside the shell:
+#   bamboo verify
+#   bamboo analyze --task-id 123 …      # single task against the live stack
+#   bamboo batch-analyze --input-dir /in --output-dir /out
+#   exit                                # tears the stack down
+```
+
+Or drive the pieces yourself (same single container session — the services live in that
+session's process namespace, so `setup`/`batch`/`teardown` **must share one `docker run`**):
+
+```bash
+docker run -it --rm … --entrypoint bash bamboo-batch-analyze
+  $ /opt/bamboo/entrypoint.sh setup          # boot the stack, leave it running
+  $ source /work/bamboo-batch.env            # or ${TMPDIR:-/tmp}/bamboo-batch.env without -v …:/work
+  $ bamboo investigate …                     # bamboo now sees the live stack
+  $ /opt/bamboo/entrypoint.sh batch          # run bamboo batch-analyze
+  $ /opt/bamboo/entrypoint.sh teardown       # kill services + remove scratch
+```
+
+`setup` writes the derived env (service URLs, model identities) and service PIDs to a state file
+(`$BAMBOO_WORK/bamboo-batch.env`, default `/work/bamboo-batch.env` under `submit.sh`); `batch` and
+`teardown` read it back, so you never re-type the ports or model names.
 
 ## Submitting a job
 
@@ -178,7 +216,7 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
-| `deploy/batch/run-analyze.sh` | In-container entry: boot stack, restore KB, run batch, tear down |
+| `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run batch, tear down (subcommands: `setup`/`batch`/`teardown`/`shell`) |
 | `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
 | `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |

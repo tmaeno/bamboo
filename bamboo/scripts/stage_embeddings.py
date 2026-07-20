@@ -15,7 +15,7 @@ Dockerfile's old bake command byte-for-byte, so the on-disk layout matches).
 If ``RERANKER_MODEL`` is set in your config, its cross-encoder is staged alongside the
 embedding model (the reranker is opt-in and configured, not a CLI flag). A tiny
 ``bamboo-embeddings.json`` manifest is written alongside the cache recording what was staged,
-so ``deploy/batch/run-analyze.sh`` can derive ``RERANKER_MODEL`` from it (the embedding model
+so ``deploy/batch/entrypoint.sh`` can derive ``RERANKER_MODEL`` from it (the embedding model
 itself is derived from the KB snapshot's ``metadata.json`` — the KB is its source of truth).
 See ``website/src/content/docs/guides/batch.md``.
 """
@@ -61,7 +61,7 @@ def _resolve_reranker() -> str | None:
     Reranking is opt-in and configured — there is no ``--reranker`` flag and no default
     cross-encoder. ``None`` means "don't stage a reranker" (and the batch run leaves reranking
     off). The reranker is not KB-bound; whatever you configure here is what a batch run uses
-    (``run-analyze.sh`` derives ``RERANKER_MODEL`` from the manifest this writes).
+    (``entrypoint.sh`` derives ``RERANKER_MODEL`` from the manifest this writes).
     """
     try:
         from bamboo.config import get_settings
@@ -160,7 +160,7 @@ def main(model, out_dir):
             "installed:  pip install 'bamboo[local]'"
         ) from exc
 
-    # Manifest last: its presence implies the cache is populated. run-analyze.sh reads
+    # Manifest last: its presence implies the cache is populated. entrypoint.sh reads
     # reranker_model from it; embedding_model is recorded for a best-effort cross-check
     # against the KB snapshot's metadata.json.
     manifest = os.path.join(out, MANIFEST_NAME)

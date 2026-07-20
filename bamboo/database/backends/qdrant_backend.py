@@ -334,7 +334,7 @@ class QdrantBackend(VectorDatabaseBackend):
         ``panda_docs_meta`` — travels with the batch KB. Each collection is written as
         ``qdrant-<collection>.snapshot``; the batch container recovers them all with a
         repeated ``qdrant --snapshot <file>:<collection>`` flag (see
-        ``deploy/batch/run-analyze.sh``). Used by ``bamboo dump-kb``.
+        ``deploy/batch/entrypoint.sh``). Used by ``bamboo dump-kb``.
 
         Returns manifest metadata: the per-collection list (``qdrant_collections``),
         the primary KB collection, and the Qdrant server version.

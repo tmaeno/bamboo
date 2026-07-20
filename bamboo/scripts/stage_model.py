@@ -10,7 +10,7 @@ binary when present, else a throwaway ``ollama/ollama`` Docker container), so th
 lands in that dir regardless of any Ollama daemon already running on the host.
 
 A tiny ``bamboo-model.json`` manifest is written alongside the model recording the pulled
-tag, so ``deploy/batch/run-analyze.sh`` can derive ``LLM_MODEL`` from the staged files —
+tag, so ``deploy/batch/entrypoint.sh`` can derive ``LLM_MODEL`` from the staged files —
 nothing needs to be repeated at submit time. See ``website/src/content/docs/guides/batch.md``.
 """
 
@@ -190,7 +190,7 @@ def main(model, out_dir):
             f"model pull failed (exit {exc.returncode})"
         ) from exc
 
-    # Manifest last: its presence implies the model landed. run-analyze.sh reads llm_model
+    # Manifest last: its presence implies the model landed. entrypoint.sh reads llm_model
     # from it to derive LLM_MODEL, so the model choice travels with the staged files.
     manifest = os.path.join(out, MANIFEST_NAME)
     with open(manifest, "w", encoding="utf-8") as fh:

@@ -12,7 +12,7 @@ run uses (resolved through ``get_settings()`` / ``.env``) and writes:
 Because it goes through the Snapshot API it needs only ``QDRANT_URL`` / api-key — never
 the Qdrant server's on-disk storage dir — so it works against a local Docker Qdrant or a
 managed one alike. The batch container recovers each snapshot on startup (a repeated
-``qdrant --snapshot <file>:<collection>``; see ``deploy/batch/run-analyze.sh``).
+``qdrant --snapshot <file>:<collection>``; see ``deploy/batch/entrypoint.sh``).
 
 The Neo4j graph dump stays a separate **offline** ``neo4j-admin database dump`` step
 (it needs a stopped DB + data-dir access, which a bolt URL cannot provide); this

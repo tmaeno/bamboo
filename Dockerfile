@@ -68,7 +68,7 @@ FROM bamboo AS bamboo-batch-analyze
 ARG NEO4J_VERSION
 ARG QDRANT_VERSION
 
-# Surface the baked service versions at runtime so run-analyze.sh can guard the KB
+# Surface the baked service versions at runtime so entrypoint.sh can guard the KB
 # snapshot against a version-incompatible Neo4j dump / Qdrant snapshot (see docs/BATCH.md).
 ENV NEO4J_VERSION=${NEO4J_VERSION} \
     QDRANT_VERSION=${QDRANT_VERSION}
@@ -80,7 +80,7 @@ ENV NEO4J_HOME=/opt/neo4j
 COPY --from=neo4j-src /var/lib/neo4j /opt/neo4j
 ENV PATH="${NEO4J_HOME}/bin:${JAVA_HOME}/bin:${PATH}"
 
-# APOC must be present at build time because run-analyze.sh bypasses the official
+# APOC must be present at build time because entrypoint.sh bypasses the official
 # neo4j entrypoint (which would otherwise fetch plugins at runtime — impossible
 # air-gapped). VERIFY: the APOC core jar version matches NEO4J_VERSION.
 RUN curl -fsSL -o "${NEO4J_HOME}/plugins/apoc-${NEO4J_VERSION}-core.jar" \
@@ -102,7 +102,7 @@ COPY --from=ollama-src /usr/bin/ollama /usr/local/bin/ollama
 # The embedding model is NOT baked: it is staged onto shared storage with
 # `bamboo stage-embeddings` and mounted at /embeddings (HF_HOME), like the Ollama model at
 # /models. EMBEDDING_MODEL/EMBEDDING_DIMENSION are derived at runtime from the KB snapshot's
-# metadata.json (see deploy/batch/run-analyze.sh) so query embeddings always match the KB.
+# metadata.json (see deploy/batch/entrypoint.sh) so query embeddings always match the KB.
 ENV HF_HOME=/embeddings \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
@@ -110,8 +110,11 @@ ENV HF_HOME=/embeddings \
     LLM_PROVIDER=ollama
 
 # --- Entry script (orchestrates the localhost stack per job) ---
-COPY deploy/batch/run-analyze.sh /opt/bamboo/run-analyze.sh
-RUN chmod +x /opt/bamboo/run-analyze.sh
+# Dispatches subcommands (setup/batch/teardown/shell); no subcommand = full run
+# (setup → batch → teardown), the backward-compatible default. For interactive
+# debugging: `docker run -it … bamboo-batch-analyze shell`.
+COPY deploy/batch/entrypoint.sh /opt/bamboo/entrypoint.sh
+RUN chmod +x /opt/bamboo/entrypoint.sh
 
-ENTRYPOINT ["/opt/bamboo/run-analyze.sh"]
+ENTRYPOINT ["/opt/bamboo/entrypoint.sh"]
 CMD []

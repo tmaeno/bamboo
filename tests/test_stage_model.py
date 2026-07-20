@@ -124,7 +124,7 @@ def test_pull_starts_transient_server_and_pulls_into_out(tmp_path, monkeypatch):
     assert kwargs["env"]["OLLAMA_HOST"] == "127.0.0.1:12345"
     # And the server is torn down.
     assert server.terminated
-    # A manifest records the staged tag so run-analyze.sh can derive LLM_MODEL.
+    # A manifest records the staged tag so entrypoint.sh can derive LLM_MODEL.
     manifest = json.loads((tmp_path / "models" / "bamboo-model.json").read_text())
     assert manifest == {"llm_model": "qwen3.6:1b"}
 

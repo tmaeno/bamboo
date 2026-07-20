@@ -9,6 +9,11 @@
 # /kb/metadata.json, RERANKER_MODEL from /embeddings (bamboo stage-embeddings). Export any
 # of LLM_MODEL / EMBEDDING_MODEL / RERANKER_MODEL to override the derived value for a run.
 #
+# This launches the image's default (no-subcommand) entrypoint: the full
+# setup → batch → teardown run. To debug interactively instead, run the container
+# with the `shell` subcommand (or `setup`/`batch`/`teardown`) — see the entrypoint
+# header (deploy/batch/entrypoint.sh) and docs/guides/batch.md "Interactive debugging".
+#
 # ⚠ SCAFFOLD — UNVERIFIED. Adjust SHARED/SCRATCH paths and scheduler to your site.
 set -euo pipefail
 

@@ -157,7 +157,7 @@ class Settings(BaseSettings):
     llm_summary_temperature: float = 0.3
     # When True, PandaDocNavigator never rebuilds/re-summarizes the doc index; it
     # loads the pre-built index from Qdrant as-is (no GitHub staleness check, no LLM
-    # summarization). Set in the offline batch container (deploy/batch/run-analyze.sh).
+    # summarization). Set in the offline batch container (deploy/batch/entrypoint.sh).
     doc_index_freeze: bool = False
 
     # Extraction
