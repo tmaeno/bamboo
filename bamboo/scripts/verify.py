@@ -382,10 +382,45 @@ def check_database_connections() -> bool:
 
 
 def _ca_cert_count() -> int:
-    """Number of CA roots Python's default SSL context can load (0 = no trust store)."""
+    """Number of CA roots Python's default SSL context can load (0 = no trust store).
+
+    ``get_ca_certs()`` only reflects a *cafile* that was eagerly loaded; it returns an
+    empty list for a **CApath** (hashed-dir) trust store or the lazily-configured default
+    paths that Linux distros ship (e.g. Debian's ``/etc/ssl/certs``). Relying on it alone
+    false-positives a perfectly working Linux/container system as "no trust store", which
+    then sends ``check_tls_trust_store`` down its repair path needlessly. So when it comes
+    back empty, probe the OpenSSL default verify paths on disk before concluding the store
+    is empty; only a genuinely empty store (e.g. a macOS python.org framework build whose
+    "Install Certificates.command" was never run) returns 0.
+    """
+    import os
     import ssl
 
-    return len(ssl.create_default_context().get_ca_certs())
+    certs = ssl.create_default_context().get_ca_certs()
+    if certs:
+        return len(certs)
+
+    paths = ssl.get_default_verify_paths()
+    # A populated default cafile — load it so we can report an accurate count.
+    for cafile in (paths.cafile, paths.openssl_cafile):
+        if cafile and os.path.isfile(cafile) and os.path.getsize(cafile) > 0:
+            try:
+                probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                probe.load_verify_locations(cafile=cafile)
+                loaded = probe.get_ca_certs()
+                if loaded:
+                    return len(loaded)
+            except (OSError, ssl.SSLError):
+                pass
+    # A populated CApath (hashed dir) — usable, though an exact count isn't readily
+    # available without loading every hashed file, so report a positive sentinel.
+    for capath in (paths.capath, paths.openssl_capath):
+        try:
+            if capath and os.path.isdir(capath) and os.listdir(capath):
+                return 1
+        except OSError:
+            pass
+    return 0
 
 
 def check_tls_trust_store() -> bool:
@@ -434,16 +469,37 @@ def check_tls_trust_store() -> bool:
 
     from dotenv import set_key
 
-    set_key(env_path, "SSL_CERT_FILE", bundle)
-    set_key(env_path, "SSL_CERT_DIR", str(Path(bundle).parent))
-    # Apply to the current process so we can confirm the fix worked right now.
+    # Apply to the current process first, so the fix is active for this run regardless
+    # of whether we can persist it below.
     os.environ["SSL_CERT_FILE"] = bundle
     os.environ["SSL_CERT_DIR"] = str(Path(bundle).parent)
+
+    # Persist into the active .env so future runs inherit it. dotenv writes a temp file
+    # then os.replace()s it over the target, which fails when .env is not writable — most
+    # notably a single-file Docker bind mount (`-v .../.env:/app/.env`), where renaming
+    # over the mount point raises OSError(EBUSY), or a read-only (:ro) mount. Degrade
+    # gracefully instead of crashing: the in-process fix above still stands.
+    persisted = True
+    try:
+        set_key(env_path, "SSL_CERT_FILE", bundle)
+        set_key(env_path, "SSL_CERT_DIR", str(Path(bundle).parent))
+    except OSError:
+        persisted = False
+
     n2 = _ca_cert_count()
     if n2 <= 0:
         return _fail(
-            f"installed certifi bundle into {env_path} but the trust store is still empty",
+            "set SSL_CERT_FILE to the certifi bundle but the trust store is still empty",
             f"Verify the bundle exists: {bundle}",
+        )
+    if not persisted:
+        print(
+            f"  ⚠ applied CA bundle for this run ({n2} roots) but could not persist to "
+            f"{env_path} (read-only or bind-mounted .env)"
+        )
+        return _ok(
+            f"set SSL_CERT_FILE={bundle} for this process. Make it permanent by setting it "
+            "yourself: bake it into the image, pass -e SSL_CERT_FILE=…, or use a writable .env."
         )
     return _ok(
         f"installed CA bundle → set SSL_CERT_FILE in {env_path} ({n2} roots). "
