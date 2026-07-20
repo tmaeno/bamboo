@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# entrypoint.sh — entry point for the air-gapped batch container (Image 2).
+# entrypoint.sh — entry point for the batch container (Image 2).
+#
+# Serves two use cases from one image:
+#   • air-gapped batch — the default; bundled Neo4j + Qdrant + Ollama, no keys.
+#   • portable run     — mount your own config at /app/.env
+#                        (`-v $PWD/.env:/app/.env:ro`) to inject keys/settings
+#                        (PANDA_*, SSL_CERT_FILE, LOG_LEVEL, …). See below.
 #
 # Boots Neo4j + Qdrant + Ollama on localhost from read-only shared-FS mounts,
 # restores the KB into node-local scratch, runs `bamboo batch-analyze` over the
@@ -94,6 +100,19 @@ die() { log "ERROR: $*"; exit 1; }
 # Print the tail of a service log so a readiness failure is diagnosable *before*
 # teardown's `rm -rf "${WORK}"` wipes it.
 dump_tail() { log "---- last 60 lines of $1 ----"; tail -n 60 "$1" 2>/dev/null | sed 's/^/  | /' >&2; log "---- end $1 ----"; }
+
+# Optional portable-mode config: mount your own .env at /app/.env
+# (`-v $PWD/.env:/app/.env:ro`, /app is WORKDIR). We do NOT parse it here — bamboo
+# loads it itself (config._find_env_file, override=False), so it supplies keys /
+# tokens / settings (PANDA_*, SSL_CERT_FILE, LOG_LEVEL, …). The batch-managed vars
+# (provider, LLM_MODEL, EMBEDDING_*, service URLs) are exported by do_setup *before*
+# bamboo runs, so override=False keeps them derived from the staged KB/model — a .env
+# copied from .env.example can't flip the container off its bundled stack. This is
+# just a heads-up so those ignored .env lines aren't mistaken for a bug.
+if [[ -f /app/.env ]]; then
+  log "runtime .env detected at /app/.env — supplies keys/settings to bamboo;"
+  log "  batch-managed vars (provider, LLM_MODEL, EMBEDDING_*, service URLs) stay derived."
+fi
 
 # --------------------------------------------------------------------------- #
 # Scratch + teardown (must survive SIGKILL/walltime: kill the process group,

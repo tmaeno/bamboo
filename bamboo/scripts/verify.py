@@ -135,24 +135,6 @@ def check_key_dependencies() -> bool:
     return ok
 
 
-def check_docker() -> bool:
-    print("Docker (optional — needed to run databases locally)")
-    try:
-        r = subprocess.run(["docker", "--version"], capture_output=True, text=True)
-        r2 = subprocess.run(
-            ["docker", "compose", "version"], capture_output=True, text=True
-        )
-        _ok(r.stdout.strip())
-        _ok(r2.stdout.strip())
-        return True
-    except FileNotFoundError:
-        _fail(
-            "Docker not found",
-            "Install Docker Desktop: https://www.docker.com/products/docker-desktop/",
-        )
-        return False
-
-
 def _env_example_path() -> str:
     """Return the absolute path of the installed ``.env.example`` file."""
     try:
@@ -532,12 +514,6 @@ def main() -> int:
     for fn in sections:
         print(f"\n[{fn.__name__.replace('check_', '').replace('_', ' ').title()}]")
         results.append(fn())
-
-    # Docker is optional — run but don't count towards pass/fail
-    print(
-        f"\n[{check_docker.__name__.replace('check_', '').replace('_', ' ').title()}]"
-    )
-    check_docker()
 
     print("\n" + "=" * 70)
     passed = sum(results)

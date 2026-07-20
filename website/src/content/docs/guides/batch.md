@@ -134,6 +134,7 @@ docker run --rm \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
   bamboo-batch-analyze      # models derived from the staged manifests/KB; add --gpus all for GPU
 # override a model for a one-off run with e.g. -e LLM_MODEL=qwen3.6
+# portable run: add  -v $PWD/.env:/app/.env:ro  to inject keys/settings (see "Portable mode" below)
 ```
 
 With no subcommand, `entrypoint.sh` runs its full sequence — the KB metadata guard,
@@ -161,6 +162,7 @@ docker run -it --rm \
   -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
   bamboo-batch-analyze shell
+# optional: add  -v $PWD/.env:/app/.env:ro  so `bamboo verify` finds a .env (✓) — see "Portable mode"
 # inside the shell:
 #   bamboo verify
 #   bamboo analyze --task-id 123 …      # single task against the live stack
@@ -183,6 +185,42 @@ docker run -it --rm … --entrypoint bash bamboo-batch-analyze
 `setup` writes the derived env (service URLs, model identities) and service PIDs to a state file
 (`$BAMBOO_WORK/bamboo-batch.env`, default `/work/bamboo-batch.env` under `submit.sh`); `batch` and
 `teardown` read it back, so you never re-type the ports or model names.
+
+### Portable mode: injecting runtime config
+
+The same image doubles as a portable execution environment: mount your own `.env` at `/app/.env`
+(`/app` is the container's working directory) to inject credentials and settings at launch —
+no rebuild, nothing baked into the image:
+
+```bash
+docker run --rm \
+  -v $PWD/.env:/app/.env:ro \
+  -v $PWD/in:/in:ro -v $PWD/out:/out \
+  -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
+  -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
+  bamboo-batch-analyze      # + your read-only .env mounted at /app/.env
+```
+
+`bamboo` loads `/app/.env` itself (`config._find_env_file`, so `bamboo verify` reports
+`✓ .env loaded from: /app/.env` instead of the otherwise-benign `✗ .env file not found`).
+
+**What a mounted `.env` does and does not control.** Precedence is: values passed with `-e` win,
+then the image's baked batch defaults and the vars the container derives from the staged KB/model.
+So `.env` is for **keys / tokens / settings**, not for provider or model/DB selection:
+
+- **Honored** — `PANDA_*`, `SSL_CERT_FILE`, `LOG_LEVEL`, `MATTERMOST_*`, `MCP_SERVERS_CONFIG`,
+  the tool-selection knobs, etc.
+- **Ignored (stay as the container decides)** — `LLM_PROVIDER`/`EMBEDDINGS_PROVIDER` and the
+  `*_OFFLINE` flags (baked to the bundled `ollama`/`local` stack), and the KB/manifest-derived
+  `LLM_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`, `NEO4J_DATABASE`,
+  `QDRANT_COLLECTION_NAME`, and the Neo4j/Qdrant/Ollama service URLs.
+
+This is deliberate: it keeps the bundled stack and KB integrity intact even if you mount a `.env`
+copied straight from `.env.example` (whose `LLM_PROVIDER=openai`, `EMBEDDING_MODEL=…`, `LLM_MODEL=…`
+lines are simply ignored here). To point the batch image at a cloud LLM or external databases
+instead of the bundled stack, use the standalone `bamboo` image (Image 1) with `--env-file .env`,
+which is configured entirely by env — not this batch image.
 
 ## Submitting a job
 
