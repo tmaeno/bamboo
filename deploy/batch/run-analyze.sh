@@ -9,7 +9,8 @@
 # Mounts (see deploy/batch/submit.sh):
 #   /in         (ro)  directory of task-data *.json files
 #   /out        (rw)  one result JSON per task is written here
-#   /kb         (ro)  KB snapshot: <db>.dump + qdrant.snapshot + metadata.json
+#   /kb         (ro)  KB snapshot: <db>.dump + qdrant-<collection>.snapshot (one per
+#                     collection) + metadata.json
 #   /models     (ro)  Ollama models dir (OLLAMA_MODELS) + bamboo-model.json manifest
 #   /embeddings (ro)  local HF cache (HF_HOME): embedding model + optional reranker + manifest
 #   /work       (rw)  node-local scratch (optional; falls back to $TMPDIR)
@@ -44,6 +45,10 @@ export LLM_PROVIDER="${LLM_PROVIDER:-ollama}"
 export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-local}"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+# Freeze the PanDA doc index: never re-fetch from GitHub or re-summarize with the LLM;
+# load the pre-built index staged in the panda_docs / panda_docs_meta Qdrant collections
+# as-is. An explicit env still wins if a run ever needs to rebuild in-container.
+export DOC_INDEX_FREEZE="${DOC_INDEX_FREEZE:-1}"
 # NEO4J_DATABASE is derived from the KB metadata.json below (falling back to the
 # built-in `neo4j`) so the load target always matches the dump the KB was built
 # with. An explicit NEO4J_DATABASE env still wins.
@@ -211,12 +216,41 @@ neo4j-admin dbms set-initial-password "${NEO4J_PASSWORD}" >/dev/null 2>&1 || tru
 neo4j-admin database load "${NEO4J_DATABASE}" \
   --from-path="${KB_DIR}" --overwrite-destination=true
 
-log "locating Qdrant snapshot…"
-# The KB snapshot ships a Qdrant Snapshot-API file (produced by `bamboo dump-kb`, see
-# docs/BATCH.md); Qdrant recovers it into the fresh storage dir on startup via the
-# --snapshot flag below — no extraction needed here.
-QDRANT_SNAPSHOT="${KB_DIR}/qdrant.snapshot"
-[[ -f "${QDRANT_SNAPSHOT}" ]] || die "no Qdrant snapshot at ${QDRANT_SNAPSHOT}"
+log "locating Qdrant snapshot(s)…"
+# The KB ships one Qdrant Snapshot-API file per collection (produced by `bamboo dump-kb`,
+# see docs/BATCH.md), listed in metadata.json under "qdrant_collections". Qdrant recovers
+# each into the fresh storage dir on startup via a repeated --snapshot flag below — no
+# extraction needed. Building ALL collections (not just the KB one) is what carries the
+# doc-navigator's panda_docs / panda_docs_meta into the container.
+QDRANT_SNAPSHOT_ARGS=()
+QDRANT_COLL_COUNT=0
+while IFS=$'\t' read -r snap_file coll; do
+  [[ -n "${snap_file}" && -n "${coll}" ]] || continue
+  snap_path="${KB_DIR}/${snap_file}"
+  [[ -f "${snap_path}" ]] || die "missing Qdrant snapshot ${snap_path} (collection '${coll}')"
+  QDRANT_SNAPSHOT_ARGS+=(--snapshot "${snap_path}:${coll}")
+  QDRANT_COLL_COUNT=$((QDRANT_COLL_COUNT + 1))
+done < <(python - "${META}" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    meta = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for e in meta.get("qdrant_collections", []) or []:
+    f, c = e.get("snapshot_file"), e.get("collection")
+    if f and c:
+        print(f"{f}\t{c}")
+PY
+)
+# Legacy fallback: a KB dumped before multi-collection support ships a single
+# qdrant.snapshot with no "qdrant_collections" list.
+if [[ ${QDRANT_COLL_COUNT} -eq 0 ]]; then
+  legacy="${KB_DIR}/qdrant.snapshot"
+  [[ -f "${legacy}" ]] || die "no Qdrant snapshots in ${KB_DIR} (neither qdrant_collections nor qdrant.snapshot)"
+  QDRANT_SNAPSHOT_ARGS+=(--snapshot "${legacy}:${QDRANT_COLLECTION_NAME}")
+  QDRANT_COLL_COUNT=1
+  log "using legacy single-collection snapshot for '${QDRANT_COLLECTION_NAME}'"
+fi
 
 # --------------------------------------------------------------------------- #
 # Launch services (each in its own process group via setsid for clean teardown)
@@ -224,10 +258,10 @@ QDRANT_SNAPSHOT="${KB_DIR}/qdrant.snapshot"
 log "starting neo4j…"
 setsid neo4j console >"${WORK}/neo4j/console.log" 2>&1 & PIDS+=($!)
 
-log "starting qdrant (recovering snapshot for '${QDRANT_COLLECTION_NAME}')…"
+log "starting qdrant (recovering ${QDRANT_COLL_COUNT} collection snapshot(s))…"
 QDRANT__SERVICE__HTTP_PORT="${QDRANT_PORT}" \
 QDRANT__STORAGE__STORAGE_PATH="${WORK}/qdrant/storage" \
-  setsid qdrant --snapshot "${QDRANT_SNAPSHOT}:${QDRANT_COLLECTION_NAME}" \
+  setsid qdrant "${QDRANT_SNAPSHOT_ARGS[@]}" \
   >"${WORK}/qdrant/qdrant.log" 2>&1 & PIDS+=($!)
 
 log "starting ollama…"

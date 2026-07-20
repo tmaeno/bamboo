@@ -262,35 +262,24 @@ class QdrantBackend(VectorDatabaseBackend):
             logger.error(f"Failed to retrieve document {doc_id}: {e}")
         return None
 
-    async def export_snapshot(self, out_path: str) -> dict[str, Any]:
-        """Create a snapshot of the collection and download it to *out_path*.
+    async def _download_collection_snapshot(
+        self, collection_name: str, out_path: str
+    ) -> str:
+        """Create a snapshot of *collection_name*, stream it to *out_path*, then delete
+        the server-side copy. Returns the server-side snapshot name.
 
-        Uses only the connection info in :attr:`settings` (URL / API key /
-        collection) via the Qdrant Snapshot API — no access to the server's on-disk
-        storage dir — so it works against any reachable Qdrant (local Docker or a
-        managed instance). The server-side snapshot is deleted after a successful
-        download. Used by ``bamboo dump-kb`` to stage the batch KB (see
-        ``docs/BATCH.md``); the batch container recovers it on startup with
-        ``qdrant --snapshot <file>:<collection>``.
-
-        Returns metadata for the KB manifest: the collection name, the snapshot
-        filename, and the Qdrant server version.
+        Uses only URL / API key via the Qdrant Snapshot API — no access to the
+        server's on-disk storage dir — so it works against any reachable Qdrant.
         """
-        await self._ensure_connected()
-
-        server_version = await self._server_version()
-
-        snapshot = await self.client.create_snapshot(
-            collection_name=self.collection_name
-        )
+        snapshot = await self.client.create_snapshot(collection_name=collection_name)
         name = getattr(snapshot, "name", "")
         if not name:
             raise RuntimeError(
-                f"Qdrant returned no snapshot for collection {self.collection_name!r}"
+                f"Qdrant returned no snapshot for collection {collection_name!r}"
             )
 
         base = self.settings.qdrant_url.rstrip("/")
-        url = f"{base}/collections/{self.collection_name}/snapshots/{name}"
+        url = f"{base}/collections/{collection_name}/snapshots/{name}"
         headers = {}
         if self.settings.qdrant_api_key:
             headers["api-key"] = self.settings.qdrant_api_key
@@ -305,17 +294,67 @@ class QdrantBackend(VectorDatabaseBackend):
         finally:
             with contextlib.suppress(Exception):
                 await self.client.delete_snapshot(
-                    collection_name=self.collection_name, snapshot_name=name
+                    collection_name=collection_name, snapshot_name=name
                 )
 
         logger.info(
-            "Exported Qdrant snapshot for collection '%s' → %s",
-            self.collection_name,
-            out_path,
+            "Exported Qdrant snapshot for collection '%s' → %s", collection_name, out_path
         )
+        return name
+
+    async def export_snapshot(
+        self, out_path: str, collection_name: Optional[str] = None
+    ) -> dict[str, Any]:
+        """Create a snapshot of a single collection and download it to *out_path*.
+
+        Uses only the connection info in :attr:`settings` (URL / API key) via the
+        Qdrant Snapshot API — no access to the server's on-disk storage dir — so it
+        works against any reachable Qdrant (local Docker or a managed instance). The
+        server-side snapshot is deleted after a successful download. *collection_name*
+        defaults to the configured KB collection.
+
+        Returns metadata for the KB manifest: the collection name, the snapshot
+        filename, and the Qdrant server version.
+        """
+        await self._ensure_connected()
+        server_version = await self._server_version()
+        coll = collection_name or self.collection_name
+        name = await self._download_collection_snapshot(coll, out_path)
         return {
-            "qdrant_collection": self.collection_name,
+            "qdrant_collection": coll,
             "qdrant_snapshot": name,
+            "qdrant_version": server_version,
+        }
+
+    async def export_all_snapshots(self, out_dir: str) -> dict[str, Any]:
+        """Snapshot *every* Qdrant collection into *out_dir*, one file per collection.
+
+        Enumerates collections via the API (no hardcoded name) so all vector data —
+        the KB collection plus auxiliaries like the doc-navigator's ``panda_docs`` /
+        ``panda_docs_meta`` — travels with the batch KB. Each collection is written as
+        ``qdrant-<collection>.snapshot``; the batch container recovers them all with a
+        repeated ``qdrant --snapshot <file>:<collection>`` flag (see
+        ``deploy/batch/run-analyze.sh``). Used by ``bamboo dump-kb``.
+
+        Returns manifest metadata: the per-collection list (``qdrant_collections``),
+        the primary KB collection, and the Qdrant server version.
+        """
+        from pathlib import Path  # noqa: PLC0415
+
+        await self._ensure_connected()
+        server_version = await self._server_version()
+        names = sorted(c.name for c in (await self.client.get_collections()).collections)
+        entries: list[dict[str, str]] = []
+        for coll in names:
+            snapshot_file = f"qdrant-{coll}.snapshot"
+            await self._download_collection_snapshot(
+                coll, str(Path(out_dir) / snapshot_file)
+            )
+            entries.append({"collection": coll, "snapshot_file": snapshot_file})
+        logger.info("Exported %d Qdrant collection snapshot(s) → %s", len(entries), out_dir)
+        return {
+            "qdrant_collections": entries,
+            "primary_collection": self.collection_name,
             "qdrant_version": server_version,
         }
 

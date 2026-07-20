@@ -48,7 +48,7 @@ _COLLECTION = "panda_docs"
     "show_summary",
     is_flag=True,
     default=False,
-    help="Print the stored PanDA system knowledge summary from panda_docs_meta.json.",
+    help="Print the stored PanDA system knowledge summary from the panda_docs_meta collection.",
 )
 def main(title_filter: str | None, concept_only: bool, show_summary: bool) -> None:
     """Dump Qdrant panda_docs payload to stdout."""
@@ -57,28 +57,6 @@ def main(title_filter: str | None, concept_only: bool, show_summary: bool) -> No
 
 
 async def _run(title_filter: str | None, concept_only: bool, show_summary: bool) -> None:
-    if show_summary:
-        import json  # noqa: PLC0415
-
-        from bamboo.agents.panda_doc_navigator import _META_FILE  # noqa: PLC0415
-
-        try:
-            meta = json.loads(_META_FILE.read_text())
-        except FileNotFoundError:
-            click.echo(f"Metadata file not found: {_META_FILE}")
-            return
-        summary = meta.get("system_summary", "")
-        if not summary:
-            click.echo("No system_summary in metadata (rebuild docs to regenerate).")
-            return
-        click.echo("=" * 72)
-        click.echo("PanDA system knowledge summary")
-        click.echo("=" * 72)
-        click.echo(summary)
-        click.echo("=" * 72)
-        click.echo(f"({len(summary)} chars, from {_META_FILE})")
-        return
-
     from qdrant_client import AsyncQdrantClient
 
     from bamboo.config import get_settings
@@ -87,6 +65,41 @@ async def _run(title_filter: str | None, concept_only: bool, show_summary: bool)
     kwargs: dict = {"url": settings.qdrant_url, "check_compatibility": False}
     if settings.qdrant_api_key:
         kwargs["api_key"] = settings.qdrant_api_key
+
+    if show_summary:
+        # Read the index-meta sentinel point directly (no LLM/embeddings init).
+        from bamboo.agents.panda_doc_navigator import (  # noqa: PLC0415
+            _META_COLLECTION,
+            _META_POINT_ID,
+        )
+
+        client = AsyncQdrantClient(**kwargs)
+        try:
+            names = {c.name for c in (await client.get_collections()).collections}
+            if _META_COLLECTION not in names:
+                click.echo(
+                    f"Collection '{_META_COLLECTION}' does not exist — run --rebuild-docs first."
+                )
+                return
+            points = await client.retrieve(
+                collection_name=_META_COLLECTION,
+                ids=[_META_POINT_ID],
+                with_payload=True,
+                with_vectors=False,
+            )
+        finally:
+            await client.close()
+        summary = (points[0].payload.get("system_summary", "") if points else "")
+        if not summary:
+            click.echo("No system_summary in metadata (rebuild docs to regenerate).")
+            return
+        click.echo("=" * 72)
+        click.echo("PanDA system knowledge summary")
+        click.echo("=" * 72)
+        click.echo(summary)
+        click.echo("=" * 72)
+        click.echo(f"({len(summary)} chars, from Qdrant collection '{_META_COLLECTION}')")
+        return
 
     client = AsyncQdrantClient(**kwargs)
     try:

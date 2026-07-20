@@ -1058,7 +1058,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         from bamboo.agents.panda_doc_navigator import PandaDocNavigator  # noqa: PLC0415
         from bamboo.utils.narrator import say  # noqa: PLC0415
         hints = await prefetch_panda_context(task_data or {}, email_text)
-        system_summary = PandaDocNavigator().get_system_summary()
+        system_summary = await PandaDocNavigator().get_system_summary()
         if system_summary:
             hints["panda_system"] = system_summary
             say("Included PanDA system knowledge summary in domain hints.")

@@ -12,9 +12,12 @@ collection (``panda_docs``), and provides a dual-strategy search:
 
 All three strategies run in parallel; results are merged via Reciprocal Rank Fusion.
 
-Staleness is detected by comparing the GitHub tree SHA stored in
-``bamboo/data/panda_docs_meta.json`` against the upstream repo.  The index
-is rebuilt automatically when the SHA changes or the file is absent.
+Staleness is detected by comparing the GitHub tree SHA stored in the Qdrant
+``panda_docs_meta`` collection (a single sentinel point holding the tree SHA,
+per-file blob SHAs, and the system summary) against the upstream repo.  The
+index is rebuilt automatically when the SHA changes or the meta is absent.
+Keeping the meta in Qdrant — rather than a local file — lets the whole
+doc-navigator state travel with the KB snapshot into the offline batch image.
 """
 
 from __future__ import annotations
@@ -86,22 +89,50 @@ _EXCLUDED_RST_PATHS: frozenset[str] = frozenset({
 })
 
 _COLLECTION = "panda_docs"
-_META_FILE = Path(__file__).parent.parent / "data" / "panda_docs_meta.json"
+# Index metadata (tree SHA, per-file blob SHAs, system summary) lives as a single
+# sentinel point in this dedicated collection — kept separate from _COLLECTION so it
+# never pollutes semantic search, and travelling with the KB snapshot (see
+# QdrantBackend.export_all_snapshots) so the offline batch image is self-contained.
+_META_COLLECTION = "panda_docs_meta"
+_META_POINT_ID = str(uuid.uuid5(uuid.NAMESPACE_URL, "panda_docs::index_meta"))
+# Per-node summary cache — a build-time optimisation only (skips re-summarising
+# unchanged nodes). Not needed at read/query time, so it stays a local file and is
+# never consulted in a frozen/read-only batch run.
 _NODE_CACHE_FILE = Path(__file__).parent.parent / "data" / "panda_docs_node_cache.json"
 
 
+def _make_qdrant_client_from_settings(settings: Any) -> Any:
+    """Build an AsyncQdrantClient from settings (module-level twin of the method)."""
+    from qdrant_client import AsyncQdrantClient  # noqa: PLC0415
+    kwargs: dict[str, Any] = {"url": settings.qdrant_url, "check_compatibility": False}
+    if settings.qdrant_api_key:
+        kwargs["api_key"] = settings.qdrant_api_key
+    return AsyncQdrantClient(**kwargs)
 
-def invalidate_doc_cache() -> bool:
-    """Delete the doc-index metadata and per-node cache, forcing a full rebuild.
 
-    Returns ``True`` if either file existed and was deleted, ``False`` if both
-    were already absent.
+async def invalidate_doc_cache() -> bool:
+    """Drop the doc-index Qdrant collections and per-node cache, forcing a full rebuild.
+
+    Deletes the ``panda_docs`` (nodes + summaries) and ``panda_docs_meta`` (index
+    metadata) collections and the local node-summary cache. Returns ``True`` if
+    anything existed and was removed, ``False`` if everything was already absent.
     """
     removed = False
-    for path in (_META_FILE, _NODE_CACHE_FILE):
-        if path.exists():
-            path.unlink()
-            removed = True
+    if _NODE_CACHE_FILE.exists():
+        _NODE_CACHE_FILE.unlink()
+        removed = True
+
+    client = _make_qdrant_client_from_settings(get_settings())
+    try:
+        existing = {c.name for c in (await client.get_collections()).collections}
+        for name in (_COLLECTION, _META_COLLECTION):
+            if name in existing:
+                await client.delete_collection(collection_name=name)
+                removed = True
+    except Exception as exc:  # noqa: BLE001 — best-effort cache invalidation
+        logger.warning("invalidate_doc_cache: failed to drop doc collections: %s", exc)
+    finally:
+        await client.close()
     return removed
 
 
@@ -303,11 +334,14 @@ class PandaDocNavigator:
     # ------------------------------------------------------------------
 
     async def _check_staleness(self) -> bool:
+        if self._settings.doc_index_freeze:
+            say("Doc index frozen (DOC_INDEX_FREEZE) — using pre-built index, skipping rebuild")
+            return False
         current_sha = await self._fetch_tree_sha()
         if current_sha is None:
             logger.warning("PandaDocNavigator: GitHub unreachable — using existing index")
-            return not _META_FILE.exists()
-        meta = self._read_meta()
+            return (await self._read_meta()) is None
+        meta = await self._read_meta()
         if meta is None or meta.get("sha") != current_sha:
             old_sha = meta.get("sha") if meta else "none"
             say(f"doc index SHA changed ({old_sha} → {current_sha}) — rebuilding")
@@ -325,20 +359,38 @@ class PandaDocNavigator:
             logger.warning("PandaDocNavigator: failed to fetch tree SHA: %s", exc)
             return None
 
-    def _read_meta(self) -> dict | None:
-        try:
-            return json.loads(_META_FILE.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
+    async def _read_meta(self) -> dict | None:
+        """Return the index metadata (sentinel point in ``_META_COLLECTION``), or None.
 
-    def _write_meta(
+        None means the meta collection/point is absent (first run, or invalidated) or
+        Qdrant is unreachable — callers treat all three as "no usable meta".
+        """
+        client = self._make_qdrant_client()
+        try:
+            existing = {c.name for c in (await client.get_collections()).collections}
+            if _META_COLLECTION not in existing:
+                return None
+            points = await client.retrieve(
+                collection_name=_META_COLLECTION,
+                ids=[_META_POINT_ID],
+                with_payload=True,
+                with_vectors=False,
+            )
+            return dict(points[0].payload) if points and points[0].payload else None
+        except Exception as exc:  # noqa: BLE001 — absent/unreachable → treat as no meta
+            logger.warning("PandaDocNavigator: failed to read index meta: %s", exc)
+            return None
+        finally:
+            await client.close()
+
+    async def _write_meta(
         self,
         sha: str,
         system_summary: str = "",
         file_shas: dict[str, str] | None = None,
     ) -> None:
         from datetime import datetime, timezone  # noqa: PLC0415
-        _META_FILE.parent.mkdir(parents=True, exist_ok=True)
+        from qdrant_client.models import Distance, PointStruct, VectorParams  # noqa: PLC0415
         meta: dict = {
             "sha": sha,
             "built_at": datetime.now(timezone.utc).isoformat(),
@@ -347,7 +399,23 @@ class PandaDocNavigator:
             meta["system_summary"] = system_summary
         if file_shas:
             meta["file_shas"] = file_shas
-        _META_FILE.write_text(json.dumps(meta))
+
+        client = self._make_qdrant_client()
+        try:
+            existing = {c.name for c in (await client.get_collections()).collections}
+            if _META_COLLECTION not in existing:
+                # size=1: the meta collection is never searched, so the vector is an
+                # inert placeholder (a unit vector, valid under cosine distance).
+                await client.create_collection(
+                    collection_name=_META_COLLECTION,
+                    vectors_config=VectorParams(size=1, distance=Distance.COSINE),
+                )
+            await client.upsert(
+                collection_name=_META_COLLECTION,
+                points=[PointStruct(id=_META_POINT_ID, vector=[1.0], payload=meta)],
+            )
+        finally:
+            await client.close()
 
     def _read_node_cache(self) -> dict[str, dict]:
         """Return the per-node summary cache, or {} on any error.
@@ -363,9 +431,9 @@ class PandaDocNavigator:
         _NODE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         _NODE_CACHE_FILE.write_text(json.dumps(cache))
 
-    def get_system_summary(self) -> str:
+    async def get_system_summary(self) -> str:
         """Return the pre-generated PanDA system knowledge summary, or empty string."""
-        meta = self._read_meta()
+        meta = await self._read_meta()
         return meta.get("system_summary", "") if meta else ""
 
     async def _generate_system_summary(self, nodes: list[DocNode]) -> str:
@@ -477,7 +545,7 @@ class PandaDocNavigator:
             return
 
         # ── File-level diff against stored meta ─────────────────────────────
-        old_meta = self._read_meta() or {}
+        old_meta = await self._read_meta() or {}
         old_file_shas: dict[str, str] = old_meta.get("file_shas") or {}
         current_paths_set = set(rst_paths)
         changed_or_new = [
@@ -496,7 +564,7 @@ class PandaDocNavigator:
             say("No RST file content changed; refreshing meta only.")
             await self._load_graph_from_qdrant()
             if tree_sha:
-                self._write_meta(
+                await self._write_meta(
                     tree_sha,
                     system_summary=old_meta.get("system_summary", ""),
                     file_shas=file_shas,
@@ -563,7 +631,7 @@ class PandaDocNavigator:
         system_summary = await self._generate_system_summary(all_nodes_for_summary)
 
         if tree_sha:
-            self._write_meta(
+            await self._write_meta(
                 tree_sha,
                 system_summary=system_summary,
                 file_shas=file_shas,

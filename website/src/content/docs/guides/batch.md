@@ -52,30 +52,38 @@ SHARED=/shared bamboo stage-embeddings
 
 ### Build the KB snapshot
 
-The batch container restores the KB from three files under `/kb`. Produce `qdrant.snapshot`
+The batch container restores the KB from the files under `/kb`. Produce the Qdrant snapshots
 and `metadata.json` with **`bamboo dump-kb`** — it reads your Qdrant/Neo4j/embedding config from
-the same `.env` your populated deployment uses, so the snapshot matches it exactly. The Neo4j
-graph dump stays a separate offline step (it needs a stopped DB + data-dir access, which a bolt
-URL can't provide). Stage all three files to the shared path mounted read-only at `/kb`.
+the same `.env` your populated deployment uses, so the snapshot matches it exactly. `dump-kb`
+exports **every** Qdrant collection (one snapshot file each), so auxiliary collections — notably
+the doc-navigator's `panda_docs` / `panda_docs_meta` — travel with the KB, not just the main one.
+The Neo4j graph dump stays a separate offline step (it needs a stopped DB + data-dir access, which
+a bolt URL can't provide). Stage all of them to the shared path mounted read-only at `/kb`.
 
 | File | What it is | Restored by `run-analyze.sh` |
 |------|------------|------------------------------|
 | `neo4j.dump` | Neo4j offline dump, named for the batch `NEO4J_DATABASE` (default `neo4j`) | `neo4j-admin database load neo4j --from-path=/kb` |
-| `qdrant.snapshot` | Qdrant Snapshot-API export of the collection | recovered on startup (`qdrant --snapshot <file>:<collection>`) |
-| `metadata.json` | embedding model/dimension, collection, Neo4j/Qdrant versions | the KB metadata guard (embeddings + versions) |
+| `qdrant-<collection>.snapshot` | Qdrant Snapshot-API export, one file per collection (all collections, incl. the doc-navigator's `panda_docs` / `panda_docs_meta`) | each recovered on startup (a repeated `qdrant --snapshot <file>:<collection>`) |
+| `metadata.json` | embedding model/dimension, the collection list + primary collection, Neo4j/Qdrant versions | the KB metadata guard (embeddings + versions) |
+
+The doc-navigator index is served **as-is** in the container: `run-analyze.sh` sets
+`DOC_INDEX_FREEZE=1`, so the navigator never reaches out to GitHub or the LLM to rebuild doc
+summaries — it loads the staged `panda_docs` / `panda_docs_meta` collections directly. (Set
+`DOC_INDEX_FREEZE=0` to allow an in-container rebuild if you ever need one.)
 
 **Qdrant snapshot + metadata.json** — from a host that can reach your Qdrant (and Neo4j, for the
 version stamp):
 
 ```bash
-bamboo dump-kb --out /tmp/kb   # writes qdrant.snapshot + metadata.json from your .env
+bamboo dump-kb --out /tmp/kb   # writes qdrant-<collection>.snapshot (one per collection) + metadata.json from your .env
 ```
 
-`dump-kb` uses the Qdrant **Snapshot API** (only `QDRANT_URL`/collection/api-key — never Qdrant's
-on-disk storage dir), so it works against a local Docker Qdrant or a managed instance, with no
-service stop. `metadata.json` is filled entirely from real state: `embedding_model`/
-`embedding_dimension`/`neo4j_database`/`qdrant_collection` from your config, plus
-`neo4j_version`/`qdrant_version` read live from the servers.
+`dump-kb` uses the Qdrant **Snapshot API** (only `QDRANT_URL`/api-key — never Qdrant's on-disk
+storage dir), so it works against a local Docker Qdrant or a managed instance, with no service
+stop; it enumerates and snapshots every collection. `metadata.json` is filled entirely from real
+state: `embedding_model`/`embedding_dimension`/`neo4j_database` from your config, the
+`qdrant_collections` list (each collection + its snapshot file) plus the primary `qdrant_collection`,
+and `neo4j_version`/`qdrant_version` read live from the servers.
 
 **Neo4j dump** (offline — the database must be stopped). `dump-kb` prints this command with your
 DB name filled in; with `neo4j-admin` on the deployment host:
@@ -84,7 +92,7 @@ DB name filled in; with `neo4j-admin` on the deployment host:
 # If you are running Neo4j Desktop, the DBMS may use the default block store format
 # (Enterprise Edition). Neo4j Community Edition does not support the block format,
 # so you must first convert the database store format to aligned before dumping it.
-# First navigate to the DBMS directory, then run:
+# To convert the format, navigate to the DBMS directory, then run:
 neo4j-admin database migrate neo4j --to-format=aligned
 
 neo4j-admin database dump neo4j --to-path=/tmp/kb   # writes neo4j.dump

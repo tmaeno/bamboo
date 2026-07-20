@@ -4,13 +4,15 @@
 ``bamboo dump-kb --out DIR`` connects to the SAME Qdrant / Neo4j the local bamboo
 run uses (resolved through ``get_settings()`` / ``.env``) and writes:
 
-  - ``qdrant.snapshot``  — a Qdrant Snapshot-API export of the configured collection
-  - ``metadata.json``    — embedding model/dimension + collection + live server versions
+  - ``qdrant-<collection>.snapshot``  — one Qdrant Snapshot-API export per collection.
+    Every collection is included, so the doc-navigator's ``panda_docs`` /
+    ``panda_docs_meta`` travel alongside the KB collection.
+  - ``metadata.json``    — embedding model/dimension + collection list + live server versions
 
-Because it goes through the Snapshot API it needs only ``QDRANT_URL`` / collection /
-api-key — never the Qdrant server's on-disk storage dir — so it works against a local
-Docker Qdrant or a managed one alike. The batch container recovers the snapshot on
-startup (``qdrant --snapshot <file>:<collection>``; see ``deploy/batch/run-analyze.sh``).
+Because it goes through the Snapshot API it needs only ``QDRANT_URL`` / api-key — never
+the Qdrant server's on-disk storage dir — so it works against a local Docker Qdrant or a
+managed one alike. The batch container recovers each snapshot on startup (a repeated
+``qdrant --snapshot <file>:<collection>``; see ``deploy/batch/run-analyze.sh``).
 
 The Neo4j graph dump stays a separate **offline** ``neo4j-admin database dump`` step
 (it needs a stopped DB + data-dir access, which a bolt URL cannot provide); this
@@ -94,12 +96,16 @@ async def _run(out_dir: str) -> int:
             f"Vector backend {type(backend).__name__} has no snapshot export; "
             "the batch KB dump currently supports Qdrant only."
         )
-    snapshot_path = out / "qdrant.snapshot"
     try:
-        qmeta = await backend.export_snapshot(str(snapshot_path))
+        qmeta = await backend.export_all_snapshots(str(out))
     finally:
         await backend.close()
-    console.print(f"[green]✓[/green] Qdrant snapshot → {snapshot_path}")
+    collections = qmeta.get("qdrant_collections", [])
+    for entry in collections:
+        console.print(
+            f"[green]✓[/green] Qdrant snapshot ({entry['collection']}) "
+            f"→ {out / entry['snapshot_file']}"
+        )
 
     # --- Neo4j server version (read live over bolt; the dump itself stays offline) ---
     neo4j_version = await _neo4j_version(settings)
@@ -110,9 +116,12 @@ async def _run(out_dir: str) -> int:
         "embedding_dimension": settings.embedding_dimension,
         "neo4j_database": settings.neo4j_database,
         "neo4j_version": neo4j_version,
+        # Primary KB collection — used by the restore-time embedding-consistency guard.
         "qdrant_collection": qmeta.get(
-            "qdrant_collection", settings.qdrant_collection_name
+            "primary_collection", settings.qdrant_collection_name
         ),
+        # Every collection + its snapshot file — the batch restore recovers them all.
+        "qdrant_collections": collections,
         "qdrant_version": qmeta.get("qdrant_version", ""),
     }
     meta_path = out / "metadata.json"
@@ -134,7 +143,7 @@ async def _run(out_dir: str) -> int:
     "out_dir",
     required=True,
     type=click.Path(file_okay=False),
-    help="Directory to write qdrant.snapshot + metadata.json (created if missing).",
+    help="Directory to write qdrant-<collection>.snapshot files + metadata.json (created if missing).",
 )
 def main(out_dir):
     """Export the env-derivable KB snapshot artifacts (Qdrant snapshot + metadata.json).

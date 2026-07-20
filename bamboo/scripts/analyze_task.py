@@ -142,7 +142,7 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         from bamboo.agents.panda_doc_navigator import (
             invalidate_doc_cache,  # noqa: PLC0415
         )
-        deleted = invalidate_doc_cache()
+        deleted = asyncio.run(invalidate_doc_cache())
         click.echo(
             "✓ Doc index cache cleared — will rebuild on next use." if deleted
             else "Doc index cache was already empty."
