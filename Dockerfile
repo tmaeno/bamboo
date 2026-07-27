@@ -53,6 +53,7 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 # Copy the project and install with the offline-model (+ panda) extras.
 COPY . /app
+RUN git clone https://github.com/PanDAWMS/panda-client.git && cd panda-client && cp packages/light/pyproject.toml . && pip install --no-cache-dir .
 RUN pip install --no-cache-dir ".[local,panda]"
 
 # Image 1 is pure app: configured entirely by env (NEO4J_URI/QDRANT_URL/LLM_*/…).

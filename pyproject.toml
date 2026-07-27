@@ -47,7 +47,7 @@ dependencies = [
 [project.optional-dependencies]
 # PanDA integration
 panda = [
-    "panda-client-light>=1.6.11",
+    "panda-client-light>=2.0.2",
     "panda-server-source",
 ]
 # Fully local setup: embeddings (sentence-transformers) + LLM (Ollama).
