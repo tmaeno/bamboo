@@ -1,6 +1,6 @@
 name: build-images
 
-# Builds the two-target image (see Dockerfile / docs/BATCH.md) and pushes to
+# Builds the two-target image (see Dockerfile / the Batch Analysis guide) and pushes to
 # ghcr.io. The .sif for the air-gapped cluster is built from the pushed image on
 # a networked host (or via the optional job below), then copied to the cluster —
 # compute nodes never touch the registry.
@@ -50,15 +50,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Image 2 — bamboo-batch-analyze (FROM bamboo; → .sif)
-      - name: Build & push bamboo-batch-analyze
+      # Image 2 — bamboo-batch (FROM bamboo; → .sif)
+      - name: Build & push bamboo-batch
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: bamboo-batch-analyze
+          target: bamboo-batch
           platforms: linux/amd64
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}-batch-analyze:latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE }}-batch:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -74,10 +74,10 @@ jobs:
       - uses: eWaterCycle/setup-apptainer@v2
       - name: Build .sif from the pushed image
         run: |
-          apptainer build bamboo-batch-analyze.sif \
-            "docker://${{ env.REGISTRY }}/${{ env.IMAGE }}-batch-analyze:latest"
+          apptainer build bamboo-batch.sif \
+            "docker://${{ env.REGISTRY }}/${{ env.IMAGE }}-batch:latest"
       - uses: actions/upload-artifact@v4
         with:
-          name: bamboo-batch-analyze-sif
-          path: bamboo-batch-analyze.sif
+          name: bamboo-batch-sif
+          path: bamboo-batch.sif
           retention-days: 7

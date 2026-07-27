@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Two-target build (see docs/BATCH.md and the plan):
-#   --target bamboo                → Image 1: the bamboo app, talks to EXTERNAL services
-#                                    (the standalone Docker artifact).
-#   --target bamboo-batch-analyze  → Image 2: FROM bamboo, bundles Neo4j + Qdrant + Ollama
-#                                    so a single container is self-sufficient on an
-#                                    air-gapped batch node. Convert to .sif with Apptainer.
+# Two-target build (see website/src/content/docs/guides/batch.md):
+#   --target bamboo        → Image 1: the bamboo app, talks to EXTERNAL services
+#                            (the standalone Docker artifact).
+#   --target bamboo-batch  → Image 2: FROM bamboo, bundles Neo4j + Qdrant + Ollama
+#                            so a single container is self-sufficient on an air-gapped
+#                            batch node. Convert to .sif with Apptainer.
 #
 ARG PYTHON_VERSION=3.12
 ARG NEO4J_VERSION=2026.06.0
@@ -60,7 +60,6 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 # Copy the project and install with the offline-model (+ panda) extras.
 COPY . /app
-RUN git clone https://github.com/PanDAWMS/panda-client.git && cd panda-client && cp packages/light/pyproject.toml . && pip install --no-cache-dir .
 RUN pip install --no-cache-dir ".[local,panda]"
 
 # Image 1 is pure app: configured entirely by env (NEO4J_URI/QDRANT_URL/LLM_*/…).
@@ -68,9 +67,9 @@ ENTRYPOINT ["bamboo"]
 CMD ["--help"]
 
 # =========================================================================== #
-# Image 2 — bamboo-batch-analyze (FROM bamboo; bundles the service stack)
+# Image 2 — bamboo-batch (FROM bamboo; bundles the service stack)
 # =========================================================================== #
-FROM bamboo AS bamboo-batch-analyze
+FROM bamboo AS bamboo-batch
 
 # Re-declare (no default) to inherit the values from the global ARGs above.
 ARG NEO4J_VERSION
@@ -78,7 +77,7 @@ ARG QDRANT_VERSION
 ARG OLLAMA_VERSION
 
 # Surface the baked service versions at runtime so entrypoint.sh can guard the KB
-# snapshot against a version-incompatible Neo4j dump / Qdrant snapshot (see docs/BATCH.md).
+# snapshot against a version-incompatible Neo4j dump / Qdrant snapshot (see the Batch guide).
 ENV NEO4J_VERSION=${NEO4J_VERSION} \
     QDRANT_VERSION=${QDRANT_VERSION}
 
@@ -176,9 +175,10 @@ ENV HF_HOME=/embeddings \
     LLM_PROVIDER=ollama
 
 # --- Entry script (orchestrates the localhost stack per job) ---
-# Dispatches subcommands (setup/batch/teardown/shell); no subcommand = full run
-# (setup → batch → teardown), the backward-compatible default. For interactive
-# debugging: `docker run -it … bamboo-batch-analyze shell`.
+# Dispatches subcommands (batch-analyze/exec/shell/setup/teardown/help); each names the
+# workload it runs, and no argument prints usage rather than guessing one. The batch job
+# is `docker run … bamboo-batch batch-analyze`; any other bamboo command runs with
+# `docker run … bamboo-batch exec <cmd…>`; `shell` is the interactive form.
 COPY deploy/batch/entrypoint.sh /opt/bamboo/entrypoint.sh
 RUN chmod +x /opt/bamboo/entrypoint.sh
 

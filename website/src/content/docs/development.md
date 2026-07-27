@@ -165,15 +165,24 @@ The repository ships one multi-stage `Dockerfile` with two targets:
   docker run --rm --env-file .env bamboo analyze --task-data task.json --output out.json
   ```
 
-- **`bamboo-batch-analyze`** — `FROM bamboo`, additionally bundles Neo4j + Qdrant +
-  Ollama so a single container is self-sufficient on an air-gapped batch node. It is
-  converted to an Apptainer `.sif` for offline batch execution.
+- **`bamboo-batch`** — `FROM bamboo`, additionally bundles Neo4j + Qdrant + Ollama so a
+  single container is self-sufficient on an air-gapped batch node. It is converted to an
+  Apptainer `.sif` for offline batch execution. Its entry script names every workload:
+  `batch-analyze` for the `/in` → `/out` job, `exec <cmd…>` for any other bamboo command
+  against the booted stack, `shell` for an interactive session.
+
+  ```bash
+  docker build --target bamboo-batch -t bamboo-batch .
+  docker run --rm … bamboo-batch batch-analyze     # the batch job
+  docker run --rm … bamboo-batch exec bamboo verify
+  ```
 
 CI builds and pushes both images to GHCR on tags / manual dispatch — see
 `.github/workflows/build-images.yml`.
 
 For the air-gapped Apptainer batch deployment (KB/model staging on the shared
-filesystem, `bamboo batch-analyze`, CPU/GPU queues), see **[BATCH.md](/bamboo/guides/batch/)**.
+filesystem, `bamboo batch-analyze`, CPU/GPU queues), see the
+**[Batch Analysis guide](/bamboo/guides/batch/)**.
 
 > The legacy `docker-compose.yml` at the repo root is a dev-only convenience for
 > standing up Neo4j + Qdrant locally; it is not used for deployment.

@@ -14,7 +14,7 @@ you can't precompute it. The design:
 - **One lean image, two targets** (`Dockerfile`):
   - `bamboo` — the app, configured by env, talks to external services (also the
     standalone Docker artifact).
-  - `bamboo-batch-analyze` — `FROM bamboo`, adds Neo4j + Qdrant + Ollama (copied from
+  - `bamboo-batch` — `FROM bamboo`, adds Neo4j + Qdrant + Ollama (copied from
     official images) + the entry script. Converted to a `.sif`.
 - **Large, changing artifacts stay out of the image**, staged on the shared filesystem
   and mounted read-only: the **Ollama model** (`/models`), the **local embedding model**
@@ -27,9 +27,9 @@ you can't precompute it. The design:
 
 ```bash
 # 1. Build & publish the images (or use CI: .github/workflows/build-images.yml)
-docker build --target bamboo               -t bamboo .
-docker build --target bamboo-batch-analyze -t bamboo-batch-analyze .
-apptainer build bamboo-batch-analyze.sif docker-daemon://bamboo-batch-analyze:latest
+docker build --target bamboo       -t bamboo .
+docker build --target bamboo-batch -t bamboo-batch .
+apptainer build bamboo-batch.sif docker-daemon://bamboo-batch:latest
 
 # 2. Stage the LLM model onto shared storage (mounted read-only at /models).
 #    Ships with `pip install bamboo`. --model defaults to LLM_MODEL from your config
@@ -122,7 +122,7 @@ the boot-time snapshot recover is the real gate). `bamboo dump-kb` stamps all th
 Before queuing on a cluster, dress-rehearse the **exact container** on your workstation — it runs
 the same ENTRYPOINT (`entrypoint.sh`) SLURM will, so it catches the batch-specific failures (KB
 `metadata.json` mismatch, Neo4j/Qdrant version skew, a bad snapshot, a mis-staged model) where
-they're cheap to debug. Reuse the `bamboo-batch-analyze` image, staged model, and KB snapshot you
+they're cheap to debug. Reuse the `bamboo-batch` image, staged model, and KB snapshot you
 built above; point the mounts at your local paths and run it under Docker:
 
 ```bash
@@ -132,16 +132,22 @@ docker run --rm \
   -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
   -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
-  bamboo-batch-analyze      # models derived from the staged manifests/KB; add --gpus all for GPU
+  bamboo-batch batch-analyze  # models derived from the staged manifests/KB; add --gpus all for GPU
 # override a model for a one-off run with e.g. -e LLM_MODEL=qwen3.6
 # portable run: add  -v $PWD/.env:/app/.env:ro  to inject keys/settings (see "Portable mode" below)
 ```
 
-With no subcommand, `entrypoint.sh` runs its full sequence — the KB metadata guard,
+The `batch-analyze` subcommand runs the full sequence — the KB metadata guard,
 `neo4j-admin database load`, Qdrant snapshot recover, `ollama serve`, then `bamboo batch-analyze`
 over `/in` — and tears the stack down on exit. Success is one result JSON per task in `./out`; a
 `*.error.json` sidecar plus a non-zero exit flags a failing task. This is the same round-trip
 `submit.sh` performs, minus the Apptainer launcher.
+
+Name the workload: **with no subcommand the container prints usage and exits non-zero** rather than
+guessing one. `bamboo batch-analyze` is not the only batch command bamboo has — `batch-populate` is
+another — so it gets no implied position; every other command is reached with `exec` (below).
+`bamboo-batch help` lists the full set (`batch-analyze`, `exec`, `shell`, `setup`, `teardown`, `help`)
+without booting anything.
 
 > A Docker run won't reproduce every Apptainer detail — rootless arbitrary-uid execution, the
 > shared host netns (why `entrypoint.sh` allocates free ports), and `--nv` GPU wiring. Treat it as
@@ -150,8 +156,8 @@ over `/in` — and tears the stack down on exit. Success is one result JSON per 
 ### Interactive debugging
 
 To poke at `bamboo` by hand against the real staged KB — the fastest way to validate the
-scaffolded pieces or to debug RAG/agent behavior — split the boot phase from the batch phase with
-`entrypoint.sh`'s subcommands. The simplest entry boots the stack and drops you into a shell (add
+scaffolded pieces or to debug RAG/agent behavior — use `shell`, or split the boot phase off with
+`setup`/`teardown`. The simplest entry boots the stack and drops you into a shell (add
 `-it` for a TTY); the exported env already points `bamboo` at the live services, and the stack is
 torn down when you `exit`:
 
@@ -161,7 +167,7 @@ docker run -it --rm \
   -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
   -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
-  bamboo-batch-analyze shell
+  bamboo-batch shell
 # optional: add  -v $PWD/.env:/app/.env:ro  so `bamboo verify` finds a .env (✓) — see "Portable mode"
 # inside the shell:
 #   bamboo verify
@@ -170,21 +176,61 @@ docker run -it --rm \
 #   exit                                # tears the stack down
 ```
 
-Or drive the pieces yourself (same single container session — the services live in that
-session's process namespace, so `setup`/`batch`/`teardown` **must share one `docker run`**):
+#### One-shot commands (`exec`)
+
+When you want *one* command run against the staged KB — from a script, a CI step, or just without a
+TTY — use `exec` instead of `shell`. It boots the stack, runs the command, tears the stack down, and
+**exits with the command's status** (`shell` is interactive-only and discards it). Arguments are
+passed to the command verbatim, so quoted free text survives intact:
 
 ```bash
-docker run -it --rm … --entrypoint bash bamboo-batch-analyze
+docker run --rm \
+  -v $PWD/.env:/app/.env:ro \
+  -v $PWD/in:/in:ro -v $PWD/out:/out \
+  -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
+  -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
+  bamboo-batch exec bamboo verify
+
+# free-text arguments are safe — argv is not re-parsed by a shell
+docker run --rm … bamboo-batch exec bamboo investigate "why did task 123 fail"
+# pipes, redirects and && need an explicit shell:
+docker run --rm … bamboo-batch exec bash -lc 'bamboo verify | tee /out/verify.log'
+
+# a non-analyze batch command — note -v …/kb:/kb:rw (see below)
+docker run --rm … -v ${SHARED:-/shared}/bamboo/kb:/kb:rw \
+  bamboo-batch exec bash -lc 'bamboo batch-populate --drafts /out/drafts --yes && bamboo dump-kb --out /kb'
+```
+
+`exec` is how every bamboo command other than `batch-analyze` runs in this image — `batch-populate`,
+`dump-kb`, `investigate`, `verify`. One thing to know for the write path: the container restores the KB
+into node-local scratch and **teardown deletes it**, so a command that modifies the KB only leaves a
+trace if you snapshot it back out (`bamboo dump-kb --out /kb`) — which needs `/kb` mounted `:rw`
+instead of the read-only mount the analyze path uses.
+
+Setup chatter goes to stderr, so the command's stdout stays clean and pipeable
+(`… exec bamboo verify > verify.txt` captures only `bamboo`'s output). A command that does not exist
+is rejected before the stack boots, so a typo costs a second rather than a few minutes. The trade-off
+is cost: each `exec` pays a full stack boot (KB load, snapshot recover, `ollama serve`), so several
+commands in a row are cheaper inside one `shell` session. Passing arguments to `shell` is an error
+that points you here.
+
+Or drive the pieces yourself (same single container session — the services live in that
+session's process namespace, so `setup`/`teardown` **must share one `docker run`**):
+
+```bash
+docker run -it --rm … --entrypoint bash bamboo-batch
   $ /opt/bamboo/entrypoint.sh setup          # boot the stack, leave it running
   $ source /work/bamboo-batch.env            # or ${TMPDIR:-/tmp}/bamboo-batch.env without -v …:/work
   $ bamboo investigate …                     # bamboo now sees the live stack
-  $ /opt/bamboo/entrypoint.sh batch          # run bamboo batch-analyze
+  $ bamboo batch-analyze --input-dir /in --output-dir /out
   $ /opt/bamboo/entrypoint.sh teardown       # kill services + remove scratch
 ```
 
 `setup` writes the derived env (service URLs, model identities) and service PIDs to a state file
-(`$BAMBOO_WORK/bamboo-batch.env`, default `/work/bamboo-batch.env` under `submit.sh`); `batch` and
-`teardown` read it back, so you never re-type the ports or model names.
+(`$BAMBOO_WORK/bamboo-batch.env`, default `/work/bamboo-batch.env` under `submit.sh`). Sourcing it is
+what points `bamboo` at the live stack; `teardown` reads it back for the service PIDs, so you never
+re-type the ports or model names.
 
 ### Portable mode: injecting runtime config
 
@@ -199,7 +245,7 @@ docker run --rm \
   -v ${SHARED:-/shared}/bamboo/ollama:/models:ro \
   -v ${SHARED:-/shared}/bamboo/embeddings:/embeddings:ro \
   -v ${SHARED:-/shared}/bamboo/kb:/kb:ro \
-  bamboo-batch-analyze      # + your read-only .env mounted at /app/.env
+  bamboo-batch batch-analyze   # + your read-only .env mounted at /app/.env
 ```
 
 `bamboo` loads `/app/.env` itself (`config._find_env_file`, so `bamboo verify` reports
@@ -253,8 +299,8 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch-analyze`) |
-| `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run batch, tear down (subcommands: `setup`/`batch`/`teardown`/`shell`) |
+| `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch`) |
+| `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run the workload, tear down (subcommands: `batch-analyze`/`exec`/`shell`/`setup`/`teardown`/`help`) |
 | `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
 | `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |

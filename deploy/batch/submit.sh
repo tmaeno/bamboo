@@ -9,15 +9,17 @@
 # /kb/metadata.json, RERANKER_MODEL from /embeddings (bamboo stage-embeddings). Export any
 # of LLM_MODEL / EMBEDDING_MODEL / RERANKER_MODEL to override the derived value for a run.
 #
-# This launches the image's default (no-subcommand) entrypoint: the full
-# setup → batch → teardown run. To debug interactively instead, run the container
-# with the `shell` subcommand (or `setup`/`batch`/`teardown`) — see the entrypoint
-# header (deploy/batch/entrypoint.sh) and docs/guides/batch.md "Interactive debugging".
+# This passes the `batch-analyze` subcommand explicitly: boot the stack, run
+# `bamboo batch-analyze` over /in, tear down. The container does not guess a workload —
+# with no subcommand it prints usage and exits non-zero. To debug interactively instead,
+# use `shell` (or `setup`/`teardown`); to run a single command against the booted stack
+# non-interactively, use `exec <cmd…>` — see the entrypoint header
+# (deploy/batch/entrypoint.sh) and the Batch Analysis guide, "Interactive debugging".
 #
 # ⚠ SCAFFOLD — UNVERIFIED. Adjust SHARED/SCRATCH paths and scheduler to your site.
 set -euo pipefail
 
-SIF="${SIF:-bamboo-batch-analyze.sif}"
+SIF="${SIF:-bamboo-batch.sif}"
 SHARED="${SHARED:-/shared}"
 SCRATCH="${SCRATCH:-${TMPDIR:-/tmp}/bamboo.$$}"     # node-local scratch
 IN_DIR="${IN_DIR:-$PWD/in}"                          # staged task-data *.json
@@ -47,7 +49,7 @@ done
 [[ "${USE_GPU}" == "1" ]] && apptainer_args+=(--nv)
 
 # --- Optional: live PanDA fetch (--task-id) needs OIDC creds. Pass the token via
-#     the file: form so it never lands in env/argv (see docs/BATCH.md). ---
+#     the file: form so it never lands in env/argv (see the Batch guide). ---
 if [[ -n "${PANDA_TOKEN_FILE:-}" ]]; then
   apptainer_args+=(
     --bind "${PANDA_TOKEN_FILE}:/run/panda/token:ro"
@@ -57,8 +59,8 @@ if [[ -n "${PANDA_TOKEN_FILE:-}" ]]; then
   )
 fi
 
-echo "[submit] apptainer ${apptainer_args[*]} ${SIF}"
-apptainer "${apptainer_args[@]}" "${SIF}"
+echo "[submit] apptainer ${apptainer_args[*]} ${SIF} batch-analyze"
+apptainer "${apptainer_args[@]}" "${SIF}" batch-analyze
 
 # ---------------------------------------------------------------------------
 # SLURM example (CPU queue):

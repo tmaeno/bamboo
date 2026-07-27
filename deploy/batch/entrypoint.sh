@@ -2,39 +2,50 @@
 # entrypoint.sh — entry point for the batch container (Image 2).
 #
 # Serves two use cases from one image:
-#   • air-gapped batch — the default; bundled Neo4j + Qdrant + Ollama, no keys.
+#   • air-gapped batch — `batch-analyze`; bundled Neo4j + Qdrant + Ollama, no keys.
 #   • portable run     — mount your own config at /app/.env
 #                        (`-v $PWD/.env:/app/.env:ro`) to inject keys/settings
 #                        (PANDA_*, SSL_CERT_FILE, LOG_LEVEL, …). See below.
 #
 # Boots Neo4j + Qdrant + Ollama on localhost from read-only shared-FS mounts,
-# restores the KB into node-local scratch, runs `bamboo batch-analyze` over the
-# staged tasks, then tears everything down. Designed to run rootless under
-# Apptainer (you are an arbitrary uid; the .sif and /models /kb are read-only).
+# restores the KB into node-local scratch, runs the requested workload against that
+# stack, then tears everything down. Designed to run rootless under Apptainer (you
+# are an arbitrary uid; the .sif and /models /kb are read-only).
 #
-# Subcommands (the boot phase and the batch phase are separable so you can stop
-# mid-way and poke at `bamboo` by hand inside one container session):
+# Subcommands — each names the workload it runs; the container never guesses one
+# (`bamboo batch-analyze` is only one of bamboo's batch commands, batch-populate is
+# another, so no argument / an unknown token / --help print usage instead of booting):
 #
-#   entrypoint.sh                 full run: setup → batch → teardown (default; any
-#                                 extra args are forwarded to `bamboo batch-analyze`).
-#   entrypoint.sh run [args]      explicit alias of the default.
+#   entrypoint.sh batch-analyze [args]
+#                                 the batch job: `bamboo batch-analyze --input-dir /in
+#                                 --output-dir /out [args]`, then teardown. What
+#                                 deploy/batch/submit.sh runs. Any OTHER bamboo command
+#                                 goes through `exec` (see below).
+#   entrypoint.sh exec <cmd…>     run <cmd…> against the stack (argv verbatim, no shell
+#                                 re-parse), teardown on exit; exits with <cmd…>'s
+#                                 status. Needs no TTY, so it is the scriptable form of
+#                                 `shell`. For pipes/redirects: exec bash -lc '…'.
+#   entrypoint.sh shell           drop into an interactive shell with the env exported;
+#                                 teardown on exit.
 #   entrypoint.sh setup           boot the stack + restore the KB, then LEAVE IT
 #                                 RUNNING. Persists a state env-file (see below).
-#   entrypoint.sh batch [args]    run `bamboo batch-analyze` against an already
-#                                 booted stack (sources the state env-file).
 #   entrypoint.sh teardown        kill the services and remove the scratch dir.
-#   entrypoint.sh shell           boot the stack, then drop into an interactive
-#                                 shell with the env exported; teardown on exit.
+#   entrypoint.sh help            print usage (booting nothing).
 #
 # Interactive debugging (ONE container session — services live in that session's
-# process namespace, so `setup`/`batch`/`teardown` must share a single `docker run`):
-#   docker run -it … bamboo-batch-analyze shell          # boot + interactive bash
+# process namespace, so `setup`/`teardown` must share a single `docker run`):
+#   docker run -it … bamboo-batch shell                  # boot + interactive bash
+#   # one-shot, no TTY needed, exit code is the command's:
+#   docker run … bamboo-batch exec bamboo verify
+#   docker run … bamboo-batch exec bash -lc 'bamboo verify | tee /out/verify.log'
+#   # a non-analyze batch command (needs /kb mounted :rw for the write-back):
+#   docker run … bamboo-batch exec bash -lc 'bamboo batch-populate … && bamboo dump-kb --out /kb'
 #   # or drive the pieces yourself:
-#   docker run -it --entrypoint bash … bamboo-batch-analyze
+#   docker run -it --entrypoint bash … bamboo-batch
 #     $ /opt/bamboo/entrypoint.sh setup
 #     $ source "${BAMBOO_WORK:-/tmp}/bamboo-batch.env"    # bamboo now sees the stack
 #     $ bamboo analyze … / bamboo investigate … / bamboo verify
-#     $ /opt/bamboo/entrypoint.sh batch
+#     $ bamboo batch-analyze --input-dir /in --output-dir /out
 #     $ /opt/bamboo/entrypoint.sh teardown
 #
 # Mounts (see deploy/batch/submit.sh):
@@ -101,6 +112,37 @@ die() { log "ERROR: $*"; exit 1; }
 # teardown's `rm -rf "${WORK}"` wipes it.
 dump_tail() { log "---- last 60 lines of $1 ----"; tail -n 60 "$1" 2>/dev/null | sed 's/^/  | /' >&2; log "---- end $1 ----"; }
 
+# Printed on `help` (to stdout) and ahead of a dispatch error (redirected to stderr
+# by the caller). Every subcommand names the workload it runs: the container never
+# guesses one, because `batch-analyze` is not the only batch command bamboo has.
+usage() {
+  cat <<'USAGE'
+bamboo-batch — bamboo plus a bundled Neo4j + Qdrant + Ollama stack in one container.
+Each subcommand boots the stack from the read-only mounts, runs its workload, and
+tears the stack down (setup/teardown split it apart for interactive debugging).
+
+Usage:  <image> <subcommand> [args…]
+
+  batch-analyze [args…]  the batch job: `bamboo batch-analyze --input-dir /in
+                         --output-dir /out [args…]`. This is what deploy/batch/submit.sh
+                         runs. Any OTHER bamboo command goes through `exec`, e.g.
+                         `exec bamboo batch-populate …`, `exec bamboo dump-kb …`.
+  exec <cmd…>            run <cmd…> against the stack; exits with its status. argv is
+                         passed verbatim (quoted free text is safe); for pipes,
+                         redirects or && use `exec bash -lc '…'`.
+  shell                  drop into an interactive bash with the stack env exported.
+  setup                  boot the stack and LEAVE IT RUNNING; writes a state env-file.
+                         Then: source it and run bamboo directly in the same session.
+  teardown               kill the services and remove the scratch dir.
+  help                   this message.
+
+Mounts:  /in (ro) task-data *.json   /out (rw) results   /kb (ro) KB snapshot
+         /models (ro) Ollama models  /embeddings (ro) HF cache   /work (rw, optional)
+Portable mode: mount your own .env at /app/.env to inject keys/settings (not the
+         provider/model/service vars — those stay derived from the staged KB/model).
+USAGE
+}
+
 # Optional portable-mode config: mount your own .env at /app/.env
 # (`-v $PWD/.env:/app/.env:ro`, /app is WORKDIR). We do NOT parse it here — bamboo
 # loads it itself (config._find_env_file, override=False), so it supplies keys /
@@ -119,8 +161,8 @@ fi
 # remove scratch). Services run in their own process groups (setsid) so they
 # outlive do_setup returning; teardown kills those groups.
 #
-# In-process (full run / shell) WORK and PIDS are already set. Standalone
-# `teardown` loads them from the state env-file first.
+# In-process (batch-analyze / exec / shell) WORK and PIDS are already set.
+# Standalone `teardown` loads them from the state env-file first.
 # --------------------------------------------------------------------------- #
 WORK=""
 PIDS=()
@@ -143,8 +185,8 @@ teardown() {
 }
 
 # --------------------------------------------------------------------------- #
-# Persist the derived env + service PIDs so a later `batch`/`teardown` or an
-# interactive shell can source the live stack. `printf %q` escaping keeps values
+# Persist the derived env + service PIDs so a later `teardown`, or a shell in the
+# same session, can source the live stack. `printf %q` escaping keeps values
 # re-sourceable. Only emit the optional model vars when they were actually set.
 # --------------------------------------------------------------------------- #
 persist_env() {
@@ -166,21 +208,12 @@ persist_env() {
   log "wrote stack state to ${BAMBOO_STATE_FILE}"
 }
 
-# Source the state env-file when the stack env isn't already in this process
-# (i.e. a standalone `batch` after a separate `setup`). No-op for the full run.
-load_state() {
-  [[ -n "${NEO4J_URI:-}" ]] && return 0
-  [[ -f "${BAMBOO_STATE_FILE}" ]] || die "no stack state at ${BAMBOO_STATE_FILE} — run 'entrypoint.sh setup' first"
-  # shellcheck disable=SC1090
-  source "${BAMBOO_STATE_FILE}"
-}
-
 # --------------------------------------------------------------------------- #
 # do_setup — boot the localhost stack and restore the KB into scratch.
 #
 # On entry it guards a partial boot (teardown on EXIT/INT/TERM); on success it
 # clears that trap so the caller owns teardown (a standalone `setup` leaves the
-# stack running; `run`/`shell` re-arm the trap themselves).
+# stack running; `exec`/`shell` re-arm the trap themselves).
 # --------------------------------------------------------------------------- #
 do_setup() {
   trap 'teardown' EXIT INT TERM
@@ -302,7 +335,7 @@ PY
   # Restore KB into writable scratch
   # ------------------------------------------------------------------------- #
   log "restoring Neo4j dump…"
-  # VERIFY: Neo4j 5 admin syntax + dump filename (<db>.dump). See the /kb contract in docs/BATCH.md.
+  # VERIFY: Neo4j 5 admin syntax + dump filename (<db>.dump). See the /kb contract in the Batch guide.
   # The Neo4j 5 CLI (`neo4j`, `neo4j-admin`) reads its conf dir from $NEO4J_CONF —
   # export it so both the offline `database load` and `neo4j console` pick up the
   # scratch neo4j.conf below (without it they use $NEO4J_HOME/conf and write to the
@@ -331,7 +364,7 @@ EOF
 
   log "locating Qdrant snapshot(s)…"
   # The KB ships one Qdrant Snapshot-API file per collection (produced by `bamboo dump-kb`,
-  # see docs/BATCH.md), listed in metadata.json under "qdrant_collections". Qdrant recovers
+  # see the Batch guide), listed in metadata.json under "qdrant_collections". Qdrant recovers
   # each into the fresh storage dir on startup via a repeated --snapshot flag below — no
   # extraction needed. Building ALL collections (not just the KB one) is what carries the
   # doc-navigator's panda_docs / panda_docs_meta into the container.
@@ -396,46 +429,20 @@ PY
 
   persist_env
   # Hand teardown control back to the caller: a standalone `setup` leaves the stack
-  # running; `run`/`shell` re-arm their own EXIT trap. A mid-setup failure above
+  # running; `exec`/`shell` re-arm their own EXIT trap. A mid-setup failure above
   # instead trips the guard trap and cleans up the half-booted stack.
   trap - EXIT INT TERM
 }
 
 # --------------------------------------------------------------------------- #
-# do_batch — run the batch (deps + in-process models warm across every task).
-# --------------------------------------------------------------------------- #
-do_batch() {
-  log "running bamboo batch-analyze…"
-  set +e
-  bamboo batch-analyze --input-dir "${IN_DIR}" --output-dir "${OUT_DIR}" "${@}"
-  local rc=$?
-  set -e
-  log "batch-analyze exited rc=${rc}"
-  return "${rc}"
-}
-
-# --------------------------------------------------------------------------- #
 # Subcommands
 # --------------------------------------------------------------------------- #
-cmd_run() {                     # default: boot → batch → teardown (backward compatible)
-  do_setup
-  trap 'teardown' EXIT INT TERM
-  local rc=0
-  do_batch "$@" || rc=$?
-  exit "${rc}"                  # teardown fires via the EXIT trap
-}
-
 cmd_setup() {                   # boot the stack and leave it running
   do_setup
   log "stack is up. To use it:"
-  log "  source ${BAMBOO_STATE_FILE}   # then run bamboo … against the live stack"
-  log "  entrypoint.sh batch [args]    # run bamboo batch-analyze"
+  log "  source ${BAMBOO_STATE_FILE}   # then run bamboo … against the live stack, e.g."
+  log "  bamboo batch-analyze --input-dir ${IN_DIR} --output-dir ${OUT_DIR}"
   log "  entrypoint.sh teardown        # kill services + remove scratch"
-}
-
-cmd_batch() {                   # run batch-analyze against an already booted stack
-  load_state
-  do_batch "$@"
 }
 
 cmd_teardown() {                # kill services + remove scratch (loads state if needed)
@@ -443,6 +450,9 @@ cmd_teardown() {                # kill services + remove scratch (loads state if
 }
 
 cmd_shell() {                   # boot the stack, drop into an interactive shell, teardown on exit
+  # `shell` is interactive-only. Extra args used to be silently dropped, which made
+  # `shell bamboo verify` boot the stack and sit at a prompt as if nothing was asked.
+  [[ $# -eq 0 ]] || die "'shell' takes no arguments — use 'exec $*' to run a command non-interactively"
   do_setup
   trap 'teardown' EXIT INT TERM
   log "stack is up — dropping into an interactive shell. Type 'exit' to tear down."
@@ -450,22 +460,61 @@ cmd_shell() {                   # boot the stack, drop into an interactive shell
   bash -i || true               # child, not exec, so the EXIT trap runs teardown on return
 }
 
+cmd_exec() {                    # boot the stack, run one command against it, teardown on exit
+  [[ $# -gt 0 ]] || die "exec needs a command, e.g. 'exec bamboo verify' (pipes/redirects: exec bash -lc '…')"
+  # Resolve the command *before* booting: a typo would otherwise cost the full stack
+  # boot (minutes) only to come back as a 127 from a command that was never going to run.
+  command -v "$1" >/dev/null 2>&1 \
+    || die "not an executable: '$1' (exec runs argv directly; for shell syntax use exec bash -lc '…')"
+  # Setup writes to stdout (`neo4j-admin database load`), which would corrupt a piped
+  # command's output — the point of exec is that `docker run … exec bamboo … > file` works.
+  # A redirect on a function call is not a subshell, so WORK/PIDS still propagate.
+  do_setup >&2
+  trap 'teardown' EXIT INT TERM
+  log "stack is up — running: $*"
+  local rc=0
+  "$@" || rc=$?                 # argv verbatim: quoting preserved, no shell re-parse
+  log "command exited rc=${rc}"
+  exit "${rc}"                  # teardown fires via the EXIT trap
+}
+
+cmd_batch_analyze() {           # the batch job: `bamboo batch-analyze` wired to the /in → /out mounts
+  # Answer --help without booting anything (click never invokes the callback for it).
+  local a
+  for a in "$@"; do
+    [[ "${a}" == "-h" || "${a}" == "--help" ]] && { bamboo batch-analyze --help; exit 0; }
+  done
+  # `batch-analyze` *is* an exec of one specific command, so delegate rather than
+  # duplicate: rc propagation, teardown and stdout separation then hold by construction.
+  cmd_exec bamboo batch-analyze --input-dir "${IN_DIR}" --output-dir "${OUT_DIR}" "$@"
+}
+
 # --------------------------------------------------------------------------- #
-# Dispatch. Only the literal tokens below are subcommands; anything else (e.g.
-# `--task-id 123`) falls through to the default full run with all args forwarded
-# to `bamboo batch-analyze` — preserving the pre-subcommand invocation contract.
+# Dispatch. Every subcommand names the workload it runs, and nothing is implied:
+# no argument, an unknown token and --help all print usage instead of booting the
+# stack and guessing a job. `bamboo batch-analyze` is only *one* of bamboo's batch
+# commands (batch-populate is another), so it gets no privileged position here —
+# the others are reached with `exec bamboo <cmd> …`.
 #
 # Consume the subcommand into $sub, then shift it off *only if* one was given
 # (a bare `shift` with no positional params fails and would trip `set -e`, which
-# is the common CMD [] / no-args case).
+# is the CMD [] / no-args case).
 # --------------------------------------------------------------------------- #
-sub="${1:-run}"
+sub="${1:-}"
 if [[ $# -gt 0 ]]; then shift; fi
 case "${sub}" in
-  run)      cmd_run "$@" ;;
-  setup)    cmd_setup "$@" ;;
-  batch)    cmd_batch "$@" ;;
-  teardown) cmd_teardown "$@" ;;
-  shell)    cmd_shell "$@" ;;
-  *)        cmd_run "${sub}" "$@" ;;   # not a subcommand → forward all args to batch-analyze
+  batch-analyze)  cmd_batch_analyze "$@" ;;
+  setup)          cmd_setup "$@" ;;
+  teardown)       cmd_teardown "$@" ;;
+  shell)          cmd_shell "$@" ;;
+  exec)           cmd_exec "$@" ;;
+  help|-h|--help) usage ;;
+  run|batch)      usage >&2       # migration aid: both used to mean batch-analyze
+                  die "'${sub}' no longer exists — use 'batch-analyze' (boots the stack, runs the /in → /out job, tears down)" ;;
+  "")             usage >&2
+                  die "no subcommand given — 'batch-analyze' for the batch job, 'exec <cmd…>' for anything else" ;;
+  -*)             usage >&2       # options used to be forwarded to batch-analyze implicitly
+                  die "unknown option '${sub}' — options belong to a subcommand, e.g. 'batch-analyze ${sub} …'" ;;
+  *)              usage >&2
+                  die "unknown subcommand '${sub}' — to run it as a command use 'exec ${sub} …'" ;;
 esac
