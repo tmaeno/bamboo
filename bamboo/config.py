@@ -143,8 +143,10 @@ class Settings(BaseSettings):
     # Ollama-specific: set to False to disable chain-of-thought reasoning mode
     # (strongly recommended for Qwen3+ models — reasoning adds 1-2 min per call)
     ollama_reasoning: bool = True
-    # Ollama server base URL — used to auto-detect the served context window via
-    # /api/ps (see llm_context_window) and by ``bamboo verify``.
+    # Ollama server base URL — authoritative for *all* Ollama traffic: inference
+    # (passed as ChatOllama.base_url, so it wins over a bare OLLAMA_HOST env var),
+    # the served-context-window probe via /api/ps (see llm_context_window), and
+    # ``bamboo verify``.
     ollama_base_url: str = "http://localhost:11434"
     # The model's usable context window, in tokens. ``0`` = auto-detect: for Ollama
     # the *served* window is read from ``/api/ps``; for OpenAI/Anthropic a built-in

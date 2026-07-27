@@ -4,7 +4,8 @@ Three public async functions:
 
 ``prefetch_panda_docs(task_data, email_text)``
     BM25 ReadTheDocs search, splitRule param lookup, gdpconfig param lookup.
-    Returns a ``dict[str, str]`` of hint entries keyed by query string.
+    Returns ``(doc_hints, meta)``: a ``dict[str, str]`` of hint entries keyed by
+    query string, plus a dict of retrieval metadata (queries, result count).
 
 ``prefetch_panda_source(task_data)``
     Runs PandaSourceNavigator on the task errorDialog to produce a code-level
@@ -24,6 +25,7 @@ import logging
 import re
 from typing import Any
 
+from bamboo.utils.errors import format_diagnostic, log_diagnostic
 from bamboo.utils.narrator import say, show_block, thinking
 
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 async def prefetch_panda_docs(
     task_data: dict[str, Any], email_text: str = ""
-) -> dict[str, str]:
+) -> tuple[dict[str, str], dict[str, Any]]:
     """Fetch PanDA documentation hints before the first extraction pass.
 
     Derives search queries from key ``task_data`` fields (status,
@@ -42,9 +44,10 @@ async def prefetch_panda_docs(
     search terms.  Falls back to the raw 120-char errorDialog string if the
     LLM call fails.
 
-    Returns a ``doc_hints`` dict: keys are query strings, values are plain
-    rendered text (``"[Title] snippet\\n\\n[Title2] snippet2"``).
-    Returns an empty dict on any error so the caller is unaffected.
+    Returns ``(doc_hints, meta)``.  ``doc_hints`` keys are query strings, values
+    are plain rendered text (``"[Title] snippet\\n\\n[Title2] snippet2"``);
+    ``meta`` carries the queries actually issued and the result count.
+    ``doc_hints`` is empty on any error so the caller is unaffected.
     """
     error_dialog = task_data.get("errorDialog", "") or ""
     status = task_data.get("status", "")
@@ -93,9 +96,13 @@ async def prefetch_panda_docs(
                 say(f"Doc NL query: {nl_query_from_llm!r}", level=logging.DEBUG)
                 say(f"Doc keywords: {clean_kw}", level=logging.DEBUG)
         except Exception as exc:
-            logger.warning(
-                "prefetch_panda_docs: query extraction failed (%s) — falling back to raw errorDialog",
+            from bamboo.llm.errors import log_llm_failure  # noqa: PLC0415
+
+            log_llm_failure(
+                logger,
+                "prefetch_panda_docs: query extraction failed",
                 exc,
+                fallback="falling back to raw errorDialog",
             )
 
         if not nl_query_from_llm and not keyword_query_str and plain_error:
@@ -123,7 +130,18 @@ async def prefetch_panda_docs(
             "search_panda_docs", query=nl_query, keyword_query=keyword_query
         )
     except Exception as exc:
-        logger.warning("prefetch_panda_docs: search failed for query=%r: %s", nl_query, exc)
+        # search_panda_docs fans out over Qdrant/embeddings/GitHub, so the failing
+        # leg names its own endpoint; this only sets the severity and the context.
+        log_diagnostic(
+            logger,
+            format_diagnostic(
+                "prefetch_panda_docs: search failed",
+                exc,
+                target=f"query={nl_query!r}",
+                fallback="no documentation hints",
+            ),
+            exc,
+        )
         results = []
 
     source_dist: dict[str, int] = {}
@@ -209,7 +227,14 @@ async def prefetch_panda_source(task_data: dict[str, Any]) -> dict[str, str]:
     try:
         result = await PandaSourceNavigator().navigate(error_dialog)
     except Exception as exc:
-        logger.warning("prefetch_panda_source: navigator failed (%s)", exc)
+        from bamboo.llm.errors import log_llm_failure  # noqa: PLC0415
+
+        log_llm_failure(
+            logger,
+            "prefetch_panda_source: navigator failed",
+            exc,
+            fallback="no source-code analysis in this run",
+        )
         return {}
     if not result or result.startswith("No methods found") or result.startswith("Neither"):
         return {}

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
+from bamboo.utils.errors import format_diagnostic, log_diagnostic, log_endpoint_failure
 from bamboo.utils.log_filters import parse_brokerage_summary
 from bamboo.utils.narrator import say
 from bamboo.utils.panda_client import (
@@ -1173,9 +1174,19 @@ class PandaMcpClient(McpClient):
                 query, top_k=max_results, keyword_query=keyword_query
             )
         except Exception as exc:
-            logger.warning(
-                "PandaMcpClient.search_panda_docs: navigator failed for query=%r: %s",
-                query, exc,
+            # The navigator fans out to Qdrant, the embeddings model and (when the
+            # index is stale) GitHub, so there is no single endpoint to name here —
+            # whichever leg failed logged its own URL just above. Route through
+            # log_diagnostic anyway so a transport failure is ERROR, not WARNING.
+            log_diagnostic(
+                logger,
+                format_diagnostic(
+                    "PandaMcpClient.search_panda_docs: navigator failed",
+                    exc,
+                    target=f"query={query!r}",
+                    fallback="no documentation results",
+                ),
+                exc,
             )
             return []
 
@@ -1289,6 +1300,13 @@ class PandaMcpClient(McpClient):
                     )
                 return content, _BROKERAGE_RST_PATH
         except Exception as exc:
-            logger.warning("PandaMcpClient: failed to fetch brokerage doc: %s", exc)
+            log_endpoint_failure(
+                logger,
+                "PandaMcpClient: failed to fetch brokerage doc",
+                exc,
+                service="github",
+                endpoint=url,
+                fallback="no brokerage documentation in this run",
+            )
             return "", _BROKERAGE_RST_PATH
 

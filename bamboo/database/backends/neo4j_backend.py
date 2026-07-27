@@ -25,6 +25,7 @@ except ImportError as e:
 from bamboo.config import get_settings
 from bamboo.database.base import GraphDatabaseBackend
 from bamboo.models.graph_element import BaseNode, GraphRelationship, NodeType
+from bamboo.utils.errors import describe_endpoint_failure, log_endpoint_failure
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,14 @@ class Neo4jBackend(GraphDatabaseBackend):
             try:
                 await self._create_indexes()
             except Exception as exc:  # noqa: BLE001 — indexes are best-effort
-                logger.warning("Neo4j index creation failed: %s", exc)
+                log_endpoint_failure(
+                    logger,
+                    "Neo4j index creation failed",
+                    exc,
+                    service="neo4j",
+                    endpoint=self.settings.neo4j_uri,
+                    fallback="queries will run without indexes",
+                )
 
     @contextlib.asynccontextmanager
     async def _session(self, **kwargs):
@@ -138,7 +146,15 @@ class Neo4jBackend(GraphDatabaseBackend):
         try:
             await self._ensure_connected()
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to connect to Neo4j: %s", exc)
+            logger.error(
+                "%s",
+                describe_endpoint_failure(
+                    "Failed to connect to Neo4j",
+                    exc,
+                    service="neo4j",
+                    endpoint=self.settings.neo4j_uri,
+                ),
+            )
             raise
 
     async def close(self):

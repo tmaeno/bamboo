@@ -30,6 +30,7 @@ from bamboo.llm import (
     KNOWLEDGE_REVIEW_USER,
     get_extraction_llm,
 )
+from bamboo.llm.errors import log_llm_failure
 from bamboo.models.knowledge_entity import KnowledgeGraph
 from bamboo.utils.narrator import say, show_block, thinking
 
@@ -172,8 +173,14 @@ class KnowledgeReviewer:
             if result.failure_dimension:
                 say(f"Failure dimension(s): {', '.join(result.failure_dimension)}")
             return result
-        except Exception:
-            logger.exception("KnowledgeReviewer: LLM call failed — failing open (approved=True)")
+        except Exception as exc:
+            log_llm_failure(
+                logger,
+                "KnowledgeReviewer: LLM call failed",
+                exc,
+                fallback="failing open (approved=True) — the graph is NOT reviewed",
+                exc_info=True,
+            )
             return ReviewResult(approved=True, confidence=0.0)
 
 
@@ -274,10 +281,12 @@ async def summarise_email_investigations(email_text: str) -> str:
             ]
         )
         return response.content.strip()
-    except Exception:
-        logger.warning(
-            "summarise_email_investigations: LLM call failed — "
-            "falling back to raw truncated email for reviewer context",
+    except Exception as exc:
+        log_llm_failure(
+            logger,
+            "summarise_email_investigations: LLM call failed",
+            exc,
+            fallback="falling back to raw truncated email for reviewer context",
             exc_info=True,
         )
         return ""

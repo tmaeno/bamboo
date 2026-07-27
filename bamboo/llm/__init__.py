@@ -8,10 +8,15 @@ Public API
 ``get_embeddings()``
     Return the cached :class:`~langchain_core.embeddings.Embeddings`.
 
+``log_llm_failure()`` / ``describe_llm_failure()``
+    Report a failed LLM call with the provider, model and endpoint it was dialled
+    at — see :mod:`bamboo.llm.errors`.
+
 All prompt template constants are also re-exported here for convenient
 single-import access across the rest of the package.
 """
 
+from .errors import describe_llm_failure, is_llm_connection_error, llm_endpoint, log_llm_failure
 from .llm_client import get_embeddings, get_extraction_llm, get_llm, get_summary_llm, get_reranker
 from .prompts import (
     BROKERAGE_LOG_EXTRACTION_SYSTEM,
@@ -74,6 +79,10 @@ __all__ = [
     "get_summary_llm",
     "get_embeddings",
     "get_reranker",
+    "describe_llm_failure",
+    "is_llm_connection_error",
+    "llm_endpoint",
+    "log_llm_failure",
     "BROKERAGE_LOG_EXTRACTION_SYSTEM",
     "BROKERAGE_LOG_EXTRACTION_USER",
     "PROCEDURE_DESC_MERGE_SYSTEM",

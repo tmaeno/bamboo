@@ -105,9 +105,11 @@ def _detect_ollama_context_window(settings: Any) -> int:
             model, _OLLAMA_FALLBACK_CONTEXT,
         )
     except Exception as exc:  # noqa: BLE001 — degrade to fallback, never break a turn
+        # Name the URL: a bare transport error ("All connection attempts failed")
+        # gives no clue which endpoint was probed.
         logger.debug(
-            "resolve_context_window: /api/ps probe failed (%s); fallback %d",
-            exc, _OLLAMA_FALLBACK_CONTEXT,
+            "resolve_context_window: %s/api/ps probe failed (%s: %s); fallback %d",
+            base_url, type(exc).__name__, exc, _OLLAMA_FALLBACK_CONTEXT,
         )
     return _OLLAMA_FALLBACK_CONTEXT
 
@@ -161,8 +163,13 @@ def _build_llm(temperature: float) -> BaseChatModel:
                 "Install it with:  pip install langchain-ollama\n"
                 "Also make sure Ollama is installed and running: https://ollama.com"
             ) from exc
+        # base_url must be passed explicitly: with base_url=None langchain-ollama
+        # builds ollama.Client(host=None), which silently falls back to
+        # OLLAMA_HOST or http://127.0.0.1:11434 — so OLLAMA_BASE_URL would apply
+        # to the /api/ps probe and `bamboo verify` but not to inference itself.
         return ChatOllama(
             model=settings.llm_model,
+            base_url=settings.ollama_base_url or None,
             temperature=temperature,
             reasoning=settings.ollama_reasoning,
         )

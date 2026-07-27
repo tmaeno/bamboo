@@ -19,6 +19,7 @@ except ImportError as e:
 
 from bamboo.config import get_settings
 from bamboo.database.base import VectorDatabaseBackend
+from bamboo.utils.errors import describe_endpoint_failure, log_endpoint_failure
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,15 @@ class QdrantBackend(VectorDatabaseBackend):
         try:
             await self._ensure_connected()
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Failed to connect to Qdrant: {e}")
+            logger.error(
+                "%s",
+                describe_endpoint_failure(
+                    "Failed to connect to Qdrant",
+                    e,
+                    service="qdrant",
+                    endpoint=self.settings.qdrant_url,
+                ),
+            )
             raise
 
     async def close(self):
@@ -370,5 +379,12 @@ class QdrantBackend(VectorDatabaseBackend):
                 resp.raise_for_status()
                 return str(resp.json().get("version", ""))
         except Exception as exc:  # noqa: BLE001 — version is informational metadata
-            logger.warning("Could not read Qdrant server version: %s", exc)
+            log_endpoint_failure(
+                logger,
+                "Could not read Qdrant server version",
+                exc,
+                service="qdrant",
+                endpoint=base,
+                fallback="version reported as unknown",
+            )
             return ""

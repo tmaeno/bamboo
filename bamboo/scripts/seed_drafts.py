@@ -90,6 +90,7 @@ async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm
+    from bamboo.llm.errors import log_llm_failure
     from bamboo.mcp.panda_mcp_client import PandaMcpClient
 
     error_dialog = task_data.get("errorDialog", "") or ""
@@ -119,7 +120,12 @@ async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
         if parsed and isinstance(parsed, list):
             keywords = [k for k in parsed if isinstance(k, str)][:5]
     except Exception as exc:
-        logger.debug("keyword extraction failed: %s", exc)
+        log_llm_failure(
+            logger,
+            "seed_drafts: keyword extraction failed",
+            exc,
+            fallback="falling back to the raw 120-char errorDialog",
+        )
 
     panda = PandaMcpClient()
     parts: list[str] = []

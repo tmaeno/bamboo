@@ -54,6 +54,7 @@ async def canonicalize_descriptions(
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from bamboo.llm import DESCRIPTION_CANONICALIZE_SYSTEM, DESCRIPTION_CANONICALIZE_USER, get_extraction_llm
+    from bamboo.llm.errors import log_llm_failure
     from bamboo.utils.narrator import say
 
     nodes_with_desc = [n for n in nodes if n.description]
@@ -117,12 +118,14 @@ async def canonicalize_descriptions(
                         node.description = new_desc
                         total_changed += 1
         except Exception as exc:
-            logger.warning(
-                "canonicalize_descriptions: batch %d–%d failed (%s) — keeping original descriptions\nRaw response: %r",
-                batch_start,
-                batch_start + len(batch) - 1,
+            log_llm_failure(
+                logger,
+                f"canonicalize_descriptions: batch {batch_start}–{batch_start + len(batch) - 1} failed",
                 exc,
-                locals().get("raw", "<no response>"),
+                fallback=(
+                    "keeping original descriptions; "
+                    f"raw response={locals().get('raw', '<no response>')!r}"
+                ),
             )
 
     logger.debug(

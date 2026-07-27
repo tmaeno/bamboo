@@ -37,6 +37,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.config import get_settings
 from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm
+from bamboo.llm.errors import log_llm_failure
+from bamboo.utils.errors import log_endpoint_failure
 from bamboo.llm.prompts import (
     PANDA_DOC_SUMMARIZE_SYSTEM as _SUMMARIZE_SYSTEM,
     PANDA_DOC_SUMMARIZE_USER as _SUMMARIZE_USER,
@@ -122,7 +124,8 @@ async def invalidate_doc_cache() -> bool:
         _NODE_CACHE_FILE.unlink()
         removed = True
 
-    client = _make_qdrant_client_from_settings(get_settings())
+    settings = get_settings()
+    client = _make_qdrant_client_from_settings(settings)
     try:
         existing = {c.name for c in (await client.get_collections()).collections}
         for name in (_COLLECTION, _META_COLLECTION):
@@ -130,7 +133,14 @@ async def invalidate_doc_cache() -> bool:
                 await client.delete_collection(collection_name=name)
                 removed = True
     except Exception as exc:  # noqa: BLE001 — best-effort cache invalidation
-        logger.warning("invalidate_doc_cache: failed to drop doc collections: %s", exc)
+        log_endpoint_failure(
+            logger,
+            "invalidate_doc_cache: failed to drop doc collections",
+            exc,
+            service="qdrant",
+            endpoint=settings.qdrant_url,
+            fallback="doc cache left in place",
+        )
     finally:
         await client.close()
     return removed
@@ -356,7 +366,14 @@ class PandaDocNavigator:
                 resp.raise_for_status()
                 return resp.json().get("sha")
         except Exception as exc:
-            logger.warning("PandaDocNavigator: failed to fetch tree SHA: %s", exc)
+            log_endpoint_failure(
+                logger,
+                "PandaDocNavigator: failed to fetch tree SHA",
+                exc,
+                service="github",
+                endpoint=_PANDA_DOCS_TREE_URL,
+                fallback="cannot tell whether the doc index is stale",
+            )
             return None
 
     async def _read_meta(self) -> dict | None:
@@ -378,7 +395,14 @@ class PandaDocNavigator:
             )
             return dict(points[0].payload) if points and points[0].payload else None
         except Exception as exc:  # noqa: BLE001 — absent/unreachable → treat as no meta
-            logger.warning("PandaDocNavigator: failed to read index meta: %s", exc)
+            log_endpoint_failure(
+                logger,
+                "PandaDocNavigator: failed to read index meta",
+                exc,
+                service="qdrant",
+                endpoint=self._settings.qdrant_url,
+                fallback="treating the doc index as absent",
+            )
             return None
         finally:
             await client.close()
@@ -475,7 +499,12 @@ class PandaDocNavigator:
                 say(f"System knowledge summary generated ({len(summary)} chars).")
             return summary
         except Exception as exc:
-            logger.warning("PandaDocNavigator: system summary generation failed (%s)", exc)
+            log_llm_failure(
+                logger,
+                "PandaDocNavigator: system summary generation failed",
+                exc,
+                fallback="no system-knowledge summary",
+            )
             return ""
 
     # ------------------------------------------------------------------
@@ -670,7 +699,14 @@ class PandaDocNavigator:
             say(f"discovered {len(rst_paths)} doc page path(s)")
             return rst_paths, sha, file_shas
         except Exception as exc:
-            logger.warning("PandaDocNavigator: failed to fetch RST paths: %s", exc)
+            log_endpoint_failure(
+                logger,
+                "PandaDocNavigator: failed to fetch RST paths",
+                exc,
+                service="github",
+                endpoint=_PANDA_DOCS_TREE_URL,
+                fallback="no doc pages discovered",
+            )
             return [], None, {}
 
     async def _fetch_html_pages(self, rst_paths: list[str]) -> dict[str, str]:
@@ -682,7 +718,12 @@ class PandaDocNavigator:
                 r.raise_for_status()
                 return path, r.text
             except Exception as exc:
-                logger.debug("PandaDocNavigator: skipped %s: %s", path, exc)
+                # One line per page, so keep it terse — but still name the URL, since
+                # a whole-site outage and a single missing page look identical here.
+                logger.debug(
+                    "PandaDocNavigator: skipped %s (%s: %s)",
+                    _rst_path_to_html_url(path), type(exc).__name__, exc,
+                )
                 return path, ""
 
         async with httpx.AsyncClient(timeout=20) as client:
@@ -860,8 +901,11 @@ class PandaDocNavigator:
                     except (json.JSONDecodeError, AttributeError):
                         raise
                     except Exception as exc:
-                        logger.warning(
-                            "PandaDocNavigator: summarize failed for %r: %s", node.title, exc
+                        log_llm_failure(
+                            logger,
+                            f"PandaDocNavigator: summarize failed for {node.title!r}",
+                            exc,
+                            fallback="using truncated raw content as the summary",
                         )
                         node.summary = node.content[:300]
                         node.doc_type = "other"
@@ -1118,7 +1162,12 @@ class PandaDocNavigator:
             candidate_set = set(candidates)
             return [s for s in selected if s in candidate_set]
         except Exception as exc:
-            logger.warning("PandaDocNavigator: LLM select failed: %s", exc)
+            log_llm_failure(
+                logger,
+                "PandaDocNavigator: LLM select failed",
+                exc,
+                fallback="selecting no sections",
+            )
             return []
 
     # ------------------------------------------------------------------

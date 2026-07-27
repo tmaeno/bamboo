@@ -43,6 +43,7 @@ from typing import Any, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 from rich.console import Console
+from rich.markup import escape as _rich_escape
 
 from bamboo.agents.helpers.orchestration import (
     analyze_code_side_effects,
@@ -73,7 +74,9 @@ from bamboo.llm import (
     INVESTIGATE_NARRATION_USER,
     INVESTIGATE_ORCHESTRATION_SYSTEM,
     INVESTIGATE_ORCHESTRATION_USER,
+    describe_llm_failure,
     get_extraction_llm,
+    log_llm_failure,
 )
 from bamboo.models.graph_element import (
     CauseNode,
@@ -465,7 +468,9 @@ class InvestigationOrchestrator:
                     task_data or {}, email_text=error_dialog
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("prefetch_hints failed: %s", exc)
+                log_llm_failure(
+                    logger, "prefetch_hints failed", exc, fallback="no domain hints this session"
+                )
                 self.session.doc_hints = {}
 
         # 3) Build initial graph skeleton.
@@ -479,8 +484,12 @@ class InvestigationOrchestrator:
                 )
                 self._merge_into_partial_graph(nodes, rels)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("bootstrap_initial_graph failed: %s", exc)
-                self.io.notice(f"[yellow]bootstrap failed: {exc}[/yellow]")
+                log_llm_failure(logger, "bootstrap_initial_graph failed", exc)
+                # escape(): exception text carries brackets ("[Errno 61]") that Rich
+                # would eat as markup — and "[/tmp/x]" raises MarkupError outright.
+                self.io.notice(
+                    f"[yellow]{_rich_escape(describe_llm_failure('bootstrap_initial_graph failed', exc))}[/yellow]"
+                )
 
         # 4) Display signals.
         self._display_kickoff_panel(task_data, symptom)
@@ -683,7 +692,9 @@ class InvestigationOrchestrator:
         try:
             response = await self._invoke_llm(INVESTIGATE_INTENT_SYSTEM, prompt_user)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("intent classifier failed: %s", exc)
+            log_llm_failure(
+                logger, "intent classifier failed", exc, fallback="defaulting to 'narration'"
+            )
             return "narration"  # safe default — won't trigger external tools
         parsed = _parse_json_response(response)
         intent = str(parsed.get("intent", "narration")).strip().lower()
@@ -930,7 +941,12 @@ class InvestigationOrchestrator:
                         INVESTIGATE_ORCHESTRATION_SYSTEM, make_user(tools_text), stream_sink=sink
                     )
                 except Exception as exc:  # noqa: BLE001
-                    self.io.notice(f"[red]Orchestration LLM call failed: {exc}[/red]")
+                    # Both channels on purpose: the operator sees why their turn was
+                    # dropped, and the log keeps it for a post-mortem.
+                    log_llm_failure(logger, "Orchestration LLM call failed", exc)
+                    self.io.notice(
+                        f"[red]{_rich_escape(describe_llm_failure('Orchestration LLM call failed', exc))}[/red]"
+                    )
                     return
                 plan = _parse_json_response(response)
                 code = plan.get("code")
@@ -1115,7 +1131,10 @@ class InvestigationOrchestrator:
         try:
             response = await self._invoke_llm(EMAIL_EXTRACTION_SYSTEM, user_msg)
         except Exception as exc:  # noqa: BLE001
-            self.io.notice(f"[red]Narration extraction failed: {exc}[/red]")
+            log_llm_failure(logger, "Narration extraction failed", exc)
+            self.io.notice(
+                f"[red]{_rich_escape(describe_llm_failure('Narration extraction failed', exc))}[/red]"
+            )
             return
         parsed = _parse_json_response(response)
         added = self._merge_narration_extraction(parsed)
@@ -1297,7 +1316,12 @@ class InvestigationOrchestrator:
                 task_data, doc_hints=self.session.doc_hints or None
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("analyze_task in session-start failed: %s", exc)
+            log_llm_failure(
+                logger,
+                "analyze_task in session-start failed",
+                exc,
+                fallback="no proactive hypothesis",
+            )
             return
         if result is None:
             return

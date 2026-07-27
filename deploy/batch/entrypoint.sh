@@ -153,7 +153,7 @@ persist_env() {
     local k
     for k in NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE \
              QDRANT_URL QDRANT_COLLECTION_NAME \
-             OLLAMA_BASE_URL OLLAMA_MODELS \
+             OLLAMA_BASE_URL OLLAMA_HOST OLLAMA_MODELS \
              LLM_PROVIDER LLM_MODEL \
              EMBEDDINGS_PROVIDER EMBEDDING_MODEL EMBEDDING_DIMENSION RERANKER_MODEL \
              HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE; do
@@ -201,6 +201,10 @@ do_setup() {
   export NEO4J_URI="bolt://127.0.0.1:${BOLT_PORT}"
   export QDRANT_URL="http://127.0.0.1:${QDRANT_PORT}"
   export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
+  # bamboo itself reads OLLAMA_BASE_URL; OLLAMA_HOST is exported so the `ollama`
+  # CLI in an interactive `shell` (ollama ps/list) reaches the bundled server
+  # instead of the default 11434, where nothing is listening.
+  export OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}"
   log "ports: bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT}"
 
   # LLM_MODEL: an explicit env wins; otherwise derive it from the staged /models manifest

@@ -69,6 +69,7 @@ from bamboo.llm import (
     get_embeddings,
     get_extraction_llm,
 )
+from bamboo.llm.errors import log_llm_failure
 from bamboo.llm.prompts import (
     CAUSE_RESOLUTION_CANONICALIZE_SYSTEM,
     CAUSE_RESOLUTION_CANONICALIZE_USER,
@@ -832,8 +833,11 @@ async def _validate_error_category_match(error_message: str, category: str) -> b
             say(f'Category "{category}" rejected for this error — creating new category')
         return match
     except Exception as exc:
-        logger.warning(
-            "_validate_error_category_match: LLM check failed (%s) — accepting match", exc
+        log_llm_failure(
+            logger,
+            "_validate_error_category_match: LLM check failed",
+            exc,
+            fallback="accepting the match unvalidated",
         )
         return True
 

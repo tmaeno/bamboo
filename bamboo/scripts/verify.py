@@ -160,6 +160,85 @@ def _check_duplicate_env_keys(env_path: str) -> list[str]:
     return [key for key, n in counts.items() if n > 1]
 
 
+def _check_ollama_model(s) -> bool:
+    """Probe ``{ollama_base_url}/api/tags`` and confirm ``llm_model`` is pulled.
+
+    Deliberately not a ``GET /`` liveness ping: that only proves *something* answers,
+    and the second-most-common Ollama failure is a running server that was never told
+    to pull the configured model — which then fails at the first real ``ainvoke``,
+    long after ``bamboo verify`` said everything was fine.
+    """
+    import json as _json
+    import urllib.request
+
+    from bamboo.llm.llm_client import _ollama_model_matches
+
+    base = (getattr(s, "ollama_base_url", "") or "http://localhost:11434").rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=5) as resp:
+            payload = _json.loads(resp.read().decode())
+    except Exception as exc:
+        return _fail(
+            f"Ollama server not reachable at {base}  ({type(exc).__name__}: {exc})",
+            "Run:  ollama serve\n"
+            f"    then pull the model:  ollama pull {s.llm_model}\n"
+            "    If the server runs elsewhere, set OLLAMA_BASE_URL in your .env",
+        )
+
+    names = [m.get("model") or m.get("name") or "" for m in (payload.get("models") or [])]
+    _ok(f"Ollama server is reachable at {base}  ({len(names)} model(s) available)")
+    # Tag-tolerant match (``qwen3.6`` vs ``qwen3.6:latest``) — reuse the matcher the
+    # context-window probe already uses so the two can't disagree.
+    if any(_ollama_model_matches(n, s.llm_model) for n in names):
+        return _ok(f"LLM_MODEL {s.llm_model!r} is pulled")
+    return _fail(
+        f"LLM_MODEL {s.llm_model!r} is not pulled on {base}",
+        f"Run:  ollama pull {s.llm_model}\n"
+        f"    Available: {', '.join(names) if names else '(none)'}",
+    )
+
+
+def check_llm_roundtrip() -> bool:
+    """Generate one token through the real client — the only end-to-end LLM proof.
+
+    Every other LLM assertion in this file is reachability or key *presence*, so an
+    invalid API key, an unloadable model, or a client misconfigured to dial a
+    different endpoint than the one probed all pass silently. This runs the exact
+    path production uses (``get_extraction_llm``).
+
+    Behind ``bamboo verify --llm`` because a cold local model can take minutes to
+    load into VRAM, and the default ``bamboo verify`` must stay fast.
+    """
+    print("Real LLM round-trip (--llm)")
+
+    try:
+        from langchain_core.messages import HumanMessage
+
+        from bamboo.config import get_settings
+        from bamboo.llm import describe_llm_failure, get_extraction_llm, llm_endpoint
+
+        s = get_settings()
+    except Exception as exc:
+        return _fail(f"could not load the LLM client: {type(exc).__name__}: {exc}")
+
+    print(f"  … calling {s.llm_provider}/{s.llm_model} at {llm_endpoint(s)} (may be slow on a cold model)")
+    try:
+        response = get_extraction_llm().invoke([HumanMessage(content="Reply with the word: ok")])
+    except Exception as exc:
+        return _fail(
+            describe_llm_failure("LLM round-trip failed", exc),
+            "Fix the endpoint/credentials above, then re-run: bamboo verify --llm",
+        )
+
+    text = (getattr(response, "content", "") or "").strip()
+    if not text:
+        return _fail(
+            f"LLM returned an empty response  (provider={s.llm_provider} model={s.llm_model})",
+            "The endpoint is reachable but produced nothing — check the model is healthy.",
+        )
+    return _ok(f"LLM round-trip OK  ({s.llm_provider}/{s.llm_model} → {text[:60]!r})")
+
+
 def check_api_keys() -> bool:
     print("API keys / settings")
 
@@ -216,18 +295,7 @@ def check_api_keys() -> bool:
     # LLM key — not required for ollama (runs locally)
     if s.llm_provider == "ollama":
         _ok(f"LLM provider: ollama / {s.llm_model}  (no API key required)")
-        import urllib.request
-
-        ollama_base = getattr(s, "ollama_base_url", "http://localhost:11434")
-        try:
-            urllib.request.urlopen(ollama_base, timeout=2)
-            _ok(f"Ollama server is reachable at {ollama_base}")
-        except Exception:
-            _fail(
-                f"Ollama server not reachable at {ollama_base}",
-                "Run:  ollama serve\n"
-                f"    then pull the model:  ollama pull {s.llm_model}",
-            )
+        if not _check_ollama_model(s):
             ok = False
     else:
         if s.llm_api_key:
@@ -493,7 +561,7 @@ def check_completion_scripts() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def main() -> int:
+def main(check_llm: bool = False) -> int:
     print("=" * 70)
     print("Bamboo Installation Verification")
     print("=" * 70)
@@ -509,6 +577,8 @@ def main() -> int:
         check_api_keys,
         check_database_connections,
     ]
+    if check_llm:
+        sections.append(check_llm_roundtrip)
 
     results = []
     for fn in sections:
@@ -539,10 +609,17 @@ import click
 
 
 @click.command("verify")
-def cmd() -> None:
+@click.option(
+    "--llm",
+    "check_llm",
+    is_flag=True,
+    help="Also generate one token through the real LLM client. Proves credentials and "
+    "the endpoint end-to-end, but can take minutes on a cold local model.",
+)
+def cmd(check_llm: bool) -> None:
     """Verify that the Bamboo package is correctly installed."""
-    sys.exit(main())
+    sys.exit(main(check_llm=check_llm))
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main("--llm" in sys.argv))
