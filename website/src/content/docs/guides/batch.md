@@ -143,21 +143,8 @@ cp -a /tmp/kb           sandbox/kb        # the dir built in "Build the KB snaps
 tar czf sandbox.tgz -C sandbox .
 ```
 
-Run it — no `/models`, `/embeddings` or `/kb` mount, and `/out` is the only writable one:
-
-```bash
-docker run --rm \
-  -v $PWD/sandbox.tgz:/sandbox.tgz:ro -e BAMBOO_SANDBOX=/sandbox.tgz \
-  -v $PWD/work:/work -e BAMBOO_WORK=/work \
-  -v $PWD/out:/out \
-  bamboo-batch exec bamboo analyze -v --task-id 51721011
-```
-
-On a cluster, `deploy/batch/submit.sh` takes `SANDBOX=` and does the binding for you:
-
-```bash
-SANDBOX=$PWD/sandbox.tgz OUT_DIR=$PWD/out deploy/batch/submit.sh
-```
+Running it is the same workload either way, so the commands live with the rest: locally under
+"Testing locally" below, on a cluster under "Submitting a job".
 
 What to know about it:
 
@@ -205,6 +192,23 @@ The `batch-analyze` subcommand runs the full sequence — the KB metadata guard,
 over `/in` — and tears the stack down on exit. Success is one result JSON per task in `./out`; a
 `*.error.json` sidecar plus a non-zero exit flags a failing task. This is the same round-trip
 `submit.sh` performs, minus the Apptainer launcher.
+
+Rehearsing a **sandbox** job (see "Single-tarball sandbox" above) is the same command with the
+mounts collapsed into the archive — no `/models`, `/embeddings`, `/kb` or `/in`, `/out` the only
+writable mount, and `/work` the scratch the archive is expanded into:
+
+```bash
+docker run --rm \
+  -v $PWD/sandbox.tgz:/sandbox.tgz:ro -e BAMBOO_SANDBOX=/sandbox.tgz \
+  -v $PWD/work:/work -e BAMBOO_WORK=/work \
+  -v $PWD/out:/out \
+  bamboo-batch batch-analyze
+```
+
+The task data comes from the archive's `in/` here, and the `sandbox: in -> …` line in the log is
+what confirms it: `batch-analyze` builds its argv *after* the boot that expands the sandbox, so
+`--input-dir` follows the archive. Let it — passing `--input-dir /in` yourself pins the literal
+mount and quietly ignores the sandbox's `in/`.
 
 Name the workload: **with no subcommand the container prints usage and exits non-zero** rather than
 guessing one. `bamboo batch-analyze` is not the only batch command bamboo has — `batch-populate` is
@@ -328,7 +332,7 @@ So `.env` is for **keys / tokens / settings**, not for provider or model/DB sele
 This is deliberate: it keeps the bundled stack and KB integrity intact even if you mount a `.env`
 copied straight from `.env.example` (whose `LLM_PROVIDER=openai`, `EMBEDDING_MODEL=…`, `LLM_MODEL=…`
 lines are simply ignored here). To point the batch image at a cloud LLM or external databases
-instead of the bundled stack, use the standalone `bamboo` image (Image 1) with `--env-file .env`,
+instead of the bundled stack, use the standalone `bamboo` image with `--env-file .env`,
 which is configured entirely by env — not this batch image.
 
 ## Submitting a job
@@ -339,7 +343,14 @@ Stage task-data `*.json` files into an input dir, then:
 SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out \
   deploy/batch/submit.sh          # CPU queue (models derived from staged artifacts; export LLM_MODEL to override)
 # GPU queue: also export USE_GPU=1   (adds --nv; Ollama auto-detects the GPU)
-# single-tarball inputs: export SANDBOX=$PWD/sandbox.tgz instead of SHARED (see above)
+```
+
+For a **sandbox** job (see "Single-tarball sandbox" above), `SANDBOX=` replaces `SHARED=` and
+`IN_DIR=` — the archive carries the models, embeddings, KB and task data, and `submit.sh` does
+the binding for you:
+
+```bash
+SANDBOX=$PWD/sandbox.tgz OUT_DIR=$PWD/out deploy/batch/submit.sh
 ```
 
 One result JSON is written per task to `OUT_DIR`; a failing task gets a
