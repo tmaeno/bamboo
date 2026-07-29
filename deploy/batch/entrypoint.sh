@@ -57,6 +57,18 @@
 #   /embeddings (ro)  local HF cache (HF_HOME): embedding model + optional reranker + manifest
 #   /work       (rw)  node-local scratch (optional; falls back to $TMPDIR)
 #
+# Sandbox — the staged inputs handed over as ONE archive instead of separate mounts.
+# Point BAMBOO_SANDBOX at a tarball (or an already-extracted directory) whose top level
+# holds any of  models/  kb/  embeddings/  in/ :
+#   docker run … -v $PWD/sandbox.tgz:/sandbox.tgz:ro -e BAMBOO_SANDBOX=/sandbox.tgz \
+#                -v $PWD/work:/work -e BAMBOO_WORK=/work  bamboo-batch exec bamboo …
+# Each component present in the sandbox re-points its path; components absent from it keep
+# their mount default, so a kb/-only tarball composes with mounted /models + /embeddings.
+# A tarball is expanded into the job's scratch dir alongside the restored Neo4j/Qdrant
+# data, so mount node-local scratch at /work (BAMBOO_WORK) to keep that off the container
+# writable layer. Nothing is auto-detected: with BAMBOO_SANDBOX unset the mounts stand
+# exactly as before.
+#
 # ⚠ SCAFFOLD — UNVERIFIED. Grep "VERIFY:" for spots the Phase 0 spike must confirm
 #   (rootless Neo4j wiring, admin subcommand syntax, readiness probes).
 set -euo pipefail
@@ -138,6 +150,9 @@ Usage:  <image> <subcommand> [args…]
 
 Mounts:  /in (ro) task-data *.json   /out (rw) results   /kb (ro) KB snapshot
          /models (ro) Ollama models  /embeddings (ro) HF cache   /work (rw, optional)
+Sandbox: BAMBOO_SANDBOX=<tarball|dir> supplies those inputs as one archive whose top
+         level holds any of models/ kb/ embeddings/ in/ — each component present wins
+         over its mount, each absent one keeps the mount. Opt-in; nothing is guessed.
 Portable mode: mount your own .env at /app/.env to inject keys/settings (not the
          provider/model/service vars — those stay derived from the staged KB/model).
 USAGE
@@ -188,6 +203,11 @@ teardown() {
 # Persist the derived env + service PIDs so a later `teardown`, or a shell in the
 # same session, can source the live stack. `printf %q` escaping keeps values
 # re-sourceable. Only emit the optional model vars when they were actually set.
+#
+# BAMBOO_SANDBOX/BAMBOO_IN/BAMBOO_KB are in the list for the `setup` → source → run
+# bamboo by hand flow (see the header): with a sandbox the inputs live in scratch, so
+# `--input-dir /in` would be wrong. They are unset without a sandbox, and the loop skips
+# unset vars, so a non-sandbox state file is unchanged.
 # --------------------------------------------------------------------------- #
 persist_env() {
   {
@@ -198,7 +218,8 @@ persist_env() {
              OLLAMA_BASE_URL OLLAMA_HOST OLLAMA_MODELS \
              LLM_PROVIDER LLM_MODEL \
              EMBEDDINGS_PROVIDER EMBEDDING_MODEL EMBEDDING_DIMENSION RERANKER_MODEL \
-             HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE; do
+             HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE \
+             BAMBOO_SANDBOX BAMBOO_IN BAMBOO_KB; do
       [[ -n "${!k:-}" ]] && printf 'export %s=%q\n' "$k" "${!k}"
     done
     # Internal bookkeeping for teardown (not exported into bamboo's env).
@@ -206,6 +227,105 @@ persist_env() {
     printf 'BAMBOO_SERVICE_PIDS=%q\n' "${PIDS[*]:-}"
   } >"${BAMBOO_STATE_FILE}"
   log "wrote stack state to ${BAMBOO_STATE_FILE}"
+}
+
+# --------------------------------------------------------------------------- #
+# resolve_sandbox — accept the staged inputs as ONE archive instead of four mounts.
+#
+# BAMBOO_SANDBOX names a tarball, or a directory that is already the extracted form of
+# one (used in place, no copy). Its top level holds any of models/ kb/ embeddings/ in/;
+# each component present re-points the corresponding path and each absent one keeps the
+# value it already had, so a partial sandbox composes with the /models /kb /embeddings
+# /in mounts. Strictly opt-in: with BAMBOO_SANDBOX unset this is a no-op, which is how a
+# stray tarball beside the job is kept from ever changing what a run reads.
+#
+# Must run after WORK exists and before anything reads OLLAMA_MODELS / HF_HOME / KB_DIR /
+# IN_DIR — hence the call site at the top of do_setup. Extracting into WORK means
+# teardown's `rm -rf "${WORK}"` removes it for free (walltime kills included), and what
+# the services see is writable, unlike the :ro mounts.
+# --------------------------------------------------------------------------- #
+SANDBOX_COMPONENTS=(models kb embeddings in)
+
+resolve_sandbox() {
+  local src="${BAMBOO_SANDBOX:-}"
+  [[ -n "${src}" ]] || return 0
+
+  local root
+  if [[ -d "${src}" ]]; then
+    root="${src%/}"
+    log "sandbox: using already-extracted directory ${root}"
+  elif [[ -f "${src}" ]]; then
+    command -v tar >/dev/null 2>&1 || die "sandbox: no tar in this image, cannot expand ${src}"
+    root="${WORK}/sandbox"
+    mkdir -p "${root}"
+    # Size + headroom before the fact: a multi-GB archive filling scratch is the likeliest
+    # failure here, and tar's "No space left on device" says nothing about how close it was.
+    if command -v du >/dev/null 2>&1 && command -v df >/dev/null 2>&1; then
+      log "sandbox: $(du -m "${src}" | awk '{print $1}') MB archive," \
+          "$(( $(df -Pk "${root}" | awk 'NR==2{print $4}') / 1024 )) MB free at ${root}"
+    fi
+    log "sandbox: extracting ${src} -> ${root}"
+    # No suffix logic: tar detects the compression from the archive itself. gzip/bzip2/xz
+    # are all present in the image; .tar.zst is NOT — the Dockerfile purges zstd after
+    # installing Ollama, so that purge is the line to change if zstd sandboxes ever appear.
+    # --no-same-owner: the archive carries the staging host's uid/gid, while under rootless
+    # Apptainer we are an arbitrary uid that must own what it extracts. (Already the
+    # non-root default; explicit so the Docker-as-root path behaves identically.)
+    tar -xf "${src}" -C "${root}" --no-same-owner
+  else
+    die "BAMBOO_SANDBOX=${src} is neither a file nor a directory"
+  fi
+
+  # True when $1 directly holds at least one component directory.
+  _sandbox_has_component() {
+    local c
+    for c in "${SANDBOX_COMPONENTS[@]}"; do [[ -d "$1/${c}" ]] && return 0; done
+    return 1
+  }
+  # Tolerate one wrapper level (`tar czf sandbox.tgz sandbox/` rather than `… -C sandbox .`),
+  # but only when the top level names no component at all AND the single directory below it
+  # does — so this can never shadow a real component, and a wrong archive is reported
+  # against its own top level rather than against whatever we happened to descend into.
+  # Settling this before the mapping keeps a bad archive from printing four "keeping …"
+  # lines that read as if the sandbox had been accepted.
+  if ! _sandbox_has_component "${root}"; then
+    local subs=("${root}"/*/)
+    if [[ ${#subs[@]} -eq 1 ]] && _sandbox_has_component "${subs[0]%/}"; then
+      root="${subs[0]%/}"
+      log "sandbox: no component at the top level — descending into ${root}"
+    else
+      die "sandbox ${src} holds none of ${SANDBOX_COMPONENTS[*]} at its top level (found: $(ls -A "${root}" 2>/dev/null | tr '\n' ' '))"
+    fi
+  fi
+
+  # Map each component independently. Both directions are logged: a quietly kept /models
+  # is exactly what you need to see when a partial sandbox didn't cover what you meant.
+  if [[ -d "${root}/models" ]]; then
+    export OLLAMA_MODELS="${root}/models"
+    log "sandbox: models     -> ${OLLAMA_MODELS}"
+  else
+    log "sandbox: no models/ — keeping OLLAMA_MODELS=${OLLAMA_MODELS}"
+  fi
+  if [[ -d "${root}/embeddings" ]]; then
+    export HF_HOME="${root}/embeddings"
+    log "sandbox: embeddings -> ${HF_HOME}"
+  else
+    log "sandbox: no embeddings/ — keeping HF_HOME=${HF_HOME}"
+  fi
+  # KB_DIR/IN_DIR are script-local; BAMBOO_KB/BAMBOO_IN are exported alongside so
+  # persist_env carries the sandbox paths into a `setup`-then-source session.
+  if [[ -d "${root}/kb" ]]; then
+    KB_DIR="${root}/kb"; export BAMBOO_KB="${KB_DIR}"
+    log "sandbox: kb         -> ${KB_DIR}"
+  else
+    log "sandbox: no kb/ — keeping KB_DIR=${KB_DIR}"
+  fi
+  if [[ -d "${root}/in" ]]; then
+    IN_DIR="${root}/in"; export BAMBOO_IN="${IN_DIR}"
+    log "sandbox: in         -> ${IN_DIR}"
+  else
+    log "sandbox: no in/ — keeping IN_DIR=${IN_DIR}"
+  fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -219,8 +339,16 @@ do_setup() {
   trap 'teardown' EXIT INT TERM
 
   WORK="$(mktemp -d "${WORK_ROOT%/}/bamboo.XXXXXX")"
+  # OUT_DIR is deliberately NOT created here: `bamboo batch-analyze` creates its own
+  # --output-dir, it is the only thing that writes there, and most subcommands never touch
+  # it — an unbound /out would otherwise abort the whole boot on the read-only rootfs of a
+  # rootless Apptainer run, over a directory the workload doesn't use.
   mkdir -p "${WORK}/neo4j/data" "${WORK}/neo4j/logs" "${WORK}/neo4j/run" \
-           "${WORK}/neo4j/conf" "${WORK}/qdrant/storage" "${WORK}/ollama" "${OUT_DIR}"
+           "${WORK}/neo4j/conf" "${WORK}/qdrant/storage" "${WORK}/ollama"
+
+  # A sandbox may supply models/ kb/ embeddings/ in/ as one archive; resolve it before
+  # anything below reads OLLAMA_MODELS / HF_HOME / KB_DIR / IN_DIR.
+  resolve_sandbox
 
   # ------------------------------------------------------------------------- #
   # Free-port allocation — Apptainer shares the host netns, so co-scheduled jobs
@@ -436,7 +564,32 @@ PY
 
 # --------------------------------------------------------------------------- #
 # Subcommands
+#
+# `exec` and `batch-analyze` share the two halves below rather than one calling the
+# other, so rc propagation, teardown and stdout separation still hold by construction
+# for both — while each keeps control of *when* its argv is built. That matters for
+# batch-analyze: a sandbox re-points IN_DIR inside do_setup, so expanding it before the
+# boot would silently pin the job to the /in mount.
 # --------------------------------------------------------------------------- #
+
+# Boot the stack and hand teardown to the EXIT trap.
+# Setup writes to stdout (`neo4j-admin database load`), which would corrupt a piped
+# command's output — the point of exec is that `docker run … exec bamboo … > file` works.
+# A redirect on a function call is not a subshell, so WORK/PIDS still propagate.
+_boot() {
+  do_setup >&2
+  trap 'teardown' EXIT INT TERM
+}
+
+# Run argv verbatim against the booted stack and exit with its status.
+_run_and_exit() {
+  log "stack is up — running: $*"
+  local rc=0
+  "$@" || rc=$?                 # argv verbatim: quoting preserved, no shell re-parse
+  log "command exited rc=${rc}"
+  exit "${rc}"                  # teardown fires via the EXIT trap
+}
+
 cmd_setup() {                   # boot the stack and leave it running
   do_setup
   log "stack is up. To use it:"
@@ -466,27 +619,22 @@ cmd_exec() {                    # boot the stack, run one command against it, te
   # boot (minutes) only to come back as a 127 from a command that was never going to run.
   command -v "$1" >/dev/null 2>&1 \
     || die "not an executable: '$1' (exec runs argv directly; for shell syntax use exec bash -lc '…')"
-  # Setup writes to stdout (`neo4j-admin database load`), which would corrupt a piped
-  # command's output — the point of exec is that `docker run … exec bamboo … > file` works.
-  # A redirect on a function call is not a subshell, so WORK/PIDS still propagate.
-  do_setup >&2
-  trap 'teardown' EXIT INT TERM
-  log "stack is up — running: $*"
-  local rc=0
-  "$@" || rc=$?                 # argv verbatim: quoting preserved, no shell re-parse
-  log "command exited rc=${rc}"
-  exit "${rc}"                  # teardown fires via the EXIT trap
+  _boot
+  _run_and_exit "$@"
 }
 
-cmd_batch_analyze() {           # the batch job: `bamboo batch-analyze` wired to the /in → /out mounts
+cmd_batch_analyze() {           # the batch job: `bamboo batch-analyze` wired to the /in → /out paths
   # Answer --help without booting anything (click never invokes the callback for it).
   local a
   for a in "$@"; do
     [[ "${a}" == "-h" || "${a}" == "--help" ]] && { bamboo batch-analyze --help; exit 0; }
   done
-  # `batch-analyze` *is* an exec of one specific command, so delegate rather than
-  # duplicate: rc propagation, teardown and stdout separation then hold by construction.
-  cmd_exec bamboo batch-analyze --input-dir "${IN_DIR}" --output-dir "${OUT_DIR}" "$@"
+  # Boot first, THEN build the argv: a sandbox (BAMBOO_SANDBOX) can re-point IN_DIR inside
+  # do_setup, so expanding it here would pin the job to the /in mount and ignore the
+  # sandbox's in/. `bamboo` needs no `command -v` pre-flight the way exec's argv does —
+  # it is this image's own entry point, not something a user typed.
+  _boot
+  _run_and_exit bamboo batch-analyze --input-dir "${IN_DIR}" --output-dir "${OUT_DIR}" "$@"
 }
 
 # --------------------------------------------------------------------------- #

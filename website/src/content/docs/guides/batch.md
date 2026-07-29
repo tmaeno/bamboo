@@ -19,6 +19,8 @@ you can't precompute it. The design:
 - **Large, changing artifacts stay out of the image**, staged on the shared filesystem
   and mounted read-only: the **Ollama model** (`/models`), the **local embedding model**
   (`/embeddings`), and the **KB snapshot** (`/kb`). Update them without rebuilding the image.
+  Where a job is handed one archive instead of a shared filesystem, the same three arrive
+  as a **sandbox tarball** (`BAMBOO_SANDBOX`) — see "Single-tarball sandbox" below.
 - **`bamboo batch-analyze`** processes many tasks per container invocation so the
   costly service + model startup is paid **once**, not per task.
 
@@ -116,6 +118,67 @@ name is set at submit time (export one to override for a run). Still *compared* 
 the Neo4j version must match `NEO4J_VERSION` (dump/load is version-strict → hard fail), and the
 Qdrant major version is checked best-effort against `QDRANT_VERSION` (a mismatch only warns, since
 the boot-time snapshot recover is the real gate). `bamboo dump-kb` stamps all these values for you.
+
+## Single-tarball sandbox (alternative to the three mounts)
+
+Some deployments hand a job **one archive** rather than three shared-filesystem
+directories. Set **`BAMBOO_SANDBOX`** to a tarball whose top level holds the same
+component directories and the container reads them from there instead:
+
+```bash
+$ tar tzf sandbox.tgz
+models/…            # what `bamboo stage-model` produces      → OLLAMA_MODELS
+kb/…                # what `bamboo dump-kb` produces (+ the .dump) → the KB snapshot
+embeddings/…        # what `bamboo stage-embeddings` produces  → HF_HOME
+in/…                # optional: the task-data *.json           → --input-dir
+```
+
+Build one by pointing the same staging commands at a common directory, then tarring its
+*contents* (`-C sandbox .`) — nothing new to learn, only different `--out` paths:
+
+```bash
+bamboo stage-model      --out sandbox/models
+bamboo stage-embeddings --out sandbox/embeddings
+cp -a /tmp/kb           sandbox/kb        # the dir built in "Build the KB snapshot" above
+tar czf sandbox.tgz -C sandbox .
+```
+
+Run it — no `/models`, `/embeddings` or `/kb` mount, and `/out` is the only writable one:
+
+```bash
+docker run --rm \
+  -v $PWD/sandbox.tgz:/sandbox.tgz:ro -e BAMBOO_SANDBOX=/sandbox.tgz \
+  -v $PWD/work:/work -e BAMBOO_WORK=/work \
+  -v $PWD/out:/out \
+  bamboo-batch exec bamboo analyze -v --task-id 51721011
+```
+
+On a cluster, `deploy/batch/submit.sh` takes `SANDBOX=` and does the binding for you:
+
+```bash
+SANDBOX=$PWD/sandbox.tgz OUT_DIR=$PWD/out deploy/batch/submit.sh
+```
+
+What to know about it:
+
+- **Opt-in.** With `BAMBOO_SANDBOX` unset nothing changes; a tarball that happens to sit
+  next to the job is never picked up.
+- **Per-component.** Only the components actually in the archive are redirected — a `kb/`-only
+  tarball composes with `/models` + `/embeddings` still mounted. Every component is logged
+  either way (`sandbox: kb -> …` / `sandbox: no models/ — keeping OLLAMA_MODELS=/models`), so a
+  partial sandbox that didn't cover what you meant is visible in the job log. An archive with
+  none of the four names is rejected before anything boots.
+- **It costs scratch space.** The archive is expanded under `BAMBOO_WORK` next to the restored
+  Neo4j/Qdrant data, so mount node-local scratch at `/work` — otherwise it lands in the
+  container's writable layer. Teardown removes it with the rest of the scratch dir. Pass an
+  **already-extracted directory** instead of a tarball and it is read in place, with no copy.
+- **Model derivation is unchanged**, just relative to the sandbox: `LLM_MODEL` from
+  `models/bamboo-model.json`, `EMBEDDING_MODEL`/`EMBEDDING_DIMENSION` from `kb/metadata.json`,
+  `RERANKER_MODEL` from `embeddings/bamboo-embeddings.json`. The metadata guard above applies
+  as-is.
+- **Formats:** `.tgz`/`.tar.gz`, `.tar.bz2`, `.tar.xz`, plain `.tar` — detected from the archive,
+  not its name. **Not `.tar.zst`**: the `Dockerfile` purges `zstd` after installing Ollama.
+  A single wrapper directory (`tar czf sandbox.tgz sandbox/`) is tolerated.
 
 ## Testing locally
 
@@ -276,6 +339,7 @@ Stage task-data `*.json` files into an input dir, then:
 SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out \
   deploy/batch/submit.sh          # CPU queue (models derived from staged artifacts; export LLM_MODEL to override)
 # GPU queue: also export USE_GPU=1   (adds --nv; Ollama auto-detects the GPU)
+# single-tarball inputs: export SANDBOX=$PWD/sandbox.tgz instead of SHARED (see above)
 ```
 
 One result JSON is written per task to `OUT_DIR`; a failing task gets a
@@ -302,5 +366,5 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 | `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch`) |
 | `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run the workload, tear down (subcommands: `batch-analyze`/`exec`/`shell`/`setup`/`teardown`/`help`) |
 | `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
-| `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU) |
+| `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU; `SANDBOX=` for a single-tarball job) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |
