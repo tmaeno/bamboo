@@ -30,6 +30,10 @@
 #   entrypoint.sh setup           boot the stack + restore the KB, then LEAVE IT
 #                                 RUNNING. Persists a state env-file (see below).
 #   entrypoint.sh teardown        kill the services and remove the scratch dir.
+#   entrypoint.sh gpu-check       boot ONLY Ollama (needs /models; seconds, not the minutes
+#                                 a KB restore costs) and report whether generation runs on
+#                                 the GPU, plus the CUDA library resolution it got. For
+#                                 diagnosing a silent CPU fallback on a --nv node.
 #   entrypoint.sh help            print usage (booting nothing).
 #
 # Interactive debugging (ONE container session — services live in that session's
@@ -56,6 +60,11 @@
 #   /models     (ro)  Ollama models dir (OLLAMA_MODELS) + bamboo-model.json manifest
 #   /embeddings (ro)  local HF cache (HF_HOME): embedding model + optional reranker + manifest
 #   /work       (rw)  node-local scratch (optional; falls back to $TMPDIR)
+#
+# Exported for debugging (also written to the state env-file): BAMBOO_RUN_DIR is the job's
+# scratch dir — mktemp-suffixed, so nothing outside can guess it — and BAMBOO_NEO4J_LOG /
+# BAMBOO_QDRANT_LOG / BAMBOO_OLLAMA_LOG are the service logs under it. teardown removes the
+# whole dir on every exit path including a walltime kill; BAMBOO_KEEP_WORK=1 keeps it.
 #
 # Sandbox — the staged inputs handed over as ONE archive instead of separate mounts.
 # Point BAMBOO_SANDBOX at a tarball (or an already-extracted directory) whose top level
@@ -146,6 +155,9 @@ Usage:  <image> <subcommand> [args…]
   setup                  boot the stack and LEAVE IT RUNNING; writes a state env-file.
                          Then: source it and run bamboo directly in the same session.
   teardown               kill the services and remove the scratch dir.
+  gpu-check              boot ONLY Ollama (needs /models, seconds not minutes) and report
+                         whether generation runs on the GPU, with the CUDA library
+                         resolution it used. For diagnosing a silent CPU fallback.
   help                   this message.
 
 Mounts:  /in (ro) task-data *.json   /out (rw) results   /kb (ro) KB snapshot
@@ -155,6 +167,12 @@ Sandbox: BAMBOO_SANDBOX=<tarball|dir> supplies those inputs as one archive whose
          over its mount, each absent one keeps the mount. Opt-in; nothing is guessed.
 Portable mode: mount your own .env at /app/.env to inject keys/settings (not the
          provider/model/service vars — those stay derived from the staged KB/model).
+GPU:     nothing to configure (Ollama auto-detects), but every boot logs an
+         `accelerator: gpu|cpu` line derived from /api/ps. BAMBOO_REQUIRE_GPU=1 makes a CPU
+         fallback a hard failure — deploy/batch/submit.sh sets it whenever it passes --nv.
+Logs:    BAMBOO_RUN_DIR is the job's scratch dir; BAMBOO_NEO4J_LOG / BAMBOO_QDRANT_LOG /
+         BAMBOO_OLLAMA_LOG are the service logs under it. All are exported and written to
+         the state env-file. BAMBOO_KEEP_WORK=1 keeps them past teardown.
 USAGE
 }
 
@@ -177,7 +195,14 @@ fi
 # outlive do_setup returning; teardown kills those groups.
 #
 # In-process (batch-analyze / exec / shell) WORK and PIDS are already set.
-# Standalone `teardown` loads them from the state env-file first.
+# Standalone `teardown` loads them from the state env-file first (via the exported
+# BAMBOO_RUN_DIR, which is the job's scratch dir — see do_setup).
+#
+# BAMBOO_KEEP_WORK=1 keeps the scratch dir, i.e. the three service logs. Debugging a
+# service (why did Ollama pick the CPU? why did the Neo4j load fail?) means reading
+# ${BAMBOO_OLLAMA_LOG} / ${BAMBOO_NEO4J_LOG} / ${BAMBOO_QDRANT_LOG} *after* the run, and
+# `rm -rf` fires on every exit path including a walltime kill — so without this the only
+# window on them is dump_tail's 60 lines. The services are still killed either way.
 # --------------------------------------------------------------------------- #
 WORK=""
 PIDS=()
@@ -186,7 +211,7 @@ teardown() {
   if [[ -z "${WORK}" && -f "${BAMBOO_STATE_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${BAMBOO_STATE_FILE}" || true
-    WORK="${BAMBOO_WORK_ACTIVE:-}"
+    WORK="${BAMBOO_RUN_DIR:-}"
     read -ra PIDS <<<"${BAMBOO_SERVICE_PIDS:-}"
   fi
   log "tearing down (rc=$rc)…"
@@ -194,7 +219,13 @@ teardown() {
     [[ -n "${pid}" ]] && { kill -- "-${pid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true; }
   done
   wait 2>/dev/null || true
-  [[ -n "${WORK}" ]] && rm -rf "${WORK}" 2>/dev/null || true
+  if [[ -n "${WORK}" ]]; then
+    if [[ "${BAMBOO_KEEP_WORK:-}" == "1" ]]; then
+      log "BAMBOO_KEEP_WORK=1 — keeping scratch dir ${WORK} (service logs are under it)"
+    else
+      rm -rf "${WORK}" 2>/dev/null || true
+    fi
+  fi
   rm -f "${BAMBOO_STATE_FILE}" 2>/dev/null || true
   log "done."
 }
@@ -215,15 +246,18 @@ persist_env() {
     local k
     for k in NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE \
              QDRANT_URL QDRANT_COLLECTION_NAME \
-             OLLAMA_BASE_URL OLLAMA_HOST OLLAMA_MODELS \
+             OLLAMA_BASE_URL OLLAMA_HOST OLLAMA_MODELS OLLAMA_KEEP_ALIVE \
              LLM_PROVIDER LLM_MODEL \
              EMBEDDINGS_PROVIDER EMBEDDING_MODEL EMBEDDING_DIMENSION RERANKER_MODEL \
              HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE \
-             BAMBOO_SANDBOX BAMBOO_IN BAMBOO_KB; do
+             BAMBOO_SANDBOX BAMBOO_IN BAMBOO_KB \
+             BAMBOO_RUN_DIR BAMBOO_OLLAMA_LOG BAMBOO_NEO4J_LOG BAMBOO_QDRANT_LOG \
+             BAMBOO_REQUIRE_GPU BAMBOO_KEEP_WORK; do
       [[ -n "${!k:-}" ]] && printf 'export %s=%q\n' "$k" "${!k}"
     done
-    # Internal bookkeeping for teardown (not exported into bamboo's env).
-    printf 'BAMBOO_WORK_ACTIVE=%q\n' "${WORK}"
+    # Internal bookkeeping for teardown (not exported into bamboo's env). The scratch
+    # dir itself is BAMBOO_RUN_DIR above — exported, because reading a service log needs
+    # the path and the mktemp suffix makes it unguessable.
     printf 'BAMBOO_SERVICE_PIDS=%q\n' "${PIDS[*]:-}"
   } >"${BAMBOO_STATE_FILE}"
   log "wrote stack state to ${BAMBOO_STATE_FILE}"
@@ -329,6 +363,193 @@ resolve_sandbox() {
 }
 
 # --------------------------------------------------------------------------- #
+# Shared service helpers.
+#
+# Free-port allocation — Apptainer shares the host netns, so co-scheduled jobs would
+# otherwise collide on 7687/6333/11434. Readiness waits fail by returning non-zero so the
+# caller can dump the right log before dying.
+# --------------------------------------------------------------------------- #
+free_port() { python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
+wait_tcp()  { for _ in $(seq "${2:-120}"); do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 1; done; return 1; }
+wait_http() { for _ in $(seq "${3:-120}"); do curl -fsS "$2" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+
+# --------------------------------------------------------------------------- #
+# Ollama: launch wiring + "is it actually on the GPU?".
+#
+# Kept out of do_setup because `gpu-check` boots Ollama ALONE (no Neo4j, no Qdrant, no KB
+# restore) and has to get byte-identical wiring — the entire point of that subcommand is
+# to answer "what would the real job see?" in seconds instead of a full stack boot.
+# --------------------------------------------------------------------------- #
+
+# Where the release tarball put the runtime (the Dockerfile extracts to /usr/local, so this
+# is the <exedir>/../lib/ollama that Ollama itself searches). Overridable only so the
+# ordering rule below is assertable off-image — the tests cannot create /usr/local/lib.
+OLLAMA_LIB_ROOT="${OLLAMA_LIB_ROOT:-/usr/local/lib/ollama}"
+
+# ollama_ld_library_path — restore the library search precedence Ollama's install assumes.
+#
+# Ollama does not use the host's CUDA runtime: every lib/ollama/cuda_v<N>/ ships its own
+# libcudart/libcublas/libcublasLt, and libggml-cuda.so finds them through RUNPATH $ORIGIN.
+# The dynamic linker searches RUNPATH *after* LD_LIBRARY_PATH, so a site that prepends its
+# own CUDA runtime wins over the one Ollama was built and tested against. Measured on an
+# ALRB GPU node under `apptainer --nv`:
+#
+#   LD_LIBRARY_PATH=/alrb/cuda/lib64:/.singularity.d/libs
+#   cuda_v13/libggml-cuda.so: libcudart.so.13 => /alrb/cuda/lib64/…       (HOST)
+#   cuda_v12/libggml-cuda.so: libcudart.so.12 => …/lib/ollama/cuda_v12/…  (bundled)
+#
+# v12 escaped only because that host dir happens to carry no libcudart.so.12. A
+# version-mismatched runtime makes libggml-cuda.so fail to dlopen, and Ollama then falls
+# back to the CPU silently — /api/tags still answers, so the readiness probe is satisfied
+# and only the wall-clock gives it away. Hence report_accelerator below as well.
+#
+# Fixed by PREPENDING Ollama's own directories, never by deleting the site's:
+#   • additive, so nothing a site put on the path is taken away — which of its entries are
+#     safe to lose is not ours to judge;
+#   • the defect is precedence, not presence, and this restores the intended order exactly;
+#   • it covers everything Ollama vendors (lib/ollama also carries libgomp.so.1), where a
+#     name-based delete rule would be whack-a-mole;
+#   • the --nv driver stays the host's job: /.singularity.d/libs keeps its place further
+#     down the list, which is where libcuda.so.1 must keep coming from — Ollama ships no
+#     driver, and both cuda_v12 and cuda_v13 already resolve it correctly from there.
+#
+# Listing every cuda_v* at once is safe because the runtime SONAMEs are major-version
+# distinct (libcudart.so.12 vs .13): only the directory of the runtime Ollama actually
+# selects gets loaded, so nothing here has to predict that choice.
+#
+# Computed at the launch site rather than baked as a Dockerfile ENV, because the site
+# wrapper injects its directories at container start and may prepend them — which would
+# beat an image-level value. An unset LD_LIBRARY_PATH is left effectively unset (a plain
+# `docker run --gpus all` has the driver in the ldconfig cache instead), so this is a
+# no-op there rather than a regression.
+ollama_ld_library_path() {
+  local out="" d
+  for d in "${OLLAMA_LIB_ROOT}" "${OLLAMA_LIB_ROOT}"/cuda_v*; do
+    [[ -d "${d}" ]] && out="${out:+${out}:}${d}"
+  done
+  # `${out:+${out}:}` on BOTH joins, not a bare "${out}:${LD_LIBRARY_PATH}": an empty
+  # element in LD_LIBRARY_PATH means "the current directory", so a missing lib/ollama
+  # (any non-image run — the test suite, a CPU-only rebuild) must not silently put $PWD
+  # at the front of ollama's library search path.
+  [[ -n "${LD_LIBRARY_PATH:-}" ]] && out="${out:+${out}:}${LD_LIBRARY_PATH}"
+  printf '%s' "${out}"
+}
+
+# Record — never act on — a host CUDA runtime on the path, so the job log shows that the
+# condition existed and which directory it was. A for-glob rather than `compgen -G`: the
+# test suite runs this script under macOS bash 3.2.
+_dir_has_cuda_runtime() {
+  local f
+  for f in "$1"/libcudart.so*; do [[ -e "${f}" ]] && return 0; done
+  return 1
+}
+log_host_cuda_shadowing() {
+  local p parts=()
+  IFS=: read -ra parts <<<"${LD_LIBRARY_PATH:-}" || true
+  for p in "${parts[@]:-}"; do
+    [[ -n "${p}" && "${p}" != "${OLLAMA_LIB_ROOT}"* ]] || continue
+    _dir_has_cuda_runtime "${p}" \
+      && log "note: host CUDA runtime on LD_LIBRARY_PATH (${p}) — overridden by ollama's bundled cuda_v*"
+  done
+  return 0
+}
+
+# Start `ollama serve` in its own process group and register it for teardown. Requires
+# WORK, OLLAMA_PORT and BAMBOO_OLLAMA_LOG. HOME is redirected into scratch because Ollama
+# writes there and the container rootfs is read-only under rootless Apptainer.
+launch_ollama() {
+  OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" HOME="${WORK}/ollama" \
+  LD_LIBRARY_PATH="$(ollama_ld_library_path)" \
+    setsid ollama serve >"${BAMBOO_OLLAMA_LOG}" 2>&1 & PIDS+=($!)
+}
+
+# The runtime/GPU lines of ollama.log, for a failure that the log explains but /api/ps
+# cannot. Printed *before* teardown removes the scratch dir.
+dump_ollama_gpu_lines() {
+  log "---- runtime/GPU lines of ${BAMBOO_OLLAMA_LOG} ----"
+  grep -iE 'gpu|cuda|rocm|vulkan|library|offload|compute|no compatible' "${BAMBOO_OLLAMA_LOG}" 2>/dev/null \
+    | tail -n 40 | sed 's/^/  | /' >&2 || true
+  log "---- end ----"
+}
+
+# report_accelerator — state in the job log whether Ollama generates on the GPU.
+#
+# The readiness probe (GET /api/tags) answers even with no inference runtime loaded at all,
+# so "all services ready" has never implied that generation is possible, let alone
+# accelerated. This closes both gaps with two calls:
+#
+#   1. POST /api/generate with an empty prompt — Ollama's documented load-and-return. It is
+#      the first real proof the model can be loaded, and it leaves the model resident
+#      (keep_alive) so the first task doesn't pay the load.
+#   2. GET /api/ps reports `size` (bytes resident) and `size_vram` (bytes on the GPU) for
+#      that model — the same numbers `ollama ps` renders as its PROCESSOR column. This is
+#      the only non-heuristic answer available: no log scraping, so no dependence on how a
+#      given Ollama release happens to word its startup lines.
+#
+# BAMBOO_REQUIRE_GPU=1 turns a CPU fallback into a failed boot. submit.sh sets it whenever
+# it passes --nv: a GPU queue quietly running an order of magnitude slower on the CPU is
+# never the wanted outcome, and without this the job just finishes late.
+report_accelerator() {
+  local keep="${OLLAMA_KEEP_ALIVE:-30m}" payload stats size vram size_gib vram_gib
+  payload="$(python - "${LLM_MODEL}" "${keep}" <<'PY'
+import json, sys
+print(json.dumps({"model": sys.argv[1], "prompt": "", "keep_alive": sys.argv[2]}))
+PY
+)"
+  log "loading ${LLM_MODEL} into ollama (keep_alive=${keep})…"
+  curl -fsS "${OLLAMA_BASE_URL}/api/generate" -H 'Content-Type: application/json' -d "${payload}" >/dev/null \
+    || { dump_tail "${BAMBOO_OLLAMA_LOG}"; die "ollama could not load ${LLM_MODEL} — generation is impossible on this node"; }
+
+  # The response goes to a file rather than a pipe because `python - <<'PY'` already uses
+  # stdin for the script — piping the JSON in as well silently hands json.load an exhausted
+  # stream, i.e. a permanent "UNKNOWN". Passing a path is also what _json_get does, and it
+  # leaves the raw reply in scratch for BAMBOO_KEEP_WORK to preserve.
+  local ps_json="${WORK}/ollama/api-ps.json"
+  curl -fsS "${OLLAMA_BASE_URL}/api/ps" -o "${ps_json}" || true
+  # `:latest`-tolerant match, the same problem bamboo/llm/llm_client.py::_ollama_model_matches
+  # solves for its own /api/ps probe: /models may hold "qwen3.6" where /api/ps says
+  # "qwen3.6:latest", and an exact compare would report UNKNOWN for a perfectly good GPU run.
+  stats="$(python - "${ps_json}" "${LLM_MODEL}" <<'PY' 2>/dev/null || true
+import json, sys
+want = sys.argv[2]
+try:
+    entries = (json.load(open(sys.argv[1])) or {}).get("models") or []
+except Exception:
+    sys.exit(0)
+for e in entries:
+    name = e.get("model") or e.get("name") or ""
+    if name == want or name.split(":")[0] == want.split(":")[0]:
+        size, vram = int(e.get("size") or 0), int(e.get("size_vram") or 0)
+        print(size, vram, f"{size / 2**30:.1f}", f"{vram / 2**30:.1f}")
+        break
+PY
+)"
+  read -r size vram size_gib vram_gib <<<"${stats:-}" || true
+
+  if [[ -z "${size:-}" || "${size}" == "0" ]]; then
+    # Informational probe, so a missing entry is not fatal by itself — but it leaves
+    # BAMBOO_REQUIRE_GPU nothing to verify, and "unverified" must not pass for "GPU".
+    log "accelerator: UNKNOWN — ${LLM_MODEL} loaded but /api/ps reported no entry for it"
+    if [[ "${BAMBOO_REQUIRE_GPU:-}" == "1" ]]; then
+      dump_ollama_gpu_lines
+      die "BAMBOO_REQUIRE_GPU=1 but the accelerator could not be determined from /api/ps"
+    fi
+  elif [[ "${vram}" == "0" ]]; then
+    log "accelerator: cpu — ${LLM_MODEL} is entirely in host RAM (${size_gib} GiB), nothing offloaded"
+    dump_ollama_gpu_lines
+    if [[ "${BAMBOO_REQUIRE_GPU:-}" == "1" ]]; then
+      die "BAMBOO_REQUIRE_GPU=1 but ollama is running on the CPU (reasons above; full log: ${BAMBOO_OLLAMA_LOG})"
+    fi
+    log "continuing on the CPU — set BAMBOO_REQUIRE_GPU=1 to make this a hard failure"
+  elif [[ "${vram}" == "${size}" ]]; then
+    log "accelerator: gpu — ${LLM_MODEL} fully offloaded (${vram_gib} GiB in VRAM)"
+  else
+    log "accelerator: gpu (PARTIAL) — ${vram_gib} of ${size_gib} GiB in VRAM, the remainder on the CPU"
+  fi
+  return 0
+}
+
+# --------------------------------------------------------------------------- #
 # do_setup — boot the localhost stack and restore the KB into scratch.
 #
 # On entry it guards a partial boot (teardown on EXIT/INT/TERM); on success it
@@ -339,6 +560,15 @@ do_setup() {
   trap 'teardown' EXIT INT TERM
 
   WORK="$(mktemp -d "${WORK_ROOT%/}/bamboo.XXXXXX")"
+  # Export the job's scratch dir and each service's log file. The mktemp suffix makes the
+  # path unguessable from outside, so anything that wants a service log — a debugging
+  # shell, a wrapper script, the job's own stderr — has to be told it. Announce it here,
+  # the moment it exists, so it is in the log even if the boot dies further down.
+  export BAMBOO_RUN_DIR="${WORK}"
+  export BAMBOO_NEO4J_LOG="${WORK}/neo4j/console.log"
+  export BAMBOO_QDRANT_LOG="${WORK}/qdrant/qdrant.log"
+  export BAMBOO_OLLAMA_LOG="${WORK}/ollama/ollama.log"
+  log "scratch: BAMBOO_RUN_DIR=${BAMBOO_RUN_DIR} (removed on teardown unless BAMBOO_KEEP_WORK=1)"
   # OUT_DIR is deliberately NOT created here: `bamboo batch-analyze` creates its own
   # --output-dir, it is the only thing that writes there, and most subcommands never touch
   # it — an unbound /out would otherwise abort the whole boot on the read-only rootfs of a
@@ -350,11 +580,6 @@ do_setup() {
   # anything below reads OLLAMA_MODELS / HF_HOME / KB_DIR / IN_DIR.
   resolve_sandbox
 
-  # ------------------------------------------------------------------------- #
-  # Free-port allocation — Apptainer shares the host netns, so co-scheduled jobs
-  # would otherwise collide on 7687/6333/11434.
-  # ------------------------------------------------------------------------- #
-  free_port() { python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
   BOLT_PORT="$(free_port)"
   QDRANT_PORT="$(free_port)"
   OLLAMA_PORT="$(free_port)"
@@ -531,29 +756,31 @@ PY
   # Launch services (each in its own process group via setsid for clean teardown)
   # ------------------------------------------------------------------------- #
   log "starting neo4j…"
-  setsid neo4j console >"${WORK}/neo4j/console.log" 2>&1 & PIDS+=($!)
+  setsid neo4j console >"${BAMBOO_NEO4J_LOG}" 2>&1 & PIDS+=($!)
 
   log "starting qdrant (recovering ${QDRANT_COLL_COUNT} collection snapshot(s))…"
   QDRANT__SERVICE__HTTP_PORT="${QDRANT_PORT}" \
   QDRANT__STORAGE__STORAGE_PATH="${WORK}/qdrant/storage" \
     setsid qdrant "${QDRANT_SNAPSHOT_ARGS[@]}" \
-    >"${WORK}/qdrant/qdrant.log" 2>&1 & PIDS+=($!)
+    >"${BAMBOO_QDRANT_LOG}" 2>&1 & PIDS+=($!)
 
   log "starting ollama…"
-  OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" HOME="${WORK}/ollama" \
-    setsid ollama serve >"${WORK}/ollama/ollama.log" 2>&1 & PIDS+=($!)
+  log_host_cuda_shadowing
+  launch_ollama
 
   # ------------------------------------------------------------------------- #
   # Readiness (fail fast on timeout)
   # ------------------------------------------------------------------------- #
-  wait_tcp()  { for _ in $(seq "${2:-120}"); do (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && return 0; sleep 1; done; return 1; }
-  wait_http() { for _ in $(seq "${3:-120}"); do curl -fsS "$2" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-
   log "waiting for services (bolt=${BOLT_PORT} qdrant=${QDRANT_PORT} ollama=${OLLAMA_PORT})…"
-  wait_tcp  "${BOLT_PORT}" 180 || { dump_tail "${WORK}/neo4j/console.log"; die "neo4j not ready"; }
-  wait_http "${QDRANT_PORT}" "http://127.0.0.1:${QDRANT_PORT}/readyz" 120 || { dump_tail "${WORK}/qdrant/qdrant.log"; die "qdrant not ready"; }
-  wait_http "${OLLAMA_PORT}" "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 120 || { dump_tail "${WORK}/ollama/ollama.log"; die "ollama not ready"; }
+  wait_tcp  "${BOLT_PORT}" 180 || { dump_tail "${BAMBOO_NEO4J_LOG}"; die "neo4j not ready"; }
+  wait_http "${QDRANT_PORT}" "http://127.0.0.1:${QDRANT_PORT}/readyz" 120 || { dump_tail "${BAMBOO_QDRANT_LOG}"; die "qdrant not ready"; }
+  wait_http "${OLLAMA_PORT}" "http://127.0.0.1:${OLLAMA_PORT}/api/tags" 120 || { dump_tail "${BAMBOO_OLLAMA_LOG}"; die "ollama not ready"; }
   log "all services ready"
+  log "  service logs: ${BAMBOO_NEO4J_LOG} ${BAMBOO_QDRANT_LOG} ${BAMBOO_OLLAMA_LOG}"
+
+  # Only NOW is generation known to work at all: /api/tags above answers without an
+  # inference runtime. This also decides gpu-vs-cpu, which nothing else in the boot reveals.
+  report_accelerator
 
   persist_env
   # Hand teardown control back to the caller: a standalone `setup` leaves the stack
@@ -623,6 +850,58 @@ cmd_exec() {                    # boot the stack, run one command against it, te
   _run_and_exit "$@"
 }
 
+# --------------------------------------------------------------------------- #
+# gpu-check — boot ONLY Ollama and answer "is this node's GPU actually being used?".
+#
+# Worth its own subcommand because the full boot costs minutes (KB load, snapshot recover)
+# and none of it bears on the answer, while the alternative — running ldd/curl by hand from
+# an `apptainer exec` — cannot see what the real job sees: the launch env, the prepended
+# LD_LIBRARY_PATH, the port, the log. This runs the same launch_ollama/report_accelerator
+# the batch job runs, so a green result here means a green result there.
+#
+# Needs /models (OLLAMA_MODELS) only; BAMBOO_SANDBOX works too. Pair with
+# BAMBOO_KEEP_WORK=1 to read the full ollama.log afterwards.
+# --------------------------------------------------------------------------- #
+cmd_gpu_check() {
+  [[ $# -eq 0 ]] || die "'gpu-check' takes no arguments"
+  trap 'teardown' EXIT INT TERM
+
+  WORK="$(mktemp -d "${WORK_ROOT%/}/bamboo.XXXXXX")"
+  export BAMBOO_RUN_DIR="${WORK}"
+  export BAMBOO_OLLAMA_LOG="${WORK}/ollama/ollama.log"
+  mkdir -p "${WORK}/ollama"
+  resolve_sandbox
+
+  log "== container CUDA runtime =="
+  log "LD_LIBRARY_PATH (as given):   ${LD_LIBRARY_PATH:-<unset>}"
+  log "LD_LIBRARY_PATH (for ollama): $(ollama_ld_library_path)"
+  log_host_cuda_shadowing
+  ls -1 "${OLLAMA_LIB_ROOT}" "${OLLAMA_LIB_ROOT}"/cuda_v* 2>&1 | sed 's/^/  | /' >&2 || true
+  # ldd under the SAME path ollama will get — a bare ldd resolves against the caller's
+  # environment and so can report host libraries ollama would never load (or vice versa).
+  local so
+  for so in "${OLLAMA_LIB_ROOT}"/cuda_v*/libggml-cuda.so; do
+    [[ -e "${so}" ]] || continue
+    log "ldd ${so}:"
+    LD_LIBRARY_PATH="$(ollama_ld_library_path)" ldd "${so}" 2>&1 \
+      | grep -E 'cudart|cublas|cuda\.so|not found' | sed 's/^/  | /' >&2 || true
+  done
+
+  log "== ollama =="
+  OLLAMA_PORT="$(free_port)"
+  export OLLAMA_BASE_URL="http://127.0.0.1:${OLLAMA_PORT}"
+  export OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}"
+  : "${LLM_MODEL:=$(_json_get "${OLLAMA_MODELS}/bamboo-model.json" llm_model)}"
+  : "${LLM_MODEL:?no LLM_MODEL and no ${OLLAMA_MODELS}/bamboo-model.json — stage a model with 'bamboo stage-model'}"
+  export LLM_MODEL
+  log "models=${OLLAMA_MODELS} model=${LLM_MODEL} port=${OLLAMA_PORT}"
+  launch_ollama
+  wait_http "${OLLAMA_PORT}" "${OLLAMA_BASE_URL}/api/tags" 120 \
+    || { dump_tail "${BAMBOO_OLLAMA_LOG}"; die "ollama not ready"; }
+  report_accelerator
+  log "full ollama log: ${BAMBOO_OLLAMA_LOG} (add BAMBOO_KEEP_WORK=1 to keep it past teardown)"
+}
+
 cmd_batch_analyze() {           # the batch job: `bamboo batch-analyze` wired to the /in → /out paths
   # Answer --help without booting anything (click never invokes the callback for it).
   local a
@@ -656,6 +935,7 @@ case "${sub}" in
   teardown)       cmd_teardown "$@" ;;
   shell)          cmd_shell "$@" ;;
   exec)           cmd_exec "$@" ;;
+  gpu-check)      cmd_gpu_check "$@" ;;
   help|-h|--help) usage ;;
   run|batch)      usage >&2       # migration aid: both used to mean batch-analyze
                   die "'${sub}' no longer exists — use 'batch-analyze' (boots the stack, runs the /in → /out job, tears down)" ;;

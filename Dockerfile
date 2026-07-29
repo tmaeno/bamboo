@@ -148,20 +148,56 @@ RUN apt-get update \
 # system library, which it names instead of leaving you to guess.
 #
 # The ggml CPU backends (libggml-cpu-*.so) are dlopen'd, not linked, so they are
-# checked individually rather than via llama-server. cuda_v*/ is deliberately NOT
-# checked: those legitimately report libcuda.so.1 "not found" at build time — the
-# NVIDIA driver comes from the host under `apptainer --nv` (submit.sh USE_GPU=1).
+# checked individually rather than via llama-server.
+#
+# cuda_v*/ IS checked, with two names allowed to be unresolved and nothing else:
+#   • libcuda.so.1     — the NVIDIA *driver*. Ollama ships none; it arrives from the host
+#                        under `apptainer --nv` (submit.sh USE_GPU=1) or from the NVIDIA
+#                        container runtime under `docker run --gpus`.
+#   • libggml-base.so.0 — lives one directory up in lib/ollama/ and is already loaded by
+#                        the time ggml dlopen's a backend, so ldd's "not found" here is an
+#                        artifact of inspecting the file in isolation.
+# Everything else unresolved is a genuinely broken CUDA build, and REQUIRE_CUDA additionally
+# demands the runtime be *present and vendored* — one cuda_v<N>/libggml-cuda.so with its own
+# libcudart beside it. That property is load-bearing at runtime: entrypoint.sh prepends
+# lib/ollama/cuda_v* to LD_LIBRARY_PATH precisely so a site's own CUDA runtime cannot shadow
+# Ollama's (see ollama_ld_library_path). The old check globbed only lib/ollama/*.so* —
+# non-recursive — so a release that dropped or moved the CUDA runtime built green and
+# produced a GPU image that silently ran on the CPU.
+ARG REQUIRE_CUDA=1
 RUN set -eu; \
     test -x /usr/local/lib/ollama/llama-server || { \
       echo "FATAL: no llama-server under /usr/local/lib/ollama — Ollama's layout changed" >&2; \
       ls -R /usr/local/lib/ollama >&2 || true; exit 1; }; \
+    if [ "${REQUIRE_CUDA}" = "1" ]; then \
+      cuda_ok=0; \
+      for so in /usr/local/lib/ollama/cuda_v*/libggml-cuda.so; do \
+        if [ -f "$so" ]; then \
+          for rt in "$(dirname "$so")"/libcudart.so.*; do \
+            if [ -e "$rt" ]; then cuda_ok=1; fi; \
+          done; \
+        fi; \
+      done; \
+      if [ "$cuda_ok" != "1" ]; then \
+        echo "FATAL: no cuda_v*/libggml-cuda.so with a vendored libcudart under /usr/local/lib/ollama." >&2; \
+        echo "  ollama ${OLLAMA_VERSION} either ships CUDA separately now or moved it; a GPU job" >&2; \
+        echo "  would fall back to the CPU silently. Fix the install, or build with --build-arg REQUIRE_CUDA=0." >&2; \
+        ls -R /usr/local/lib/ollama >&2 || true; \
+        exit 1; \
+      fi; \
+    fi; \
+    n=0; \
     for b in /usr/local/bin/ollama /usr/local/bin/qdrant \
-             /usr/local/lib/ollama/llama-server /usr/local/lib/ollama/*.so*; do \
-      if ldd "$b" 2>/dev/null | grep "not found"; then \
+             /usr/local/lib/ollama/llama-server /usr/local/lib/ollama/*.so* \
+             /usr/local/lib/ollama/cuda_v*/*.so*; do \
+      [ -e "$b" ] || continue; \
+      n=$((n + 1)); \
+      if ldd "$b" 2>/dev/null | grep "not found" \
+           | grep -v -e 'libcuda\.so\.1' -e 'libggml-base\.so\.0'; then \
         echo "FATAL: $b has unresolved shared libraries (listed above)" >&2; exit 1; \
       fi; \
     done; \
-    echo "ok: ollama + qdrant present and fully linked ($(ls /usr/local/lib/ollama/*.so* | wc -l) shared objects checked)"
+    echo "ok: ollama + qdrant present and fully linked ($n objects checked, REQUIRE_CUDA=${REQUIRE_CUDA})"
 
 # --- Local embeddings resolve from a read-only HF cache mounted at /embeddings ---
 # The embedding model is NOT baked: it is staged onto shared storage with

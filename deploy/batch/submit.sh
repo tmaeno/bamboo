@@ -29,7 +29,9 @@ SHARED="${SHARED:-/shared}"
 SCRATCH="${SCRATCH:-${TMPDIR:-/tmp}/bamboo.$$}"     # node-local scratch
 IN_DIR="${IN_DIR:-$PWD/in}"                          # staged task-data *.json
 OUT_DIR="${OUT_DIR:-$PWD/out}"
-USE_GPU="${USE_GPU:-0}"                              # 1 on a GPU queue
+USE_GPU="${USE_GPU:-0}"                              # 1 on a GPU queue: adds --nv and makes a
+                                                     # CPU fallback fatal (BAMBOO_REQUIRE_GPU;
+                                                     # set it to 0 to warn instead)
 SANDBOX="${SANDBOX:-}"                               # optional: one archive (or an already
                                                      # extracted dir) carrying models/ kb/
                                                      # embeddings/ [in/] instead of the
@@ -66,10 +68,22 @@ apptainer_args=(run --cleanenv
 )
 [[ -n "${SANDBOX_DEST}" ]] && apptainer_args+=(--env "BAMBOO_SANDBOX=${SANDBOX_DEST}")
 # Optional per-run overrides — forwarded only when explicitly set (else derived in-container).
-for _var in LLM_MODEL EMBEDDING_MODEL RERANKER_MODEL; do
+#
+# CUDA_VISIBLE_DEVICES / NVIDIA_VISIBLE_DEVICES are in this list because --cleanenv drops
+# them: a scheduler that allocates a subset of a multi-GPU node communicates that choice
+# through the environment, and without forwarding it the container sees every device on the
+# node unless the site also isolates by cgroup. Forwarded only when set, so nothing is
+# invented on a single-GPU or CPU queue.
+for _var in LLM_MODEL EMBEDDING_MODEL RERANKER_MODEL \
+            CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES; do
   [[ -n "${!_var:-}" ]] && apptainer_args+=(--env "${_var}=${!_var}")
 done
-[[ "${USE_GPU}" == "1" ]] && apptainer_args+=(--nv)
+# --nv wires the host driver in; BAMBOO_REQUIRE_GPU makes the container *verify* it was
+# actually used. Ollama answers /api/tags and generates happily on the CPU when its CUDA
+# runtime fails to load, so a GPU-queue job would otherwise just finish an order of
+# magnitude late with nothing in the log saying why. Asking for a GPU queue and silently
+# getting CPU is never the wanted outcome — so on a GPU queue it is a hard failure.
+[[ "${USE_GPU}" == "1" ]] && apptainer_args+=(--nv --env "BAMBOO_REQUIRE_GPU=${BAMBOO_REQUIRE_GPU:-1}")
 
 # --- Optional: live PanDA fetch (--task-id) needs OIDC creds. Pass the token via
 #     the file: form so it never lands in env/argv (see the Batch guide). ---
@@ -91,7 +105,9 @@ apptainer "${apptainer_args[@]}" "${SIF}" batch-analyze
 #   #SBATCH -p cpu -c 8 --mem=24G -t 02:00:00
 #   export SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out   # models derived from staged artifacts
 #   srun deploy/batch/submit.sh
-# GPU queue: add `#SBATCH -p gpu --gres=gpu:1` and `export USE_GPU=1`.
+# GPU queue: add `#SBATCH -p gpu --gres=gpu:1` and `export USE_GPU=1`. Look for the
+#   `accelerator: gpu …` line in the job log; to diagnose a CPU fallback without paying a
+#   full stack boot, run `apptainer exec --nv … ${SIF} /opt/bamboo/entrypoint.sh gpu-check`.
 # Single-archive inputs: `export SANDBOX=$PWD/sandbox.tgz` instead of SHARED (and give
 # SCRATCH room for the expanded archive on top of the restored KB).
 # ---------------------------------------------------------------------------

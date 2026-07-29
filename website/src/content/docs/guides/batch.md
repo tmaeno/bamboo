@@ -299,6 +299,21 @@ docker run -it --rm … --entrypoint bash bamboo-batch
 what points `bamboo` at the live stack; `teardown` reads it back for the service PIDs, so you never
 re-type the ports or model names.
 
+#### Reading the service logs
+
+Neo4j, Qdrant and Ollama each log into the job's scratch directory, whose name carries a `mktemp`
+suffix — so the paths are exported (and written to the state file) rather than left to be guessed:
+
+| Variable | What |
+| --- | --- |
+| `BAMBOO_RUN_DIR` | the job's scratch dir (`$BAMBOO_WORK/bamboo.XXXXXX`) |
+| `BAMBOO_NEO4J_LOG` / `BAMBOO_QDRANT_LOG` / `BAMBOO_OLLAMA_LOG` | the three service logs under it |
+| `BAMBOO_KEEP_WORK=1` | keep the scratch dir — and therefore the logs — past teardown |
+
+`teardown` removes the scratch dir on **every** exit path, walltime kills included, so without
+`BAMBOO_KEEP_WORK=1` the only window on a service log is the 60-line tail the entrypoint dumps when a
+readiness probe fails. Set it whenever you are diagnosing a service rather than a task.
+
 ### Portable mode: injecting runtime config
 
 The same image doubles as a portable execution environment: mount your own `.env` at `/app/.env`
@@ -342,7 +357,7 @@ Stage task-data `*.json` files into an input dir, then:
 ```bash
 SHARED=/shared IN_DIR=$PWD/in OUT_DIR=$PWD/out \
   deploy/batch/submit.sh          # CPU queue (models derived from staged artifacts; export LLM_MODEL to override)
-# GPU queue: also export USE_GPU=1   (adds --nv; Ollama auto-detects the GPU)
+# GPU queue: also export USE_GPU=1   (adds --nv; see "Running on a GPU queue" below)
 ```
 
 For a **sandbox** job (see "Single-tarball sandbox" above), `SANDBOX=` replaces `SHARED=` and
@@ -356,6 +371,48 @@ SANDBOX=$PWD/sandbox.tgz OUT_DIR=$PWD/out deploy/batch/submit.sh
 One result JSON is written per task to `OUT_DIR`; a failing task gets a
 `*.error.json` sidecar and the job exits non-zero (the batch still completes the
 others). A SLURM wrapper example is in `deploy/batch/submit.sh`.
+
+### Running on a GPU queue
+
+`USE_GPU=1` adds `--nv`, and there is nothing to configure beyond that — Ollama detects the device
+itself. What it does *not* do by itself is tell you whether it succeeded: Ollama answers
+`GET /api/tags` (the readiness probe) and generates perfectly happily on the CPU when its CUDA
+runtime fails to load, so a broken GPU setup shows up only as a job that takes an order of magnitude
+longer. Every boot therefore ends with an explicit verdict, taken from `/api/ps` after loading the
+model:
+
+```
+[entrypoint] accelerator: gpu — qwen3.6:latest fully offloaded (18.4 GiB in VRAM)
+[entrypoint] accelerator: gpu (PARTIAL) — 12.0 of 18.4 GiB in VRAM, the remainder on the CPU
+[entrypoint] accelerator: cpu — qwen3.6:latest is entirely in host RAM (18.4 GiB), nothing offloaded
+```
+
+`submit.sh` sets `BAMBOO_REQUIRE_GPU=1` whenever it passes `--nv`, which turns that last case into a
+failed boot instead of a slow job (`BAMBOO_REQUIRE_GPU=0` to warn and continue instead).
+
+To diagnose a CPU fallback without paying a full stack boot, `gpu-check` starts **only** Ollama —
+it needs `/models` and nothing else — and prints the accelerator verdict together with the CUDA
+library resolution it got:
+
+```bash
+apptainer exec --nv -B ${SHARED:-/shared}/bamboo/ollama:/models:ro \
+  --env BAMBOO_KEEP_WORK=1 bamboo-batch.sif /opt/bamboo/entrypoint.sh gpu-check
+```
+
+:::note[Sites that put their own CUDA runtime on `LD_LIBRARY_PATH`]
+Ollama does not use the host's CUDA runtime: each `lib/ollama/cuda_v<N>/` ships its own
+`libcudart`/`libcublas`, found through RUNPATH `$ORIGIN` — which the dynamic linker searches *after*
+`LD_LIBRARY_PATH`. A site that prepends its own CUDA directory therefore overrides the runtime Ollama
+was built against for whichever major version it happens to ship, and a mismatch makes
+`libggml-cuda.so` fail to load — the silent CPU fallback above. Observed on an ALRB GPU node, where
+`LD_LIBRARY_PATH=/alrb/cuda/lib64:/.singularity.d/libs` captured `cuda_v13`'s `libcudart.so.13`
+while `cuda_v12` resolved correctly only because that directory had no `libcudart.so.12`.
+
+`entrypoint.sh` handles this by **prepending** Ollama's own library directories before launching
+`ollama serve` (`ollama_ld_library_path`) — additive, so nothing the site put on the path is removed,
+and `/.singularity.d/libs` keeps its place, which is where `libcuda.so.1` must keep coming from.
+When the condition is present the boot logs `note: host CUDA runtime on LD_LIBRARY_PATH (…)`.
+:::
 
 ### Live PanDA fetch (optional)
 
@@ -375,7 +432,7 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch`) |
-| `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run the workload, tear down (subcommands: `batch-analyze`/`exec`/`shell`/`setup`/`teardown`/`help`) |
+| `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run the workload, tear down (subcommands: `batch-analyze`/`exec`/`shell`/`setup`/`teardown`/`gpu-check`/`help`) |
 | `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
 | `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU; `SANDBOX=` for a single-tarball job) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |

@@ -342,3 +342,291 @@ def test_do_setup_does_not_create_the_output_dir(tmp_path: Path) -> None:
     )
     assert not out.exists(), "do_setup created OUT_DIR"
     _assert_no_service_started(proc)
+
+
+# --- gpu-check / LD_LIBRARY_PATH -----------------------------------------------------
+#
+# `gpu-check` boots Ollama alone, and its first act is to print the library search path it
+# will hand `ollama serve`. That runs before the `${LLM_MODEL:?…}` guard, so pointing
+# OLLAMA_MODELS at a directory with no manifest reaches the interesting output and then
+# stops — no ollama binary needed, nothing started.
+#
+# What is being pinned down is the ordering rule: Ollama's own lib dirs must come FIRST,
+# because its cuda_v<N>/libcudart is found via RUNPATH $ORIGIN and the linker searches
+# RUNPATH *after* LD_LIBRARY_PATH — so a site CUDA dir on the path silently wins otherwise
+# (ALRB's /alrb/cuda/lib64 did, which is what this whole path exists for), and Ollama then
+# falls back to the CPU without failing anything the readiness probe checks.
+
+
+def _fake_ollama_lib(tmp_path: Path, *cuda_dirs: str) -> Path:
+    """A stand-in for /usr/local/lib/ollama, which tests cannot create."""
+    root = tmp_path / "ollama-lib"
+    root.mkdir(parents=True, exist_ok=True)
+    for name in cuda_dirs:
+        (root / name).mkdir()
+    return root
+
+
+def _run_gpu_check(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [shutil.which("bash") or "bash", str(ENTRYPOINT), "gpu-check"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "BAMBOO_WORK": str(tmp_path),
+            "OLLAMA_MODELS": str(tmp_path / "no-such-models"),
+            **env,
+        },
+    )
+
+
+_LD_MARKER = "LD_LIBRARY_PATH (for ollama):"
+
+
+def _ollama_ld_path(proc: subprocess.CompletedProcess[str]) -> str:
+    for line in proc.stderr.splitlines():
+        if _LD_MARKER in line:
+            return line.partition(_LD_MARKER)[2].strip()
+    raise AssertionError(f"no {_LD_MARKER!r} line in:\n{proc.stderr}")
+
+
+def test_gpu_check_is_offered_and_takes_no_arguments() -> None:
+    assert "gpu-check" in _run("help").stdout
+    proc = _run("gpu-check", "--verbose")
+    assert proc.returncode != 0
+    assert "'gpu-check' takes no arguments" in proc.stderr
+    _assert_nothing_booted(proc)
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="entrypoint.sh needs `python` to get this far"
+)
+def test_ollama_lib_dirs_are_prepended_and_the_caller_path_is_preserved(
+    tmp_path: Path,
+) -> None:
+    """Ollama's dirs first, every caller entry kept, original order intact."""
+    lib = _fake_ollama_lib(tmp_path, "cuda_v12", "cuda_v13")
+    host, driver = tmp_path / "host-cuda", tmp_path / "driver"
+    host.mkdir()
+    driver.mkdir()
+    proc = _run_gpu_check(
+        tmp_path,
+        OLLAMA_LIB_ROOT=str(lib),
+        LD_LIBRARY_PATH=f"{host}:{driver}",
+    )
+    assert _ollama_ld_path(proc).split(":") == [
+        str(lib),
+        str(lib / "cuda_v12"),
+        str(lib / "cuda_v13"),
+        str(host),
+        str(driver),
+    ]
+    _assert_no_service_started(proc)
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="entrypoint.sh needs `python` to get this far"
+)
+def test_a_host_cuda_runtime_on_the_path_is_reported(tmp_path: Path) -> None:
+    """The condition that caused the silent CPU fallback must be named in the log.
+
+    Only reported, never removed: which of a site's LD_LIBRARY_PATH entries are safe to
+    drop is not ours to decide — the prepend above already wins.
+    """
+    lib = _fake_ollama_lib(tmp_path, "cuda_v13")
+    host = tmp_path / "alrb-cuda"
+    host.mkdir()
+    (host / "libcudart.so.13").touch()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    proc = _run_gpu_check(
+        tmp_path, OLLAMA_LIB_ROOT=str(lib), LD_LIBRARY_PATH=f"{host}:{plain}"
+    )
+    assert f"host CUDA runtime on LD_LIBRARY_PATH ({host})" in proc.stderr
+    assert (
+        str(plain)
+        not in proc.stderr.partition("host CUDA runtime")[2].partition("\n")[0]
+    )
+    assert str(host) in _ollama_ld_path(proc), (
+        "a host entry was dropped, not overridden"
+    )
+    _assert_no_service_started(proc)
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="entrypoint.sh needs `python` to get this far"
+)
+def test_an_unset_caller_path_yields_no_empty_element(tmp_path: Path) -> None:
+    """An empty element in LD_LIBRARY_PATH means "the current directory".
+
+    So a missing lib/ollama — any non-image run — must not leave a stray `:` that puts $PWD
+    at the front of Ollama's library search path.
+    """
+    proc = _run_gpu_check(tmp_path, OLLAMA_LIB_ROOT=str(tmp_path / "absent"))
+    assert _ollama_ld_path(proc) == "", "expected an empty path, not a bare separator"
+    proc = _run_gpu_check(tmp_path, OLLAMA_LIB_ROOT=str(_fake_ollama_lib(tmp_path)))
+    assert "" not in _ollama_ld_path(proc).split(":")
+    _assert_no_service_started(proc)
+
+
+# --- BAMBOO_KEEP_WORK ----------------------------------------------------------------
+
+
+def _state_file(work: Path, run_dir: Path) -> Path:
+    """The state env-file `teardown` falls back to when WORK isn't already set."""
+    state = work / "bamboo-batch.env"
+    state.write_text(f"export BAMBOO_RUN_DIR={run_dir}\nBAMBOO_SERVICE_PIDS=\n")
+    return state
+
+
+@pytest.mark.parametrize("keep,survives", [("1", True), ("", False)])
+def test_teardown_honours_keep_work(tmp_path: Path, keep: str, survives: bool) -> None:
+    """The service logs live in the scratch dir teardown deletes on every exit path.
+
+    Also covers the state-file key: teardown reads the scratch dir back as BAMBOO_RUN_DIR
+    (exported, so a debugging shell can find the logs), not the old internal-only name.
+    """
+    run_dir = tmp_path / "bamboo.abc123"
+    (run_dir / "ollama").mkdir(parents=True)
+    (run_dir / "ollama" / "ollama.log").write_text("gpu discovery went here\n")
+    _state_file(tmp_path, run_dir)
+    proc = subprocess.run(
+        [shutil.which("bash") or "bash", str(ENTRYPOINT), "teardown"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "BAMBOO_WORK": str(tmp_path),
+            **({"BAMBOO_KEEP_WORK": keep} if keep else {}),
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert run_dir.exists() is survives, proc.stderr
+    if survives:
+        assert "keeping scratch dir" in proc.stderr
+
+
+# --- report_accelerator: gpu vs cpu, and BAMBOO_REQUIRE_GPU --------------------------
+#
+# This is the verdict a GPU job is judged on, so its four outcomes are pinned here rather
+# than left to a node test. It cannot go through `gpu-check`: launch_ollama uses `setsid`,
+# which macOS does not ship. So the script is *sourced* (`help` prints usage and returns,
+# starting nothing) and report_accelerator called directly against a stub `curl`.
+
+
+_FAKE_CURL = """#!/usr/bin/env bash
+# /api/generate succeeds; /api/ps writes $FAKE_PS to the -o path.
+out=""; url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
+    -d|-H) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  */api/ps) printf '%s' "${FAKE_PS}" > "$out" ;;
+esac
+exit 0
+"""
+
+_GPU_FULL = (
+    '{"models":[{"model":"qwen3.6:latest","size":19783483392,"size_vram":19783483392}]}'
+)
+_GPU_PARTIAL = (
+    '{"models":[{"model":"qwen3.6:latest","size":19783483392,"size_vram":12884901888}]}'
+)
+_CPU_ONLY = '{"models":[{"model":"qwen3.6:latest","size":19783483392,"size_vram":0}]}'
+_NO_ENTRY = '{"models":[]}'
+
+
+def _report_accelerator(
+    tmp_path: Path, api_ps: str, require_gpu: str = ""
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    curl = bin_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(0o755)
+    work = tmp_path / "work"
+    (work / "ollama").mkdir(parents=True)
+    (work / "ollama" / "ollama.log").write_text("no compatible GPUs were discovered\n")
+    return subprocess.run(
+        [
+            shutil.which("bash") or "bash",
+            "-c",
+            f'source "{ENTRYPOINT}" help >/dev/null\n'
+            f'WORK="{work}"; BAMBOO_OLLAMA_LOG="$WORK/ollama/ollama.log"\n'
+            "OLLAMA_BASE_URL=http://127.0.0.1:1; LLM_MODEL=qwen3.6\n"
+            'report_accelerator; echo "FN_RC=$?"\n',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "FAKE_PS": api_ps,
+            **({"BAMBOO_REQUIRE_GPU": require_gpu} if require_gpu else {}),
+        },
+    )
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="report_accelerator parses /api/ps in python"
+)
+@pytest.mark.parametrize(
+    "api_ps,expected",
+    [
+        (_GPU_FULL, "accelerator: gpu — qwen3.6 fully offloaded (18.4 GiB in VRAM)"),
+        (_GPU_PARTIAL, "accelerator: gpu (PARTIAL) — 12.0 of 18.4 GiB in VRAM"),
+        (_CPU_ONLY, "accelerator: cpu — qwen3.6 is entirely in host RAM"),
+        (_NO_ENTRY, "accelerator: UNKNOWN"),
+    ],
+    ids=["gpu-full", "gpu-partial", "cpu-only", "no-entry"],
+)
+def test_report_accelerator_names_the_processor(
+    tmp_path: Path, api_ps: str, expected: str
+) -> None:
+    """size_vram vs size is the whole verdict; every outcome must say so out loud."""
+    proc = _report_accelerator(tmp_path, api_ps)
+    assert expected in proc.stderr, proc.stderr
+    assert "FN_RC=0" in proc.stdout, (
+        "a non-required CPU/UNKNOWN result must not fail the boot"
+    )
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="report_accelerator parses /api/ps in python"
+)
+@pytest.mark.parametrize("api_ps", [_CPU_ONLY, _NO_ENTRY], ids=["cpu-only", "no-entry"])
+def test_require_gpu_fails_the_boot_when_the_gpu_is_not_confirmed(
+    tmp_path: Path, api_ps: str
+) -> None:
+    """What submit.sh sets on a GPU queue: unconfirmed must not pass for confirmed.
+
+    A CPU fallback is silent otherwise — Ollama serves /api/tags and generates fine, just an
+    order of magnitude slower — so the job's only symptom is finishing late.
+    """
+    proc = _report_accelerator(tmp_path, api_ps, require_gpu="1")
+    assert "BAMBOO_REQUIRE_GPU=1" in proc.stderr
+    assert "FN_RC=" not in proc.stdout, "die() must abort, not return"
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="report_accelerator parses /api/ps in python"
+)
+def test_report_accelerator_reads_api_ps_from_a_file_not_a_pipe(tmp_path: Path) -> None:
+    """`python - <<'PY'` already uses stdin for the script.
+
+    Piping the JSON in as well hands json.load an exhausted stream, which reports UNKNOWN
+    for every run — a GPU node included — and BAMBOO_REQUIRE_GPU then fails a healthy job.
+    """
+    proc = _report_accelerator(tmp_path, _GPU_FULL)
+    assert "UNKNOWN" not in proc.stderr, proc.stderr
+    assert (tmp_path / "work" / "ollama" / "api-ps.json").exists(), (
+        "the raw /api/ps reply should be left in scratch for debugging"
+    )
