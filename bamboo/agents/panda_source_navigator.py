@@ -64,7 +64,10 @@ def _grep_candidates(
                 continue
             files_hit += 1
             try:
-                tree = ast.parse(source_text)
+                # filename= so that a SyntaxWarning raised while tokenising third-party
+                # source (e.g. `"\d"` in an old PanDA module) names the file, instead of
+                # ast.parse's default `<unknown>:<lineno>` which is unactionable.
+                tree = ast.parse(source_text, filename=str(py_file))
             except SyntaxError:
                 continue
             lines = source_text.splitlines()
@@ -121,7 +124,8 @@ def _read_method(module: str, qualname: str) -> dict[str, Any] | None:
     py_file = pkg_root / rel_path
     try:
         source_text = py_file.read_text(errors="replace")
-        tree = ast.parse(source_text)
+        # filename= — see _grep_candidates: attributes any tokeniser SyntaxWarning to the file.
+        tree = ast.parse(source_text, filename=str(py_file))
     except Exception:
         return None
     lines = source_text.splitlines()

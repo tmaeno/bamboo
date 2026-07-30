@@ -13,6 +13,7 @@ The interactive review-and-policy gate lives in ``test_investigation_session.py`
 from __future__ import annotations
 
 import logging
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -226,6 +227,24 @@ def test_referenced_tool_names():
     # aliased (non-call attribute access) is still seen
     assert referenced_tool_names("m = tools.kill_job\nreturn await m()") == frozenset({"kill_job"})
     assert referenced_tool_names("def (:") == frozenset()  # unparseable → empty
+
+
+def test_parsing_generated_code_attributes_its_warnings():
+    """A tokeniser warning must name the source, not arrive as `<unknown>:<lineno>`.
+
+    Generated code reaching the parser with `"\\d"` instead of `r"\\d"` produced exactly that
+    in a batch job log — unattributable lines naming neither a file nor the fact that the
+    source was LLM output. The category differs by interpreter (DeprecationWarning before
+    3.12, SyntaxWarning from 3.12), so only the filename is asserted.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert referenced_tool_names(
+            'p = "\\d+"\nreturn await tools.get_jobs()'
+        ) == frozenset({"get_jobs"})
+    assert [w.filename for w in caught] == ["<orchestration-code>"], [
+        (w.filename, w.category.__name__) for w in caught
+    ]
 
 
 def test_procedure_signature_and_name():

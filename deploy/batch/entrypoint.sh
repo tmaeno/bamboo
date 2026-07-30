@@ -262,7 +262,8 @@ persist_env() {
              HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE \
              BAMBOO_SANDBOX BAMBOO_IN BAMBOO_KB \
              BAMBOO_RUN_DIR BAMBOO_OLLAMA_LOG BAMBOO_NEO4J_LOG BAMBOO_QDRANT_LOG \
-             BAMBOO_ACCEL_LOG BAMBOO_ACCEL_SAMPLE_SEC BAMBOO_ACCEL_REPORT_DIR \
+             BAMBOO_ACCEL_LOG BAMBOO_ACCEL_SAMPLE_SEC BAMBOO_ACCEL_UTIL_MS \
+             BAMBOO_ACCEL_DUMP_MAX BAMBOO_ACCEL_REPORT_DIR \
              BAMBOO_REQUIRE_GPU BAMBOO_KEEP_WORK; do
       [[ -n "${!k:-}" ]] && printf 'export %s=%q\n' "$k" "${!k}"
     done
@@ -555,42 +556,47 @@ start_accel_sampler() {
     --base-url "${OLLAMA_BASE_URL}" \
     --model "${LLM_MODEL}" \
     --interval "${BAMBOO_ACCEL_SAMPLE_SEC:-15}" \
+    --util-ms "${BAMBOO_ACCEL_UTIL_MS:-1000}" \
     >>"${BAMBOO_OLLAMA_LOG}" 2>&1 & PIDS+=($!)
-  log "sampling the accelerator every ${BAMBOO_ACCEL_SAMPLE_SEC:-15}s -> ${BAMBOO_ACCEL_LOG}"
+  log "sampling the accelerator every ${BAMBOO_ACCEL_SAMPLE_SEC:-15}s (nvidia-smi every ${BAMBOO_ACCEL_UTIL_MS:-1000}ms) -> ${BAMBOO_ACCEL_LOG}"
 }
 
-# Summarise, then keep a copy somewhere that outlives the scratch dir.
+# Summarise — including the record itself — then keep a copy that outlives the scratch dir.
 #
-# Called from teardown, so it must never fail: every path is guarded. The summary goes to
-# stderr through `log` like all entrypoint output — `_boot` folds do_setup's stdout into
-# stderr so that `exec bamboo … > file` yields only the command's own output, and a summary
-# on stdout would break that contract.
+# Called from teardown, so it must never fail: every path is guarded. Everything goes to
+# stderr through `log`, like all entrypoint output: `_boot` folds do_setup's stdout into stderr
+# precisely so `exec bamboo … > file` yields only the command's own output, and putting a
+# summary on stdout would break that contract.
 #
-# The stderr copy alone is not enough though: it depends on the scheduler retaining stderr,
-# and the TSV lives in the directory teardown is about to remove — so a multi-hour job can
-# end with no record at all. BAMBOO_ACCEL_REPORT_DIR (default OUT_DIR) gets a durable copy.
-# It is only used when it ALREADY exists and is writable, never mkdir -p'd: do_setup
+# The record (not just the summary) is dumped because stderr is what a scheduler reliably
+# keeps, while the TSV sits in the directory teardown is about to remove — a multi-hour job
+# could otherwise end with no evidence at all. `log`'s prefix keeps it recoverable:
+#
+#   sed -n 's/^\[entrypoint\]   | //p' job.err > accelerator.tsv
+#
+# Formatting (summary, timeline, downsampling) lives entirely in accel_sampler.py; this stays
+# a pipe, so there is one owner of the record format.
+#
+# BAMBOO_ACCEL_REPORT_DIR (default OUT_DIR) additionally gets a file copy, which beats grepping
+# a log when it works. Only when it ALREADY exists and is writable, never mkdir -p'd: do_setup
 # deliberately does not create OUT_DIR, because an unbound /out would abort the boot of a
-# rootless Apptainer run over a directory the workload never touches — and teardown must not
-# reintroduce that. Which of the two happened is logged either way: a missing artifact must
-# not look like a clean run.
+# rootless Apptainer run over a directory the workload never touches — teardown must not
+# reintroduce that. Failing to copy is now a one-liner, not an alarm: the record is in the log
+# either way, so the line says where it *is* rather than only what did not happen.
 report_accel_samples() {
-  local tsv="${BAMBOO_ACCEL_LOG:-}" dest="${BAMBOO_ACCEL_REPORT_DIR:-${OUT_DIR}}" summary
+  local tsv="${BAMBOO_ACCEL_LOG:-}" dest="${BAMBOO_ACCEL_REPORT_DIR:-${OUT_DIR}}" out
   [[ -n "${tsv}" && -f "${tsv}" ]] || return 0
   [[ -f "${ACCEL_SAMPLER}" ]] || return 0
-  summary="$(python "${ACCEL_SAMPLER}" --report --tsv "${tsv}" 2>/dev/null)" || return 0
-  while IFS= read -r line; do log "${line}"; done <<<"${summary}"
+  out="$(python "${ACCEL_SAMPLER}" --report --tsv "${tsv}" \
+           --dump-max "${BAMBOO_ACCEL_DUMP_MAX:-2000}" 2>/dev/null)" || return 0
+  while IFS= read -r line; do log "${line}"; done <<<"${out}"
 
-  if [[ -n "${dest}" && -d "${dest}" && -w "${dest}" ]]; then
-    if cp "${tsv}" "${dest}/accelerator.tsv" 2>/dev/null \
-       && printf '%s\n' "${summary}" >"${dest}/accelerator.txt" 2>/dev/null; then
-      log "accelerator record kept at ${dest}/accelerator.{tsv,txt}"
-    else
-      log "could not write the accelerator record to ${dest} — it is in this log only"
-    fi
+  if [[ -n "${dest}" && -d "${dest}" && -w "${dest}" ]] \
+     && cp "${tsv}" "${dest}/accelerator.tsv" 2>/dev/null \
+     && printf '%s\n' "${out}" >"${dest}/accelerator.txt" 2>/dev/null; then
+    log "accelerator record also kept at ${dest}/accelerator.{tsv,txt}"
   else
-    log "accelerator record not kept: ${dest:-<unset>} is not an existing writable dir"
-    log "  (set BAMBOO_ACCEL_REPORT_DIR, or BAMBOO_KEEP_WORK=1 to keep ${tsv})"
+    log "accelerator record is in this log only (${dest:-<unset>} not writable; BAMBOO_ACCEL_REPORT_DIR / BAMBOO_KEEP_WORK=1 to keep a file)"
   fi
   return 0
 }

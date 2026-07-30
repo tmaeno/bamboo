@@ -1,35 +1,46 @@
 #!/usr/bin/env python3
-"""Record, for the whole life of a batch job, whether Ollama is generating on the GPU.
+"""Record, for the whole life of a batch job, whether Ollama is *using* the GPU.
 
-`entrypoint.sh`'s ``report_accelerator`` answers that question **once**, right after the
-model is preloaded. That turned out not to be enough: a job on a GPU node logged
-``accelerator: gpu (PARTIAL) - 19.1 of 22.8 GiB in VRAM`` at boot and yet the site's job
-monitor reported ``ngpus: 0.0`` / ``gpufbmem: 0.0`` for its entire run. A point measurement
-cannot distinguish "never used the GPU" from "started there and was evicted", and those have
-completely different causes — so this samples continuously instead.
+`entrypoint.sh`'s ``report_accelerator`` answers that question **once**, right after the model
+is preloaded, and only in terms of residency. Neither was enough:
+
+* A job logged ``accelerator: gpu (PARTIAL)`` at boot and the site's job monitor still reported
+  ``ngpus: 0.0`` for its whole run — a point measurement cannot distinguish "never used the GPU"
+  from "started there and was evicted", and those have different causes.
+* ``size_vram`` proves the weights are *in* VRAM, not that any token was produced there. The
+  first ``gpu-check`` run was exactly that shape: the model resident, ``gpusmpct: 0.0``, because
+  it loaded the model and never generated. So SM utilisation is sampled too.
 
 Two modes over one on-disk format (TSV), so the format has a single owner:
 
-* ``--sample`` — poll ``{base}/api/ps`` plus ``nvidia-smi`` every ``--interval`` seconds and
-  append one row per sample. Runs until killed; ``entrypoint.sh`` starts it after the boot
-  verdict and ``teardown`` kills it with the services.
-* ``--report`` — read a TSV and print the end-of-job summary: time in each state, the state
-  *transitions* with the offset of the first non-GPU sample, and the VRAM envelope.
+* ``--sample`` — poll ``{base}/api/ps`` every ``--interval`` seconds, aggregate the SM stream
+  (below) over that window, and append one row. Runs until killed; ``entrypoint.sh`` starts it
+  after the boot verdict and ``teardown`` kills it with the services.
+* ``--report`` — read a TSV and print the summary, a per-state *timeline*, and with
+  ``--dump-max`` the record itself so it survives in a job log.
 
-Deliberately stdlib-only (``urllib`` rather than httpx): this runs inside the batch image
-next to the services, and a diagnostic must not be the thing that fails to import.
+SM utilisation comes from a **separate, denser stream**: one long-lived
+``nvidia-smi --loop-ms`` child read by a daemon thread. ``utilization.gpu`` is an instantaneous
+figure over roughly the preceding second, so reading it once per 15 s poll would miss the bursts
+that token generation consists of; one ``fork`` for the whole job buys ~15 ticks per row instead.
+
+Deliberately stdlib-only (``urllib`` rather than httpx): this runs inside the batch image next to
+the services, and a diagnostic must not be the thing that fails to import.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Iterable, Iterator, NamedTuple, Optional
 
@@ -39,9 +50,14 @@ COLUMNS = (
     "state",  # see classify()
     "size",  # bytes the model occupies in total
     "size_vram",  # bytes of it resident on the GPU
-    "gpu_total_mib",  # summed over devices; "" when nvidia-smi is unavailable
-    "gpu_used_mib",
-    "gpu_free_mib",
+    "gpu_total_mib",  # device totals over this window; "" when not measured
+    "gpu_used_mib",  # the window's PEAK used (all processes)
+    "gpu_free_mib",  # the window's MINIMUM free
+    "sm_min",  # SM utilisation % over the window, summed across devices
+    "sm_mean",
+    "sm_max",
+    "membw_max",  # memory-bandwidth utilisation %, the window's peak
+    "util_ticks",  # nvidia-smi ticks that landed in this window — see aggregate()
 )
 
 # States, worst-to-best. `unreachable` means the sampler could not reach Ollama at all
@@ -53,14 +69,19 @@ GPU_PARTIAL = "gpu-partial"
 GPU_FULL = "gpu-full"
 STATE_ORDER = (GPU_FULL, GPU_PARTIAL, CPU, UNLOADED, UNREACHABLE)
 
+# Below this, "the GPU held the weights but did no work" is the honest reading. An idle device
+# still reports a percent or two, so 0 alone would be too strict a test; real generation drives
+# this to tens of percent, so nothing in between is being papered over.
+IDLE_SM_PCT = 2
+
 
 def model_matches(entry_name: str, model: str) -> bool:
     """Match an ``/api/ps`` entry to the configured model name.
 
-    Same ``:latest``-tolerance as ``bamboo.llm.llm_client._ollama_model_matches`` — the
-    staged manifest may say ``qwen3.6`` where ``/api/ps`` says ``qwen3.6:latest``. Inlined
-    rather than imported: this script must keep working if the venv is not importable, which
-    is exactly the situation where a diagnostic matters most.
+    Same ``:latest``-tolerance as ``bamboo.llm.llm_client._ollama_model_matches`` — the staged
+    manifest may say ``qwen3.6`` where ``/api/ps`` says ``qwen3.6:latest``. Inlined rather than
+    imported: this script must keep working if the venv is not importable, which is exactly the
+    situation where a diagnostic matters most.
     """
     if not entry_name:
         return False
@@ -71,7 +92,8 @@ def classify(size: int, size_vram: int) -> str:
     """Turn ``/api/ps`` byte counts into one of the states above.
 
     ``size_vram`` is what ``ollama ps`` renders as its PROCESSOR column, so this is the
-    non-heuristic answer: no scraping of log wording that changes between releases.
+    non-heuristic answer: no scraping of log wording that changes between releases. It speaks
+    only about residency — see the SM columns for whether the GPU did any work.
     """
     if size <= 0:
         return UNLOADED
@@ -100,98 +122,291 @@ def read_api_ps(
     return UNLOADED, 0, 0
 
 
-class DeviceVram(NamedTuple):
+# --------------------------------------------------------------------------------------- #
+# The nvidia-smi stream
+# --------------------------------------------------------------------------------------- #
+
+UTIL_QUERY = (
+    "index,utilization.gpu,utilization.memory,memory.total,memory.used,memory.free"
+)
+
+
+class DeviceRow(NamedTuple):
+    index: int
+    sm_pct: int
+    membw_pct: int
+    total_mib: int
+    used_mib: int
+    free_mib: int
+
+
+class Tick(NamedTuple):
+    """One nvidia-smi iteration, summed over the devices it reported."""
+
+    sm_pct: int
+    membw_pct: int
+    total_mib: int
+    used_mib: int
+    free_mib: int
+
+
+def parse_device_row(line: str) -> Optional[DeviceRow]:
+    """Parse one CSV row, or None if it is not one.
+
+    ``[N/A]`` appears for utilisation on some devices (and for everything on a stray warning
+    line), so anything unparseable is dropped rather than turned into a zero — an invented 0 %
+    would read as "the GPU was idle".
+    """
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) != 6:
+        return None
+    try:
+        return DeviceRow(*(int(p) for p in parts))
+    except ValueError:
+        return None
+
+
+def _sum_devices(rows: list[DeviceRow]) -> Tick:
+    """Sum a tick across devices, matching the site monitor's own definition of gpusmpct:
+    *"sum of the streaming multiprocessor usage … can be >100% when multiple GPUs are active"*.
+    Summing rather than averaging is what makes the two numbers comparable."""
+    return Tick(
+        sm_pct=sum(r.sm_pct for r in rows),
+        membw_pct=sum(r.membw_pct for r in rows),
+        total_mib=sum(r.total_mib for r in rows),
+        used_mib=sum(r.used_mib for r in rows),
+        free_mib=sum(r.free_mib for r in rows),
+    )
+
+
+class TickAssembler:
+    """Groups streamed device rows into per-iteration ticks.
+
+    ``nvidia-smi --loop-ms`` emits one row per device per iteration with no separator, so an
+    iteration boundary is where the device index stops increasing. Stateful because the stream
+    is drained incrementally, a partial iteration at a time.
+    """
+
+    def __init__(self) -> None:
+        self._cur: list[DeviceRow] = []
+        self._prev_index: Optional[int] = None
+
+    def feed(self, line: str) -> Optional[Tick]:
+        """Absorb one line; return the tick it completed, if any."""
+        row = parse_device_row(line)
+        if row is None:
+            return None
+        done: Optional[Tick] = None
+        if self._prev_index is not None and row.index <= self._prev_index and self._cur:
+            done = _sum_devices(self._cur)
+            self._cur = []
+        self._cur.append(row)
+        self._prev_index = row.index
+        return done
+
+    def flush(self) -> Optional[Tick]:
+        """Close the iteration in progress — the stream ends mid-tick when we are killed."""
+        if not self._cur:
+            return None
+        tick = _sum_devices(self._cur)
+        self._cur = []
+        self._prev_index = None
+        return tick
+
+
+def group_ticks(lines: Iterable[str]) -> list[Tick]:
+    """Batch form of TickAssembler, for a finite sequence of rows."""
+    assembler = TickAssembler()
+    ticks = [t for t in (assembler.feed(line) for line in lines) if t is not None]
+    last = assembler.flush()
+    return ticks + ([last] if last else [])
+
+
+class UtilWindow(NamedTuple):
+    """What one row of the TSV records about the GPU, over one /api/ps interval."""
+
+    sm_min: Optional[int]
+    sm_mean: Optional[int]
+    sm_max: Optional[int]
+    membw_max: Optional[int]
     total_mib: Optional[int]
     used_mib: Optional[int]
     free_mib: Optional[int]
+    ticks: int
 
     @classmethod
-    def unavailable(cls) -> DeviceVram:
-        return cls(None, None, None)
+    def unmeasured(cls) -> UtilWindow:
+        return cls(None, None, None, None, None, None, None, 0)
 
 
-def read_gpu_vram(timeout: float = 5.0) -> DeviceVram:
-    """Total/used/free VRAM summed over all visible devices, via ``nvidia-smi``.
+def aggregate(ticks: list[Tick]) -> UtilWindow:
+    """Collapse a window's ticks into one row's worth of numbers.
 
-    Summed rather than per-device because the interesting question is the envelope: was the
-    card simply too small for the model, or was a co-tenant holding the memory? Both show up
-    as ``free`` collapsing while ``total`` stays put.
+    VRAM keeps the envelope rather than a snapshot — peak used, minimum free — so the job-level
+    figures in report() stay exact however coarse the rows are. ``total`` is taken from the last
+    tick since it does not move.
+
+    No ticks yields all-None, not zeros: "not measured" and "0 %" must not be confused, which is
+    the whole reason ``util_ticks`` is recorded next to them.
     """
-    if shutil.which("nvidia-smi") is None:
-        return DeviceVram.unavailable()
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total,memory.used,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=True,
-        ).stdout
-    except (subprocess.SubprocessError, OSError):
-        return DeviceVram.unavailable()
-    total = used = free = 0
-    seen = False
-    for line in out.splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) != 3:
-            continue
+    if not ticks:
+        return UtilWindow.unmeasured()
+    sm = [t.sm_pct for t in ticks]
+    return UtilWindow(
+        sm_min=min(sm),
+        sm_mean=round(sum(sm) / len(sm)),
+        sm_max=max(sm),
+        membw_max=max(t.membw_pct for t in ticks),
+        total_mib=ticks[-1].total_mib,
+        used_mib=max(t.used_mib for t in ticks),
+        free_mib=min(t.free_mib for t in ticks),
+        ticks=len(ticks),
+    )
+
+
+class UtilStream:
+    """A long-lived ``nvidia-smi --loop-ms`` child, read by a daemon thread.
+
+    The thread only appends raw lines to a deque; assembly and aggregation happen on the main
+    loop. ``deque.append``/``popleft`` are individually atomic in CPython, so draining by
+    popleft-until-empty needs no lock.
+
+    Lines are attributed to the window in which they were *read*, not to a parsed timestamp. If
+    nvidia-smi block-buffers into the pipe instead of flushing per iteration, windows become
+    lumpy while the job-level min/mean/max stays exact — and ``util_ticks`` makes that visible
+    rather than silent.
+    """
+
+    def __init__(self, loop_ms: int) -> None:
+        self._loop_ms = loop_ms
+        self._lines: deque[str] = deque()
+        self._proc: Optional[subprocess.Popen[str]] = None
+        self._assembler = TickAssembler()
+
+    def start(self) -> bool:
+        """Spawn the stream. False when there is no nvidia-smi to spawn (a CPU queue)."""
+        if shutil.which("nvidia-smi") is None:
+            return False
         try:
-            t, u, f = (int(p) for p in parts)
-        except ValueError:
-            continue
-        total, used, free, seen = total + t, used + u, free + f, True
-    return DeviceVram(total, used, free) if seen else DeviceVram.unavailable()
+            self._proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+                [
+                    "nvidia-smi",
+                    f"--query-gpu={UTIL_QUERY}",
+                    "--format=csv,noheader,nounits",
+                    f"--loop-ms={self._loop_ms}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError:
+            return False
+        threading.Thread(target=self._read, daemon=True).start()
+        return True
+
+    def _read(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                self._lines.append(line)
+        except (OSError, ValueError):
+            pass  # pipe closed under us by stop() or by teardown killing the group
+
+    def drain(self) -> list[Tick]:
+        """Take everything read since the last call, as completed ticks."""
+        ticks: list[Tick] = []
+        while True:
+            try:
+                line = self._lines.popleft()
+            except IndexError:
+                break
+            tick = self._assembler.feed(line)
+            if tick is not None:
+                ticks.append(tick)
+        return ticks
+
+    def stop(self) -> None:
+        """Belt and braces: the child shares our process group, so teardown's `kill -- -PID`
+        already reaps it. This covers the ordinary-exit path."""
+        if self._proc is None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=2)
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+
+# --------------------------------------------------------------------------------------- #
+# Sampling
+# --------------------------------------------------------------------------------------- #
 
 
 def sample(
-    tsv: Path, base_url: str, model: str, interval: float, *, once: bool = False
+    tsv: Path,
+    base_url: str,
+    model: str,
+    interval: float,
+    *,
+    util_ms: int = 1000,
+    once: bool = False,
 ) -> None:
     """Append one row per interval until killed (or one row, with ``once``).
 
-    Each row is flushed immediately: ``teardown`` kills this process, so anything still
-    buffered would be lost — and the last samples before the kill are the ones describing how
-    the job ended.
+    Each row is flushed immediately: ``teardown`` kills this process, so anything still buffered
+    would be lost — and the last samples before the kill are the ones describing how the job
+    ended.
     """
     tsv.parent.mkdir(parents=True, exist_ok=True)
     new = not tsv.exists() or tsv.stat().st_size == 0
     started = time.monotonic()
-    warned_no_smi = False
-    with tsv.open("a", encoding="utf-8") as fh:
-        if new:
-            fh.write("\t".join(COLUMNS) + "\n")
-            fh.flush()
-        while True:
-            state, size, vram = read_api_ps(base_url, model)
-            vram_dev = read_gpu_vram()
-            if vram_dev.total_mib is None and not warned_no_smi:
-                # Once, not per sample: a CPU queue would otherwise fill the log with it.
-                print(
-                    "accel-sampler: nvidia-smi unavailable", file=sys.stderr, flush=True
-                )
-                warned_no_smi = True
-            fh.write(
-                "\t".join(
-                    str(v) if v is not None else ""
-                    for v in (
-                        int(time.monotonic() - started),
-                        state,
-                        size,
-                        vram,
-                        vram_dev.total_mib,
-                        vram_dev.used_mib,
-                        vram_dev.free_mib,
+    stream = UtilStream(util_ms)
+    if not stream.start():
+        # Once, not per sample: a CPU queue would otherwise repeat it forever.
+        print("accel-sampler: nvidia-smi unavailable", file=sys.stderr, flush=True)
+    try:
+        with tsv.open("a", encoding="utf-8") as fh:
+            if new:
+                fh.write("\t".join(COLUMNS) + "\n")
+                fh.flush()
+            while True:
+                # The GPU stream is drained first so the window ends at the /api/ps read, not
+                # somewhere inside it.
+                util = aggregate(stream.drain())
+                state, size, vram = read_api_ps(base_url, model)
+                fh.write(
+                    "\t".join(
+                        "" if v is None else str(v)
+                        for v in (
+                            int(time.monotonic() - started),
+                            state,
+                            size,
+                            vram,
+                            util.total_mib,
+                            util.used_mib,
+                            util.free_mib,
+                            util.sm_min,
+                            util.sm_mean,
+                            util.sm_max,
+                            util.membw_max,
+                            util.ticks,
+                        )
                     )
+                    + "\n"
                 )
-                + "\n"
-            )
-            fh.flush()
-            if once:
-                return
-            time.sleep(interval)
+                fh.flush()
+                if once:
+                    return
+                time.sleep(interval)
+    finally:
+        stream.stop()
+
+
+# --------------------------------------------------------------------------------------- #
+# Reporting
+# --------------------------------------------------------------------------------------- #
 
 
 class Row(NamedTuple):
@@ -199,15 +414,22 @@ class Row(NamedTuple):
     state: str
     size: int
     size_vram: int
-    vram: DeviceVram
+    total_mib: Optional[int]
+    used_mib: Optional[int]
+    free_mib: Optional[int]
+    sm_min: Optional[int]
+    sm_mean: Optional[int]
+    sm_max: Optional[int]
+    membw_max: Optional[int]
+    util_ticks: int
 
 
 def parse_rows(lines: Iterable[str]) -> Iterator[Row]:
     """Yield well-formed rows, skipping anything else.
 
-    Malformed rows are expected, not exceptional: the sampler is killed by ``teardown``, so
-    the final line can be a partial write. A summary that raised on that would be missing
-    exactly when it is wanted.
+    Malformed rows are expected, not exceptional: the sampler is killed by ``teardown``, so the
+    final line can be a partial write. A summary that raised on that would be missing exactly
+    when it is wanted.
     """
 
     def _opt_int(value: str) -> Optional[int]:
@@ -236,7 +458,8 @@ def parse_rows(lines: Iterable[str]) -> Iterator[Row]:
             state,
             size,
             vram,
-            DeviceVram(_opt_int(parts[4]), _opt_int(parts[5]), _opt_int(parts[6])),
+            *(_opt_int(p) for p in parts[4:11]),
+            _opt_int(parts[11]) or 0,
         )
 
 
@@ -244,7 +467,92 @@ def _gib(byte_count: int) -> str:
     return f"{byte_count / 2**30:.1f} GiB"
 
 
-def report(tsv: Path) -> str:
+def _fmt_offset(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def _sm_range(rows: list[Row]) -> str:
+    sm_max = [r.sm_max for r in rows if r.sm_max is not None]
+    sm_min = [r.sm_min for r in rows if r.sm_min is not None]
+    sm_mean = [r.sm_mean for r in rows if r.sm_mean is not None]
+    if not sm_max:
+        return "sm not measured"
+    mean = round(sum(sm_mean) / len(sm_mean)) if sm_mean else 0
+    return f"sm {min(sm_min)}-{max(sm_max)}% (mean {mean}%)"
+
+
+class Segment(NamedTuple):
+    rows: list[Row]
+
+    @property
+    def state(self) -> str:
+        return self.rows[0].state
+
+
+def segments(rows: list[Row]) -> list[Segment]:
+    """Split into runs of constant state — one line each in the timeline."""
+    out: list[Segment] = []
+    for row in rows:
+        if out and out[-1].state == row.state:
+            out[-1].rows.append(row)
+        else:
+            out.append(Segment([row]))
+    return out
+
+
+def format_timeline(rows: list[Row]) -> list[str]:
+    """Collapse consecutive same-state samples to one line each.
+
+    This is the readable answer and stays short however long the job ran, which is what lets the
+    raw record below it be downsampled without losing the shape.
+    """
+    lines = []
+    for seg in segments(rows):
+        span = (
+            f"{_fmt_offset(seg.rows[0].offset_s)}-{_fmt_offset(seg.rows[-1].offset_s)}"
+        )
+        peak_vram = max(r.size_vram for r in seg.rows)
+        vram = _gib(peak_vram) if peak_vram else "—"
+        lines.append(
+            f"  {span:<15} {seg.state:<12} {len(seg.rows):>4} smp  "
+            f"vram {vram:<10} {_sm_range(seg.rows)}"
+        )
+    return lines
+
+
+def format_record(tsv: Path, max_rows: int) -> list[str]:
+    """The record itself, verbatim TSV including the header.
+
+    Verbatim rather than padded into aligned columns so it round-trips: piped back through
+    --report it reproduces the same summary, and it pastes into a spreadsheet.
+
+    Above ``max_rows`` data rows it keeps every ``ceil(n/max)``-th plus the last one and says so.
+    The timeline above is always complete, so only resolution is lost, never shape. ``0`` means
+    unlimited.
+    """
+    raw = tsv.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not raw:
+        return []
+    header, data = raw[0], raw[1:]
+    note = ""
+    if max_rows and len(data) > max_rows:
+        stride = math.ceil(len(data) / max_rows)
+        kept = data[::stride]
+        if data and kept[-1] != data[-1]:
+            kept.append(data[-1])
+        note = f" — downsampled, 1 in {stride} of {len(data)} rows"
+        data = kept
+    return [
+        f"---- accelerator record ({len(data)} rows{note}) ----",
+        f"  | {header}",
+        *(f"  | {line}" for line in data),
+        "---- end ----",
+    ]
+
+
+def report(tsv: Path, dump_max: Optional[int] = None) -> str:
     """Render the end-of-job summary that goes into the job log."""
     if not tsv.exists():
         return f"accelerator: no samples recorded ({tsv} is missing)"
@@ -260,9 +568,7 @@ def report(tsv: Path) -> str:
     total = len(rows)
     span = rows[-1].offset_s - rows[0].offset_s
 
-    lines = [
-        f"accelerator over the job: {total} samples spanning {span // 60}m{span % 60}s"
-    ]
+    lines = [f"accelerator over the job: {total} samples spanning {_fmt_offset(span)}"]
     for state in STATE_ORDER:
         if counts[state]:
             lines.append(
@@ -271,38 +577,43 @@ def report(tsv: Path) -> str:
 
     # The transitions are the point of sampling at all: "gpu-full -> unloaded -> cpu" is a
     # different bug report from "cpu" throughout.
-    transitions = [rows[0].state]
-    first_non_gpu: Optional[Row] = None
-    for row in rows:
-        if row.state != transitions[-1]:
-            transitions.append(row.state)
-        if first_non_gpu is None and not row.state.startswith("gpu-"):
-            first_non_gpu = row
+    transitions = [seg.state for seg in segments(rows)]
+    first_non_gpu = next((r for r in rows if not r.state.startswith("gpu-")), None)
     if len(transitions) > 1:
         lines.append(f"  transitions: {' -> '.join(transitions)}")
     if first_non_gpu is not None:
         lines.append(
-            f"  first non-GPU sample: {first_non_gpu.state} at +"
-            f"{first_non_gpu.offset_s // 60}m{first_non_gpu.offset_s % 60}s"
+            f"  first non-GPU sample: {first_non_gpu.state} at "
+            f"+{_fmt_offset(first_non_gpu.offset_s)}"
         )
 
     on_gpu = counts[GPU_FULL] + counts[GPU_PARTIAL]
+    sm_max = max((r.sm_max for r in rows if r.sm_max is not None), default=None)
     if on_gpu == 0:
         lines.append("  verdict: the GPU was NEVER used by ollama during this job")
+    elif sm_max is not None and sm_max <= IDLE_SM_PCT:
+        # The gap this file exists to close: residency is not compute. Reported for any
+        # non-zero GPU residency, because "the weights are on the card" is exactly the finding
+        # that reads as success when it isn't.
+        lines.append(
+            f"  verdict: resident on the GPU but NO COMPUTE observed"
+            f" (sm never exceeded {sm_max}%)"
+        )
     elif on_gpu == total:
         lines.append("  verdict: ollama was on the GPU for every sample")
     else:
         lines.append(
             f"  verdict: ollama was on the GPU for {100 * on_gpu // total}% of samples"
         )
+    lines.append(f"  compute: {_sm_range(rows)} — device-wide, all processes")
 
     # VRAM envelope: distinguishes "card too small for the model" from "someone else had it".
-    frees = [r.vram.free_mib for r in rows if r.vram.free_mib is not None]
-    totals = [r.vram.total_mib for r in rows if r.vram.total_mib is not None]
+    frees = [r.free_mib for r in rows if r.free_mib is not None]
+    totals = [r.total_mib for r in rows if r.total_mib is not None]
     if frees and totals:
         lines.append(
             f"  device VRAM: min free {min(frees)} MiB of {max(totals)} MiB total"
-            f" (max used {max(r.vram.used_mib or 0 for r in rows)} MiB, all processes)"
+            f" (max used {max(r.used_mib or 0 for r in rows)} MiB, all processes)"
         )
     else:
         lines.append("  device VRAM: not recorded (no nvidia-smi in the container)")
@@ -310,8 +621,14 @@ def report(tsv: Path) -> str:
     biggest = max(rows, key=lambda r: r.size)
     if biggest.size:
         lines.append(
-            f"  model footprint: {_gib(biggest.size)} total, peak {_gib(max(r.size_vram for r in rows))} in VRAM"
+            f"  model footprint: {_gib(biggest.size)} total,"
+            f" peak {_gib(max(r.size_vram for r in rows))} in VRAM"
         )
+
+    lines.append("timeline:")
+    lines.extend(format_timeline(rows))
+    if dump_max is not None:
+        lines.extend(format_record(tsv, dump_max))
     return "\n".join(lines)
 
 
@@ -324,7 +641,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--base-url", default="", help="ollama base URL (--sample)")
     parser.add_argument("--model", default="", help="model name to look for (--sample)")
     parser.add_argument(
-        "--interval", type=float, default=15.0, help="seconds between samples"
+        "--interval", type=float, default=15.0, help="seconds between /api/ps samples"
+    )
+    parser.add_argument(
+        "--util-ms", type=int, default=1000, help="nvidia-smi stream period, ms"
+    )
+    parser.add_argument(
+        "--dump-max",
+        type=int,
+        default=None,
+        help="--report: also print the record, at most N rows (0 = unlimited)",
     )
     parser.add_argument(
         "--once", action="store_true", help="take a single sample and exit"
@@ -332,13 +658,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.report:
-        print(report(args.tsv))
+        print(report(args.tsv, dump_max=args.dump_max))
         return 0
 
     if not args.base_url or not args.model:
         parser.error("--sample needs --base-url and --model")
     try:
-        sample(args.tsv, args.base_url, args.model, args.interval, once=args.once)
+        sample(
+            args.tsv,
+            args.base_url,
+            args.model,
+            args.interval,
+            util_ms=args.util_ms,
+            once=args.once,
+        )
     except KeyboardInterrupt:  # pragma: no cover — teardown sends the signal
         pass
     return 0

@@ -310,6 +310,8 @@ suffix — so the paths are exported (and written to the state file) rather than
 | `BAMBOO_NEO4J_LOG` / `BAMBOO_QDRANT_LOG` / `BAMBOO_OLLAMA_LOG` | the three service logs under it |
 | `BAMBOO_ACCEL_LOG` | the per-sample GPU record (TSV) — see "Running on a GPU queue" |
 | `BAMBOO_ACCEL_SAMPLE_SEC` | seconds between accelerator samples (default 15) |
+| `BAMBOO_ACCEL_UTIL_MS` | `nvidia-smi` stream period for SM utilisation (default 1000) |
+| `BAMBOO_ACCEL_DUMP_MAX` | rows of the record dumped to the log (default 2000; `0` = unlimited) |
 | `BAMBOO_ACCEL_REPORT_DIR` | where teardown copies the accelerator record (default `OUT_DIR`) |
 | `BAMBOO_KEEP_WORK=1` | keep the scratch dir — and therefore the logs — past teardown |
 
@@ -420,30 +422,75 @@ finish on the CPU with nothing in the log saying so. Override it if a node genui
 there is no idle period worth reclaiming VRAM for otherwise, since this stack lives and dies with the
 job.
 
+#### Residency is not compute
+
+`size_vram` says the weights are **in** VRAM. It does not say a single token was produced there —
+a model can sit on the card while every layer runs on the CPU, and `gpu-full 100%` would still be
+printed. So SM utilisation is recorded too, from `nvidia-smi utilization.gpu`:
+
+```
+[entrypoint]   verdict: resident on the GPU but NO COMPUTE observed (sm never exceeded 1%)
+```
+
+That is the one conclusion the residency figures alone get wrong, and it is a real shape: the very
+first `gpu-check` run produced it (model resident, `gpusmpct: 0.0`) because it loads the model and
+never generates.
+
+`utilization.gpu` is an instantaneous figure over roughly the preceding second, so sampling it once
+per 15 s poll would miss the bursts that token generation consists of. It comes instead from a
+separate `nvidia-smi --loop-ms` stream (`BAMBOO_ACCEL_UTIL_MS`, default 1000 ms) aggregated into each
+row as min/mean/max, with `util_ticks` recording how many ticks landed in that window — much below
+`SAMPLE_SEC × 1000 / UTIL_MS` means `nvidia-smi` was buffering and the per-row figures should be read
+as lumpy, though the job-level range stays exact.
+
+Values are summed across devices, matching the site monitor's own `gpusmpct`
+(*"sum of the streaming multiprocessor usage … can be >100% when multiple GPUs are active"*), so the
+two are directly comparable. Both `utilization.gpu` and `memory.used` are **device-wide, all
+processes** — on a shared card they are an upper bound on this job's share, not its share.
+
 #### The end-of-job summary
 
 Because the boot verdict is a single measurement, the state is sampled every
 `BAMBOO_ACCEL_SAMPLE_SEC` seconds (default 15) for the life of the job and summarised at teardown:
 
 ```
-[entrypoint] accelerator over the job: 412 samples spanning 103m0s
+[entrypoint] accelerator over the job: 412 samples spanning 103m00s
 [entrypoint]   gpu-partial     96   23%
 [entrypoint]   cpu            210   50%
 [entrypoint]   unloaded       106   25%
 [entrypoint]   transitions: gpu-partial -> unloaded -> cpu
 [entrypoint]   first non-GPU sample: unloaded at +18m15s
 [entrypoint]   verdict: ollama was on the GPU for 23% of samples
+[entrypoint]   compute: sm 0-88% (mean 41%) — device-wide, all processes
 [entrypoint]   device VRAM: min free 4576 MiB of 24576 MiB total (max used 20000 MiB, all processes)
+[entrypoint]   model footprint: 22.3 GiB total, peak 19.1 GiB in VRAM
+[entrypoint] timeline:
+[entrypoint]   0m00s-18m00s    gpu-partial   72 smp  vram 19.1 GiB   sm 3-88% (mean 41%)
+[entrypoint]   18m15s-19m00s   unloaded       4 smp  vram —          sm 0-0% (mean 0%)
+[entrypoint]   19m15s-1h43m    cpu          336 smp  vram —          sm 0-2% (mean 0%)
 ```
 
-The **transitions** line is the point: it separates "never used the GPU" from "started there and was
-evicted", which have different causes and different owners. Like every other entrypoint message the
-summary goes to **stderr** (so `exec bamboo … > file` still captures only the command's own output),
-and because stderr may not be retained — and the per-sample record lives in the scratch dir teardown
-deletes — both are also copied to `BAMBOO_ACCEL_REPORT_DIR` (default `/out`) as
-`accelerator.tsv` / `accelerator.txt` when that directory already exists and is writable. It is never
-created: an unbound `/out` would abort the boot of a rootless Apptainer run over a directory the
-workload never touches. Whether the copy happened is logged either way.
+The **transitions** line and the timeline are the point: they separate "never used the GPU" from
+"started there and was evicted", which have different causes and different owners.
+
+The per-sample record is dumped below the timeline as well, verbatim TSV, because stderr is what a
+scheduler reliably keeps while the record file lives in the scratch dir teardown removes.
+`BAMBOO_ACCEL_DUMP_MAX` (default 2000 rows, ≈8 h at 15 s) caps it — above that it keeps every
+*n*-th row plus the last and says it downsampled, and the timeline stays complete either way, so only
+resolution is lost. `0` means unlimited. To turn a job log back into a TSV:
+
+```bash
+sed -n 's/^\[entrypoint\]   | //p' job.err > accelerator.tsv
+# feed it straight back for the same summary:
+python /opt/bamboo/accel_sampler.py --report --tsv accelerator.tsv
+```
+
+Like every other entrypoint message this all goes to **stderr**, so `exec bamboo … > file` still
+captures only the command's own output. A copy also lands in `BAMBOO_ACCEL_REPORT_DIR`
+(default `/out`) as `accelerator.tsv` / `accelerator.txt` when that directory already exists and is
+writable — it is never created, since an unbound `/out` would abort the boot of a rootless Apptainer
+run over a directory the workload never touches. `batch-analyze` creates `/out`, so a real batch job
+gets the files for free; an `exec` run against a read-only `/out` says the record is in the log only.
 
 To diagnose a CPU fallback without paying a full stack boot, `gpu-check` starts **only** Ollama —
 it needs `/models` and nothing else — and prints the accelerator verdict together with the CUDA

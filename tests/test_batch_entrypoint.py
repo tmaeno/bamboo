@@ -776,9 +776,10 @@ def _teardown_with_samples(
     (run_dir / "ollama").mkdir(parents=True)
     tsv = run_dir / "ollama" / "accelerator.tsv"
     tsv.write_text(
-        "offset_s\tstate\tsize\tsize_vram\tgpu_total_mib\tgpu_used_mib\tgpu_free_mib\n"
-        "0\tgpu-partial\t100\t80\t24576\t20000\t4576\n"
-        "15\tcpu\t100\t0\t24576\t500\t24076\n"
+        "offset_s\tstate\tsize\tsize_vram\tgpu_total_mib\tgpu_used_mib\tgpu_free_mib"
+        "\tsm_min\tsm_mean\tsm_max\tmembw_max\tutil_ticks\n"
+        "0\tgpu-partial\t100\t80\t24576\t20000\t4576\t3\t41\t88\t44\t15\n"
+        "15\tcpu\t100\t0\t24576\t500\t24076\t0\t0\t1\t0\t15\n"
     )
     (tmp_path / "bamboo-batch.env").write_text(
         f"export BAMBOO_RUN_DIR={run_dir}\n"
@@ -807,32 +808,51 @@ def _teardown_with_samples(
     not _HAS_PYTHON, reason="the summary is produced by accel_sampler.py"
 )
 def test_teardown_summarises_and_keeps_the_accelerator_record(tmp_path: Path) -> None:
-    """The summary alone lives on stderr and the TSV dies with the scratch dir.
+    """The record must reach stderr, because that is what a scheduler reliably retains.
 
-    A job that ran for hours can therefore end with no record of whether it used the GPU, so
-    teardown copies both into an existing writable dir before the rm -rf.
+    The TSV itself dies with the scratch dir and the file copy needs a writable dir, so a job
+    that ran for hours could otherwise end with no evidence of whether it used the GPU.
     """
     out = tmp_path / "out"
     out.mkdir()
     proc, run_dir = _teardown_with_samples(tmp_path, out)
     assert proc.returncode == 0, proc.stderr
     assert "transitions: gpu-partial -> cpu" in proc.stderr, proc.stderr
+    # The record itself, verbatim and recoverable with the documented sed one-liner.
+    assert "| offset_s\tstate\tsize" in proc.stderr, "the TSV header was not dumped"
+    assert "| 0\tgpu-partial\t100\t80" in proc.stderr, "the TSV rows were not dumped"
     assert (out / "accelerator.tsv").read_text().count("\n") == 3  # header + 2 rows
     assert "transitions" in (out / "accelerator.txt").read_text()
     assert not run_dir.exists(), "the scratch dir should still be removed"
 
 
+def test_the_dumped_record_survives_the_documented_sed_recovery(tmp_path: Path) -> None:
+    """The docs promise `sed -n 's/^\\[entrypoint\\]   | //p'` reconstructs the TSV."""
+    out = tmp_path / "out"
+    out.mkdir()
+    proc, _ = _teardown_with_samples(tmp_path, out)
+    recovered = [
+        line.partition("[entrypoint]   | ")[2]
+        for line in proc.stderr.splitlines()
+        if "[entrypoint]   | " in line
+    ]
+    assert recovered[0].split("\t")[:4] == ["offset_s", "state", "size", "size_vram"]
+    assert recovered[1:] == (out / "accelerator.tsv").read_text().splitlines()[1:]
+
+
 @pytest.mark.skipif(
     not _HAS_PYTHON, reason="the summary is produced by accel_sampler.py"
 )
-def test_teardown_says_so_when_the_record_cannot_be_kept(tmp_path: Path) -> None:
+def test_teardown_says_where_the_record_is_when_it_cannot_be_copied(
+    tmp_path: Path,
+) -> None:
     """A read-only /out is normal for `exec` on a rootless Apptainer run.
 
-    It must not fail teardown, and it must not be silent either — a missing artifact that
-    nothing mentions reads as a clean run.
+    It must not fail teardown, and now that the record is dumped to stderr regardless, the line
+    should say where the record *is* rather than only what did not happen.
     """
     proc, _ = _teardown_with_samples(tmp_path, tmp_path / "does-not-exist")
     assert proc.returncode == 0, proc.stderr
     assert "transitions: gpu-partial -> cpu" in proc.stderr
-    assert "accelerator record not kept" in proc.stderr
-    assert "BAMBOO_KEEP_WORK=1" in proc.stderr
+    assert "| 0\tgpu-partial\t100\t80" in proc.stderr, "the record must still be dumped"
+    assert "accelerator record is in this log only" in proc.stderr

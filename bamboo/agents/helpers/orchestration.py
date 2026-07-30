@@ -36,6 +36,11 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
+# Stands in for a path when parsing LLM-generated code: ast.parse otherwise labels any
+# tokeniser SyntaxWarning `<unknown>:<lineno>`, which says neither which source it was nor
+# that the source was generated at all.
+_GENERATED_CODE_FILENAME = "<orchestration-code>"
+
 
 # Restricted builtins exposed to LLM-generated orchestration code. Same set as
 # the ContextEnricher path used historically — intentionally small to make
@@ -269,7 +274,10 @@ def _referenced_tool_names(code: str) -> frozenset[str] | None:
     that a call-only match would miss.
     """
     try:
-        tree = ast.parse(code)
+        # filename= so a SyntaxWarning in generated code (a `"\d"` regex the model forgot to
+        # make raw) is attributed, instead of arriving as `<unknown>:<lineno>` which names
+        # neither a file nor the fact that it is LLM output.
+        tree = ast.parse(code, filename=_GENERATED_CODE_FILENAME)
     except SyntaxError:
         return None
     names: set[str] = set()
