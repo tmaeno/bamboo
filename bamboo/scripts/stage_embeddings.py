@@ -29,6 +29,7 @@ import sys
 
 import click
 
+from bamboo.utils.console import echo
 from bamboo.utils.logging import setup_logging
 
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -143,11 +144,11 @@ def main(model, out_dir):
     out = os.path.abspath(_resolve_out(out_dir))
     os.makedirs(out, exist_ok=True)
 
-    click.echo(f"[stage-embeddings] warming '{model}' into {out}")
+    echo(f"[stage-embeddings] warming '{model}' into {out}")
     try:
         _warm(model, out, "SentenceTransformer")
         if reranker:
-            click.echo(f"[stage-embeddings] warming reranker '{reranker}' into {out}")
+            echo(f"[stage-embeddings] warming reranker '{reranker}' into {out}")
             _warm(reranker, out, "CrossEncoder")
     except FileNotFoundError as exc:
         raise click.ClickException(
@@ -169,7 +170,7 @@ def main(model, out_dir):
         fh.write("\n")
 
     staged = f"'{model}'" + (f" + reranker '{reranker}'" if reranker else "")
-    click.echo(f"[stage-embeddings] ✓ {staged} staged to {out}")
+    echo(f"[stage-embeddings] ✓ {staged} staged to {out}")
 
 
 if __name__ == "__main__":

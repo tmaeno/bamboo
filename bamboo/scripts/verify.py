@@ -12,16 +12,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from bamboo.utils.console import echo
+
 
 def _ok(msg: str) -> bool:
-    print(f"  ✓ {msg}")
+    echo(f"  ✓ {msg}")
     return True
 
 
 def _fail(msg: str, hint: str = "") -> bool:
-    print(f"  ✗ {msg}")
+    echo(f"  ✗ {msg}")
     if hint:
-        print(f"    → {hint}")
+        echo(f"    → {hint}")
     return False
 
 
@@ -31,7 +33,7 @@ def _fail(msg: str, hint: str = "") -> bool:
 
 
 def check_python_version() -> bool:
-    print("Python version")
+    echo("Python version")
     v = sys.version_info
     label = f"Python {v.major}.{v.minor}.{v.micro}"
     if (v.major, v.minor) >= (3, 10):
@@ -40,7 +42,7 @@ def check_python_version() -> bool:
 
 
 def check_package_importable() -> bool:
-    print("Package import")
+    echo("Package import")
     try:
         import bamboo  # noqa: F401
 
@@ -50,7 +52,7 @@ def check_package_importable() -> bool:
 
 
 def check_submodule_imports() -> bool:
-    print("Sub-module imports")
+    echo("Sub-module imports")
     modules = [
         "bamboo.config",
         "bamboo.cli",
@@ -83,7 +85,7 @@ def check_submodule_imports() -> bool:
 
 
 def check_cli_entry_points() -> bool:
-    print("CLI entry points")
+    echo("CLI entry points")
     ok = True
     for args in (
         ["bamboo", "--help"],
@@ -110,7 +112,7 @@ def check_cli_entry_points() -> bool:
 
 
 def check_key_dependencies() -> bool:
-    print("Key dependencies")
+    echo("Key dependencies")
     deps = [
         ("langchain_core", "langchain-core"),
         ("langgraph", "langgraph"),
@@ -209,7 +211,7 @@ def check_llm_roundtrip() -> bool:
     Behind ``bamboo verify --llm`` because a cold local model can take minutes to
     load into VRAM, and the default ``bamboo verify`` must stay fast.
     """
-    print("Real LLM round-trip (--llm)")
+    echo("Real LLM round-trip (--llm)")
 
     try:
         from langchain_core.messages import HumanMessage
@@ -221,7 +223,7 @@ def check_llm_roundtrip() -> bool:
     except Exception as exc:
         return _fail(f"could not load the LLM client: {type(exc).__name__}: {exc}")
 
-    print(f"  … calling {s.llm_provider}/{s.llm_model} at {llm_endpoint(s)} (may be slow on a cold model)")
+    echo(f"  … calling {s.llm_provider}/{s.llm_model} at {llm_endpoint(s)} (may be slow on a cold model)")
     try:
         response = get_extraction_llm().invoke([HumanMessage(content="Reply with the word: ok")])
     except Exception as exc:
@@ -240,7 +242,7 @@ def check_llm_roundtrip() -> bool:
 
 
 def check_api_keys() -> bool:
-    print("API keys / settings")
+    echo("API keys / settings")
 
     from bamboo.config import _find_env_file
 
@@ -357,7 +359,7 @@ def check_api_keys() -> bool:
 
 def check_database_connections() -> bool:
     """Connect to Neo4j and Qdrant, creating the vector collection if absent."""
-    print("Database connections")
+    echo("Database connections")
 
     async def _probe():
         from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -503,7 +505,7 @@ def check_tls_trust_store() -> bool:
     is no longer fatal and this check no longer mutates ``os.environ`` or ``.env``
     (which previously leaked a host-specific ``SSL_CERT_FILE`` into containers).
     """
-    print("TLS trust store")
+    echo("TLS trust store")
 
     n = _ca_cert_count()
     if n > 0:
@@ -526,7 +528,7 @@ def check_tls_trust_store() -> bool:
 
 def check_completion_scripts() -> bool:
     """Regenerate zsh/bash completion scripts from the Click CLI if out of date."""
-    print("Shell completion scripts")
+    echo("Shell completion scripts")
     try:
         from click.shell_completion import BashComplete, ZshComplete
         from bamboo.cli import cli
@@ -550,7 +552,7 @@ def check_completion_scripts() -> bool:
                 updated.append(filename)
 
         if updated:
-            print(f"    → Commit the updated file(s): {', '.join(updated)}")
+            echo(f"    → Commit the updated file(s): {', '.join(updated)}")
         return True
     except Exception as exc:
         return _fail(f"could not generate completion scripts: {exc}")
@@ -562,9 +564,9 @@ def check_completion_scripts() -> bool:
 
 
 def main(check_llm: bool = False) -> int:
-    print("=" * 70)
-    print("Bamboo Installation Verification")
-    print("=" * 70)
+    echo("=" * 70)
+    echo("Bamboo Installation Verification")
+    echo("=" * 70)
 
     sections = [
         check_python_version,
@@ -582,26 +584,26 @@ def main(check_llm: bool = False) -> int:
 
     results = []
     for fn in sections:
-        print(f"\n[{fn.__name__.replace('check_', '').replace('_', ' ').title()}]")
+        echo(f"\n[{fn.__name__.replace('check_', '').replace('_', ' ').title()}]")
         results.append(fn())
 
-    print("\n" + "=" * 70)
+    echo("\n" + "=" * 70)
     passed = sum(results)
     total = len(results)
 
     if passed == total:
-        print(f"✓ All {total} checks passed — Bamboo is ready to use!")
-        print()
-        print("Next steps:")
-        print("  bamboo populate --task-id <id>   # ingest your first task")
-        print("  bamboo interactive               # start the reasoning session")
-        print()
-        print("Full guide: docs/QUICKSTART.md  (in the project source)")
+        echo(f"✓ All {total} checks passed — Bamboo is ready to use!")
+        echo()
+        echo("Next steps:")
+        echo("  bamboo populate --task-id <id>   # ingest your first task")
+        echo("  bamboo interactive               # start the reasoning session")
+        echo()
+        echo("Full guide: docs/QUICKSTART.md  (in the project source)")
         return 0
     else:
-        print(f"✗ {total - passed} check(s) failed  ({passed}/{total} passed)")
-        print()
-        print("Fix the issues above, then re-run: bamboo verify")
+        echo(f"✗ {total - passed} check(s) failed  ({passed}/{total} passed)")
+        echo()
+        echo("Fix the issues above, then re-run: bamboo verify")
         return 1
 
 

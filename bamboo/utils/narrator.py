@@ -50,10 +50,12 @@ from contextvars import ContextVar, Token
 from typing import Callable, Generator
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.highlighter import RegexHighlighter
 from rich.theme import Theme
+
+from bamboo.utils.console import panel_for, plain_output
+from bamboo.utils.logging import LOG_FORMAT, _AsciiFormatter
 
 _console: ContextVar[Console | None] = ContextVar("narrator_console", default=None)
 _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
@@ -66,7 +68,17 @@ _verbose: ContextVar[bool] = ContextVar("narrator_verbose", default=False)
 # detail kept out of chat); untagged records are ordinary progress lines.
 _NARRATION_LOGGER = logging.getLogger("bamboo.narration")
 
-_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+def _not_narration_block(record: logging.LogRecord) -> bool:
+    """Drop ``show_block`` records — the console gets them as a panel instead.
+
+    In plain (non-terminal) mode the narration logger propagates to this handler, so
+    without this filter a verbose detail block would appear twice: once as the raw
+    ``[title]\\n<body>`` record and once as the panel :func:`show_block` renders.
+    Handlers attached directly to ``bamboo.narration`` (e.g. Mattermost) are
+    unaffected.
+    """
+    return getattr(record, "narration_kind", None) != "block"
 
 
 class _ConsoleLogHandler(logging.Handler):
@@ -80,11 +92,23 @@ class _ConsoleLogHandler(logging.Handler):
     def __init__(self, console: Console) -> None:
         super().__init__()
         self._console = console
-        self.setFormatter(logging.Formatter(_LOG_FORMAT))
+        self.setFormatter(_AsciiFormatter(LOG_FORMAT, console=console))
+        self.addFilter(_not_narration_block)
+        # Plain mode only: a log record must stay one line. Without soft_wrap Rich
+        # word-wraps at the console width — 80 on a non-TTY, since a batch job has no
+        # COLUMNS — which splits messages mid-sentence and makes the job log
+        # ungreppable. On a terminal we keep Rich's wrapping, which coordinates with
+        # the live thinking() spinner region.
+        self._soft_wrap = plain_output(console)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._console.print(self.format(record), markup=False, highlight=False)
+            self._console.print(
+                self.format(record),
+                markup=False,
+                highlight=False,
+                soft_wrap=self._soft_wrap,
+            )
         except Exception:  # noqa: BLE001
             self.handleError(record)
 
@@ -130,14 +154,23 @@ def set_narrator(console: Console, verbose: bool = False) -> Token:
     previous state with ``_console.reset(token)`` if needed.
     """
     _verbose.set(verbose)
-    custom_theme = Theme({"custom.number": "bold magenta", "custom.string": "bold green"})
-    console.highlighter = CustomHighlighter()
-    console.push_theme(custom_theme)
-    # The Rich console is now the renderer for narration on this (CLI) process,
-    # so keep the narration logger from *also* echoing to the root stdout handler
-    # (which would double every line). The bot never sets a console, so there the
+    plain = plain_output(console)
+    if not plain:
+        # Colour and number/string highlighting are for a terminal; in a job log the
+        # markup is dead weight (Rich drops the ANSI anyway).
+        custom_theme = Theme(
+            {"custom.number": "bold magenta", "custom.string": "bold green"}
+        )
+        console.highlighter = CustomHighlighter()
+        console.push_theme(custom_theme)
+    # On a terminal the Rich console renders narration directly (see say()), so keep
+    # the narration logger from *also* echoing to the root handler — that would double
+    # every line. In plain mode we do the opposite: suppress the direct print and let
+    # the record flow to the root handler, so narration comes out in the same
+    # "asctime - name - LEVEL - message" shape as every other log line and the job log
+    # is one uniform, greppable stream. The bot never sets a console, so there the
     # narration logger keeps propagating (→ server console) + its MM handler.
-    _NARRATION_LOGGER.propagate = False
+    _NARRATION_LOGGER.propagate = plain
     # Route module logging through this Console too, so log lines coordinate with
     # the live thinking() spinner instead of corrupting it (raw stdout doesn't).
     _route_logging_through_console(console)
@@ -166,7 +199,10 @@ def say(msg: str, *, level: int = logging.INFO, kind: str | None = None) -> None
     _NARRATION_LOGGER.log(level, "%s", msg, extra=extra)
     if _verbose.get():
         c = _console.get()
-        if c is not None:
+        # In plain mode the record already reached the root handler by propagation
+        # (see set_narrator), formatted like every other log line — printing here too
+        # would duplicate it in a shape that doesn't match its neighbours.
+        if c is not None and not plain_output(c):
             prefix = "[yellow]  ⚠[/yellow]" if level >= logging.WARNING else "[dim cyan]  →[/dim cyan]"
             c.print(f"{prefix} {msg}")
 
@@ -221,8 +257,13 @@ def show_block(title: str, content: str, max_lines: int = 60) -> None:
         )
     else:
         body = "\n".join(lines)
+    # panel_for transliterates the body/title and picks an ASCII box in plain mode.
+    # It has to happen before construction: Rich measures the text it is given, so
+    # substituting afterwards would shift the panel's right border.
     c.print(
-        Panel(body, title=f"[bold cyan]{title}[/bold cyan]", border_style="dim cyan")
+        panel_for(
+            c, body, title=f"[bold cyan]{title}[/bold cyan]", border_style="dim cyan"
+        )
     )
 
 
@@ -237,7 +278,7 @@ def thinking(msg: str) -> Generator[None, None, None]:
     The label is prefixed with the caller's module name, e.g.
     ``[knowledge_accumulator] Summarizing the graph…``
 
-    No-op when no narrator console is active.
+    No-op when no narrator console is active, or in plain mode.
     """
     global _progress, _progress_ref_count
 
@@ -249,7 +290,10 @@ def thinking(msg: str) -> Generator[None, None, None]:
     _NARRATION_LOGGER.info("[%s] %s", module_name, msg, extra={"narration_kind": "step"})
 
     c = _console.get()
-    if c is None:
+    # A spinner is meaningless in a log file: Rich's transient Live renders nothing on
+    # a non-TTY except one stray blank line per call. The step record above already
+    # says what is happening, so skip the display entirely.
+    if c is None or plain_output(c):
         yield
         return
 
@@ -290,7 +334,8 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
                 process(node)
                 advance()
 
-    No-op (yields a no-op callable) when no narrator console is active.
+    Yields a log-only ``advance()`` when no narrator console is active, or in plain
+    mode (see :func:`thinking` for why the display is skipped there).
     """
     global _progress, _progress_ref_count
 
@@ -307,7 +352,7 @@ def counting(msg: str, total: int) -> Generator[Callable[[], None], None, None]:
     _emit_step(0)
 
     c = _console.get()
-    if c is None:
+    if c is None or plain_output(c):
         # No Rich progress bar, but still emit step records as work advances.
         def advance_log() -> None:
             nonlocal done

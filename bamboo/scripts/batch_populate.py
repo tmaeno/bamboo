@@ -29,12 +29,12 @@ from pathlib import Path
 from typing import Any
 
 import click
-from rich.console import Console
-from rich.table import Table
+
+from bamboo.utils.console import make_console, table_for
 
 from bamboo.utils.logging import setup_logging
 
-console = Console()
+console = make_console()
 logger = logging.getLogger(__name__)
 
 
@@ -278,7 +278,7 @@ async def _run(
         await qdrant.close()
 
     # Summary table
-    table = Table(title="batch-populate summary")
+    table = table_for(console, title="batch-populate summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Count", justify="right")
     table.add_row("Tasks populated", str(n_populated))

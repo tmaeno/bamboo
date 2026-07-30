@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from bamboo.models.knowledge_entity import ExtractedKnowledge
+from bamboo.utils.console import echo
 
 
 def print_extraction_result(result: ExtractedKnowledge, verbose: bool, dry_run: bool) -> None:
@@ -19,24 +20,24 @@ def print_extraction_result(result: ExtractedKnowledge, verbose: bool, dry_run: 
                   and full relationship list.
         dry_run:  When ``True``, add a footer note that nothing was written.
     """
-    click.echo("\n" + "=" * 70)
-    click.echo("EXTRACTION PREVIEW" if dry_run else "EXTRACTION RESULT")
-    click.echo("=" * 70)
-    click.echo(f"\nNodes:         {len(result.graph.nodes)}")
-    click.echo(f"Relationships: {len(result.graph.relationships)}")
+    echo("\n" + "=" * 70)
+    echo("EXTRACTION PREVIEW" if dry_run else "EXTRACTION RESULT")
+    echo("=" * 70)
+    echo(f"\nNodes:         {len(result.graph.nodes)}")
+    echo(f"Relationships: {len(result.graph.relationships)}")
 
     type_counts = Counter(n.node_type.value for n in result.graph.nodes)
-    click.echo("\nNode types:")
+    echo("\nNode types:")
     for node_type, count in sorted(type_counts.items()):
-        click.echo(f"  {node_type:<30} {count}")
+        echo(f"  {node_type:<30} {count}")
 
     rel_counts = Counter(r.relation_type.value for r in result.graph.relationships)
-    click.echo("\nRelationship types:")
+    echo("\nRelationship types:")
     for rel_type, count in sorted(rel_counts.items()):
-        click.echo(f"  {rel_type:<30} {count}")
+        echo(f"  {rel_type:<30} {count}")
 
     if verbose:
-        click.echo("\n--- Node details ---")
+        echo("\n--- Node details ---")
 
         connected_names: set[str] = set()
         for r in result.graph.relationships:
@@ -60,26 +61,26 @@ def print_extraction_result(result: ExtractedKnowledge, verbose: bool, dry_run: 
             return extras
 
         def _print_connected_node(n) -> None:
-            click.echo(f"  • {n.name}")
+            echo(f"  • {n.name}")
             if n.description:
                 desc = n.description.replace("\n", " ")
                 if len(desc) > 120:
                     desc = desc[:117] + "..."
-                click.echo(f"    {desc}")
+                echo(f"    {desc}")
             extras = _node_extras(n)
             if extras:
-                click.echo("    " + "  ".join(f"{k}={v}" for k, v in extras.items()))
+                echo("    " + "  ".join(f"{k}={v}" for k, v in extras.items()))
 
         def _print_isolated_node(n) -> None:
-            click.echo(click.style(f"  • {n.name}", fg="bright_black"))
+            echo(click.style(f"  • {n.name}", fg="bright_black"))
             if n.description:
                 desc = n.description.replace("\n", " ")
                 if len(desc) > 120:
                     desc = desc[:117] + "..."
-                click.echo(click.style(f"    {desc}", fg="bright_black"))
+                echo(click.style(f"    {desc}", fg="bright_black"))
             extras = _node_extras(n)
             if extras:
-                click.echo(click.style(
+                echo(click.style(
                     "    " + "  ".join(f"{k}={v}" for k, v in extras.items()),
                     fg="bright_black",
                 ))
@@ -91,28 +92,28 @@ def print_extraction_result(result: ExtractedKnowledge, verbose: bool, dry_run: 
             nodes = nodes_by_type[type_name]
             connected = [n for n in nodes if n.name in connected_names]
             isolated = [n for n in nodes if n.name not in connected_names]
-            click.echo(f"\n[{type_name}]")
+            echo(f"\n[{type_name}]")
             if connected:
-                click.echo("  connected:")
+                echo("  connected:")
                 for n in connected:
                     _print_connected_node(n)
             if isolated:
-                click.echo(click.style("  isolated:", fg="bright_black"))
+                echo(click.style("  isolated:", fg="bright_black"))
                 for n in isolated:
                     _print_isolated_node(n)
 
-        click.echo("\n--- Relationships ---")
+        echo("\n--- Relationships ---")
         for r in sorted(
             result.graph.relationships,
             key=lambda r: (r.relation_type.value, r.source_id),
         ):
             conf = f"  [{r.confidence:.2f}]" if r.confidence != 1.0 else ""
-            click.echo(f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}")
+            echo(f"  {r.source_id}  -[{r.relation_type.value}]->  {r.target_id}{conf}")
 
-    click.echo(f"\nSummary:\n{result.summary}")
-    click.echo("\n" + "=" * 70)
+    echo(f"\nSummary:\n{result.summary}")
+    echo("\n" + "=" * 70)
     if dry_run:
-        click.echo("Nothing was written to Neo4j or Qdrant.")
+        echo("Nothing was written to Neo4j or Qdrant.")
 
 
 def save_graph_json(result: ExtractedKnowledge, output: str) -> None:
@@ -146,4 +147,4 @@ def save_graph_json(result: ExtractedKnowledge, output: str) -> None:
         ],
     }
     Path(output).write_text(json.dumps(graph_json, indent=2, default=str))
-    click.echo(f"\n✓ Graph preview saved to {output}")
+    echo(f"\n✓ Graph preview saved to {output}")

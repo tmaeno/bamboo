@@ -9,12 +9,48 @@ Third-party libraries that are excessively verbose at INFO level are clamped:
 - ``transformers``, ``sentence_transformers`` → ERROR  (suppresses the
   harmless "LOAD REPORT / embeddings.position_ids UNEXPECTED" noise emitted
   by transformers 5.x on every model load)
+
+Records are formatted by :class:`_AsciiFormatter`, which transliterates decorative
+non-ASCII to ASCII when output is not a terminal — see :mod:`bamboo.utils.console`
+for why. Since every ``logger.*`` call *and* (in plain mode) every ``narrator.say``
+lands here, this is the one place that has to know about it.
 """
 
 import logging
 import sys
 
 from bamboo.config import get_settings
+from bamboo.utils.console import plain_output, to_ascii
+
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+
+class _AsciiFormatter(logging.Formatter):
+    """Format records, transliterating decorative non-ASCII when output is plain.
+
+    Bamboo's own log/narration messages are peppered with ``—``, ``→``, ``…`` and
+    friends, which turn into mojibake in a scheduler-captured job log (see
+    :mod:`bamboo.utils.console`). Doing the substitution here rather than at the
+    hundreds of ``logger.*`` / ``say`` call sites keeps the terminal experience
+    untouched and needs no per-site edits.
+
+    *console*, when given, decides the mode (``not console.is_terminal``); without one
+    the process' ``sys.stdout`` is used. Never raises — a formatting failure must not
+    break logging.
+    """
+
+    def __init__(self, fmt: str | None = None, console=None) -> None:
+        super().__init__(fmt or LOG_FORMAT)
+        self._console = console
+
+    def format(self, record: logging.LogRecord) -> str:
+        formatted = super().format(record)
+        try:
+            if plain_output(self._console):
+                return to_ascii(formatted)
+        except Exception:  # noqa: BLE001 — never break logging
+            pass
+        return formatted
 
 
 class _Neo4jNotificationFilter(logging.Filter):
@@ -82,10 +118,11 @@ def setup_logging() -> None:
     """
     settings = get_settings()
 
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_AsciiFormatter(LOG_FORMAT))
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[handler],
     )
 
     # Suppress chatty third-party loggers.

@@ -17,10 +17,16 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.table import Table
 from rich.text import Text
 
 from bamboo.frontends.base import Column, InteractionIO
+from bamboo.utils.console import (
+    make_console,
+    maybe_ascii,
+    panel_for,
+    plain_output,
+    table_for,
+)
 from bamboo.utils import narrator
 from bamboo.utils.prompts import ask as _ask, confirm as _confirm
 
@@ -137,7 +143,7 @@ class CliInteractionIO(InteractionIO):
     """Rich-terminal frontend.  Wraps a :class:`rich.console.Console`."""
 
     def __init__(self, console: Console | None = None) -> None:
-        self.console = console or Console()
+        self.console = console or make_console()
 
     @property
     def supports_interaction(self) -> bool:
@@ -267,22 +273,21 @@ class CliInteractionIO(InteractionIO):
             kwargs["title"] = title
         if style is not None:
             kwargs["border_style"] = style
-        panel = Panel.fit(body, **kwargs) if fit else Panel(body, **kwargs)
-        self.console.print(panel)
+        self.console.print(panel_for(self.console, body, fit=fit, **kwargs))
 
     def code(self, code: str, *, lang: str = "python") -> None:
         self.console.print(Syntax(code, lang, theme="monokai", line_numbers=False))
 
     def table(self, *, title: str, columns: list[Column], rows: list[list[str]]) -> None:
-        table = Table(title=title)
+        table = table_for(self.console, title=title)
         for col in columns:
             table.add_column(col.header, justify=col.justify)
         for row in rows:
-            table.add_row(*row)
+            table.add_row(*(maybe_ascii(cell, self.console) for cell in row))
         self.console.print(table)
 
     def result(self, summary: str, *, title: str | None = None) -> None:
-        self.console.print(Panel(summary, title=title))
+        self.console.print(panel_for(self.console, summary, title=title))
 
     def diff(
         self,
@@ -293,8 +298,9 @@ class CliInteractionIO(InteractionIO):
     ) -> None:
         # The terminal frontend renders the node table; *edges* (used for the
         # Mattermost Mermaid diagram) are not shown here.
-        table = Table(
-            title=f"commit diff ({len(rows)} node(s), {edge_count} relationship(s))"
+        table = table_for(
+            self.console,
+            title=f"commit diff ({len(rows)} node(s), {edge_count} relationship(s))",
         )
         table.add_column("type")
         table.add_column("name")
@@ -318,13 +324,18 @@ class CliInteractionIO(InteractionIO):
     async def detail_stream(self, *, title: str):
         """Stream a turn's verbose detail into a transient Rich ``Live`` panel.
 
-        Active only when verbose (the same flag :func:`narrator.say` uses) and when
-        no :func:`narrator.thinking` spinner is already live (Rich allows only one
-        ``Live`` per console). Otherwise yields the inactive no-op sink so the
-        caller skips the slower streaming path. The panel is transient — it
+        Active only when verbose (the same flag :func:`narrator.say` uses), on a
+        terminal (a transient ``Live`` renders nothing but a stray blank line in a job
+        log), and when no :func:`narrator.thinking` spinner is already live (Rich
+        allows only one ``Live`` per console). Otherwise yields the inactive no-op sink
+        so the caller skips the slower streaming path. The panel is transient — it
         vanishes on exit, leaving the persistent ``→ intent``/``→ strategy`` lines.
         """
-        if not narrator.is_verbose() or narrator._progress is not None:
+        if (
+            not narrator.is_verbose()
+            or plain_output(self.console)
+            or narrator._progress is not None
+        ):
             async with super().detail_stream(title=title) as sink:
                 yield sink
             return

@@ -25,12 +25,11 @@ from pathlib import Path
 from typing import Any
 
 import click
-from rich.console import Console
-from rich.table import Table
 
+from bamboo.utils.console import make_console, table_for
 from bamboo.utils.logging import setup_logging
 
-console = Console()
+console = make_console()
 logger = logging.getLogger(__name__)
 
 _FEATURE_DIFF_FIELDS = ["taskType", "prodSourceLabel", "site", "coreCount", "splitRule"]
@@ -496,7 +495,7 @@ async def _run(
         n_new_drafts += 1
 
     # -- Summary ----------------------------------------------------------
-    table = Table(title="seed-drafts summary")
+    table = table_for(console, title="seed-drafts summary")
     table.add_column("Category", style="cyan")
     table.add_column("Tasks", justify="right")
     table.add_column("Draft files", justify="right")

@@ -19,6 +19,7 @@ from pathlib import Path
 import click
 
 from bamboo.agents.investigation_session import InvestigationOrchestrator
+from bamboo.utils.console import echo
 from bamboo.utils.logging import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ def main(
         logging.getLogger("bamboo").setLevel(logging.DEBUG)
 
     if task_id is None and task_data is None and symptom is None and resume is None:
-        click.echo(
+        echo(
             "Need one of: --task-id, --task-data, --symptom, or --resume.",
             err=True,
         )
@@ -143,15 +144,14 @@ async def _run(
     allow_mutating_autorun: bool = False,
 ) -> None:
     # Local imports keep module load fast for `bamboo --help`.
-    from rich.console import Console
-
     from bamboo.agents.helpers.deps import build_deps
     from bamboo.frontends.cli import CliInteractionIO
+    from bamboo.utils.console import make_console
     from bamboo.utils.narrator import set_narrator
 
     # Build the terminal IO up front so the shared factory can route interactive
     # MCP tools (e.g. request_human_input) through it, and the orchestrator reuses it.
-    console = Console()
+    console = make_console()
     # Wire the narrator on the SAME console so say()'s "→" lines render and the
     # thinking() spinner coordinates with the IO's prompts/panels — the setup every
     # other CLI command does (e.g. analyze). Without it investigate shows no narration.
@@ -188,7 +188,7 @@ async def _run(
 
         blob = json.loads(resume_from.read_text())
         orch.session = InvestigationSession.model_validate(blob)
-        click.echo(f"Resumed session {orch.session.session_id} at turn {orch.session.turn}.")
+        echo(f"Resumed session {orch.session.session_id} at turn {orch.session.turn}.")
         # Re-build tool registry without re-running start().
         await orch._build_tool_registry()
     else:
@@ -197,7 +197,7 @@ async def _run(
     try:
         await orch.run()
     except KeyboardInterrupt:
-        click.echo("\nInterrupted; session saved.")
+        echo("\nInterrupted; session saved.")
     try:
         await orch.finalize()
     finally:

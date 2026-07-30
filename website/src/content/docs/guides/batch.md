@@ -319,6 +319,29 @@ suffix — so the paths are exported (and written to the state file) rather than
 `BAMBOO_KEEP_WORK=1` the only window on a service log is the 60-line tail the entrypoint dumps when a
 readiness probe fails. Set it whenever you are diagnosing a service rather than a task.
 
+#### Reading the job log
+
+`bamboo`'s own output adapts to where it is going. On a terminal you get colour, rounded panel
+borders, spinners and glyphs like `✓ → …`. When stdout is **not** a terminal — which is always the
+case for a scheduler-captured job log — it switches to **plain mode**:
+
+- **ASCII only.** Panels and tables are drawn with `+ - |`, and decorative glyphs are transliterated
+  (`✓` → `OK`, `→` → `->`, `—` → `-`). The file is still UTF-8, but many job-log viewers decode it as
+  cp1252, which turns every multi-byte glyph into mojibake (`╭─` → `â•­â”€`). Staying inside ASCII
+  sidesteps that entirely.
+- **One record per line.** Log lines are not word-wrapped, so a message is never split mid-sentence.
+- **120 columns, not 80.** `--cleanenv` strips `COLUMNS`, so Rich would otherwise fall back to 80 and
+  wrap the *content* of every panel and table. `BAMBOO_CONSOLE_WIDTH` overrides the default;
+  `COLUMNS` is honoured if set and `BAMBOO_CONSOLE_WIDTH` is not.
+- **One uniform stream.** Progress narration is emitted in the same
+  `asctime - name - LEVEL - message` shape as ordinary log records instead of as bare `→ …` lines,
+  so the whole log is greppable and filterable by level. This also means narration appears without
+  `-v`; `LOG_LEVEL` is the volume control.
+- Spinners are skipped — they render nothing useful in a file.
+
+`BAMBOO_PLAIN_OUTPUT=1` forces plain mode on a terminal (handy for reproducing what a job log will
+look like); `BAMBOO_PLAIN_OUTPUT=0` forces the rich rendering even when redirected.
+
 ### Portable mode: injecting runtime config
 
 The same image doubles as a portable execution environment: mount your own `.env` at `/app/.env`

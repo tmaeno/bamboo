@@ -24,6 +24,7 @@ import time
 
 import click
 
+from bamboo.utils.console import echo
 from bamboo.utils.logging import setup_logging
 
 DEFAULT_MODEL = "qwen3.6"
@@ -175,7 +176,7 @@ def main(model, out_dir):
     out = os.path.abspath(_resolve_out(out_dir))
     os.makedirs(out, exist_ok=True)
 
-    click.echo(f"[stage-model] pulling '{model}' into {out}")
+    echo(f"[stage-model] pulling '{model}' into {out}")
     try:
         if shutil.which("ollama"):
             _pull_with_local_ollama(model, out)
@@ -197,7 +198,7 @@ def main(model, out_dir):
         json.dump({"llm_model": model}, fh, indent=2)
         fh.write("\n")
 
-    click.echo(f"[stage-model] ✓ '{model}' staged to {out}")
+    echo(f"[stage-model] ✓ '{model}' staged to {out}")
 
 
 if __name__ == "__main__":

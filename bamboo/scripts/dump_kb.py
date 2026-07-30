@@ -30,11 +30,11 @@ import sys
 from pathlib import Path
 
 import click
-from rich.console import Console
 
+from bamboo.utils.console import make_console
 from bamboo.utils.logging import setup_logging
 
-console = Console()
+console = make_console()
 
 
 async def _neo4j_version(settings) -> str:

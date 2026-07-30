@@ -11,6 +11,7 @@ import click
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.database.vector_database_client import VectorDatabaseClient
+from bamboo.utils.console import echo
 from bamboo.utils.logging import setup_logging
 
 
@@ -119,7 +120,7 @@ def main(
     if rebuild_docs:
         from bamboo.agents.panda_doc_navigator import invalidate_doc_cache  # noqa: PLC0415
         deleted = asyncio.run(invalidate_doc_cache())
-        click.echo(
+        echo(
             "✓ Doc index cache cleared — will rebuild on next use." if deleted
             else "Doc index cache was already empty."
         )
@@ -162,11 +163,10 @@ async def _run_populate(
     verbose=False,
 ):
     """Core populate / dry-run logic."""
-    from rich.console import Console
-
+    from bamboo.utils.console import make_console
     from bamboo.utils.narrator import set_narrator
 
-    set_narrator(Console(), verbose=verbose)
+    set_narrator(make_console(), verbose=verbose)
 
     if task_id is not None:
         from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
@@ -174,7 +174,7 @@ async def _run_populate(
         try:
             task_dict = await resolve_task_data(task_id)
         except Exception as e:
-            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
+            echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
     from bamboo.agents.context_enricher import ContextEnricher
@@ -211,7 +211,7 @@ async def _run_populate(
         )
 
         msg = "Extracting knowledge (dry-run — nothing will be written)..." if dry_run else "Extracting knowledge..."
-        click.echo(msg)
+        echo(msg)
 
         result = await agent.process_knowledge(
             email_text=email_text,
@@ -226,13 +226,13 @@ async def _run_populate(
             from bamboo.utils.display import print_extraction_result  # noqa: PLC0415
             print_extraction_result(result, verbose=verbose, dry_run=dry_run)
         else:
-            click.echo("\n✓ Knowledge extracted and stored successfully!")
-            click.echo(f"\nSummary:\n{result.summary}")
-            click.echo(f"\nNodes: {len(result.graph.nodes)}")
-            click.echo(f"Relationships: {len(result.graph.relationships)}")
+            echo("\n✓ Knowledge extracted and stored successfully!")
+            echo(f"\nSummary:\n{result.summary}")
+            echo(f"\nNodes: {len(result.graph.nodes)}")
+            echo(f"Relationships: {len(result.graph.relationships)}")
 
         if require_procedures and not result.stored:
-            click.echo(
+            echo(
                 "\n⚠  No Procedure nodes — graph not stored (--require-procedures).",
                 err=True,
             )
@@ -246,11 +246,11 @@ async def _run_populate(
             Path(debug_report).write_text(
                 json.dumps(debug_trace, indent=2, default=str)
             )
-            click.echo(f"\n✓ Debug report saved to {debug_report}")
+            echo(f"\n✓ Debug report saved to {debug_report}")
 
     except Exception as e:
-        click.echo(f"\nError: {e}", err=True)
-        click.echo("\n--- Traceback ---", err=True)
+        echo(f"\nError: {e}", err=True)
+        echo("\n--- Traceback ---", err=True)
         traceback.print_exc()
         sys.exit(1)
     finally:

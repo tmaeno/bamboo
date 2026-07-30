@@ -11,13 +11,11 @@ import json
 import re
 
 import click
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 
+from bamboo.utils.console import make_console, maybe_ascii, panel_for, table_for
 from bamboo.utils.logging import setup_logging
 
-console = Console()
+console = make_console()
 
 # ---------------------------------------------------------------------------
 # Shell completion — auto-installed on first run
@@ -225,9 +223,11 @@ def interactive():
     """Start interactive mode."""
     _setup_readline()
     console.print(
-        Panel.fit(
+        panel_for(
+            console,
             "[bold blue]Bamboo Interactive Mode[/bold blue]\n"
             "Bolstered Assistance for Managing and Building Operations and Oversight",
+            fit=True,
             border_style="blue",
         )
     )
@@ -455,7 +455,8 @@ async def analyze_task_interactive():
 
         console.print("\n" + "=" * 80)
         console.print(
-            Panel(
+            panel_for(
+                console,
                 f"[bold]Task ID:[/bold] {result.task_id}\n"
                 f"[bold]Root Cause:[/bold] {result.root_cause}\n"
                 f"[bold]Confidence:[/bold] {result.confidence:.2%}\n"
@@ -479,7 +480,7 @@ async def analyze_task_interactive():
 
         console.print("\n" + "-" * 80)
         console.print(
-            Panel(email_content, title="Email Draft", border_style="blue")
+            panel_for(console, email_content, title="Email Draft", border_style="blue")
         )
 
         if _confirm("\nDo you approve this analysis?"):
@@ -558,7 +559,8 @@ async def query_vector_interactive():
             graph_id = metadata.get("graph_id", "—")
 
             console.print(
-                Panel(
+                panel_for(
+                    console,
                     content,
                     title=f"[bold]#{i}  score={score:.3f}  section={section}  graph_id={graph_id}[/bold]",
                     border_style="cyan",
@@ -597,7 +599,7 @@ async def query_knowledge_interactive():
             results = await graph_db.find_causes(task_features=features, limit=10)
 
         if results:
-            table = Table(title="Query Results")
+            table = table_for(console, title="Query Results")
             table.add_column("Cause", style="cyan")
             table.add_column("Description", style="white")
             table.add_column("Frequency", style="green")
@@ -605,8 +607,8 @@ async def query_knowledge_interactive():
 
             for result in results:
                 table.add_row(
-                    result.get("cause_name", ""),
-                    result.get("cause_description", "")[:50] + "...",
+                    maybe_ascii(result.get("cause_name", ""), console),
+                    maybe_ascii(result.get("cause_description", "")[:50] + "...", console),
                     str(result.get("frequency", 0)),
                     f"{result.get('confidence', 0):.2f}",
                 )
@@ -744,11 +746,16 @@ async def preview_log_filter_interactive():
         f"[bold]Reduction:[/bold] {reduction:.0f}%\n"
     )
     console.print(
-        Panel(filtered, title=f"Filtered log [{chosen_filter}]", border_style="green")
+        panel_for(
+            console,
+            filtered,
+            title=f"Filtered log [{chosen_filter}]",
+            border_style="green",
+        )
     )
 
     if _confirm("\nShow raw log?", default=False):
-        console.print(Panel(raw, title="Raw log", border_style="dim"))
+        console.print(panel_for(console, raw, title="Raw log", border_style="dim"))
 
 
 async def fetch_task_data_for_filter(task_id_str: str) -> dict:
@@ -846,7 +853,9 @@ async def check_mcp_servers_interactive():
                 source_map[t.name] = client.name
 
         # Display tools in a Rich table
-        table = Table(title=f"Available tools ({len(tools)})", show_lines=False)
+        table = table_for(
+            console, title=f"Available tools ({len(tools)})", show_lines=False
+        )
         table.add_column("Server", style="dim cyan", no_wrap=True)
         table.add_column("Tool", style="cyan", no_wrap=True)
         table.add_column("Parameters", style="dim")
@@ -856,7 +865,9 @@ async def check_mcp_servers_interactive():
             desc = t.description or ""
             if len(desc) > 70:
                 desc = desc[:67] + "..."
-            table.add_row(source_map.get(t.name, "?"), t.name, params, desc)
+            table.add_row(
+                source_map.get(t.name, "?"), t.name, params, maybe_ascii(desc, console)
+            )
         console.print(table)
 
         # Optionally call a tool

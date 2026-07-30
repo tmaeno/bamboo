@@ -11,6 +11,7 @@ import click
 
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.models.knowledge_entity import AnalysisResult
+from bamboo.utils.console import echo
 from bamboo.utils.logging import setup_logging
 
 
@@ -143,7 +144,7 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
             invalidate_doc_cache,  # noqa: PLC0415
         )
         deleted = asyncio.run(invalidate_doc_cache())
-        click.echo(
+        echo(
             "✓ Doc index cache cleared — will rebuild on next use." if deleted
             else "Doc index cache was already empty."
         )
@@ -171,39 +172,39 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
     )
 
     # Display results
-    click.echo("\n" + "=" * 80)
-    click.echo("TASK ANALYSIS RESULTS")
-    click.echo("=" * 80)
-    click.echo(f"\nTask ID: {result.task_id}")
-    click.echo(f"Root Cause: {result.root_cause}")
-    click.echo(f"Confidence: {result.confidence:.2%}")
-    click.echo(f"\nResolution: {result.resolution}")
-    click.echo(f"\nExplanation:\n{result.explanation}")
+    echo("\n" + "=" * 80)
+    echo("TASK ANALYSIS RESULTS")
+    echo("=" * 80)
+    echo(f"\nTask ID: {result.task_id}")
+    echo(f"Root Cause: {result.root_cause}")
+    echo(f"Confidence: {result.confidence:.2%}")
+    echo(f"\nResolution: {result.resolution}")
+    echo(f"\nExplanation:\n{result.explanation}")
 
     if prescription and prescription.get("hints"):
-        click.echo("\n" + "-" * 80)
-        click.echo("PRESCRIPTION")
-        click.echo("-" * 80)
+        echo("\n" + "-" * 80)
+        echo("PRESCRIPTION")
+        echo("-" * 80)
         for hint in prescription["hints"]:
-            click.echo(f"  • {hint}")
+            echo(f"  • {hint}")
         if prescription.get("command_template"):
-            click.echo(f"\n  Suggested options: {prescription['command_template']}")
+            echo(f"\n  Suggested options: {prescription['command_template']}")
         if prescription.get("notes"):
-            click.echo(f"\n  Notes: {prescription['notes']}")
+            echo(f"\n  Notes: {prescription['notes']}")
 
     if draft_path is not None:
-        click.echo("\n" + "-" * 80)
-        click.echo(f"✓ Novel incident: seed draft written to {draft_path}")
-        click.echo("  Run `bamboo review-drafts` to review and approve before adding to KB.")
-        click.echo("=" * 80)
+        echo("\n" + "-" * 80)
+        echo(f"✓ Novel incident: seed draft written to {draft_path}")
+        echo("  Run `bamboo review-drafts` to review and approve before adding to KB.")
+        echo("=" * 80)
     else:
-        click.echo("\n" + "-" * 80)
-        click.echo("EMAIL DRAFT")
-        click.echo("-" * 80)
-        click.echo(email_content)
-        click.echo("=" * 80)
+        echo("\n" + "-" * 80)
+        echo("EMAIL DRAFT")
+        echo("-" * 80)
+        echo(email_content)
+        echo("=" * 80)
 
-        click.echo("\n")
+        echo("\n")
         feedback = click.prompt(
             "Do you approve this analysis? (yes/no/edit)",
             type=click.Choice(["yes", "no", "edit"]),
@@ -211,28 +212,28 @@ def main(task_data, task_id, external_data, output, compare_task_ids, min_occurr
         )
 
         if feedback == "yes":
-            click.echo("✓ Analysis approved!")
+            echo("✓ Analysis approved!")
         elif feedback == "no":
             reason = click.prompt("Please provide feedback for improvement")
-            click.echo(f"Feedback recorded: {reason}")
+            echo(f"Feedback recorded: {reason}")
         else:
-            click.echo("Please edit the results manually.")
+            echo("Please edit the results manually.")
 
     if output:
         output_path = Path(output)
         if email_content:
             result.email_content = email_content
         output_path.write_text(result.model_dump_json(indent=2))
-        click.echo(f"\n✓ Results saved to {output}")
+        echo(f"\n✓ Results saved to {output}")
 
     if post_to_mattermost:
         from bamboo.frontends.mattermost.poster import post_analysis  # noqa: PLC0415
 
         try:
             asyncio.run(post_analysis(post_to_mattermost, result))
-            click.echo(f"\n✓ Analysis posted to Mattermost channel {post_to_mattermost}")
+            echo(f"\n✓ Analysis posted to Mattermost channel {post_to_mattermost}")
         except Exception as exc:  # noqa: BLE001
-            click.echo(f"\n✗ Failed to post to Mattermost: {exc}", err=True)
+            echo(f"\n✗ Failed to post to Mattermost: {exc}", err=True)
 
     os._exit(0)
 
@@ -252,7 +253,7 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
             try:
                 task_dict = await fetch_task_data(tid)
             except Exception as e:
-                click.echo(f"Warning: could not fetch task {tid}: {e}", err=True)
+                echo(f"Warning: could not fetch task {tid}: {e}", err=True)
                 continue
             status = (task_dict or {}).get("status", "")
             if status:
@@ -260,25 +261,25 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
             else:
                 gid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"graph:{tid}"))
             graph_ids.append(gid)
-            click.echo(f"  Task {tid} (status={status or 'unknown'}) → graph_id {gid}")
+            echo(f"  Task {tid} (status={status or 'unknown'}) → graph_id {gid}")
 
         if len(graph_ids) < 2:
-            click.echo("Need at least 2 resolvable task IDs to compute a pattern.", err=True)
+            echo("Need at least 2 resolvable task IDs to compute a pattern.", err=True)
             return
 
-        click.echo(
+        echo(
             f"\nQuerying common subgraph across {len(graph_ids)} task(s) "
             f"(min_occurrences={min_occurrences})..."
         )
         edges = await graph_db.find_common_pattern(graph_ids, min_occurrences)
 
-        click.echo("\n" + "=" * 70)
-        click.echo("COMMON PATTERN")
-        click.echo("=" * 70)
-        click.echo(f"\nEdges matching threshold: {len(edges)}")
+        echo("\n" + "=" * 70)
+        echo("COMMON PATTERN")
+        echo("=" * 70)
+        echo(f"\nEdges matching threshold: {len(edges)}")
 
         if not edges:
-            click.echo("No common edges found at this threshold.")
+            echo("No common edges found at this threshold.")
             return
 
         from collections import Counter
@@ -290,22 +291,22 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
                     node_types[ntype] += 1
                     seen_nodes.add(name)
 
-        click.echo(f"Distinct nodes: {len(seen_nodes)}")
-        click.echo("\nNode types:")
+        echo(f"Distinct nodes: {len(seen_nodes)}")
+        echo("\nNode types:")
         for ntype, count in sorted(node_types.items()):
-            click.echo(f"  {ntype:<30} {count}")
+            echo(f"  {ntype:<30} {count}")
 
-        click.echo("\nEdges (sorted by occurrence count):")
+        echo("\nEdges (sorted by occurrence count):")
         for e in edges:
             conf = f"  [{e['confidence']:.2f}]" if e["confidence"] != 1.0 else ""
-            click.echo(
+            echo(
                 f"  {e['src_name']}  -[{e['rel_type']}]->  {e['tgt_name']}"
                 f"  (shared by {e['occurrence_count']}/{len(graph_ids)} tasks){conf}"
             )
-        click.echo("\n" + "=" * 70)
+        echo("\n" + "=" * 70)
 
     except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+        echo(f"Error: {e}", err=True)
         sys.exit(1)
     finally:
         await graph_db.close()
@@ -354,11 +355,10 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
     """Run the async reasoning pipeline and return results."""
     import uuid
 
-    from rich.console import Console
-
+    from bamboo.utils.console import make_console
     from bamboo.utils.narrator import set_narrator
 
-    set_narrator(Console(), verbose=verbose)
+    set_narrator(make_console(), verbose=verbose)
 
     if task_id is not None:
         from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
@@ -366,7 +366,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
         try:
             task_dict = await resolve_task_data(task_id)
         except Exception as e:
-            click.echo(f"Error fetching task data from PanDA: {e}", err=True)
+            echo(f"Error fetching task data from PanDA: {e}", err=True)
             sys.exit(1)
 
     from bamboo.agents.helpers.deps import build_deps
@@ -382,7 +382,7 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
 
         debug_trace: dict | None = {} if debug_report else None
 
-        click.echo("Analyzing task...")
+        echo("Analyzing task...")
         result, prescription, email_content, draft_path = await analyze_one(
             deps, task_dict, external_dict, debug_trace=debug_trace, drafts_dir=drafts_dir
         )
@@ -413,14 +413,14 @@ async def _analyze_task(task_dict, task_id, external_dict, verbose=False, debug_
             Path(debug_report).write_text(
                 json.dumps(debug_trace, indent=2, default=str)
             )
-            click.echo(f"\n✓ Debug report saved to {debug_report}")
+            echo(f"\n✓ Debug report saved to {debug_report}")
 
         if draft_path is not None:
-            click.echo("Novel incident — wrote seed draft instead of email.")
+            echo("Novel incident — wrote seed draft instead of email.")
         return result, prescription, email_content, draft_path
 
     except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+        echo(f"Error: {e}", err=True)
         sys.exit(1)
     finally:
         await graph_db.close()

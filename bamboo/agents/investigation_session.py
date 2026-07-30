@@ -62,6 +62,7 @@ from bamboo.agents.helpers.tool_selection import (
     render_tools,
 )
 from bamboo.config import get_settings
+from bamboo.utils.console import make_console
 from bamboo.utils.narrator import say, step
 from bamboo.frontends.base import Card, Column, DetailSink, InteractionIO, ReviewOption
 from bamboo.frontends.cli import CliInteractionIO
@@ -387,7 +388,7 @@ class InvestigationOrchestrator:
         allow_mutating_autorun: bool = False,
     ) -> None:
         self.deps = deps
-        self.console = deps.console or Console()
+        self.console = deps.console or make_console()
         # Frontend interaction surface. Defaults to the Rich terminal so the CLI
         # and tests that don't supply one keep working unchanged.
         self.io: InteractionIO = deps.io or CliInteractionIO(self.console)

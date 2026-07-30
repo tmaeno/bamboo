@@ -29,12 +29,11 @@ from pathlib import Path
 from typing import Any
 
 import click
-from rich.console import Console
-from rich.table import Table
 
+from bamboo.utils.console import make_console, table_for
 from bamboo.utils.logging import setup_logging
 
-console = Console()
+console = make_console()
 logger = logging.getLogger(__name__)
 
 _UNSAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -158,7 +157,7 @@ async def _run(
         await graph_db.close()
         await vector_db.close()
 
-    table = Table(title="batch-analyze summary")
+    table = table_for(console, title="batch-analyze summary")
     table.add_column("Metric", style="cyan")
     table.add_column("Count", justify="right")
     table.add_row("Analyzed OK", str(n_ok))

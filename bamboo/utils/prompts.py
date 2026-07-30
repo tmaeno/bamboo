@@ -18,12 +18,13 @@ import re
 
 from rich.console import Console
 
+from bamboo.utils.console import make_console
 
 # A module-level Console instance shared by all callers — keeps colour output
 # consistent across the CLI and the orchestrator. Importers may also pass
 # their own Console via the optional ``console`` keyword if they want to
 # redirect output (e.g. for tests).
-_default_console = Console()
+_default_console = make_console()
 
 
 _RICH_MARKUP_RE = re.compile(r"\[/?[^\]]*\]")
