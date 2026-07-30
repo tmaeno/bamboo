@@ -33,6 +33,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import pty
 import shutil
 import subprocess
 import sys
@@ -42,7 +44,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
-from typing import Iterable, Iterator, NamedTuple, Optional
+from typing import Any, Iterable, Iterator, NamedTuple, Optional
 
 # One column layout, written by --sample and read by --report.
 COLUMNS = (
@@ -73,6 +75,11 @@ STATE_ORDER = (GPU_FULL, GPU_PARTIAL, CPU, UNLOADED, UNREACHABLE)
 # still reports a percent or two, so 0 alone would be too strict a test; real generation drives
 # this to tens of percent, so nothing in between is being papered over.
 IDLE_SM_PCT = 2
+
+
+def _note(message: str) -> None:
+    """One-line diagnostic on stderr, prefixed so it is identifiable in a job log."""
+    print(f"accel-sampler: {message}", file=sys.stderr, flush=True)
 
 
 def model_matches(entry_name: str, model: str) -> bool:
@@ -264,58 +271,127 @@ def aggregate(ticks: list[Tick]) -> UtilWindow:
     )
 
 
-class UtilStream:
-    """A long-lived ``nvidia-smi --loop-ms`` child, read by a daemon thread.
+MODE_STREAM = "stream"
+MODE_ONESHOT = "oneshot"
+MODE_NONE = "none"
 
-    The thread only appends raw lines to a deque; assembly and aggregation happen on the main
-    loop. ``deque.append``/``popleft`` are individually atomic in CPython, so draining by
+# Consecutive empty windows before the stream is written off. One can be legitimate (a short
+# interval, a slow first tick); two in a row means it is not delivering.
+_STREAM_DRY_LIMIT = 2
+
+# …but only once the stream has had a fair chance, in wall time. A tick is complete only when the
+# *next* iteration's first row arrives, so the earliest possible tick is two loop periods in, and
+# a caller polling faster than that (a small BAMBOO_ACCEL_SAMPLE_SEC) would otherwise write off a
+# perfectly healthy stream on timing alone.
+def _stream_grace_s(loop_ms: int) -> float:
+    return 3 * loop_ms / 1000 + 1.0
+
+
+def _oneshot(timeout: float = 5.0) -> list[Tick]:
+    """One ``nvidia-smi`` invocation: a single tick, or none if it fails.
+
+    Coarse — one sample per window instead of ~15 — but it cannot be defeated by buffering,
+    which is why it is the fallback.
+    """
+    try:
+        out = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [
+                "nvidia-smi",
+                f"--query-gpu={UTIL_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        return []
+    return group_ticks(out.splitlines())
+
+
+class UtilSource:
+    """Per-window GPU utilisation: a streamed ``nvidia-smi`` when that works, one-shot when not.
+
+    The stream is a long-lived ``nvidia-smi --loop-ms`` child read by a daemon thread, which
+    appends raw lines to a deque; assembly and aggregation happen on the main loop.
+    ``deque.append``/``popleft`` are individually atomic in CPython, so draining by
     popleft-until-empty needs no lock.
 
-    Lines are attributed to the window in which they were *read*, not to a parsed timestamp. If
-    nvidia-smi block-buffers into the pipe instead of flushing per iteration, windows become
-    lumpy while the job-level min/mean/max stays exact — and ``util_ticks`` makes that visible
-    rather than silent.
+    **The child is given a pty, not a pipe.** nvidia-smi's stdout goes through stdio, which
+    block-buffers (8 KiB) when it is not a terminal: at ~31 bytes per row and one row per second
+    the first flush lands over four minutes in, so a three-minute job recorded *zero* ticks
+    while a per-poll one-shot had been working fine. A pty makes ``isatty()`` true and stdio
+    line-buffers instead. (A local stub built from shell ``echo`` — one ``write(2)`` per line —
+    hid this completely, which is why the fallback below exists rather than trust alone.)
+
+    If the stream still delivers nothing for ``_STREAM_DRY_LIMIT`` consecutive windows it is
+    written off and every later window uses a one-shot. Losing density beats losing the data.
     """
 
-    def __init__(self, loop_ms: int) -> None:
+    def __init__(self, loop_ms: int, *, stderr_path: Optional[Path] = None) -> None:
         self._loop_ms = loop_ms
+        self._stderr_path = stderr_path
         self._lines: deque[str] = deque()
-        self._proc: Optional[subprocess.Popen[str]] = None
+        self._proc: Optional[subprocess.Popen[bytes]] = None
+        self._stdout: Optional[Any] = None
         self._assembler = TickAssembler()
+        self._dry = 0
+        self._stream_since = 0.0
+        self.mode = MODE_NONE
 
-    def start(self) -> bool:
-        """Spawn the stream. False when there is no nvidia-smi to spawn (a CPU queue)."""
+    def start(self) -> str:
+        """Pick a mode and return it. ``none`` when there is no nvidia-smi at all."""
         if shutil.which("nvidia-smi") is None:
+            self.mode = MODE_NONE
+            return self.mode
+        self.mode = MODE_STREAM if self._spawn_stream() else MODE_ONESHOT
+        return self.mode
+
+    def _spawn_stream(self) -> bool:
+        argv = [
+            "nvidia-smi",
+            f"--query-gpu={UTIL_QUERY}",
+            "--format=csv,noheader,nounits",
+            f"--loop-ms={self._loop_ms}",
+        ]
+        # stderr goes to a file rather than DEVNULL: discarding it is what made the buffering
+        # failure above undiagnosable from the job log.
+        err = None
+        try:
+            if self._stderr_path is not None:
+                err = self._stderr_path.open("wb")
+            master, slave = pty.openpty()
+        except OSError:
+            if err is not None:
+                err.close()
             return False
         try:
             self._proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-                [
-                    "nvidia-smi",
-                    f"--query-gpu={UTIL_QUERY}",
-                    "--format=csv,noheader,nounits",
-                    f"--loop-ms={self._loop_ms}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
+                argv, stdout=slave, stderr=err or subprocess.DEVNULL, close_fds=True
             )
         except OSError:
+            os.close(master)
             return False
+        finally:
+            os.close(slave)
+            if err is not None:
+                err.close()
+        self._stdout = os.fdopen(master, "r", errors="replace", newline="")
+        self._stream_since = time.monotonic()
         threading.Thread(target=self._read, daemon=True).start()
         return True
 
     def _read(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
+        if self._stdout is None:
             return
         try:
-            for line in proc.stdout:
+            for line in self._stdout:
                 self._lines.append(line)
         except (OSError, ValueError):
-            pass  # pipe closed under us by stop() or by teardown killing the group
+            pass  # the pty closes with EIO when the child goes, incl. teardown killing the group
 
-    def drain(self) -> list[Tick]:
-        """Take everything read since the last call, as completed ticks."""
+    def _drain_stream(self) -> list[Tick]:
         ticks: list[Tick] = []
         while True:
             try:
@@ -327,16 +403,49 @@ class UtilStream:
                 ticks.append(tick)
         return ticks
 
+    def read_window(self) -> tuple[list[Tick], Optional[str]]:
+        """Ticks for the window just ended, plus a one-off note when the mode changed."""
+        if self.mode == MODE_NONE:
+            return [], None
+        if self.mode == MODE_ONESHOT:
+            return _oneshot(), None
+        ticks = self._drain_stream()
+        if ticks:
+            self._dry = 0
+            return ticks, None
+        self._dry += 1
+        waited = time.monotonic() - self._stream_since
+        if self._dry < _STREAM_DRY_LIMIT or waited < _stream_grace_s(self._loop_ms):
+            return [], None
+        self.stop()
+        self.mode = MODE_ONESHOT
+        return _oneshot(), (
+            f"nvidia-smi --loop-ms delivered nothing in {waited:.0f}s"
+            f"{self._stderr_hint()} — falling back to one sample per window"
+        )
+
+    def _stderr_hint(self) -> str:
+        if self._stderr_path is None or not self._stderr_path.exists():
+            return ""
+        first = self._stderr_path.read_text(errors="replace").strip().splitlines()
+        return f" ({first[0]})" if first else ""
+
     def stop(self) -> None:
         """Belt and braces: the child shares our process group, so teardown's `kill -- -PID`
         already reaps it. This covers the ordinary-exit path."""
-        if self._proc is None:
-            return
-        try:
-            self._proc.terminate()
-            self._proc.wait(timeout=2)
-        except (subprocess.SubprocessError, OSError):
-            pass
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except (subprocess.SubprocessError, OSError):
+                pass
+        if self._stdout is not None:
+            try:
+                self._stdout.close()
+            except OSError:
+                pass
+            self._stdout = None
 
 
 # --------------------------------------------------------------------------------------- #
@@ -362,19 +471,21 @@ def sample(
     tsv.parent.mkdir(parents=True, exist_ok=True)
     new = not tsv.exists() or tsv.stat().st_size == 0
     started = time.monotonic()
-    stream = UtilStream(util_ms)
-    if not stream.start():
-        # Once, not per sample: a CPU queue would otherwise repeat it forever.
-        print("accel-sampler: nvidia-smi unavailable", file=sys.stderr, flush=True)
+    source = UtilSource(util_ms, stderr_path=tsv.with_name("nvidia-smi.err"))
+    # Said once, on stderr, not per sample. It has to be visible: when this was buried in
+    # ollama.log an entire run recorded no GPU data with nothing in the job log to say why.
+    _note(f"GPU utilisation source: {source.start()}")
     try:
         with tsv.open("a", encoding="utf-8") as fh:
             if new:
                 fh.write("\t".join(COLUMNS) + "\n")
                 fh.flush()
             while True:
-                # The GPU stream is drained first so the window ends at the /api/ps read, not
-                # somewhere inside it.
-                util = aggregate(stream.drain())
+                # Read first so the window ends at the /api/ps read, not somewhere inside it.
+                ticks, note = source.read_window()
+                if note:
+                    _note(note)
+                util = aggregate(ticks)
                 state, size, vram = read_api_ps(base_url, model)
                 fh.write(
                     "\t".join(
@@ -401,7 +512,7 @@ def sample(
                     return
                 time.sleep(interval)
     finally:
-        stream.stop()
+        source.stop()
 
 
 # --------------------------------------------------------------------------------------- #
@@ -616,7 +727,13 @@ def report(tsv: Path, dump_max: Optional[int] = None) -> str:
             f" (max used {max(r.used_mib or 0 for r in rows)} MiB, all processes)"
         )
     else:
-        lines.append("  device VRAM: not recorded (no nvidia-smi in the container)")
+        # Deliberately no cause: this used to read "(no nvidia-smi in the container)" and said
+        # so on a node that had one — the columns were empty because the sampler's stream was
+        # buffered, not because the tool was missing. The reason belongs to whoever recorded it.
+        lines.append(
+            "  device VRAM: not recorded — no nvidia-smi samples"
+            " (see the accel-sampler lines in this log)"
+        )
 
     biggest = max(rows, key=lambda r: r.size)
     if biggest.size:

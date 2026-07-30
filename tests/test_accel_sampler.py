@@ -222,41 +222,98 @@ def test_aggregate_of_nothing_is_unmeasured_not_zero() -> None:
     assert window.ticks == 0
 
 
-def test_util_stream_reads_a_stub_nvidia_smi(tmp_path: Path, monkeypatch: Any) -> None:
-    """Covers the Popen + reader-thread + assembler path that no pure test reaches."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    stub = bin_dir / "nvidia-smi"
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo '0, 40, 10, 20480, 1000, 19480'\n"
-        "echo '1, 60, 20, 20480, 2000, 18480'\n"
-        "echo '0, 90, 45, 20480, 3000, 17480'\n"
-        "echo '1, 10, 5, 20480, 3000, 17480'\n"
-    )
-    stub.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-
-    stream = sampler.UtilStream(loop_ms=100)
-    assert stream.start() is True
-    for _ in range(50):  # the child exits immediately; wait for the reader to catch up
-        time.sleep(0.02)
-        ticks = stream.drain()
-        if len(ticks) >= 1:
-            break
-    stream.stop()
-    assert [t.sm_pct for t in ticks] == [100], ticks
-
-
-def test_util_stream_reports_absence_rather_than_failing(
+def test_the_stream_gets_lines_from_a_child_that_never_flushes(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
+    """Proves the pty, not just the plumbing.
+
+    The stub never calls flush(), so through a pipe its output would sit in stdio's 8 KiB buffer
+    and arrive minutes late or never — the production failure. Through a pty, `isatty()` is true
+    and stdio line-buffers, so the rows show up. Also covers Popen + reader thread + assembler,
+    which no pure test reaches.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _stub_nvidia_smi(
+        bin_dir,
+        loop_body=(
+            "    print('0, 40, 10, 20480, 1000, 19480')\n"
+            "    print('1, 60, 20, 20480, 2000, 18480')\n"
+            "    time.sleep(0.05)\n"
+        ),
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    source = sampler.UtilSource(loop_ms=50, stderr_path=tmp_path / "err")
+    assert source.start() == "stream"
+    ticks: list[Any] = []
+    for _ in range(100):
+        time.sleep(0.02)
+        ticks, _ = source.read_window()
+        if ticks:
+            break
+    source.stop()
+    assert [t.sm_pct for t in ticks[:1]] == [100], ticks
+    assert source.mode == "stream", "a working stream must not be downgraded"
+
+
+def _stub_nvidia_smi(bin_dir: Path, *, loop_body: str) -> Path:
+    """A stub `nvidia-smi` whose loop mode runs `loop_body` and whose one-shot mode emits a row.
+
+    Written in Python and **never calling flush()** on purpose. Python line-buffers stdout only
+    when it is a tty, so this stub emits promptly through a pty and not at all through a pipe —
+    which is precisely the difference that made the real nvidia-smi record nothing. A stub built
+    from shell `echo` (one write(2) per line) cannot tell the two apart and hid this bug.
+    """
+    stub = bin_dir / "nvidia-smi"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if any(a.startswith('--loop-ms') for a in sys.argv):\n"
+        "  while True:\n"
+        f"{loop_body}"
+        "else:\n"
+        "  print('0, 7, 3, 20480, 500, 19980')\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def test_a_stream_that_never_delivers_falls_back_to_one_shot(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The production failure: three minutes of samples with every GPU column empty.
+
+    nvidia-smi's stdout goes through stdio, which block-buffers 8 KiB when it is not a terminal;
+    at ~31 bytes a row and one row a second the first flush lands past four minutes, so a
+    shorter job records nothing at all. A pty fixes the usual case, and this fallback covers
+    whatever else can silence the stream — losing density beats losing the data.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _stub_nvidia_smi(bin_dir, loop_body="    time.sleep(30)\n")  # emits nothing, ever
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    source = sampler.UtilSource(loop_ms=50, stderr_path=tmp_path / "err")
+    assert source.start() == "stream"
+    assert source.read_window() == ([], None)  # one dry window is tolerated
+    ticks, note = source.read_window()
+    if not note:  # …and so is any window inside the grace period
+        time.sleep(sampler._stream_grace_s(50))
+        ticks, note = source.read_window()
+    source.stop()
+    assert source.mode == "oneshot"
+    assert note and "falling back" in note
+    assert [t.sm_pct for t in ticks] == [7], "the fallback must still produce a sample"
+
+
+def test_no_nvidia_smi_at_all_is_reported_as_such(tmp_path: Path, monkeypatch: Any) -> None:
     """A CPU queue has no nvidia-smi; the sampler must keep recording state either way."""
     monkeypatch.setenv("PATH", str(tmp_path))
-    stream = sampler.UtilStream(loop_ms=100)
-    assert stream.start() is False
-    assert stream.drain() == []
-    stream.stop()  # must be safe with no child
+    source = sampler.UtilSource(loop_ms=100)
+    assert source.start() == "none"
+    assert source.read_window() == ([], None)
+    source.stop()  # must be safe with no child
 
 
 def test_sample_once_writes_a_header_and_a_row(
@@ -311,8 +368,11 @@ def test_report_says_never_when_the_gpu_was_not_used(tmp_path: Path) -> None:
     out = sampler.report(tsv)
     assert "the GPU was NEVER used by ollama during this job" in out
     assert "transitions:" not in out  # nothing changed, so nothing to show
-    assert "not recorded (no nvidia-smi" in out
     assert "sm not measured" in out
+    # No cause is claimed: empty columns used to be reported as "no nvidia-smi in the container"
+    # on a node that had one, because the sampler's stream was buffered rather than absent.
+    assert "device VRAM: not recorded — no nvidia-smi samples" in out
+    assert "in the container" not in out
 
 
 def test_report_shows_the_eviction_that_a_boot_time_verdict_hides(

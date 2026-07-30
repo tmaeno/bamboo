@@ -557,7 +557,10 @@ start_accel_sampler() {
     --model "${LLM_MODEL}" \
     --interval "${BAMBOO_ACCEL_SAMPLE_SEC:-15}" \
     --util-ms "${BAMBOO_ACCEL_UTIL_MS:-1000}" \
-    >>"${BAMBOO_OLLAMA_LOG}" 2>&1 & PIDS+=($!)
+    >>"${BAMBOO_OLLAMA_LOG}" & PIDS+=($!)
+  # NOTE: stdout only. The sampler's stderr is left on ours — i.e. the job log — because it is
+  # where it says which GPU source it got. Folding that into ollama.log once cost a whole run:
+  # the record came back with every GPU column empty and nothing anywhere explaining why.
   log "sampling the accelerator every ${BAMBOO_ACCEL_SAMPLE_SEC:-15}s (nvidia-smi every ${BAMBOO_ACCEL_UTIL_MS:-1000}ms) -> ${BAMBOO_ACCEL_LOG}"
 }
 

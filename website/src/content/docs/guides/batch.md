@@ -439,9 +439,21 @@ never generates.
 `utilization.gpu` is an instantaneous figure over roughly the preceding second, so sampling it once
 per 15 s poll would miss the bursts that token generation consists of. It comes instead from a
 separate `nvidia-smi --loop-ms` stream (`BAMBOO_ACCEL_UTIL_MS`, default 1000 ms) aggregated into each
-row as min/mean/max, with `util_ticks` recording how many ticks landed in that window — much below
-`SAMPLE_SEC × 1000 / UTIL_MS` means `nvidia-smi` was buffering and the per-row figures should be read
-as lumpy, though the job-level range stays exact.
+row as min/mean/max, with `util_ticks` recording how many ticks landed in that window.
+
+That stream is given a **pty**, not a pipe. `nvidia-smi` writes through stdio, which block-buffers
+8 KiB when its output is not a terminal — at ~31 bytes a row and one row a second the first flush
+lands past four minutes, so a shorter job records nothing at all. A pty makes `isatty()` true and
+stdio line-buffers instead. If the stream still delivers nothing, the sampler says so on stderr and
+falls back to one `nvidia-smi` call per window: coarser, but immune to buffering.
+
+```
+accel-sampler: GPU utilisation source: stream
+accel-sampler: nvidia-smi --loop-ms delivered nothing in 30s (…) — falling back to one sample per window
+```
+
+Empty GPU columns therefore mean "no samples", never a diagnosis — the reason is in those
+`accel-sampler:` lines and in `nvidia-smi.err` beside the record.
 
 Values are summed across devices, matching the site monitor's own `gpusmpct`
 (*"sum of the streaming multiprocessor usage … can be >100% when multiple GPUs are active"*), so the
