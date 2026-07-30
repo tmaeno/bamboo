@@ -630,3 +630,209 @@ def test_report_accelerator_reads_api_ps_from_a_file_not_a_pipe(tmp_path: Path) 
     assert (tmp_path / "work" / "ollama" / "api-ps.json").exists(), (
         "the raw /api/ps reply should be left in scratch for debugging"
     )
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="report_accelerator parses /api/ps in python"
+)
+@pytest.mark.parametrize(
+    "require,api_ps,should_die",
+    [
+        ("full", _GPU_FULL, False),
+        ("full", _GPU_PARTIAL, True),
+        ("1", _GPU_PARTIAL, False),  # back-compat: 1 has always meant "any offload"
+        ("1", _GPU_FULL, False),
+        ("yes", _GPU_FULL, True),  # unrecognised must not silently disable the check
+    ],
+    ids=[
+        "full-ok",
+        "full-rejects-partial",
+        "1-allows-partial",
+        "1-ok",
+        "typo-is-an-error",
+    ],
+)
+def test_require_gpu_levels(
+    tmp_path: Path, require: str, api_ps: str, should_die: bool
+) -> None:
+    """`full` exists because gpu-partial is the *unstable* state.
+
+    A partial offload means VRAM was already too tight to hold the model, so the next load
+    can land at zero layers and the job quietly finishes on the CPU — which is how this came
+    up. A node expected to fit the model should refuse to start when it doesn't.
+    """
+    proc = _report_accelerator(tmp_path, api_ps, require_gpu=require)
+    if should_die:
+        assert "FN_RC=" not in proc.stdout, f"expected die(), got:\n{proc.stderr}"
+        assert "ERROR" in proc.stderr
+    else:
+        assert "FN_RC=0" in proc.stdout, proc.stderr
+
+
+# --- launch_ollama: the server env ---------------------------------------------------
+
+
+def test_launch_ollama_pins_keep_alive_and_the_library_path(tmp_path: Path) -> None:
+    """OLLAMA_KEEP_ALIVE must reach `ollama serve`, not just the preload request.
+
+    langchain_ollama sends `keep_alive: null` on every call, which Ollama reads as
+    "unspecified" and answers with its 5-minute *server* default. A keep_alive passed only on
+    the preload therefore governs nothing once bamboo starts talking: the model unloads and
+    the reload re-decides GPU offload from whatever VRAM is free then. That is exactly the bug
+    this asserts against — and it also gives launch_ollama its first direct test, since
+    `setsid` does not exist on macOS and has to be stubbed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "setsid").write_text('#!/usr/bin/env bash\nexec "$@"\n')
+    dump = tmp_path / "ollama-env.txt"
+    (bin_dir / "ollama").write_text(f'#!/usr/bin/env bash\nenv > "{dump}"\n')
+    for stub in ("setsid", "ollama"):
+        (bin_dir / stub).chmod(0o755)
+
+    lib = tmp_path / "ollama-lib"
+    (lib / "cuda_v13").mkdir(parents=True)
+    work = tmp_path / "work"
+    (work / "ollama").mkdir(parents=True)
+    host_cuda = tmp_path / "host-cuda"
+    host_cuda.mkdir()
+
+    proc = subprocess.run(
+        [
+            shutil.which("bash") or "bash",
+            "-c",
+            f'source "{ENTRYPOINT}" help >/dev/null\n'
+            f'WORK="{work}"; OLLAMA_PORT=12345\n'
+            f'BAMBOO_OLLAMA_LOG="$WORK/ollama/ollama.log"\n'
+            "launch_ollama\nwait\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "OLLAMA_LIB_ROOT": str(lib),
+            "LD_LIBRARY_PATH": str(host_cuda),
+        },
+    )
+    assert dump.exists(), f"stub ollama never ran: {proc.stderr}"
+    env = dict(
+        line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line
+    )
+    assert env.get("OLLAMA_KEEP_ALIVE") == "-1", "the server never got the keep-alive"
+    assert env.get("OLLAMA_HOST") == "127.0.0.1:12345"
+    assert env.get("LD_LIBRARY_PATH", "").split(":") == [
+        str(lib),
+        str(lib / "cuda_v13"),
+        str(host_cuda),
+    ]
+
+
+@pytest.mark.parametrize("preset", ["", "42m"])
+def test_launch_ollama_keep_alive_is_overridable(tmp_path: Path, preset: str) -> None:
+    """-1 is a default, not a policy: a node that must evict can say so."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "setsid").write_text('#!/usr/bin/env bash\nexec "$@"\n')
+    dump = tmp_path / "ollama-env.txt"
+    (bin_dir / "ollama").write_text(f'#!/usr/bin/env bash\nenv > "{dump}"\n')
+    for stub in ("setsid", "ollama"):
+        (bin_dir / stub).chmod(0o755)
+    work = tmp_path / "work"
+    (work / "ollama").mkdir(parents=True)
+
+    subprocess.run(
+        [
+            shutil.which("bash") or "bash",
+            "-c",
+            f'source "{ENTRYPOINT}" help >/dev/null\n'
+            f'WORK="{work}"; OLLAMA_PORT=1\n'
+            f'BAMBOO_OLLAMA_LOG="$WORK/ollama/ollama.log"\n'
+            "launch_ollama\nwait\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "OLLAMA_LIB_ROOT": str(tmp_path / "absent"),
+            **({"OLLAMA_KEEP_ALIVE": preset} if preset else {}),
+        },
+    )
+    env = dict(
+        line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line
+    )
+    assert env.get("OLLAMA_KEEP_ALIVE") == (preset or "-1")
+
+
+# --- the durable accelerator record --------------------------------------------------
+
+
+def _teardown_with_samples(
+    tmp_path: Path, report_dir: Path | None, **env: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run a standalone `teardown` over a scratch dir holding a recorded TSV."""
+    run_dir = tmp_path / "bamboo.abc123"
+    (run_dir / "ollama").mkdir(parents=True)
+    tsv = run_dir / "ollama" / "accelerator.tsv"
+    tsv.write_text(
+        "offset_s\tstate\tsize\tsize_vram\tgpu_total_mib\tgpu_used_mib\tgpu_free_mib\n"
+        "0\tgpu-partial\t100\t80\t24576\t20000\t4576\n"
+        "15\tcpu\t100\t0\t24576\t500\t24076\n"
+    )
+    (tmp_path / "bamboo-batch.env").write_text(
+        f"export BAMBOO_RUN_DIR={run_dir}\n"
+        f"export BAMBOO_ACCEL_LOG={tsv}\n"
+        "BAMBOO_SERVICE_PIDS=\n"
+    )
+    proc = subprocess.run(
+        [shutil.which("bash") or "bash", str(ENTRYPOINT), "teardown"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "BAMBOO_WORK": str(tmp_path),
+            "ACCEL_SAMPLER": str(
+                Path(ENTRYPOINT).resolve().parent / "accel_sampler.py"
+            ),
+            **({"BAMBOO_ACCEL_REPORT_DIR": str(report_dir)} if report_dir else {}),
+            **env,
+        },
+    )
+    return proc, run_dir
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="the summary is produced by accel_sampler.py"
+)
+def test_teardown_summarises_and_keeps_the_accelerator_record(tmp_path: Path) -> None:
+    """The summary alone lives on stderr and the TSV dies with the scratch dir.
+
+    A job that ran for hours can therefore end with no record of whether it used the GPU, so
+    teardown copies both into an existing writable dir before the rm -rf.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    proc, run_dir = _teardown_with_samples(tmp_path, out)
+    assert proc.returncode == 0, proc.stderr
+    assert "transitions: gpu-partial -> cpu" in proc.stderr, proc.stderr
+    assert (out / "accelerator.tsv").read_text().count("\n") == 3  # header + 2 rows
+    assert "transitions" in (out / "accelerator.txt").read_text()
+    assert not run_dir.exists(), "the scratch dir should still be removed"
+
+
+@pytest.mark.skipif(
+    not _HAS_PYTHON, reason="the summary is produced by accel_sampler.py"
+)
+def test_teardown_says_so_when_the_record_cannot_be_kept(tmp_path: Path) -> None:
+    """A read-only /out is normal for `exec` on a rootless Apptainer run.
+
+    It must not fail teardown, and it must not be silent either — a missing artifact that
+    nothing mentions reads as a clean run.
+    """
+    proc, _ = _teardown_with_samples(tmp_path, tmp_path / "does-not-exist")
+    assert proc.returncode == 0, proc.stderr
+    assert "transitions: gpu-partial -> cpu" in proc.stderr
+    assert "accelerator record not kept" in proc.stderr
+    assert "BAMBOO_KEEP_WORK=1" in proc.stderr

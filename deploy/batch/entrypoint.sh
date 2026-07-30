@@ -63,8 +63,10 @@
 #
 # Exported for debugging (also written to the state env-file): BAMBOO_RUN_DIR is the job's
 # scratch dir — mktemp-suffixed, so nothing outside can guess it — and BAMBOO_NEO4J_LOG /
-# BAMBOO_QDRANT_LOG / BAMBOO_OLLAMA_LOG are the service logs under it. teardown removes the
-# whole dir on every exit path including a walltime kill; BAMBOO_KEEP_WORK=1 keeps it.
+# BAMBOO_QDRANT_LOG / BAMBOO_OLLAMA_LOG are the service logs under it, with BAMBOO_ACCEL_LOG
+# the per-sample GPU record. teardown removes the whole dir on every exit path including a
+# walltime kill; BAMBOO_KEEP_WORK=1 keeps it, and the accelerator summary is additionally
+# copied to BAMBOO_ACCEL_REPORT_DIR (default /out) when that is an existing writable dir.
 #
 # Sandbox — the staged inputs handed over as ONE archive instead of separate mounts.
 # Point BAMBOO_SANDBOX at a tarball (or an already-extracted directory) whose top level
@@ -168,11 +170,16 @@ Sandbox: BAMBOO_SANDBOX=<tarball|dir> supplies those inputs as one archive whose
 Portable mode: mount your own .env at /app/.env to inject keys/settings (not the
          provider/model/service vars — those stay derived from the staged KB/model).
 GPU:     nothing to configure (Ollama auto-detects), but every boot logs an
-         `accelerator: gpu|cpu` line derived from /api/ps. BAMBOO_REQUIRE_GPU=1 makes a CPU
-         fallback a hard failure — deploy/batch/submit.sh sets it whenever it passes --nv.
+         `accelerator: gpu|cpu` line derived from /api/ps, and the state is then sampled for
+         the life of the job and summarised at teardown. BAMBOO_REQUIRE_GPU=1 makes a CPU
+         fallback a hard failure (=full also rejects a partial offload); submit.sh sets 1
+         whenever it passes --nv. The model is pinned resident (OLLAMA_KEEP_ALIVE, default
+         -1) so a mid-job reload cannot silently re-decide the offload.
 Logs:    BAMBOO_RUN_DIR is the job's scratch dir; BAMBOO_NEO4J_LOG / BAMBOO_QDRANT_LOG /
-         BAMBOO_OLLAMA_LOG are the service logs under it. All are exported and written to
-         the state env-file. BAMBOO_KEEP_WORK=1 keeps them past teardown.
+         BAMBOO_OLLAMA_LOG / BAMBOO_ACCEL_LOG are the records under it. All are exported and
+         written to the state env-file. BAMBOO_KEEP_WORK=1 keeps them past teardown; the
+         accelerator summary is also copied to BAMBOO_ACCEL_REPORT_DIR (default /out) when
+         that already exists and is writable.
 USAGE
 }
 
@@ -219,6 +226,9 @@ teardown() {
     [[ -n "${pid}" ]] && { kill -- "-${pid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true; }
   done
   wait 2>/dev/null || true
+  # After the kill (the sampler has stopped writing) and before the rm -rf (the TSV lives
+  # under WORK). Never fatal — teardown runs on every failure path.
+  report_accel_samples || true
   if [[ -n "${WORK}" ]]; then
     if [[ "${BAMBOO_KEEP_WORK:-}" == "1" ]]; then
       log "BAMBOO_KEEP_WORK=1 — keeping scratch dir ${WORK} (service logs are under it)"
@@ -252,6 +262,7 @@ persist_env() {
              HF_HOME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE DOC_INDEX_FREEZE \
              BAMBOO_SANDBOX BAMBOO_IN BAMBOO_KB \
              BAMBOO_RUN_DIR BAMBOO_OLLAMA_LOG BAMBOO_NEO4J_LOG BAMBOO_QDRANT_LOG \
+             BAMBOO_ACCEL_LOG BAMBOO_ACCEL_SAMPLE_SEC BAMBOO_ACCEL_REPORT_DIR \
              BAMBOO_REQUIRE_GPU BAMBOO_KEEP_WORK; do
       [[ -n "${!k:-}" ]] && printf 'export %s=%q\n' "$k" "${!k}"
     done
@@ -457,10 +468,131 @@ log_host_cuda_shadowing() {
 # Start `ollama serve` in its own process group and register it for teardown. Requires
 # WORK, OLLAMA_PORT and BAMBOO_OLLAMA_LOG. HOME is redirected into scratch because Ollama
 # writes there and the container rootfs is read-only under rootless Apptainer.
+#
+# OLLAMA_KEEP_ALIVE is the *server* default, and it has to be set here rather than per
+# request: langchain_ollama sends `keep_alive: null` on every call (ChatOllama._chat_params
+# emits it explicitly), and Ollama reads null as "unspecified" and falls back to the server
+# default of 5 minutes. So a keep_alive passed only on the preload request governs nothing
+# once bamboo starts talking — the model unloads 5 minutes after the last LLM call and
+# reloads on the next one.
+#
+# That reload is the problem: Ollama re-decides how many layers to offload from whatever
+# VRAM is free *at that instant*. On a node where the first load already only fit partially
+# (observed: 19.1 of 22.8 GiB), a later reload can land at zero layers and the rest of the
+# job runs on the CPU, while the boot-time `accelerator:` line still says gpu. -1 (never
+# unload) removes the whole class: this stack is created and torn down with the job, so
+# there is no idle period worth reclaiming VRAM for, and a reload costs minutes anyway.
 launch_ollama() {
   OLLAMA_HOST="127.0.0.1:${OLLAMA_PORT}" HOME="${WORK}/ollama" \
+  OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}" \
   LD_LIBRARY_PATH="$(ollama_ld_library_path)" \
     setsid ollama serve >"${BAMBOO_OLLAMA_LOG}" 2>&1 & PIDS+=($!)
+}
+
+# The device's own accounting: total/used/free VRAM per GPU. nvidia-smi is bound into the
+# container by `apptainer --nv` (and by the NVIDIA container runtime under docker --gpus),
+# so its absence means "no GPU wired in" and is worth saying once rather than hiding.
+log_gpu_devices() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    log "no nvidia-smi in the container — no GPU is wired in (missing --nv / --gpus?)"
+    return 0
+  fi
+  log "---- nvidia-smi devices (MiB) ----"
+  nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free \
+             --format=csv,noheader 2>&1 | sed 's/^/  | /' >&2 || true
+  log "---- end ----"
+}
+
+# require_gpu_ok <state> — is `state` good enough for BAMBOO_REQUIRE_GPU?
+#
+#   unset / 0  always (report only)
+#   1          any GPU offload            — the original meaning, kept for existing submissions
+#   full       the whole model in VRAM
+#
+# `full` exists because gpu-partial is the *unstable* state: it means VRAM was already too
+# tight to hold the model, so the next load can land at zero layers and the job silently
+# finishes on the CPU. A node that is expected to fit the model should refuse to start when
+# it doesn't. An unrecognised value is an error rather than a silent "off" — a typo'd
+# BAMBOO_REQUIRE_GPU that quietly disables the check is the failure this whole guard exists
+# to prevent. Sets REQUIRE_GPU_REASON for the caller to die with.
+REQUIRE_GPU_REASON=""
+require_gpu_ok() {
+  local state="$1" want="${BAMBOO_REQUIRE_GPU:-}"
+  REQUIRE_GPU_REASON=""
+  case "${want}" in
+    ""|0) return 0 ;;
+    1)
+      [[ "${state}" == gpu-* ]] && return 0
+      REQUIRE_GPU_REASON="BAMBOO_REQUIRE_GPU=1 but the model is not on the GPU (${state}); full log: ${BAMBOO_OLLAMA_LOG}"
+      ;;
+    full)
+      [[ "${state}" == "gpu-full" ]] && return 0
+      REQUIRE_GPU_REASON="BAMBOO_REQUIRE_GPU=full but the model is not entirely in VRAM (${state}); full log: ${BAMBOO_OLLAMA_LOG}"
+      ;;
+    *)
+      REQUIRE_GPU_REASON="unrecognised BAMBOO_REQUIRE_GPU='${want}' — use 1 (any GPU offload), full (whole model in VRAM), or 0/unset"
+      ;;
+  esac
+  return 1
+}
+
+# --------------------------------------------------------------------------- #
+# The accelerator sampler — report_accelerator, but for the whole job.
+#
+# report_accelerator measures once, right after the preload. That is not enough: a run has
+# been observed logging `accelerator: gpu (PARTIAL)` at boot while the site's job monitor
+# reported no GPU use at all across its lifetime. A single sample cannot tell "never on the
+# GPU" from "started there and was evicted", and those are different problems with different
+# owners. accel_sampler.py records the state every BAMBOO_ACCEL_SAMPLE_SEC and teardown
+# summarises the transitions.
+# --------------------------------------------------------------------------- #
+ACCEL_SAMPLER="${ACCEL_SAMPLER:-/opt/bamboo/accel_sampler.py}"
+
+start_accel_sampler() {
+  [[ -f "${ACCEL_SAMPLER}" ]] || { log "no ${ACCEL_SAMPLER} — skipping accelerator sampling"; return 0; }
+  setsid python "${ACCEL_SAMPLER}" --sample \
+    --tsv "${BAMBOO_ACCEL_LOG}" \
+    --base-url "${OLLAMA_BASE_URL}" \
+    --model "${LLM_MODEL}" \
+    --interval "${BAMBOO_ACCEL_SAMPLE_SEC:-15}" \
+    >>"${BAMBOO_OLLAMA_LOG}" 2>&1 & PIDS+=($!)
+  log "sampling the accelerator every ${BAMBOO_ACCEL_SAMPLE_SEC:-15}s -> ${BAMBOO_ACCEL_LOG}"
+}
+
+# Summarise, then keep a copy somewhere that outlives the scratch dir.
+#
+# Called from teardown, so it must never fail: every path is guarded. The summary goes to
+# stderr through `log` like all entrypoint output — `_boot` folds do_setup's stdout into
+# stderr so that `exec bamboo … > file` yields only the command's own output, and a summary
+# on stdout would break that contract.
+#
+# The stderr copy alone is not enough though: it depends on the scheduler retaining stderr,
+# and the TSV lives in the directory teardown is about to remove — so a multi-hour job can
+# end with no record at all. BAMBOO_ACCEL_REPORT_DIR (default OUT_DIR) gets a durable copy.
+# It is only used when it ALREADY exists and is writable, never mkdir -p'd: do_setup
+# deliberately does not create OUT_DIR, because an unbound /out would abort the boot of a
+# rootless Apptainer run over a directory the workload never touches — and teardown must not
+# reintroduce that. Which of the two happened is logged either way: a missing artifact must
+# not look like a clean run.
+report_accel_samples() {
+  local tsv="${BAMBOO_ACCEL_LOG:-}" dest="${BAMBOO_ACCEL_REPORT_DIR:-${OUT_DIR}}" summary
+  [[ -n "${tsv}" && -f "${tsv}" ]] || return 0
+  [[ -f "${ACCEL_SAMPLER}" ]] || return 0
+  summary="$(python "${ACCEL_SAMPLER}" --report --tsv "${tsv}" 2>/dev/null)" || return 0
+  while IFS= read -r line; do log "${line}"; done <<<"${summary}"
+
+  if [[ -n "${dest}" && -d "${dest}" && -w "${dest}" ]]; then
+    if cp "${tsv}" "${dest}/accelerator.tsv" 2>/dev/null \
+       && printf '%s\n' "${summary}" >"${dest}/accelerator.txt" 2>/dev/null; then
+      log "accelerator record kept at ${dest}/accelerator.{tsv,txt}"
+    else
+      log "could not write the accelerator record to ${dest} — it is in this log only"
+    fi
+  else
+    log "accelerator record not kept: ${dest:-<unset>} is not an existing writable dir"
+    log "  (set BAMBOO_ACCEL_REPORT_DIR, or BAMBOO_KEEP_WORK=1 to keep ${tsv})"
+  fi
+  return 0
 }
 
 # The runtime/GPU lines of ollama.log, for a failure that the log explains but /api/ps
@@ -479,26 +611,32 @@ dump_ollama_gpu_lines() {
 # accelerated. This closes both gaps with two calls:
 #
 #   1. POST /api/generate with an empty prompt — Ollama's documented load-and-return. It is
-#      the first real proof the model can be loaded, and it leaves the model resident
-#      (keep_alive) so the first task doesn't pay the load.
+#      the first real proof the model can be loaded, and it leaves the model resident (for
+#      the server's OLLAMA_KEEP_ALIVE, see launch_ollama) so the first task doesn't pay the
+#      load. No keep_alive is sent on this request on purpose: the server default is the one
+#      thing that governs bamboo's own calls, so a second value here could only disagree
+#      with it.
 #   2. GET /api/ps reports `size` (bytes resident) and `size_vram` (bytes on the GPU) for
 #      that model — the same numbers `ollama ps` renders as its PROCESSOR column. This is
 #      the only non-heuristic answer available: no log scraping, so no dependence on how a
 #      given Ollama release happens to word its startup lines.
 #
-# BAMBOO_REQUIRE_GPU=1 turns a CPU fallback into a failed boot. submit.sh sets it whenever
-# it passes --nv: a GPU queue quietly running an order of magnitude slower on the CPU is
-# never the wanted outcome, and without this the job just finishes late.
+# BAMBOO_REQUIRE_GPU turns an unconfirmed GPU into a failed boot — see require_gpu_ok.
 report_accelerator() {
-  local keep="${OLLAMA_KEEP_ALIVE:-30m}" payload stats size vram size_gib vram_gib
-  payload="$(python - "${LLM_MODEL}" "${keep}" <<'PY'
+  local payload stats size vram size_gib vram_gib
+  payload="$(python - "${LLM_MODEL}" <<'PY'
 import json, sys
-print(json.dumps({"model": sys.argv[1], "prompt": "", "keep_alive": sys.argv[2]}))
+print(json.dumps({"model": sys.argv[1], "prompt": ""}))
 PY
 )"
-  log "loading ${LLM_MODEL} into ollama (keep_alive=${keep})…"
+  log "loading ${LLM_MODEL} into ollama (server keep_alive=${OLLAMA_KEEP_ALIVE:--1})…"
   curl -fsS "${OLLAMA_BASE_URL}/api/generate" -H 'Content-Type: application/json' -d "${payload}" >/dev/null \
     || { dump_tail "${BAMBOO_OLLAMA_LOG}"; die "ollama could not load ${LLM_MODEL} — generation is impossible on this node"; }
+
+  # The device's own view, printed before the verdict: "19.1 of 22.8 GiB offloaded" is a
+  # number with no denominator until you know whether the card holds 24 GiB or 94 GiB, and
+  # whether a co-tenant is holding most of it. One line here answers both.
+  log_gpu_devices
 
   # The response goes to a file rather than a pipe because `python - <<'PY'` already uses
   # stdin for the script — piping the JSON in as well silently hands json.load an exhausted
@@ -530,21 +668,17 @@ PY
     # Informational probe, so a missing entry is not fatal by itself — but it leaves
     # BAMBOO_REQUIRE_GPU nothing to verify, and "unverified" must not pass for "GPU".
     log "accelerator: UNKNOWN — ${LLM_MODEL} loaded but /api/ps reported no entry for it"
-    if [[ "${BAMBOO_REQUIRE_GPU:-}" == "1" ]]; then
-      dump_ollama_gpu_lines
-      die "BAMBOO_REQUIRE_GPU=1 but the accelerator could not be determined from /api/ps"
-    fi
+    require_gpu_ok unknown || { dump_ollama_gpu_lines; die "${REQUIRE_GPU_REASON}"; }
   elif [[ "${vram}" == "0" ]]; then
     log "accelerator: cpu — ${LLM_MODEL} is entirely in host RAM (${size_gib} GiB), nothing offloaded"
     dump_ollama_gpu_lines
-    if [[ "${BAMBOO_REQUIRE_GPU:-}" == "1" ]]; then
-      die "BAMBOO_REQUIRE_GPU=1 but ollama is running on the CPU (reasons above; full log: ${BAMBOO_OLLAMA_LOG})"
-    fi
-    log "continuing on the CPU — set BAMBOO_REQUIRE_GPU=1 to make this a hard failure"
+    require_gpu_ok cpu || die "${REQUIRE_GPU_REASON}"
   elif [[ "${vram}" == "${size}" ]]; then
     log "accelerator: gpu — ${LLM_MODEL} fully offloaded (${vram_gib} GiB in VRAM)"
+    require_gpu_ok gpu-full || die "${REQUIRE_GPU_REASON}"
   else
     log "accelerator: gpu (PARTIAL) — ${vram_gib} of ${size_gib} GiB in VRAM, the remainder on the CPU"
+    require_gpu_ok gpu-partial || { dump_ollama_gpu_lines; die "${REQUIRE_GPU_REASON}"; }
   fi
   return 0
 }
@@ -568,6 +702,7 @@ do_setup() {
   export BAMBOO_NEO4J_LOG="${WORK}/neo4j/console.log"
   export BAMBOO_QDRANT_LOG="${WORK}/qdrant/qdrant.log"
   export BAMBOO_OLLAMA_LOG="${WORK}/ollama/ollama.log"
+  export BAMBOO_ACCEL_LOG="${WORK}/ollama/accelerator.tsv"
   log "scratch: BAMBOO_RUN_DIR=${BAMBOO_RUN_DIR} (removed on teardown unless BAMBOO_KEEP_WORK=1)"
   # OUT_DIR is deliberately NOT created here: `bamboo batch-analyze` creates its own
   # --output-dir, it is the only thing that writes there, and most subcommands never touch
@@ -781,6 +916,9 @@ PY
   # Only NOW is generation known to work at all: /api/tags above answers without an
   # inference runtime. This also decides gpu-vs-cpu, which nothing else in the boot reveals.
   report_accelerator
+  # Then keep watching, because that verdict can stop being true mid-job. Started before
+  # persist_env so its PID lands in the state file and a standalone `teardown` reaps it.
+  start_accel_sampler
 
   persist_env
   # Hand teardown control back to the caller: a standalone `setup` leaves the stack
@@ -872,6 +1010,7 @@ cmd_gpu_check() {
   mkdir -p "${WORK}/ollama"
   resolve_sandbox
 
+  log_gpu_devices
   log "== container CUDA runtime =="
   log "LD_LIBRARY_PATH (as given):   ${LD_LIBRARY_PATH:-<unset>}"
   log "LD_LIBRARY_PATH (for ollama): $(ollama_ld_library_path)"

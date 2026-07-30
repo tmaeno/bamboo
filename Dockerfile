@@ -211,12 +211,18 @@ ENV HF_HOME=/embeddings \
     LLM_PROVIDER=ollama
 
 # --- Entry script (orchestrates the localhost stack per job) ---
-# Dispatches subcommands (batch-analyze/exec/shell/setup/teardown/help); each names the
-# workload it runs, and no argument prints usage rather than guessing one. The batch job
+# Dispatches subcommands (batch-analyze/exec/shell/setup/teardown/gpu-check/help); each names
+# the workload it runs, and no argument prints usage rather than guessing one. The batch job
 # is `docker run … bamboo-batch batch-analyze`; any other bamboo command runs with
 # `docker run … bamboo-batch exec <cmd…>`; `shell` is the interactive form.
+#
+# accel_sampler.py rides along: the entrypoint runs it detached for the life of the job to
+# record whether Ollama is still on the GPU (a boot-time verdict can stop being true), and
+# again at teardown to summarise. Stdlib-only on purpose — it must not depend on the app's
+# venv resolving, since a broken environment is when a diagnostic matters most.
 COPY deploy/batch/entrypoint.sh /opt/bamboo/entrypoint.sh
-RUN chmod +x /opt/bamboo/entrypoint.sh
+COPY deploy/batch/accel_sampler.py /opt/bamboo/accel_sampler.py
+RUN chmod +x /opt/bamboo/entrypoint.sh /opt/bamboo/accel_sampler.py
 
 ENTRYPOINT ["/opt/bamboo/entrypoint.sh"]
 CMD []

@@ -308,6 +308,9 @@ suffix — so the paths are exported (and written to the state file) rather than
 | --- | --- |
 | `BAMBOO_RUN_DIR` | the job's scratch dir (`$BAMBOO_WORK/bamboo.XXXXXX`) |
 | `BAMBOO_NEO4J_LOG` / `BAMBOO_QDRANT_LOG` / `BAMBOO_OLLAMA_LOG` | the three service logs under it |
+| `BAMBOO_ACCEL_LOG` | the per-sample GPU record (TSV) — see "Running on a GPU queue" |
+| `BAMBOO_ACCEL_SAMPLE_SEC` | seconds between accelerator samples (default 15) |
+| `BAMBOO_ACCEL_REPORT_DIR` | where teardown copies the accelerator record (default `OUT_DIR`) |
 | `BAMBOO_KEEP_WORK=1` | keep the scratch dir — and therefore the logs — past teardown |
 
 `teardown` removes the scratch dir on **every** exit path, walltime kills included, so without
@@ -387,8 +390,60 @@ model:
 [entrypoint] accelerator: cpu — qwen3.6:latest is entirely in host RAM (18.4 GiB), nothing offloaded
 ```
 
-`submit.sh` sets `BAMBOO_REQUIRE_GPU=1` whenever it passes `--nv`, which turns that last case into a
-failed boot instead of a slow job (`BAMBOO_REQUIRE_GPU=0` to warn and continue instead).
+A `nvidia-smi` table of total/used/free VRAM per device is printed just above the verdict, because
+"12.0 of 18.4 GiB offloaded" is a number with no denominator until you know whether the card holds
+24 GiB or 94 GiB — and whether a co-tenant is holding most of it.
+
+`submit.sh` sets `BAMBOO_REQUIRE_GPU=1` whenever it passes `--nv`, which turns a CPU fallback into a
+failed boot instead of a slow job:
+
+| `BAMBOO_REQUIRE_GPU` | boot succeeds when |
+| --- | --- |
+| unset or `0` | always — the verdict is logged and nothing is enforced |
+| `1` | any GPU offload (what `submit.sh` passes) |
+| `full` | the **whole** model is in VRAM |
+
+`full` is the strict opt-in for a node that is expected to fit the model, because `gpu (PARTIAL)` is
+the *unstable* state: it means VRAM was already too tight, so the next load can land at zero layers
+and the job quietly finishes on the CPU. An unrecognised value is an error rather than a silent
+"off" — a typo'd `BAMBOO_REQUIRE_GPU` that disables the check is the exact failure the guard exists
+to prevent.
+
+#### The model stays resident for the whole job
+
+The container pins `OLLAMA_KEEP_ALIVE=-1` (never unload) on the Ollama **server**, not per request.
+That matters because `langchain_ollama` sends `keep_alive: null` on every call, which Ollama reads as
+"unspecified" and answers with its *server* default of 5 minutes. Without the pin the model unloads
+five minutes after the last LLM call and reloads on the next one — and **a reload re-decides how many
+layers to offload from whatever VRAM is free at that instant**, so a job that booted on the GPU can
+finish on the CPU with nothing in the log saying so. Override it if a node genuinely needs eviction;
+there is no idle period worth reclaiming VRAM for otherwise, since this stack lives and dies with the
+job.
+
+#### The end-of-job summary
+
+Because the boot verdict is a single measurement, the state is sampled every
+`BAMBOO_ACCEL_SAMPLE_SEC` seconds (default 15) for the life of the job and summarised at teardown:
+
+```
+[entrypoint] accelerator over the job: 412 samples spanning 103m0s
+[entrypoint]   gpu-partial     96   23%
+[entrypoint]   cpu            210   50%
+[entrypoint]   unloaded       106   25%
+[entrypoint]   transitions: gpu-partial -> unloaded -> cpu
+[entrypoint]   first non-GPU sample: unloaded at +18m15s
+[entrypoint]   verdict: ollama was on the GPU for 23% of samples
+[entrypoint]   device VRAM: min free 4576 MiB of 24576 MiB total (max used 20000 MiB, all processes)
+```
+
+The **transitions** line is the point: it separates "never used the GPU" from "started there and was
+evicted", which have different causes and different owners. Like every other entrypoint message the
+summary goes to **stderr** (so `exec bamboo … > file` still captures only the command's own output),
+and because stderr may not be retained — and the per-sample record lives in the scratch dir teardown
+deletes — both are also copied to `BAMBOO_ACCEL_REPORT_DIR` (default `/out`) as
+`accelerator.tsv` / `accelerator.txt` when that directory already exists and is writable. It is never
+created: an unbound `/out` would abort the boot of a rootless Apptainer run over a directory the
+workload never touches. Whether the copy happened is logged either way.
 
 To diagnose a CPU fallback without paying a full stack boot, `gpu-check` starts **only** Ollama —
 it needs `/models` and nothing else — and prints the accelerator verdict together with the CUDA
@@ -433,6 +488,7 @@ for in-job refresh (needs IdP egress too) or use a long-lived X.509 proxy.
 |------|---------|
 | `Dockerfile` | Two-target image (`bamboo`, `bamboo-batch`) |
 | `deploy/batch/entrypoint.sh` | In-container entry: boot stack, restore KB, run the workload, tear down (subcommands: `batch-analyze`/`exec`/`shell`/`setup`/`teardown`/`gpu-check`/`help`) |
+| `deploy/batch/accel_sampler.py` | Records whether Ollama stayed on the GPU for the whole job, and summarises it at teardown |
 | `bamboo stage-model` / `bamboo stage-embeddings` | Stage the LLM / embedding (+ reranker) models onto shared storage |
 | `deploy/batch/submit.sh` | Example Apptainer submission (CPU/GPU; `SANDBOX=` for a single-tarball job) |
 | `.github/workflows/build-images.yml` | CI: build + push images, optional `.sif` |
