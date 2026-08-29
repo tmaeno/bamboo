@@ -125,6 +125,40 @@ def boundary_ownership_param_declared(fragment: MapFragment) -> GateResult:
     )
 
 
+def outcome_in_declared_vocabulary(fragment: MapFragment) -> GateResult:
+    """(i) Every extracted outcome appears in its subject's declared vocabulary.
+
+    The spec classes state their status sets outright (``statusToReassign()``
+    and friends), and the junctions state what the code actually writes.  Both
+    describe the same vocabulary, so a value in one and not the other means the
+    declaration has fallen behind the code or the extraction read the wrong
+    write -- and which of those it is cannot be settled from here, only pointed
+    at.
+
+    Subjects with no declared vocabulary are skipped rather than failed: having
+    nothing to compare against is not a disagreement.
+    """
+    vocabularies = {s.name: set(s.vocabulary) for s in fragment.subjects if s.vocabulary}
+    failures: list[str] = []
+    checked = 0
+    for junction in fragment.junctions:
+        vocabulary = vocabularies.get(junction.subject)
+        if not vocabulary:
+            continue
+        for branch in junction.branches:
+            checked += 1
+            if branch.outcome not in vocabulary:
+                where = junction.anchor.as_ref() if junction.anchor else junction.owner
+                failures.append(f"{junction.subject} = {branch.outcome!r} ({where})")
+    return GateResult(
+        gate="outcome-in-vocabulary",
+        passed=not failures,
+        checked=checked,
+        failures=sorted(set(failures)),
+        note="The declared status sets and the writes should describe one vocabulary.",
+    )
+
+
 def unobservable_boundaries(
     fragment: MapFragment, threshold: float = 0.5
 ) -> list[tuple[str, int, int]]:
@@ -171,6 +205,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(namespace_disambiguates(fragment))
     if fragment.boundaries:
         results.append(boundary_ownership_param_declared(fragment))
+    if fragment.junctions:
+        results.append(outcome_in_declared_vocabulary(fragment))
     return results
 
 

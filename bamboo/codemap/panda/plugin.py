@@ -25,7 +25,7 @@ from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import MapFragment, SourceModule
-from bamboo.codemap.panda.recognizers import boundary, errorcode
+from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +77,20 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.boundaries.extend(boundaries)
         fragment.coverage.extend(boundary_coverage)
 
+        subjects, junctions, progress_coverage = progress.extract(
+            self._modules, self.map_id, self._version
+        )
+        fragment.subjects.extend(subjects)
+        fragment.junctions.extend(junctions)
+        fragment.coverage.extend(progress_coverage)
+
         logger.info(
-            "PandaCodeMapPlugin: %d value enumeration(s), %d boundary/boundaries",
+            "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
+            "%d subject(s), %d junction(s)",
             len(enums),
             len(boundaries),
+            len(subjects),
+            len(junctions),
         )
         return fragment
 
