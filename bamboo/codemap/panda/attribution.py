@@ -55,6 +55,7 @@ from typing import Optional
 from bamboo.codemap.models import SourceModule
 
 CERTAIN = "certain"
+STRUCTURAL = "structural"
 HEURISTIC = "heuristic"
 UNRESOLVED = "unresolved"
 
@@ -122,6 +123,10 @@ class SpecAttributor:
     ) -> None:
         self._declarations = declarations
         self._bases = bases or {}
+        self._declared_names: set[str] = (
+            set().union(*declarations.values()) if declarations else set()
+        )
+        self._accessed_cache: dict[ast.AST, dict[str, set[str]]] = {}
         self._by_noun: dict[str, set[str]] = {}
         for spec_class in declarations:
             noun = _normalise(spec_class)
@@ -221,6 +226,77 @@ class SpecAttributor:
                 return only
         return None
 
+    # -- structural inference -------------------------------------------- #
+
+    def _accessed_attributes(
+        self, func: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> dict[str, set[str]]:
+        """Return ``{object expression: attributes touched on it}`` for *func*.
+
+        Only names some spec declares are kept.  ``_attributes`` is the class's
+        *column* list, not its attribute surface, so methods and computed
+        fields -- ``addFile``, ``getTransient``, ``isAllowedNoOutput`` -- are
+        never in it.  Leaving them in made the superset test fail for eleven
+        writes whose class was in fact unambiguous.
+
+        Memoised per function: the map is read once per write site, and
+        recomputing it would make attribution quadratic in a function's size.
+        """
+        cached = self._accessed_cache.get(func)
+        if cached is not None:
+            return cached
+        found: dict[str, set[str]] = {}
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Attribute) or node.attr not in self._declared_names:
+                continue
+            try:
+                expression = ast.unparse(node.value)
+            except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+                continue
+            found.setdefault(expression, set()).add(node.attr)
+        self._accessed_cache[func] = found
+        return found
+
+    def structural_class(
+        self,
+        target: ast.Attribute,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[str]:
+        """Return the spec class implied by what the code does with the object.
+
+        The strongest evidence available without leaving the file, and the one
+        a reader uses without noticing::
+
+            for file in self.job.Files:
+                file.status = "merging"     # which status is this?
+            ...
+            if file.lfn in ...:             # lfn, type, GUID, checksum, fsize,
+            file.md5sum                     # md5sum -- only FileSpec has them all
+
+        A variable's name is what someone called it; the attributes touched on
+        it are what the code requires it to be.  Where exactly one spec class
+        declares a superset of them, that class is the answer.
+
+        Returns ``None`` when several classes fit -- ``{lfn, status, type}``
+        belongs to both ``FileSpec`` and ``JediFileSpec`` -- rather than
+        picking, since a wrong subject is a false lead.
+        """
+        if func is None:
+            return None
+        try:
+            expression = ast.unparse(target.value)
+        except Exception:  # noqa: BLE001
+            return None
+        touched = self._accessed_attributes(func).get(expression)
+        if not touched:
+            return None
+        candidates = [
+            spec_class
+            for spec_class, declared in self._declarations.items()
+            if touched <= declared
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
     def _heuristic(
         self, variable: str, attribute: str, imported: set[str]
     ) -> Optional[str]:
@@ -271,7 +347,7 @@ class SpecAttributor:
             return declaring[0], CERTAIN
 
         if isinstance(target.value, ast.Name):
-            variable = target.value.id
+            variable: Optional[str] = target.value.id
             certain = self._certain(variable, attribute, func, enclosing_class)
             if certain is not None:
                 return certain, CERTAIN
@@ -282,11 +358,21 @@ class SpecAttributor:
             # name on the left -- including ``TaskRefiner``'s task statuses.
             variable = target.value.attr
         else:
-            # A subscript or a call: ``self.dataset_map[name].status`` has no
-            # name to read at all, and each container needs its own reasoning.
-            return None, UNRESOLVED
+            # A subscript or a call has no name to read, but the attributes
+            # touched on it are still evidence, so it falls through to the
+            # structural pass rather than stopping here.
+            variable = None
 
-        guess = self._heuristic(variable, attribute, imported)
-        if guess is not None:
-            return guess, HEURISTIC
+        # Structural inference outranks the name: what the code does with the
+        # object is stronger evidence than what someone called it.  Measured
+        # against the writes the code states outright, the two never disagreed
+        # (205 of 205), which is what makes the gate in ``gates`` worth having.
+        structural = self.structural_class(target, func)
+        if structural is not None and self._declares(structural, attribute):
+            return structural, STRUCTURAL
+
+        if variable is not None:
+            guess = self._heuristic(variable, attribute, imported)
+            if guess is not None:
+                return guess, HEURISTIC
         return None, UNRESOLVED

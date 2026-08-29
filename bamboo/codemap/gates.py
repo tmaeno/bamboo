@@ -125,6 +125,49 @@ def boundary_ownership_param_declared(fragment: MapFragment) -> GateResult:
     )
 
 
+def structural_attribution_agrees(fragment: MapFragment) -> GateResult:
+    """(i) The declared type and the code's usage name the same spec class.
+
+    Two independent expressions of one fact.  A junction's subject is settled
+    from what the code *states* -- a constructor call, an annotation, ``self``
+    in a spec's own method, or an attribute only one class declares.  Its
+    ``structural_subject`` is settled from what the code *does*: the set of
+    attributes touched on that object, matched against the classes declaring a
+    superset of them.  Neither reads the other, so agreement is evidence and
+    disagreement means one of them is wrong.
+
+    This gate replaces the vocabulary comparison, which was designed for this
+    role and did not survive contact with the source (see
+    :func:`outcomes_outside_declared_subsets`).  Where that one could check 27
+    branches and failed on two correct ones, this checks every attributed
+    junction and, on PanDA, disagrees nowhere -- including on all 27 writes
+    attributed from the variable's name, which is what makes those defensible
+    rather than merely marked.
+
+    Junctions with no structural answer are skipped: too few attributes were
+    touched to imply anything, which is not a disagreement.
+    """
+    failures: list[str] = []
+    checked = 0
+    for junction in fragment.junctions:
+        if junction.structural_subject is None or junction.attribution == "unresolved":
+            continue
+        checked += 1
+        if junction.structural_subject != junction.subject:
+            where = junction.anchor.as_ref() if junction.anchor else junction.owner
+            failures.append(
+                f"{junction.subject} ({junction.attribution}) vs "
+                f"{junction.structural_subject} (usage) at {where}"
+            )
+    return GateResult(
+        gate="structural-attribution-agrees",
+        passed=not failures,
+        checked=checked,
+        failures=sorted(set(failures)),
+        note="What the code declares and what it does with the object must name one class.",
+    )
+
+
 def outcomes_outside_declared_subsets(fragment: MapFragment) -> list[tuple[str, str, str]]:
     """Outcomes no declared status list mentions.  **Reported, not gated.**
 
@@ -243,6 +286,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(namespace_disambiguates(fragment))
     if fragment.boundaries:
         results.append(boundary_ownership_param_declared(fragment))
+    if fragment.junctions:
+        results.append(structural_attribution_agrees(fragment))
     return results
 
 

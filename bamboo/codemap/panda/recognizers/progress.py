@@ -343,6 +343,7 @@ def extract(
             subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)
 
+            structural = attributor.structural_class(target, func)
             junction = junctions.get(name)
             if junction is None:
                 junction = JunctionNode(
@@ -352,6 +353,9 @@ def extract(
                     subject=subject,
                     owner=owner,
                     attribution=basis,
+                    structural_subject=(
+                        SubjectNode.make_name(structural, target.attr) if structural else None
+                    ),
                     anchor=Anchor(
                         package=module.package,
                         file=module.rel_path,

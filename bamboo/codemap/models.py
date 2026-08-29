@@ -173,13 +173,24 @@ class JunctionNode(BaseNode):
         default="certain",
         description=(
             "How the subject's class was settled: ``certain`` (the code states "
-            "the type), ``heuristic`` (the variable's name, narrowed by the "
-            "module's imports), or ``unresolved``.  A separate axis from "
-            "``Branch.tier`` on purpose -- tier is about whether the *outcome* "
-            "is statically known, and a write can state its outcome as a "
-            "literal while leaving the class it wrote to open.  Recorded so a "
-            "guessed attribution is visible rather than indistinguishable from "
-            "a stated one."
+            "the type), ``structural`` (only one class declares every "
+            "attribute the code touches on the object), ``heuristic`` (the "
+            "variable's name, narrowed by the module's imports), or "
+            "``unresolved``.  A separate axis from ``Branch.tier`` on purpose "
+            "-- tier is about whether the *outcome* is statically known, and a "
+            "write can state its outcome as a literal while leaving the class "
+            "it wrote to open.  Recorded so a guessed attribution is visible "
+            "rather than indistinguishable from a stated one."
+        ),
+    )
+    structural_subject: Optional[str] = Field(
+        default=None,
+        description=(
+            "What the attributes touched on the object imply, derived "
+            "independently of how ``subject`` was settled.  Kept even when it "
+            "merely agrees, because agreement is the point: the declaration "
+            "and the usage are two expressions of one fact, and comparing them "
+            "is a gate that needs no production data."
         ),
     )
     branches: list[Branch] = Field(default_factory=list)

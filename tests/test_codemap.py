@@ -700,3 +700,94 @@ def test_subscripted_object_stays_unresolved():
     )
 
     assert junctions[0].attribution == "unresolved"
+
+
+def test_usage_settles_what_the_name_cannot():
+    """The attributes touched on an object say more than what it was called.
+
+    ``file`` fits ``FileSpec`` and ``JediFileSpec`` and the module imports
+    neither, so naming is exhausted.  But only ``FileSpec`` declares every
+    attribute the loop touches, and that is the answer without guessing.
+    """
+    source = (
+        "class AdderGen:\n"
+        "    def finalize(self):\n"
+        "        for file in self.job.Files:\n"
+        "            if file.lfn in self.merging:\n"
+        "                file.status = 'merging'\n"
+        "            self.log(file.GUID, file.fsize)\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/adder_gen.py")
+
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "structural"
+
+
+def test_usage_outranks_the_name_when_both_answer():
+    """What the code does with the object beats what someone called it."""
+    source = (
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "def f(files):\n"
+        "    for fileSpec in files:\n"
+        "        fileSpec.status = 'ready'\n"
+        "        use(fileSpec.lfn)\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
+
+    # The name and the import both point at JediFileSpec; ``lfn`` is declared
+    # only by FileSpec, and the usage wins.
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "structural"
+
+
+def test_too_few_attributes_imply_nothing():
+    """Touching only the attribute being written is not evidence of a class."""
+    source = (
+        "class Adder:\n"
+        "    def run(self):\n"
+        "        self.dataset_map['x'].status = 'running'\n"
+    )
+    _subjects, junctions, _cov = _progress(
+        source, "pandaserver/dataservice/adder_atlas_plugin.py"
+    )
+
+    assert junctions[0].attribution == "unresolved"
+    assert junctions[0].structural_subject is None
+
+
+def test_gate_catches_declaration_and_usage_disagreeing():
+    """Two independent readings of one fact; a split means one of them is wrong."""
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediFileSpec.status",
+        owner="pandaserver/dataservice/adder_gen.py::finalize",
+        attribution="certain",
+        structural_subject="FileSpec.status",
+        branches=[Branch(outcome="ready")],
+    )
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction])
+    result = gates.structural_attribution_agrees(fragment)
+
+    assert not result.passed
+    assert result.checked == 1
+    assert "FileSpec.status (usage)" in result.failures[0]
+
+
+def test_gate_skips_junctions_usage_cannot_speak_for():
+    """No structural answer is silence, not disagreement."""
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JobSpec.jobStatus",
+        owner="x.py::f",
+        attribution="certain",
+        structural_subject=None,
+    )
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction])
+    result = gates.structural_attribution_agrees(fragment)
+
+    assert result.passed
+    assert result.checked == 0
