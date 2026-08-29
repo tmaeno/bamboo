@@ -514,12 +514,17 @@ def test_constructor_call_attributes_the_write():
     assert junctions[0].attribution == "certain"
 
 
-def test_imports_break_the_tie_that_naming_cannot():
-    """``file`` fits ``FileSpec`` and ``JediFileSpec``; the import says which.
+def test_a_name_and_an_import_are_not_evidence():
+    """Only the import points at ``JediFileSpec`` here, and that is not enough.
 
-    PanDA variable names drop the ``Jedi`` prefix, so the name alone leaves the
-    pair unseparated.  A module that imports only one of them is not holding
-    the other.
+    Attributing from the variable's name -- narrowed by what the module
+    imports -- used to settle writes like this one.  It was removed: across the
+    whole of PanDA it decided two writes out of 278, and it was the only basis
+    whose answers had to be marked as untrusted, since importing a class is not
+    evidence that this particular variable holds one.
+
+    The remedy for a shape like this is a type annotation upstream, not another
+    rule here.
     """
     source = (
         "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
@@ -529,8 +534,24 @@ def test_imports_break_the_tie_that_naming_cannot():
     )
     _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
 
+    assert junctions[0].attribution == "unresolved"
+
+
+def test_an_annotation_settles_what_the_name_could_not():
+    """The intended remedy, and it lands in the strongest basis.
+
+    One line of standard Python -- useful to mypy and a reader either way --
+    replaces the inference rule that was removed.
+    """
+    source = (
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "def f(file: JediFileSpec):\n"
+        "    file.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
+
     assert junctions[0].subject == "JediFileSpec.status"
-    assert junctions[0].attribution == "heuristic"
+    assert junctions[0].attribution == "certain"
 
 
 def test_importing_both_leaves_the_write_unresolved():
@@ -614,11 +635,13 @@ def test_declared_subsets_do_not_gate_the_outcomes():
     assert all(r.gate != "outcome-in-vocabulary" for r in gates.run_all(fragment))
 
 
-def test_attribution_mix_names_the_attributes_that_need_looking_at():
-    """The weak bases concentrate, so a total would hide where they are."""
+def test_unresolved_attributes_are_reported_where_they_concentrate():
+    """A total would hide which attributes the map is thin on.
+
+    Each row is a candidate for one line of annotation upstream, so naming the
+    attribute is the whole point of the report.
+    """
     source = (
-        "from pandaserver.taskbuffer.FileSpec import FileSpec\n"
-        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
         "def f(self, files):\n"
         "    for file in files:\n"
         "        file.status = 'ready'\n"
@@ -627,8 +650,8 @@ def test_attribution_mix_names_the_attributes_that_need_looking_at():
     _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/adder_gen.py")
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=junctions)
 
-    mix = gates.attribution_mix(fragment)
-    assert [row[0] for row in mix] == ["status"]
+    # ``jobStatus`` has a single declaring class, so only ``status`` is thin.
+    assert [row[0] for row in gates.unresolved_attributes(fragment)] == ["status"]
 
 
 def test_self_write_in_a_non_spec_class_is_not_a_spec_write():
@@ -670,22 +693,22 @@ def test_subclass_of_a_spec_resolves_to_the_spec():
     assert junctions[0].attribution == "certain"
 
 
-def test_attribute_chain_uses_its_last_name():
-    """``impl.taskSpec.status`` has no plain name on the left but names its value.
+def test_attribute_chain_resolves_from_its_own_usage():
+    """``impl.taskSpec.status`` has no plain name on the left, and does not need one.
 
-    The chain's final attribute is as good a signal as a variable would be, and
-    without it TaskRefiner's task statuses are dropped for a syntactic reason
-    that says nothing about how resolvable they are.
+    Structural inference keys on the whole object expression, so a chain is
+    read exactly like a variable.  What it never does is fall back to the
+    chain's last *name* -- that was the naming heuristic, and it is gone.
     """
     source = (
-        "from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec\n"
         "def f(impl):\n"
         "    impl.taskSpec.status = 'staging'\n"
+        "    use(impl.taskSpec.oldStatus)\n"
     )
     _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/TaskRefiner.py")
 
     assert junctions[0].subject == "JediTaskSpec.status"
-    assert junctions[0].attribution == "heuristic"
+    assert junctions[0].attribution == "structural"
 
 
 def test_subscripted_object_stays_unresolved():
@@ -724,8 +747,13 @@ def test_usage_settles_what_the_name_cannot():
     assert junctions[0].attribution == "structural"
 
 
-def test_usage_outranks_the_name_when_both_answer():
-    """What the code does with the object beats what someone called it."""
+def test_usage_contradicts_the_name_and_usage_is_taken():
+    """A variable called ``fileSpec`` in a module importing ``JediFileSpec``…
+
+    …that touches ``lfn``, which only ``FileSpec`` declares.  Naming would have
+    answered ``JediFileSpec`` here and been wrong, which is the concrete reason
+    that basis is gone rather than merely unprofitable.
+    """
     source = (
         "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
         "def f(files):\n"
@@ -735,8 +763,6 @@ def test_usage_outranks_the_name_when_both_answer():
     )
     _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
 
-    # The name and the import both point at JediFileSpec; ``lfn`` is declared
-    # only by FileSpec, and the usage wins.
     assert junctions[0].subject == "FileSpec.status"
     assert junctions[0].attribution == "structural"
 

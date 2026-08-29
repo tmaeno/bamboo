@@ -11,7 +11,7 @@ recognition: the progress recognizer knows a write happened, this decides what
 it wrote to.  Selection works on the same spec variables, so folding it into
 one recognizer would mean writing it twice.
 
-Four bases, strongest first, and the map records which one was used:
+Three bases, strongest first, and the map records which one was used:
 
 ``certain``
     A constructor call, a parameter annotation, ``self`` in a spec class's own
@@ -24,16 +24,19 @@ Four bases, strongest first, and the map records which one was used:
     Exactly one class declares every attribute the code touches on the object.
     A name is what someone called it; the attributes touched are what the code
     requires it to be.
-``heuristic``
-    The variable's name matched a spec class *and* the module imports that
-    class.  Naming alone is too weak -- PanDA variables do not carry the
-    ``Jedi`` prefix, so ``file`` fits both ``FileSpec`` and ``JediFileSpec``
-    and only 24% of ambiguous writes resolve uniquely.  Intersecting with what
-    the module imports raises that to 61%.
 
 A write none of them settle is still recorded, under a placeholder subject:
 the writer is known even when the subject is not, which is enough for localize
 and prune, both of which read observed values rather than the static subject.
+
+Every basis reads evidence rather than guessing.  There used to be a fourth --
+matching the variable's name against the spec class names, narrowed by the
+module's imports -- and it was removed: it settled two writes out of 278, and
+it was the only basis whose answers had to be marked as untrusted.  The rule
+this leaves behind is that **when a shape cannot be resolved from evidence,
+the answer is a standard type annotation in PanDA (kept honest by its own CI),
+not another inference mechanism here**.  Inference is for systems that cannot
+be asked -- pilot, harvester, DDM -- and PanDA can be.
 
 **Attribution by declared vocabulary** was tried and does not work: only two
 such vocabularies exist in the whole corpus (``JediTaskSpec.status`` and
@@ -41,17 +44,11 @@ such vocabularies exist in the whole corpus (``JediTaskSpec.status`` and
 make the vocabulary gate a tautology by checking what the attribution used.
 The gate that does work compares the stated class against the structural one
 -- two independent readings, no production data (see ``codemap.gates``).
-
-The bases are ordered by how much they assume, and every one of them reads
-only what PanDA already writes.  Asking PanDA for type annotations was
-seriously considered and turned out to be unnecessary: each time the evidence
-looked absent it was there, one hop further away.
 """
 
 from __future__ import annotations
 
 import ast
-import re
 from typing import Iterator, Optional
 
 from bamboo.codemap.models import SourceModule
@@ -60,7 +57,6 @@ CERTAIN = "certain"
 # One hop through the adder idiom: what the code put into the container.
 CONTAINER = "container"
 STRUCTURAL = "structural"
-HEURISTIC = "heuristic"
 UNRESOLVED = "unresolved"
 
 # Not a write to a spec at all -- the caller drops it instead of recording an
@@ -73,21 +69,6 @@ NOT_A_SPEC = "not-a-spec"
 # with a character no Python identifier can contain, so an unresolved subject
 # can never collide with a real one.
 UNRESOLVED_CLASS = "?"
-
-# Qualifiers PanDA puts in front of a spec variable's name.  They say something
-# about the value's role in the function, never about its type.
-_PREFIXES = re.compile(r"^(tmp|new|old|orig|cur)_?", re.IGNORECASE)
-_SUFFIXES = re.compile(r"_?(list|spec)$", re.IGNORECASE)
-
-
-def _normalise(name: str) -> str:
-    """Reduce an identifier to the bare noun both spellings share.
-
-    ``tmpFileSpec``, ``tmp_file`` and ``FileSpec`` all reduce to ``file``, which
-    is what lets a variable be compared against a class name at all.
-    """
-    stripped = _SUFFIXES.sub("", _PREFIXES.sub("", name))
-    return re.sub(r"[^a-z]", "", stripped.lower())
 
 
 def _functions_with_owner(
@@ -134,9 +115,9 @@ def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
 class SpecAttributor:
     """Resolves the spec class behind an attribute write.
 
-    Built once per build: the declaration table and the per-module import sets
-    are shared by every write site, and rebuilding them per site would make
-    attribution quadratic in a corpus with ~1000 writes.
+    Built once per build: the declaration table, the class hierarchy and the
+    container element types are shared by every write site, and rebuilding them
+    per site would make attribution quadratic in a corpus with ~1000 writes.
     """
 
     def __init__(
@@ -151,35 +132,6 @@ class SpecAttributor:
         )
         self._accessed_cache: dict[ast.AST, dict[str, set[str]]] = {}
         self._element_types: dict[tuple[str, str], set[str]] = {}
-        self._by_noun: dict[str, set[str]] = {}
-        for spec_class in declarations:
-            noun = _normalise(spec_class)
-            self._by_noun.setdefault(noun, set()).add(spec_class)
-            # ``JediFileSpec`` answers to ``file`` as well: the Jedi variants
-            # are spelled without the prefix at every call site.
-            if noun.startswith("jedi"):
-                self._by_noun.setdefault(noun[len("jedi") :], set()).add(spec_class)
-
-    # -- module-level context ------------------------------------------- #
-
-    def imported_specs(self, module: SourceModule) -> set[str]:
-        """Return the spec classes *module* imports.
-
-        The disambiguator for the ``FileSpec``/``JediFileSpec`` pair, and the
-        reason the heuristic is worth having at all.  A module holds what it
-        imports; one that imports neither yields no heuristic answer, which is
-        the correct outcome rather than a coin flip.
-        """
-        found: set[str] = set()
-        for node in ast.walk(module.tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    tail = alias.name.split(".")[-1]
-                    if tail in self._declarations:
-                        found.add(tail)
-                    if alias.asname in self._declarations:
-                        found.add(alias.asname)
-        return found
 
     # -- container element types ----------------------------------------- #
 
@@ -484,24 +436,10 @@ class SpecAttributor:
         ]
         return candidates[0] if len(candidates) == 1 else None
 
-    def _heuristic(
-        self, variable: str, attribute: str, imported: set[str]
-    ) -> Optional[str]:
-        """Resolve from the variable's name, narrowed by the module's imports."""
-        candidates = {
-            spec_class
-            for spec_class in self._by_noun.get(_normalise(variable), set())
-            if self._declares(spec_class, attribute)
-        }
-        narrowed = candidates & imported
-        chosen = narrowed or candidates
-        return next(iter(chosen)) if len(chosen) == 1 else None
-
     def attribute_write(
         self,
         target: ast.Attribute,
         *,
-        imported: set[str],
         func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
         enclosing_class: Optional[str],
     ) -> tuple[Optional[str], str]:
@@ -534,40 +472,24 @@ class SpecAttributor:
             return declaring[0], CERTAIN
 
         if isinstance(target.value, ast.Name):
-            variable: Optional[str] = target.value.id
-            certain = self._certain(variable, attribute, func, enclosing_class)
+            certain = self._certain(target.value.id, attribute, func, enclosing_class)
             if certain is not None:
                 return certain, CERTAIN
-        elif isinstance(target.value, ast.Attribute):
-            # ``impl.taskSpec.status``: the chain's last attribute names the
-            # value as squarely as a variable would, and treating it as one
-            # recovers writes that are otherwise dropped for having no plain
-            # name on the left -- including ``TaskRefiner``'s task statuses.
-            variable = target.value.attr
-        else:
-            # A subscript or a call has no name to read, but the attributes
-            # touched on it are still evidence, so it falls through to the
-            # structural pass rather than stopping here.
-            variable = None
 
-        # A loop over a container whose element type the code states beats
-        # both of the readings below: ``for file in job.Files`` is settled by
-        # the ``FileSpec()`` that was put into that list, not by inference.
-        if isinstance(target.value, ast.Name):
+            # A loop over a container whose element type the code states:
+            # ``for file in job.Files`` is settled by the ``FileSpec()`` that
+            # was put into that list, not by inference about ``file``.
             element = self._iterated_element_class(target.value.id, func, enclosing_class)
             if element is not None and self._declares(element, attribute):
                 return element, CONTAINER
 
-        # Structural inference outranks the name: what the code does with the
-        # object is stronger evidence than what someone called it.  Measured
+        # Structural inference: what the code does with the object.  Measured
         # against the writes the code states outright, the two never disagreed
         # (205 of 205), which is what makes the gate in ``gates`` worth having.
+        # It is the last reading because it is the last one that is evidence --
+        # what remains after it would be a guess from the variable's name.
         structural = self.structural_class(target, func)
         if structural is not None and self._declares(structural, attribute):
             return structural, STRUCTURAL
 
-        if variable is not None:
-            guess = self._heuristic(variable, attribute, imported)
-            if guess is not None:
-                return guess, HEURISTIC
         return None, UNRESOLVED

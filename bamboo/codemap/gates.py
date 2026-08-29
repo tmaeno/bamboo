@@ -212,32 +212,24 @@ def outcomes_outside_declared_subsets(fragment: MapFragment) -> list[tuple[str, 
     return sorted(rows)
 
 
-def attribution_mix(fragment: MapFragment) -> list[tuple[str, int, int]]:
-    """Attribution basis per attribute, guessed and unresolved counts first.
+def unresolved_attributes(fragment: MapFragment) -> list[tuple[str, int]]:
+    """Attributes with writes whose spec class could not be settled, worst first.
 
-    Not a gate, because a heuristic attribution is not a disagreement -- the
-    code simply does not state the type, and no amount of reading it harder
-    changes that.  It is reported because the two weak bases have to stay
-    visible: a subject settled from a variable's name is a different kind of
-    claim from one the code states, and an unresolved write is a junction the
-    reasoning can reach only through observation.
+    Not a gate: the code does not state the type, and reading it harder does
+    not change that.  It is reported per attribute rather than as a total
+    because the gap is not spread evenly -- it concentrates on the attributes
+    several classes declare, which are also the ones the reasoning starts from
+    most often, so a single number would hide where the map is thin.
 
-    The declared vocabularies cannot check this.  Only two exist in the whole
-    PanDA corpus, both for ``status``, so they do not cover the classes that
-    need separating; the real check is conformance against observed
-    transitions, which needs production data and lives in ``check-map``.
+    Each row is a candidate for a type annotation upstream.  That is the
+    intended remedy: an unresolved shape is a request for one line of standard
+    Python in the target system, not for another inference rule here.
     """
-    counts: dict[str, Counter] = {}
+    counts: Counter = Counter()
     for junction in fragment.junctions:
-        attribute = junction.subject.split(".", 1)[-1]
-        counts.setdefault(attribute, Counter())[junction.attribution] += 1
-    rows = [
-        (attribute, bucket.get("heuristic", 0), bucket.get("unresolved", 0))
-        for attribute, bucket in counts.items()
-        if bucket.get("heuristic") or bucket.get("unresolved")
-    ]
-    rows.sort(key=lambda r: (-(r[1] + r[2]), r[0]))
-    return rows
+        if junction.attribution == "unresolved":
+            counts[junction.subject.split(".", 1)[-1]] += len(junction.branches) or 1
+    return sorted(counts.items(), key=lambda row: (-row[1], row[0]))
 
 
 def unobservable_boundaries(

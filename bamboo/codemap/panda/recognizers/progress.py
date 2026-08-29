@@ -316,7 +316,6 @@ def extract(
 
     for module in modules:
         _attach_parents(module.tree)
-        imported = attributor.imported_specs(module)
         candidates = 0
         explained = 0
         for target, literal, node in _literal_attribute_writes(module.tree):
@@ -325,7 +324,6 @@ def extract(
             func = _enclosing_function(node)
             spec_class, basis = attributor.attribute_write(
                 target,
-                imported=imported,
                 func=func,
                 enclosing_class=_enclosing_class(node),
             )

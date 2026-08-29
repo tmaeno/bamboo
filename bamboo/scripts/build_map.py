@@ -79,19 +79,19 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
         bases = Counter(j.attribution for j in fragment.junctions)
         total = sum(bases.values())
         click.echo("\njunction attribution:")
-        for basis in ("certain", "container", "structural", "heuristic", "unresolved"):
+        for basis in ("certain", "container", "structural", "unresolved"):
             count = bases.get(basis, 0)
             click.echo(f"  {basis:<12} {count:>5}  ({count * 100 // total if total else 0}%)")
-        mix = gates.attribution_mix(fragment)
-        if mix:
-            # Named per attribute because the weak bases are not spread evenly:
-            # they concentrate on the attributes several classes declare, which
-            # are also the ones the reasoning starts from most often.
-            click.echo("  attributes with guessed or unresolved writes:")
-            for attribute, heuristic, unresolved in mix[:top]:
-                click.echo(f"    {attribute:<20} heuristic={heuristic:<4} unresolved={unresolved}")
-            if len(mix) > top:
-                click.echo(f"    … {len(mix) - top} more")
+        thin = gates.unresolved_attributes(fragment)
+        if thin:
+            # Each of these is a candidate for one line of type annotation
+            # upstream, which is the intended remedy -- cheaper and more honest
+            # than another inference rule here.
+            click.echo("  attributes with unresolved writes (annotation candidates):")
+            for attribute, writes in thin[:top]:
+                click.echo(f"    {attribute:<20} {writes} write(s)")
+            if len(thin) > top:
+                click.echo(f"    … {len(thin) - top} more")
 
         drift = gates.outcomes_outside_declared_subsets(fragment)
         if drift:
