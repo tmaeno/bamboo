@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +31,19 @@ from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
 logger = logging.getLogger(__name__)
 
 PACKAGES = ("pandaserver", "pandajedi")
+
+# Test code is not the system's behaviour.  It writes the same attributes with
+# the same literals, so leaving it in files fixtures as junctions and doubles
+# the ambiguous attribution cases -- 88 of 376 modules, and 47% of the writes
+# whose spec class could not be settled came from them.  A junction pointing at
+# a test would send an investigation to code that never runs in production.
+_TEST_PATH = re.compile(r"(^|/)(tests?|jeditest)(/|$)", re.IGNORECASE)
+_TEST_FILE = re.compile(r"(^test_|_tests?$)", re.IGNORECASE)
+
+
+def _is_test_module(rel_path: str) -> bool:
+    """True when *rel_path* is test code rather than system behaviour."""
+    return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
 
 
 class PandaCodeMapPlugin(CodeMapPlugin):
@@ -179,8 +193,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         saw.
         """
         modules: list[SourceModule] = []
+        skipped_tests = 0
         for pkg, root in roots.items():
             for path in sorted(root.rglob("*.py")):
+                rel_path = f"{pkg}/{path.relative_to(root)}"
+                if _is_test_module(rel_path):
+                    skipped_tests += 1
+                    continue
                 try:
                     source = path.read_text(errors="replace")
                     tree = ast.parse(source, filename=str(path))
@@ -190,10 +209,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 modules.append(
                     SourceModule(
                         package=pkg,
-                        rel_path=f"{pkg}/{path.relative_to(root)}",
+                        rel_path=rel_path,
                         tree=tree,
                         source=source,
                         blob_sha=blob_sha(source),
                     )
                 )
+        if skipped_tests:
+            logger.info("skipped %d test module(s)", skipped_tests)
         return modules

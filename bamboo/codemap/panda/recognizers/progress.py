@@ -8,15 +8,13 @@ modelling error shows up before the harder write forms depend on it.
 
 Two decisions worth stating.
 
-**Which attribute belongs to which spec class is settled by evidence, not by
-naming.** ``taskSpec.status = ...`` looks like ``JediTaskSpec.status``, and in
-PanDA it usually is, but inferring that from the variable name is a guess.
-Instead the written literals are matched against the value sets the spec
-classes *declare* (``statusToReassign()`` and friends): an attribute whose
-outcomes are drawn from a class's declared vocabulary belongs to that class.
-Outcomes that match nothing are reported rather than assigned, because that
-means either the vocabulary is incomplete or the extraction is wrong, and
-guessing would hide both.
+**Which spec class a write belongs to is decided per write site, and the basis
+is recorded.**  ``taskSpec.status = ...`` names an attribute eight classes
+declare, so the class has to come from somewhere else; that resolution lives in
+``bamboo.codemap.panda.attribution`` because selection needs the same answer.
+A write whose class cannot be settled is still emitted, under the placeholder
+subject: the writer is known even when the subject is not, and that is enough
+for the steps that read observed values.
 
 **A path condition records what decides, not merely that something decided.**
 An ``else`` contributes the negation of its ``if``, and a condition written as
@@ -38,6 +36,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
+from bamboo.codemap.panda.attribution import UNRESOLVED_CLASS, SpecAttributor
 
 SLICE_NAME = "progress"
 
@@ -230,8 +229,12 @@ def _substitute_bare_name(
 
 def _literal_attribute_writes(
     tree: ast.Module,
-) -> Iterator[tuple[str, str, ast.Assign]]:
-    """Yield ``(attribute, literal value, node)`` for ``x.attr = "literal"``."""
+) -> Iterator[tuple[ast.Attribute, str, ast.Assign]]:
+    """Yield ``(target, literal value, node)`` for ``x.attr = "literal"``.
+
+    The whole target is yielded, not just its name: attributing the write needs
+    the object expression, which is where the class comes from.
+    """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -240,7 +243,7 @@ def _literal_attribute_writes(
             continue
         for target in node.targets:
             if isinstance(target, ast.Attribute):
-                yield target.attr, value.value, node
+                yield target, value.value, node
 
 
 def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
@@ -270,40 +273,11 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
     return declarations
 
 
-def _owning_class(
-    attribute: str,
-    outcomes: set[str],
-    vocabularies: dict[tuple[str, str], set[str]],
-    declarations: dict[str, set[str]],
-) -> Optional[str]:
-    """Return the spec class a write belongs to, or ``None`` if undecidable.
-
-    Settled only by the attribute declaration: where exactly one class says it
-    has the attribute, that class owns the write.  ``jobStatus`` and
-    ``proc_status`` resolve this way.
-
-    ``status`` does not -- eight classes declare it -- and this deliberately
-    leaves it unattributed rather than choosing.  Two tempting tie-breakers
-    were tried and rejected:
-
-    * *Largest vocabulary overlap.* Task and job statuses share words like
-      "running" and "failed", so the class declaring the most values wins every
-      tie regardless of what is being written; it filed ``fileSpec.status =
-      'cached'`` under ``JediTaskSpec``.
-    * *The literal being written.* This decides correctly, but it decides using
-      the vocabulary, which is what the vocabulary gate then checks -- the gate
-      becomes a tautology and stops being able to find anything.
-
-    Deciding per write site needs the type of the object being written to, and
-    that is not available here: of the literal ``.status`` writes, only about a
-    fifth have an object variable whose single definition is a constructor
-    call, the rest arriving as parameters or attributes.  Leaving them
-    unattributed names the missing capability instead of hiding it behind a
-    plausible-looking answer.
-    """
-    del outcomes, vocabularies
-    candidates = [cls for cls, attrs in declarations.items() if attribute in attrs]
-    return candidates[0] if len(candidates) == 1 else None
+def _enclosing_class(node: ast.AST) -> Optional[str]:
+    for ancestor in _ancestors(node):
+        if isinstance(ancestor, ast.ClassDef):
+            return ancestor.name
+    return None
 
 
 def extract(
@@ -313,44 +287,50 @@ def extract(
 ) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat]]:
     """Extract subjects, junctions for literal attribute writes, and coverage.
 
-    Coverage counts literal attribute writes as candidates and those attributed
-    to a spec class as explained, so a file writing statuses no class declares
-    shows up as a gap rather than passing silently.
+    Coverage counts literal attribute writes as candidates and those whose spec
+    class could be settled as explained.  Unresolved writes are still emitted as
+    junctions under the placeholder subject -- they are a gap in *attribution*,
+    not in extraction, and dropping them would lose the fact that the attribute
+    is written here at all.
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
+    attributor = SpecAttributor(declarations)
 
-    # Outcomes are pooled per attribute across the whole corpus before
-    # attribution: one write site rarely shows enough of a vocabulary to
-    # identify it, but the union over every site does.
-    outcomes_by_attribute: dict[str, set[str]] = {}
-    for module in modules:
-        for attribute, literal, _node in _literal_attribute_writes(module.tree):
-            outcomes_by_attribute.setdefault(attribute, set()).add(literal)
-
-    owner_by_attribute = {
-        attribute: _owning_class(attribute, outcomes, vocabularies, declarations)
-        for attribute, outcomes in outcomes_by_attribute.items()
-    }
+    # The subject universe is what the spec classes declare.  Without this
+    # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
+    # ``self.plugin_flavor``, ``self.comp_name``, message-processor bookkeeping
+    # -- none of which any spec declares, none of which can ever be attributed,
+    # and all of which would sit in the map as permanently unresolved noise.
+    spec_attribute_names = set().union(*declarations.values()) if declarations else set()
 
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
+    attributed: set[tuple[str, str]] = set()
 
     for module in modules:
         _attach_parents(module.tree)
+        imported = attributor.imported_specs(module)
         candidates = 0
         explained = 0
-        for attribute, literal, node in _literal_attribute_writes(module.tree):
-            candidates += 1
-            spec_class = owner_by_attribute.get(attribute)
-            if spec_class is None:
+        for target, literal, node in _literal_attribute_writes(module.tree):
+            if target.attr not in spec_attribute_names:
                 continue
-            explained += 1
-
+            candidates += 1
             func = _enclosing_function(node)
+            spec_class, basis = attributor.attribute_write(
+                target,
+                imported=imported,
+                func=func,
+                enclosing_class=_enclosing_class(node),
+            )
+            if spec_class is not None:
+                explained += 1
+                attributed.add((spec_class, target.attr))
+
             qualname = func.name if func is not None else "<module>"
             owner = f"{module.rel_path}::{qualname}"
-            subject = f"{spec_class}.{attribute}"
+            subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)
 
             junction = junctions.get(name)
@@ -361,6 +341,7 @@ def extract(
                     name=name,
                     subject=subject,
                     owner=owner,
+                    attribution=basis,
                     anchor=Anchor(
                         package=module.package,
                         file=module.rel_path,
@@ -376,7 +357,8 @@ def extract(
                     path_condition=path_condition(node),
                     order=len(junction.branches),
                     # The outcome is a literal at the write site, so nothing
-                    # has to be resolved at run time.
+                    # has to be resolved at run time.  Independent of whether
+                    # the subject's class was settled.
                     tier=1,
                 )
             )
@@ -403,8 +385,7 @@ def extract(
             criteria=_attribution_evidence(spec_class, attribute, declarations, vocabularies),
             vocabulary=sorted(vocabularies.get((spec_class, attribute), set())),
         )
-        for attribute, spec_class in sorted(owner_by_attribute.items())
-        if spec_class is not None
+        for spec_class, attribute in sorted(attributed)
     ]
     return subjects, list(junctions.values()), coverage
 
@@ -418,8 +399,9 @@ def _attribution_evidence(
     """Record which evidence attributed the write, so the claim can be audited."""
     evidence = ["declared-attribute"]
     if sum(1 for attrs in declarations.values() if attribute in attrs) > 1:
-        # Several classes declare the name, so the vocabulary is what decided.
-        evidence.append("vocabulary-disambiguated")
+        # Several classes declare the name, so something else had to decide;
+        # which one is recorded per junction in ``JunctionNode.attribution``.
+        evidence.append("shared-attribute-name")
     if vocabularies.get((spec_class, attribute)):
         evidence.append("declared-vocabulary")
     return evidence
@@ -439,7 +421,7 @@ def unattributed_outcomes(
     declared = set().union(*vocabularies.values()) if vocabularies else set()
     unattributed: dict[str, set[str]] = {}
     for module in modules:
-        for attribute, literal, _node in _literal_attribute_writes(module.tree):
+        for target, literal, _node in _literal_attribute_writes(module.tree):
             if literal not in declared:
-                unattributed.setdefault(attribute, set()).add(literal)
+                unattributed.setdefault(target.attr, set()).add(literal)
     return unattributed

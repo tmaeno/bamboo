@@ -125,38 +125,76 @@ def boundary_ownership_param_declared(fragment: MapFragment) -> GateResult:
     )
 
 
-def outcome_in_declared_vocabulary(fragment: MapFragment) -> GateResult:
-    """(i) Every extracted outcome appears in its subject's declared vocabulary.
+def outcomes_outside_declared_subsets(fragment: MapFragment) -> list[tuple[str, str, str]]:
+    """Outcomes no declared status list mentions.  **Reported, not gated.**
 
-    The spec classes state their status sets outright (``statusToReassign()``
-    and friends), and the junctions state what the code actually writes.  Both
-    describe the same vocabulary, so a value in one and not the other means the
-    declaration has fallen behind the code or the extraction read the wrong
-    write -- and which of those it is cannot be settled from here, only pointed
-    at.
+    This was designed as a gate -- the spec classes state their status sets in
+    ``statusToReassign()`` and friends, so an extracted outcome missing from
+    them would mean the declaration or the extraction was wrong.  Running it
+    against PanDA showed the premise is false.  The methods declare *subsets
+    selected for a purpose*, not vocabularies::
 
-    Subjects with no declared vocabulary are skipped rather than failed: having
-    nothing to compare against is not a disagreement.
+        # return list of status to update contents
+        def statusToUpdateContents(cls):
+            return ["defined"]
+
+    Their union is a sample of the status space, so an outcome outside it is
+    the normal case, not a disagreement.  Both failures the gate produced were
+    correct code and correct attribution: ``JediTaskSpec.status = 'finishing'``
+    sits next to ``= 'tobroken'`` in the same ``if``/``else``, and
+    ``JediDatasetSpec.status = 'ready'`` is two lines from
+    ``self.inMasterDatasetSpec.append(datasetSpec)``.
+
+    The sound direction is the opposite one -- every status a subset names
+    should be written by *some* junction, since nothing could otherwise reach
+    it.  That is a lower bound, and checking it needs every write form
+    extracted; with only literal attribute writes recognised it would fail on
+    values written through SQL binds.  It belongs with the graph invariants,
+    once the writes are complete.
+
+    So this stays a report: it still marks where the declarations and the code
+    have drifted apart, which is worth a look, but it cannot decide who is
+    wrong and must not fail a build.
     """
     vocabularies = {s.name: set(s.vocabulary) for s in fragment.subjects if s.vocabulary}
-    failures: list[str] = []
-    checked = 0
+    rows: set[tuple[str, str, str]] = set()
     for junction in fragment.junctions:
         vocabulary = vocabularies.get(junction.subject)
         if not vocabulary:
             continue
+        where = junction.anchor.as_ref() if junction.anchor else junction.owner
         for branch in junction.branches:
-            checked += 1
             if branch.outcome not in vocabulary:
-                where = junction.anchor.as_ref() if junction.anchor else junction.owner
-                failures.append(f"{junction.subject} = {branch.outcome!r} ({where})")
-    return GateResult(
-        gate="outcome-in-vocabulary",
-        passed=not failures,
-        checked=checked,
-        failures=sorted(set(failures)),
-        note="The declared status sets and the writes should describe one vocabulary.",
-    )
+                rows.add((junction.subject, branch.outcome, where))
+    return sorted(rows)
+
+
+def attribution_mix(fragment: MapFragment) -> list[tuple[str, int, int]]:
+    """Attribution basis per attribute, guessed and unresolved counts first.
+
+    Not a gate, because a heuristic attribution is not a disagreement -- the
+    code simply does not state the type, and no amount of reading it harder
+    changes that.  It is reported because the two weak bases have to stay
+    visible: a subject settled from a variable's name is a different kind of
+    claim from one the code states, and an unresolved write is a junction the
+    reasoning can reach only through observation.
+
+    The declared vocabularies cannot check this.  Only two exist in the whole
+    PanDA corpus, both for ``status``, so they do not cover the classes that
+    need separating; the real check is conformance against observed
+    transitions, which needs production data and lives in ``check-map``.
+    """
+    counts: dict[str, Counter] = {}
+    for junction in fragment.junctions:
+        attribute = junction.subject.split(".", 1)[-1]
+        counts.setdefault(attribute, Counter())[junction.attribution] += 1
+    rows = [
+        (attribute, bucket.get("heuristic", 0), bucket.get("unresolved", 0))
+        for attribute, bucket in counts.items()
+        if bucket.get("heuristic") or bucket.get("unresolved")
+    ]
+    rows.sort(key=lambda r: (-(r[1] + r[2]), r[0]))
+    return rows
 
 
 def unobservable_boundaries(
@@ -205,8 +243,6 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(namespace_disambiguates(fragment))
     if fragment.boundaries:
         results.append(boundary_ownership_param_declared(fragment))
-    if fragment.junctions:
-        results.append(outcome_in_declared_vocabulary(fragment))
     return results
 
 

@@ -28,7 +28,7 @@ from bamboo.codemap.models import (
     SourceModule,
     ValueEnumNode,
 )
-from bamboo.codemap.panda.recognizers import boundary, errorcode
+from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
 from bamboo.models.graph_element import NodeType
 
 MAP_ID = "panda"
@@ -451,3 +451,180 @@ def test_ownership_gate_catches_a_parameter_the_signature_lacks():
 
     assert not result.passed
     assert "task_id" in result.failures[0]
+
+
+# --------------------------------------------------------------------------- #
+# progress: attribution and path conditions
+# --------------------------------------------------------------------------- #
+
+# Two classes declaring ``status`` is the situation the whole attribution layer
+# exists for; ``jobStatus`` is the control, declared once and so never in doubt.
+_SPECS = """
+class JediTaskSpec(object):
+    _attributes = ("jediTaskID", "status", "oldStatus")
+
+    def statusToUpdateContents(cls):
+        return ["defined", "ready"]
+
+class JediFileSpec(object):
+    _attributes = ("fileID", "status", "proc_status")
+
+class FileSpec(object):
+    _attributes = ("lfn", "status")
+
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus")
+"""
+
+
+def _progress(source: str, rel: str):
+    """Extract from *source* alongside the spec declarations it writes to."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, rel),
+    ]
+    subjects, junctions, coverage = progress.extract(modules, MAP_ID, VERSION)
+    return subjects, [j for j in junctions if j.owner.startswith(rel)], coverage
+
+
+def test_single_declaring_class_needs_no_object_type():
+    """One declaring class settles the subject whatever the object expression is.
+
+    ``self.job.jobStatus`` has an attribute, not a name, on the left -- there is
+    no variable to resolve.  It does not matter: only ``JobSpec`` declares
+    ``jobStatus``, so the write can only be to a ``JobSpec``.
+    """
+    source = "def f(self):\n    self.job.jobStatus = 'failed'\n"
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/adder_gen.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [("JobSpec.jobStatus", "certain")]
+
+
+def test_constructor_call_attributes_the_write():
+    """The code states the type outright, so nothing is guessed."""
+    source = (
+        "def f():\n"
+        "    spec = JediFileSpec()\n"
+        "    spec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefinerBase.py")
+
+    assert junctions[0].subject == "JediFileSpec.status"
+    assert junctions[0].attribution == "certain"
+
+
+def test_imports_break_the_tie_that_naming_cannot():
+    """``file`` fits ``FileSpec`` and ``JediFileSpec``; the import says which.
+
+    PanDA variable names drop the ``Jedi`` prefix, so the name alone leaves the
+    pair unseparated.  A module that imports only one of them is not holding
+    the other.
+    """
+    source = (
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "def f(files):\n"
+        "    for file in files:\n"
+        "        file.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
+
+    assert junctions[0].subject == "JediFileSpec.status"
+    assert junctions[0].attribution == "heuristic"
+
+
+def test_importing_both_leaves_the_write_unresolved():
+    """Where the evidence does not decide, the map says so rather than picking.
+
+    The junction is still emitted: the writer is known even when the subject is
+    not, which is what localize and prune work from.
+    """
+    source = (
+        "from pandaserver.taskbuffer.FileSpec import FileSpec\n"
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "def f(files):\n"
+        "    for file in files:\n"
+        "        file.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/adder_gen.py")
+
+    assert junctions[0].attribution == "unresolved"
+    assert junctions[0].subject == "?.status"
+    assert junctions[0].branches[0].outcome == "ready"
+
+
+def test_writes_to_attributes_no_spec_declares_are_not_junctions():
+    """The subject universe is the spec declarations, not every attribute write.
+
+    Without this bound the map fills with bookkeeping that can never be
+    attributed and never belongs to a subject.
+    """
+    source = "def f(self):\n    self.plugin_flavor = 'atlas'\n"
+    _subjects, junctions, coverage = _progress(source, "pandajedi/jedicore/Plugin.py")
+
+    assert junctions == []
+    assert coverage == []
+
+
+def test_path_condition_records_the_negated_branch():
+    """An ``else`` is a reason for the outcome, so it contributes ``not (...)``."""
+    source = (
+        "def f(self, taskSpec, taskBroken):\n"
+        "    if taskBroken:\n"
+        "        taskSpec.status = 'tobroken'\n"
+        "    else:\n"
+        "        taskSpec.status = 'finishing'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/ContentsFeeder.py")
+
+    by_outcome = {b.outcome: b.path_condition for b in junctions[0].branches}
+    assert by_outcome["tobroken"] == ["taskBroken"]
+    assert by_outcome["finishing"] == ["not (taskBroken)"]
+
+
+def test_bare_name_condition_carries_the_expression_behind_it():
+    """``if not allowed:`` names no predicate until the assignment is substituted.
+
+    Real PanDA moved a command's acceptance test into a helper between
+    releases, which is exactly this shape.
+    """
+    source = (
+        "def f(self, taskSpec, comStr):\n"
+        "    allowed = self._check_command_allowed(comStr)\n"
+        "    if not allowed:\n"
+        "        taskSpec.status = 'tobroken'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/taskbuffer/task_event_module.py")
+
+    condition = junctions[0].branches[0].path_condition[0]
+    assert "_check_command_allowed" in condition
+
+
+def test_declared_subsets_do_not_gate_the_outcomes():
+    """A purpose-built status list is a lower bound, not a vocabulary.
+
+    ``statusToUpdateContents`` returns the statuses eligible for a content
+    update, not every status a task can hold, so an outcome outside it is
+    normal.  Reported for a human, never failed.
+    """
+    source = "def f(self, taskSpec):\n    taskSpec.status = 'finishing'\n"
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/ContentsFeeder.py")
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=junctions)
+
+    assert all(r.gate != "outcome-in-vocabulary" for r in gates.run_all(fragment))
+
+
+def test_attribution_mix_names_the_attributes_that_need_looking_at():
+    """The weak bases concentrate, so a total would hide where they are."""
+    source = (
+        "from pandaserver.taskbuffer.FileSpec import FileSpec\n"
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "def f(self, files):\n"
+        "    for file in files:\n"
+        "        file.status = 'ready'\n"
+        "    self.job.jobStatus = 'failed'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/adder_gen.py")
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=junctions)
+
+    mix = gates.attribution_mix(fragment)
+    assert [row[0] for row in mix] == ["status"]

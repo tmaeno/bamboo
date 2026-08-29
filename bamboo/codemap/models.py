@@ -169,6 +169,19 @@ class JunctionNode(BaseNode):
     derived_from: str
     subject: str = Field(..., description="Qualified subject name this junction writes.")
     owner: str = Field(..., description="module::qualname that contains the write.")
+    attribution: str = Field(
+        default="certain",
+        description=(
+            "How the subject's class was settled: ``certain`` (the code states "
+            "the type), ``heuristic`` (the variable's name, narrowed by the "
+            "module's imports), or ``unresolved``.  A separate axis from "
+            "``Branch.tier`` on purpose -- tier is about whether the *outcome* "
+            "is statically known, and a write can state its outcome as a "
+            "literal while leaving the class it wrote to open.  Recorded so a "
+            "guessed attribution is visible rather than indistinguishable from "
+            "a stated one."
+        ),
+    )
     branches: list[Branch] = Field(default_factory=list)
     anchor: Optional[Anchor] = None
 
