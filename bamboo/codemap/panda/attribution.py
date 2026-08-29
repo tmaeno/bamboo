@@ -226,8 +226,8 @@ class SpecAttributor:
         of an ``addFile`` call has to be typed without knowing which attribute
         is being written.
         """
-        if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name):
-            return expression.func.id if expression.func.id in self._declarations else None
+        if isinstance(expression, ast.Call):
+            return self._constructed_class(expression, func)
         if isinstance(expression, ast.Name):
             if expression.id == "self":
                 return enclosing_class if enclosing_class in self._declarations else None
@@ -238,9 +238,15 @@ class SpecAttributor:
         return self._structural_of(expression, func)
 
     def _stated_local_class(
-        self, variable: str, func: ast.FunctionDef | ast.AsyncFunctionDef
+        self,
+        variable: str,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+        seen: Optional[frozenset[str]] = None,
     ) -> Optional[str]:
         """Return the class a local is stated to hold, from annotation or constructor."""
+        seen = seen or frozenset()
+        if variable in seen:
+            return None
         for arg in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs):
             if arg.arg != variable or arg.annotation is None:
                 continue
@@ -252,17 +258,56 @@ class SpecAttributor:
             )
             if name in self._declarations:
                 return name
-        constructors = {
-            node.value.func.id
-            for node in ast.walk(func)
-            if isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and node.value.func.id in self._declarations
-            for target in node.targets
-            if isinstance(target, ast.Name) and target.id == variable
-        }
+        constructors: set[str] = set()
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == variable
+                for target in node.targets
+            ):
+                continue
+            built = self._constructed_class(node.value, func, seen | {variable})
+            if built is not None:
+                constructors.add(built)
         return next(iter(constructors)) if len(constructors) == 1 else None
+
+    def _constructed_class(
+        self,
+        expression: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef] = None,
+        seen: Optional[frozenset[str]] = None,
+    ) -> Optional[str]:
+        """Return the spec class an expression constructs or carries over.
+
+        Two shapes beyond the obvious ``FileSpec()``:
+
+        ``SiteSpec.SiteSpec()``
+            PanDA imports the module and calls through it, so the callee is an
+            attribute rather than a name.  Reading only names left
+            ``entity_module.getSiteInfo`` to inference, when the code was
+            stating the type outright one attribute along.
+        ``copy.copy(spec)``
+            A copy holds what the original held.  ``JobGenerator`` builds most
+            of its file specs this way, so treating the result as unknown
+            discards a type the code has already established.
+        """
+        if not isinstance(expression, ast.Call):
+            return None
+        callee = expression.func
+        if isinstance(callee, ast.Name) and callee.id in self._declarations:
+            return callee.id
+        if isinstance(callee, ast.Attribute):
+            if callee.attr in self._declarations:
+                return callee.attr
+            if callee.attr in {"copy", "deepcopy"} and expression.args:
+                source = expression.args[0]
+                if isinstance(source, ast.Name) and func is not None:
+                    # ``seen`` guards ``a = copy.copy(b); b = copy.copy(a)``,
+                    # which is not in PanDA but costs one frozenset to rule out.
+                    return self._stated_local_class(source.id, func, seen)
+                return self._constructed_class(source, func, seen)
+        return None
 
     def _iterated_element_class(
         self,
@@ -326,35 +371,12 @@ class SpecAttributor:
             )
         if func is None:
             return None
-
-        for arg in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs):
-            if arg.arg != variable or arg.annotation is None:
-                continue
-            annotation = arg.annotation
-            name = (
-                annotation.id
-                if isinstance(annotation, ast.Name)
-                else getattr(annotation, "attr", None)
-            )
-            if name and self._declares(name, attribute):
-                return name
-
-        constructors = {
-            node.value.func.id
-            for node in ast.walk(func)
-            if isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Name)
-            and node.value.func.id in self._declarations
-            for target in node.targets
-            if isinstance(target, ast.Name) and target.id == variable
-        }
-        # Several constructors mean the variable is reused for different
-        # classes; that is a genuine ambiguity, not something to pick from.
-        if len(constructors) == 1:
-            only = next(iter(constructors))
-            if self._declares(only, attribute):
-                return only
+        # The annotation-or-constructor scan lives in one place: typing the
+        # object of an ``addFile`` call needs the same answer, and two copies
+        # would drift the moment either grew a case.
+        stated = self._stated_local_class(variable, func)
+        if stated is not None and self._declares(stated, attribute):
+            return stated
         return None
 
     # -- structural inference -------------------------------------------- #

@@ -925,3 +925,41 @@ def test_container_attribute_need_not_be_a_declared_column():
 
     assert "Files" not in declarations["JobSpec"]
     assert attributor._element_types[("JobSpec", "Files")] == {"FileSpec"}
+
+
+def test_module_qualified_constructor_is_still_a_constructor():
+    """``SiteSpec.SiteSpec()`` states the type as plainly as ``SiteSpec()``.
+
+    PanDA imports the module and calls through it, so the callee is an
+    attribute rather than a name.  Reading only names sent
+    ``entity_module.getSiteInfo`` to structural inference for a type the code
+    was stating outright, one attribute along.
+    """
+    source = (
+        "from pandaserver.taskbuffer import FileSpec\n"
+        "def get_file():\n"
+        "    ret = FileSpec.FileSpec()\n"
+        "    ret.status = 'ready'\n"
+        "    return ret\n"
+    )
+    _subjects, junctions, _cov = _progress(
+        source, "pandaserver/taskbuffer/db_proxy_mods/entity_module.py"
+    )
+
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "certain"
+
+
+def test_a_copy_holds_what_the_original_held():
+    """``copy.copy(spec)`` preserves the type; that is semantics, not a guess."""
+    source = (
+        "import copy\n"
+        "def clone():\n"
+        "    lib_file_spec = FileSpec()\n"
+        "    runFileSpec = copy.copy(lib_file_spec)\n"
+        "    runFileSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/JobGenerator.py")
+
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "certain"
