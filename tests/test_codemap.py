@@ -28,6 +28,7 @@ from bamboo.codemap.models import (
     SourceModule,
     ValueEnumNode,
 )
+from bamboo.codemap.panda import attribution
 from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
 from bamboo.models.graph_element import NodeType
 
@@ -791,3 +792,110 @@ def test_gate_skips_junctions_usage_cannot_speak_for():
 
     assert result.passed
     assert result.checked == 0
+
+
+# The adder idiom, as PanDA writes it: a method that appends its parameter, and
+# a caller that hands it a freshly constructed spec.  Both containers are named
+# ``Files`` and hold different classes, which is the whole point.
+_ADDERS = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus")
+    __slots__ = _attributes + ("Files",)
+
+    def addFile(self, file):
+        self.Files.append(file)
+
+    def load(self, states):
+        for state in states:
+            file_spec = FileSpec()
+            self.addFile(file_spec)
+
+class JediDatasetSpec(object):
+    _attributes = ("datasetID", "status")
+    __slots__ = _attributes + ("Files",)
+
+    def addFile(self, fileSpec):
+        self.Files.append(fileSpec)
+"""
+
+_JEDI_ADDER_CALLER = """
+def refine(datasetSpec):
+    use(datasetSpec.datasetID)
+    fileSpec = JediFileSpec()
+    datasetSpec.addFile(fileSpec)
+"""
+
+
+def _progress_multi(*sources: tuple[str, str]):
+    """Extract with the spec fixtures plus several caller modules."""
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py")]
+    modules += [_module(text, rel) for text, rel in sources]
+    subjects, junctions, coverage = progress.extract(modules, MAP_ID, VERSION)
+    return subjects, junctions, coverage
+
+
+def test_element_type_comes_from_what_was_put_in_the_container():
+    """``for file in job.Files`` is settled by the ``FileSpec()`` that went in.
+
+    PanDA never annotates ``addFile``, but it does construct the spec two lines
+    before handing it over, and that is the same fact stated where the code
+    happens to state it.
+    """
+    consumer = (
+        "def finalize(job):\n"
+        "    for file in job.Files:\n"
+        "        file.status = 'merging'\n"
+        "    job.jobStatus = 'merging'\n"      # pins ``job`` the way adder_gen does
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        (consumer, "pandaserver/dataservice/adder_gen.py"),
+    )
+    written = [
+        j for j in junctions if j.owner.endswith("::finalize") and j.subject.endswith(".status")
+    ]
+
+    assert written[0].subject == "FileSpec.status"
+    assert written[0].attribution == "container"
+
+
+def test_two_containers_named_files_hold_different_classes():
+    """``JobSpec.Files`` and ``JediDatasetSpec.Files`` are the pair naming cannot split.
+
+    Resolving them apart is what makes the container basis worth the hop: the
+    variable is called ``file`` in both cases.
+    """
+    consumer = (
+        "def walk(job, datasetSpec):\n"
+        "    for file in job.Files:\n"
+        "        file.status = 'merging'\n"
+        "    for other in datasetSpec.Files:\n"
+        "        other.status = 'ready'\n"
+        "    use(job.jobStatus, datasetSpec.datasetID)\n"   # pins both holders
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        (_JEDI_ADDER_CALLER, "pandajedi/jedirefine/TaskRefinerBase.py"),
+        (consumer, "pandaserver/dataservice/adder_gen.py"),
+    )
+    subjects = {j.subject for j in junctions if j.owner.endswith("::walk")}
+
+    assert subjects == {"FileSpec.status", "JediFileSpec.status"}
+
+
+def test_container_attribute_need_not_be_a_declared_column():
+    """``Files`` is an object-graph edge, not a DB column.
+
+    ``__slots__ = _attributes + ("Files", ...)`` says so outright.  Requiring
+    the container to be a declared attribute made the whole pass learn nothing.
+    """
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    declarations = progress.spec_attributes(modules)
+    attributor = attribution.SpecAttributor(declarations, attribution.class_bases(modules))
+    attributor.learn_element_types(modules)
+
+    assert "Files" not in declarations["JobSpec"]
+    assert attributor._element_types[("JobSpec", "Files")] == {"FileSpec"}

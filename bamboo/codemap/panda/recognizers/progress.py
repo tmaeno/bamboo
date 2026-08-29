@@ -301,6 +301,7 @@ def extract(
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
     attributor = SpecAttributor(declarations, class_bases(modules))
+    attributor.learn_element_types(modules)
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --

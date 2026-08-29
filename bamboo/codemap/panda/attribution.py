@@ -11,50 +11,54 @@ recognition: the progress recognizer knows a write happened, this decides what
 it wrote to.  Selection works on the same spec variables, so folding it into
 one recognizer would mean writing it twice.
 
-Three bases, and the map records which one was used:
+Four bases, strongest first, and the map records which one was used:
 
 ``certain``
-    A constructor call, a parameter annotation, or ``self`` in a spec class's
-    own method.  The code states the type.
+    A constructor call, a parameter annotation, ``self`` in a spec class's own
+    method (or a subclass of one), or an attribute only one class declares.
+    The code states the type.
+``container``
+    The variable iterates a list whose element type the code states, one hop
+    through the adder idiom -- see :meth:`SpecAttributor.learn_element_types`.
+``structural``
+    Exactly one class declares every attribute the code touches on the object.
+    A name is what someone called it; the attributes touched are what the code
+    requires it to be.
 ``heuristic``
     The variable's name matched a spec class *and* the module imports that
     class.  Naming alone is too weak -- PanDA variables do not carry the
     ``Jedi`` prefix, so ``file`` fits both ``FileSpec`` and ``JediFileSpec``
     and only 24% of ambiguous writes resolve uniquely.  Intersecting with what
-    the module imports raises that to 61%, because a module that never imports
-    ``JediFileSpec`` is not holding one.
-``unresolved``
-    Neither applied.  The write is still recorded -- the writer is known even
-    when the subject is not, which is enough for localize and prune, both of
-    which read observed values rather than the static subject.
+    the module imports raises that to 61%.
 
-Two alternatives were measured and rejected:
+A write none of them settle is still recorded, under a placeholder subject:
+the writer is known even when the subject is not, which is enough for localize
+and prune, both of which read observed values rather than the static subject.
 
-* **Fixpoint type propagation** seeded from constructor calls and pushed
-  through assignment, ``append`` and iteration.  It resolved nothing extra
-  (40% before and after), because the chains do not bottom out at constructors
-  -- they die at unannotated parameters, ``JobSpec.addFile(self, file)`` being
-  the one that matters most.
-* **Attribution by declared vocabulary**, matching the written literal against
-  the value sets classes declare.  Only two such vocabularies exist in the
-  whole corpus (``JediTaskSpec.status`` and ``JediDatasetSpec.status``), so it
-  cannot separate eight classes.  It would also make the vocabulary gate a
-  tautology, since the gate checks what the attribution used.
+**Attribution by declared vocabulary** was tried and does not work: only two
+such vocabularies exist in the whole corpus (``JediTaskSpec.status`` and
+``JediDatasetSpec.status``), so it cannot separate eight classes, and it would
+make the vocabulary gate a tautology by checking what the attribution used.
+The gate that does work compares the stated class against the structural one
+-- two independent readings, no production data (see ``codemap.gates``).
 
-Because the vocabulary cannot check the heuristic either, a heuristic
-attribution is *marked* rather than trusted: the real check is conformance
-against observed transitions, which needs production data.
+The bases are ordered by how much they assume, and every one of them reads
+only what PanDA already writes.  Asking PanDA for type annotations was
+seriously considered and turned out to be unnecessary: each time the evidence
+looked absent it was there, one hop further away.
 """
 
 from __future__ import annotations
 
 import ast
 import re
-from typing import Optional
+from typing import Iterator, Optional
 
 from bamboo.codemap.models import SourceModule
 
 CERTAIN = "certain"
+# One hop through the adder idiom: what the code put into the container.
+CONTAINER = "container"
 STRUCTURAL = "structural"
 HEURISTIC = "heuristic"
 UNRESOLVED = "unresolved"
@@ -84,6 +88,25 @@ def _normalise(name: str) -> str:
     """
     stripped = _SUFFIXES.sub("", _PREFIXES.sub("", name))
     return re.sub(r"[^a-z]", "", stripped.lower())
+
+
+def _functions_with_owner(
+    node: ast.AST, owner: Optional[str] = None
+) -> Iterator[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[str]]]:
+    """Yield every function in *node* paired with the class enclosing it.
+
+    Carried down the walk rather than read back from a ``parent`` link, so
+    this works on a bare tree -- the element-type pass runs before the
+    recognizer attaches parents.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef):
+            yield from _functions_with_owner(child, child.name)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield child, owner
+            yield from _functions_with_owner(child, owner)
+        else:
+            yield from _functions_with_owner(child, owner)
 
 
 def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
@@ -127,6 +150,7 @@ class SpecAttributor:
             set().union(*declarations.values()) if declarations else set()
         )
         self._accessed_cache: dict[ast.AST, dict[str, set[str]]] = {}
+        self._element_types: dict[tuple[str, str], set[str]] = {}
         self._by_noun: dict[str, set[str]] = {}
         for spec_class in declarations:
             noun = _normalise(spec_class)
@@ -156,6 +180,161 @@ class SpecAttributor:
                     if alias.asname in self._declarations:
                         found.add(alias.asname)
         return found
+
+    # -- container element types ----------------------------------------- #
+
+    def learn_element_types(self, modules: list[SourceModule]) -> None:
+        """Record what each spec's list attributes hold, from the adder idiom.
+
+        PanDA states this outright, twice over, and in the one place it matters
+        most -- the ``FileSpec``/``JediFileSpec`` split that defeats naming::
+
+            # JobSpec.py            file_spec = FileSpec()
+            #                       self.addFile(file_spec)
+            # TaskRefinerBase.py    fileSpec = JediFileSpec()
+            #                       datasetSpec.addFile(fileSpec)
+
+        so ``JobSpec.Files`` holds ``FileSpec`` and ``JediDatasetSpec.Files``
+        holds ``JediFileSpec``.  Reading it turns ``for file in job.Files``
+        from unresolvable into settled, with no annotation asked of PanDA.
+
+        The rule is one hop, not interprocedural analysis: a method whose body
+        appends a parameter to ``self.<attr>`` passes its caller's argument
+        type through to that attribute.  Direct ``x.attr.append(v)`` counts
+        too.  Nothing here needs the element types it produces, so a single
+        pass suffices -- receivers and arguments are typed from constructor
+        calls, annotations, ``self``, and structural inference, none of which
+        consult this table.
+
+        The assumption is homogeneity: that nothing else is ever added to the
+        same list.  That is what keeps this out of ``certain``.
+        """
+        adders = self._adder_methods(modules)
+        for module in modules:
+            for func, owner in _functions_with_owner(module.tree):
+                for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
+                    if not isinstance(call.func, ast.Attribute) or not call.args:
+                        continue
+                    receiver = call.func.value
+                    if call.func.attr == "append" and isinstance(receiver, ast.Attribute):
+                        holder, attribute = receiver.value, receiver.attr
+                    else:
+                        holder, attribute = receiver, adders.get(call.func.attr)
+                        if attribute is None:
+                            continue
+                    # The container attribute is deliberately not required to
+                    # be a declared one: ``_attributes`` is the DB column list,
+                    # and ``Files`` is an edge in the object graph rather than
+                    # a column -- ``__slots__ = _attributes + ("Files", ...)``.
+                    holder_class = self.class_of(holder, func, owner)
+                    if holder_class is None:
+                        continue
+                    element = self.class_of(call.args[0], func, owner)
+                    if element is not None:
+                        self._element_types.setdefault((holder_class, attribute), set()).add(
+                            element
+                        )
+
+    def _adder_methods(self, modules: list[SourceModule]) -> dict[str, str]:
+        """Return ``{method name: attribute}`` for ``self.<attr>.append(<param>)``.
+
+        Keyed by method name rather than by class because the receiver's class
+        is often what is being resolved; requiring it first would make the
+        table useless exactly where it is needed.  The name is distinctive
+        enough in practice -- ``addFile`` means the same thing on ``JobSpec``
+        and ``JediDatasetSpec``, differing only in what it holds.
+        """
+        adders: dict[str, str] = {}
+        for module in modules:
+            for func, _owner in _functions_with_owner(module.tree):
+                parameters = {a.arg for a in (*func.args.posonlyargs, *func.args.args)}
+                for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
+                    if (
+                        isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "append"
+                        and isinstance(call.func.value, ast.Attribute)
+                        and isinstance(call.func.value.value, ast.Name)
+                        and call.func.value.value.id == "self"
+                        and len(call.args) == 1
+                        and isinstance(call.args[0], ast.Name)
+                        and call.args[0].id in parameters
+                    ):
+                        adders[func.name] = call.func.value.attr
+        return adders
+
+    def class_of(
+        self,
+        expression: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str],
+    ) -> Optional[str]:
+        """Return the spec class an expression evaluates to, if it can be told.
+
+        Attribute-agnostic, unlike :meth:`attribute_write`, because the object
+        of an ``addFile`` call has to be typed without knowing which attribute
+        is being written.
+        """
+        if isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name):
+            return expression.func.id if expression.func.id in self._declarations else None
+        if isinstance(expression, ast.Name):
+            if expression.id == "self":
+                return enclosing_class if enclosing_class in self._declarations else None
+            if func is not None:
+                stated = self._stated_local_class(expression.id, func)
+                if stated is not None:
+                    return stated
+        return self._structural_of(expression, func)
+
+    def _stated_local_class(
+        self, variable: str, func: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> Optional[str]:
+        """Return the class a local is stated to hold, from annotation or constructor."""
+        for arg in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs):
+            if arg.arg != variable or arg.annotation is None:
+                continue
+            annotation = arg.annotation
+            name = (
+                annotation.id
+                if isinstance(annotation, ast.Name)
+                else getattr(annotation, "attr", None)
+            )
+            if name in self._declarations:
+                return name
+        constructors = {
+            node.value.func.id
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in self._declarations
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id == variable
+        }
+        return next(iter(constructors)) if len(constructors) == 1 else None
+
+    def _iterated_element_class(
+        self,
+        variable: str,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str],
+    ) -> Optional[str]:
+        """Return the class of a variable that iterates a typed container."""
+        if func is None:
+            return None
+        found: set[str] = set()
+        for node in ast.walk(func):
+            if (
+                not isinstance(node, (ast.For, ast.AsyncFor))
+                or not isinstance(node.target, ast.Name)
+                or node.target.id != variable
+                or not isinstance(node.iter, ast.Attribute)
+            ):
+                continue
+            holder = self.class_of(node.iter.value, func, enclosing_class)
+            if holder is None:
+                continue
+            found |= self._element_types.get((holder, node.iter.attr), set())
+        return next(iter(found)) if len(found) == 1 else None
 
     # -- per-site resolution --------------------------------------------- #
 
@@ -281,13 +460,21 @@ class SpecAttributor:
         belongs to both ``FileSpec`` and ``JediFileSpec`` -- rather than
         picking, since a wrong subject is a false lead.
         """
+        return self._structural_of(target.value, func)
+
+    def _structural_of(
+        self,
+        expression: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[str]:
+        """Structural inference over an arbitrary object expression."""
         if func is None:
             return None
         try:
-            expression = ast.unparse(target.value)
+            rendered = ast.unparse(expression)
         except Exception:  # noqa: BLE001
             return None
-        touched = self._accessed_attributes(func).get(expression)
+        touched = self._accessed_attributes(func).get(rendered)
         if not touched:
             return None
         candidates = [
@@ -362,6 +549,14 @@ class SpecAttributor:
             # touched on it are still evidence, so it falls through to the
             # structural pass rather than stopping here.
             variable = None
+
+        # A loop over a container whose element type the code states beats
+        # both of the readings below: ``for file in job.Files`` is settled by
+        # the ``FileSpec()`` that was put into that list, not by inference.
+        if isinstance(target.value, ast.Name):
+            element = self._iterated_element_class(target.value.id, func, enclosing_class)
+            if element is not None and self._declares(element, attribute):
+                return element, CONTAINER
 
         # Structural inference outranks the name: what the code does with the
         # object is stronger evidence than what someone called it.  Measured

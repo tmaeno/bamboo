@@ -79,7 +79,7 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
         bases = Counter(j.attribution for j in fragment.junctions)
         total = sum(bases.values())
         click.echo("\njunction attribution:")
-        for basis in ("certain", "structural", "heuristic", "unresolved"):
+        for basis in ("certain", "container", "structural", "heuristic", "unresolved"):
             count = bases.get(basis, 0)
             click.echo(f"  {basis:<12} {count:>5}  ({count * 100 // total if total else 0}%)")
         mix = gates.attribution_mix(fragment)
