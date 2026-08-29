@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +74,23 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             )
         if len(weak) > top:
             click.echo(f"  … {len(weak) - top} more")
+
+    if fragment.boundaries:
+        systems = Counter(b.system for b in fragment.boundaries)
+        click.echo(
+            "\nboundaries: "
+            + ", ".join(f"{system}={count}" for system, count in systems.most_common())
+        )
+        thin = gates.unobservable_boundaries(fragment)
+        if thin:
+            # What crossed a boundary and was never logged cannot be recovered
+            # afterwards, so the limit is worth knowing before an incident
+            # turns on it rather than during one.
+            click.echo(f"  logging under half of what they receive ({len(thin)}):")
+            for interface, observed, carried in thin[:top]:
+                click.echo(f"    {observed:>3}/{carried:<3}  {interface}")
+            if len(thin) > top:
+                click.echo(f"    … {len(thin) - top} more")
 
     click.echo("\ngates:")
     all_passed = True

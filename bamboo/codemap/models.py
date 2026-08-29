@@ -222,7 +222,38 @@ class BoundaryNode(BaseNode):
     system: str
     kind: str = Field(default="reports_state", description="reports_state | transports_causation")
     interface: str = Field(..., description="Receiving-side function.")
-    carried_values: list[str] = Field(default_factory=list)
+    carried_values: list[str] = Field(
+        default_factory=list,
+        description="Names the far side supplies, in the receiving side's spelling.",
+    )
+    access_conditions: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Preconditions the boundary itself enforces before any junction "
+            "sees the request -- transport security, caller role, HTTP method, "
+            "ownership.  These are the *first* place a request can be rejected, "
+            "so a command that appears to have vanished may never have been "
+            "accepted here."
+        ),
+    )
+    observable_values: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Carried values the receiving code logs on arrival.  What is not "
+            "logged cannot be recovered afterwards, so this is the difference "
+            "between a boundary that can be investigated and one that can only "
+            "be guessed at."
+        ),
+    )
+    accepts_arbitrary: bool = Field(
+        default=False,
+        description=(
+            "The endpoint takes ``**kwargs``, so what crosses cannot be "
+            "enumerated from the signature.  Recorded rather than ignored: "
+            "listing no carried values for such a boundary would claim nothing "
+            "crosses it, which is the opposite of the truth."
+        ),
+    )
     version_binding: list[str] = Field(
         default_factory=list,
         description=(
@@ -235,8 +266,13 @@ class BoundaryNode(BaseNode):
     anchor: Optional[Anchor] = None
 
     @staticmethod
-    def make_name(map_id: str, system: str, interface: str, subject: str) -> str:
-        return f"{map_id}:{system}:{interface}:{subject}"
+    def make_name(map_id: str, system: str, interface: str) -> str:
+        """Identity is the interface, not one value crossing it.
+
+        An endpoint carries many values at once, so keying per value would
+        split one boundary into dozens that all move together.
+        """
+        return f"{map_id}:{system}:{interface}"
 
 
 class ValueEnumNode(BaseNode):

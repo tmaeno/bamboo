@@ -96,6 +96,57 @@ def namespace_disambiguates(fragment: MapFragment) -> GateResult:
     )
 
 
+def boundary_ownership_param_declared(fragment: MapFragment) -> GateResult:
+    """(i) An ownership check names a parameter the endpoint actually declares.
+
+    ``@request_validation(..., task_owner=True, task_id_param="task_id")``
+    states which parameter carries the task whose owner is checked.  The
+    signature states which parameters exist.  If they disagree the check reads
+    a parameter that is not there, and the endpoint's access control does not
+    do what its declaration says -- a disagreement between two independent
+    expressions of the same fact, which is exactly what a code-internal gate
+    is for.
+    """
+    failures = [
+        f"{b.interface} declares task_owner on "
+        f"{b.access_conditions.get('task_id_param', 'task_id')!r}, "
+        f"but its parameters are {b.carried_values}"
+        for b in fragment.boundaries
+        if b.access_conditions.get("task_owner")
+        and b.access_conditions.get("task_id_param", "task_id") not in b.carried_values
+    ]
+    checked = sum(1 for b in fragment.boundaries if b.access_conditions.get("task_owner"))
+    return GateResult(
+        gate="boundary-ownership-param",
+        passed=not failures,
+        checked=checked,
+        failures=failures,
+        note="The decorator and the signature must agree on which parameter carries the task.",
+    )
+
+
+def unobservable_boundaries(
+    fragment: MapFragment, threshold: float = 0.5
+) -> list[tuple[str, int, int]]:
+    """Boundaries that log little of what they receive, worst first.
+
+    Not a gate: logging less is sometimes correct -- an endpoint taking user
+    secrets *should* log none of them.  It is reported because it bounds what
+    can be investigated afterwards.  A value that crossed a boundary and was
+    never written down cannot be recovered from the record, so an incident that
+    turns on it can only be guessed at, and knowing that in advance is better
+    than discovering it mid-investigation.
+    """
+    rows = [
+        (b.interface, len(b.observable_values), len(b.carried_values))
+        for b in fragment.boundaries
+        if b.carried_values
+        and len(b.observable_values) / len(b.carried_values) < threshold
+    ]
+    rows.sort(key=lambda r: (r[1] / r[2], -r[2]))
+    return rows
+
+
 def coverage_matrix(fragment: MapFragment) -> list[tuple[str, str, int, int, float]]:
     """Return per-slice, per-file coverage rows sorted worst first.
 
@@ -118,6 +169,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.value_enums:
         results.append(value_enum_referenced(fragment))
         results.append(namespace_disambiguates(fragment))
+    if fragment.boundaries:
+        results.append(boundary_ownership_param_declared(fragment))
     return results
 
 

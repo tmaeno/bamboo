@@ -25,7 +25,7 @@ from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import MapFragment, SourceModule
-from bamboo.codemap.panda.recognizers import errorcode
+from bamboo.codemap.panda.recognizers import boundary, errorcode
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +67,20 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             raise RuntimeError("prepare() must be called before run()")
 
         fragment = MapFragment(map_id=self.map_id, derived_from=self._version)
-        enums, coverage = errorcode.extract(self._modules, self.map_id, self._version)
+        enums, enum_coverage = errorcode.extract(self._modules, self.map_id, self._version)
         fragment.value_enums.extend(enums)
-        fragment.coverage.extend(coverage)
+        fragment.coverage.extend(enum_coverage)
+
+        boundaries, boundary_coverage = boundary.extract(
+            self._modules, self.map_id, self._version
+        )
+        fragment.boundaries.extend(boundaries)
+        fragment.coverage.extend(boundary_coverage)
+
         logger.info(
-            "PandaCodeMapPlugin: %d value enumeration(s) across %d file(s)",
+            "PandaCodeMapPlugin: %d value enumeration(s), %d boundary/boundaries",
             len(enums),
-            len(coverage),
+            len(boundaries),
         )
         return fragment
 
