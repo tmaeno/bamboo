@@ -176,20 +176,20 @@ def _enum(constant: str, value, namespace: str = "taskbuffer.ErrorCode.EC", refe
     )
 
 
-def test_gate_5_flags_unreferenced_constants():
+def test_unreferenced_constants_are_flagged():
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
         value_enums=[_enum("EC_Kill", 100), _enum("EC_Dead", 206, references=0)],
     )
-    result = gates.gate_5_value_enum_referenced(fragment)
+    result = gates.value_enum_referenced(fragment)
 
     assert not result.passed
     assert result.checked == 2
     assert any("EC_Dead" in f for f in result.failures)
 
 
-def test_gate_5b_allows_reuse_across_namespaces():
+def test_reuse_across_namespaces_is_allowed():
     """Reused numbers are the reason the key carries a namespace at all."""
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -199,10 +199,10 @@ def test_gate_5b_allows_reuse_across_namespaces():
             _enum("EC_Watcher", 100, "jobdispatcher.ErrorCode.EC"),
         ],
     )
-    assert gates.gate_5b_namespace_disambiguates(fragment).passed
+    assert gates.namespace_disambiguates(fragment).passed
 
 
-def test_gate_5b_rejects_collision_inside_one_namespace():
+def test_collision_inside_one_namespace_is_rejected():
     """Within one namespace a repeated value makes the key identify nothing."""
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -212,7 +212,7 @@ def test_gate_5b_rejects_collision_inside_one_namespace():
             _enum("TASK_NORMAL", 0, "taskbuffer.EventServiceUtils"),
         ],
     )
-    result = gates.gate_5b_namespace_disambiguates(fragment)
+    result = gates.namespace_disambiguates(fragment)
 
     assert not result.passed
     assert "ST_ready" in result.failures[0]

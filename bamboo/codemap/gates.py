@@ -1,6 +1,7 @@
 """Self-verification gates for a Code Map fragment.
 
-The gates split in two, and the split is what makes P0 runnable at all:
+The gates split in two, and the split is what lets a build verify itself
+offline, before any production data is available:
 
 **(i) code-internal consistency** needs only the source.  It catches extraction
 bugs and misses by cross-checking two independent expressions of the same fact
@@ -43,8 +44,8 @@ class GateResult(BaseModel):
         return f"[{status}] {self.gate}: {self.checked} checked{detail}"
 
 
-def gate_5_value_enum_referenced(fragment: MapFragment) -> GateResult:
-    """Gate 5 (i): every extracted enumeration constant is referenced somewhere.
+def value_enum_referenced(fragment: MapFragment) -> GateResult:
+    """(i) Every extracted enumeration constant is referenced somewhere.
 
     A constant nothing reads is either dead or was never an enumeration member
     to begin with -- a threshold or a config default that the name-shape
@@ -61,7 +62,7 @@ def gate_5_value_enum_referenced(fragment: MapFragment) -> GateResult:
         if e.references == 0
     ]
     return GateResult(
-        gate="5:value-enum-referenced",
+        gate="value-enum-referenced",
         passed=not unreferenced,
         checked=len(fragment.value_enums),
         failures=unreferenced,
@@ -69,8 +70,8 @@ def gate_5_value_enum_referenced(fragment: MapFragment) -> GateResult:
     )
 
 
-def gate_5b_namespace_disambiguates(fragment: MapFragment) -> GateResult:
-    """Gate 5 (i), second half: a value is unique *within* its namespace.
+def namespace_disambiguates(fragment: MapFragment) -> GateResult:
+    """(i) A value is unique *within* its namespace.
 
     Reused numbers are expected and are the reason the index is keyed on
     ``(namespace, value)`` -- ``EC_Kill``, ``EC_Setupper`` and ``EC_Watcher``
@@ -87,7 +88,7 @@ def gate_5b_namespace_disambiguates(fragment: MapFragment) -> GateResult:
         if len(names) > 1
     ]
     return GateResult(
-        gate="5b:namespace-disambiguates",
+        gate="namespace-disambiguates",
         passed=not collisions,
         checked=len(seen),
         failures=collisions,
@@ -115,8 +116,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     """Run every code-internal gate that applies to *fragment*."""
     results: list[GateResult] = []
     if fragment.value_enums:
-        results.append(gate_5_value_enum_referenced(fragment))
-        results.append(gate_5b_namespace_disambiguates(fragment))
+        results.append(value_enum_referenced(fragment))
+        results.append(namespace_disambiguates(fragment))
     return results
 
 

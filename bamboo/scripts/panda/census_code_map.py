@@ -1,4 +1,4 @@
-"""Code Map census — the P0-a diagnostic.
+"""Code Map census — survey the source before fixing the slices.
 
 A **throwaway diagnostic**, not production code.  It answers the questions that
 must be settled *before* the Code Map slices are fixed:
@@ -602,7 +602,7 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
 
     Reported per file rather than as a single average: the filter-chain idiom
     varies wildly between sibling files, and a mean would hide that behind the
-    layer-1 patterns' near-perfect scores.
+    patterns that depend only on Python syntax and so match everywhere.
     """
     found: dict[str, Counter] = {
         MP_TAG: Counter(),

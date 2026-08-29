@@ -268,7 +268,7 @@ class ValueEnumNode(BaseNode):
         default=0,
         description=(
             "Number of sites referencing this constant.  Zero means it is dead "
-            "or was mis-classified -- the signal gate 5 looks for."
+            "or was mis-classified, so it does not belong in a decoding index."
         ),
     )
 
@@ -282,7 +282,8 @@ class CoverageStat(BaseModel):
 
     Reported per file rather than as a slice average: the filter-chain idiom
     ranges from 26 occurrences to none across sibling broker files, and a mean
-    would bury that under the layer-1 slices' near-perfect scores.
+    would bury that variance under the slices whose recognizers depend only on
+    Python syntax and so match near-perfectly everywhere.
     """
 
     slice_name: str
