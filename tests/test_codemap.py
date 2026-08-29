@@ -628,3 +628,75 @@ def test_attribution_mix_names_the_attributes_that_need_looking_at():
 
     mix = gates.attribution_mix(fragment)
     assert [row[0] for row in mix] == ["status"]
+
+
+def test_self_write_in_a_non_spec_class_is_not_a_spec_write():
+    """``self.attr`` writes the enclosing class's own field, whatever it is named.
+
+    A WatchDog's ``self.vo = "atlas"`` shares a name with a spec attribute and
+    nothing else.  Recording it as an unresolved junction would put the
+    WatchDog's bookkeeping in the map and leave it in the coverage denominator
+    as a gap that can never close.
+    """
+    source = (
+        "class AtlasTaskWithholderWatchDog(WatchDogBase):\n"
+        "    def __init__(self):\n"
+        "        self.vo = 'atlas'\n"
+    )
+    _subjects, junctions, coverage = _progress(
+        source, "pandajedi/jedidog/AtlasTaskWithholderWatchDog.py"
+    )
+
+    assert junctions == []
+    assert coverage == []
+
+
+def test_subclass_of_a_spec_resolves_to_the_spec():
+    """``PickleFileSpec(FileSpec)`` is real, and its ``self.status`` is a FileSpec's.
+
+    The same hierarchy walk that drops the WatchDog write has to keep this one,
+    which is why the rule reads the base classes instead of asking whether the
+    enclosing class itself declares the attribute.
+    """
+    source = (
+        "class PickleFileSpec(FileSpec):\n"
+        "    def load(self):\n"
+        "        self.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/taskbuffer/PickleFileSpec.py")
+
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "certain"
+
+
+def test_attribute_chain_uses_its_last_name():
+    """``impl.taskSpec.status`` has no plain name on the left but names its value.
+
+    The chain's final attribute is as good a signal as a variable would be, and
+    without it TaskRefiner's task statuses are dropped for a syntactic reason
+    that says nothing about how resolvable they are.
+    """
+    source = (
+        "from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec\n"
+        "def f(impl):\n"
+        "    impl.taskSpec.status = 'staging'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/TaskRefiner.py")
+
+    assert junctions[0].subject == "JediTaskSpec.status"
+    assert junctions[0].attribution == "heuristic"
+
+
+def test_subscripted_object_stays_unresolved():
+    """``self.dataset_map[name].status`` has no name to read; each container differs."""
+    source = (
+        "from pandaserver.taskbuffer.JediFileSpec import JediFileSpec\n"
+        "class Adder:\n"
+        "    def run(self):\n"
+        "        self.dataset_map['x'].status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(
+        source, "pandaserver/dataservice/adder_atlas_plugin.py"
+    )
+
+    assert junctions[0].attribution == "unresolved"

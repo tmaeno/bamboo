@@ -36,7 +36,12 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda.attribution import UNRESOLVED_CLASS, SpecAttributor
+from bamboo.codemap.panda.attribution import (
+    NOT_A_SPEC,
+    UNRESOLVED_CLASS,
+    SpecAttributor,
+    class_bases,
+)
 
 SLICE_NAME = "progress"
 
@@ -295,7 +300,7 @@ def extract(
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
-    attributor = SpecAttributor(declarations)
+    attributor = SpecAttributor(declarations, class_bases(modules))
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -316,7 +321,6 @@ def extract(
         for target, literal, node in _literal_attribute_writes(module.tree):
             if target.attr not in spec_attribute_names:
                 continue
-            candidates += 1
             func = _enclosing_function(node)
             spec_class, basis = attributor.attribute_write(
                 target,
@@ -324,6 +328,12 @@ def extract(
                 func=func,
                 enclosing_class=_enclosing_class(node),
             )
+            if basis == NOT_A_SPEC:
+                # Not a candidate at all, so it is not counted as one: a
+                # WatchDog's own ``vo`` field would otherwise sit in the
+                # denominator forever as coverage the slice can never reach.
+                continue
+            candidates += 1
             if spec_class is not None:
                 explained += 1
                 attributed.add((spec_class, target.attr))

@@ -58,6 +58,12 @@ CERTAIN = "certain"
 HEURISTIC = "heuristic"
 UNRESOLVED = "unresolved"
 
+# Not a write to a spec at all -- the caller drops it instead of recording an
+# unresolved junction.  ``self.vo = "atlas"`` in a WatchDog writes the
+# WatchDog's own field; that ``vo`` is also a spec attribute name is a
+# collision, not a relationship.
+NOT_A_SPEC = "not-a-spec"
+
 # Subject placeholder for a write whose class could not be settled.  Spelled
 # with a character no Python identifier can contain, so an unresolved subject
 # can never collide with a real one.
@@ -79,6 +85,28 @@ def _normalise(name: str) -> str:
     return re.sub(r"[^a-z]", "", stripped.lower())
 
 
+def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
+    """Return ``{class: [base class, ...]}`` for every class in the corpus.
+
+    Needed because a spec class can be subclassed: ``PickleFileSpec(FileSpec)``
+    and ``PickleJobSpec(JobSpec)`` both exist, and a ``self.status`` inside one
+    of them is a genuine ``FileSpec.status`` write.  Without the hierarchy the
+    rule for ``self`` would either miss those or, worse, refuse to drop the
+    WatchDog writes it is there to drop.
+    """
+    bases: dict[str, list[str]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            names = [
+                base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
+                for base in node.bases
+            ]
+            bases[node.name] = [n for n in names if n]
+    return bases
+
+
 class SpecAttributor:
     """Resolves the spec class behind an attribute write.
 
@@ -87,8 +115,13 @@ class SpecAttributor:
     attribution quadratic in a corpus with ~1000 writes.
     """
 
-    def __init__(self, declarations: dict[str, set[str]]) -> None:
+    def __init__(
+        self,
+        declarations: dict[str, set[str]],
+        bases: Optional[dict[str, list[str]]] = None,
+    ) -> None:
         self._declarations = declarations
+        self._bases = bases or {}
         self._by_noun: dict[str, set[str]] = {}
         for spec_class in declarations:
             noun = _normalise(spec_class)
@@ -124,6 +157,20 @@ class SpecAttributor:
     def _declares(self, spec_class: str, attribute: str) -> bool:
         return attribute in self._declarations.get(spec_class, ())
 
+    def _declaring_ancestor(self, cls: str, attribute: str) -> Optional[str]:
+        """Return the class in *cls*'s hierarchy that declares *attribute*."""
+        seen: set[str] = set()
+        pending = [cls]
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if self._declares(name, attribute):
+                return name
+            pending.extend(self._bases.get(name, ()))
+        return None
+
     def _certain(
         self,
         variable: str,
@@ -133,9 +180,14 @@ class SpecAttributor:
     ) -> Optional[str]:
         """Resolve from what the code states outright, or return ``None``."""
         if variable == "self":
-            if enclosing_class and self._declares(enclosing_class, attribute):
-                return enclosing_class
-            return None
+            # Handled before this point: ``self`` is the enclosing class, so
+            # the answer is certain either way and never falls through to the
+            # heuristic.
+            return (
+                self._declaring_ancestor(enclosing_class, attribute)
+                if enclosing_class
+                else None
+            )
         if func is None:
             return None
 
@@ -198,6 +250,18 @@ class SpecAttributor:
         it is.
         """
         attribute = target.attr
+
+        # ``self.attr`` writes the enclosing class's own attribute, by
+        # definition.  So the hierarchy answers it outright, in both
+        # directions: a subclass of a spec resolves to the spec, and a class
+        # whose hierarchy never declares the attribute is not writing a spec at
+        # all -- which is a fact about the code, not a failure to resolve it.
+        if isinstance(target.value, ast.Name) and target.value.id == "self":
+            if enclosing_class is None:
+                return None, UNRESOLVED
+            owner = self._declaring_ancestor(enclosing_class, attribute)
+            return (owner, CERTAIN) if owner else (None, NOT_A_SPEC)
+
         # A single declaring class settles it without looking at the object
         # expression at all -- ``jobStatus`` and ``ddmErrorDiag`` resolve here,
         # including in ``self.job.jobStatus = ...`` where the object is itself
@@ -206,15 +270,21 @@ class SpecAttributor:
         if len(declaring) == 1:
             return declaring[0], CERTAIN
 
-        if not isinstance(target.value, ast.Name):
-            # ``self.dataset_map[name].status`` and friends: rare, and each
-            # needs its own container reasoning.  Reported, not guessed at.
+        if isinstance(target.value, ast.Name):
+            variable = target.value.id
+            certain = self._certain(variable, attribute, func, enclosing_class)
+            if certain is not None:
+                return certain, CERTAIN
+        elif isinstance(target.value, ast.Attribute):
+            # ``impl.taskSpec.status``: the chain's last attribute names the
+            # value as squarely as a variable would, and treating it as one
+            # recovers writes that are otherwise dropped for having no plain
+            # name on the left -- including ``TaskRefiner``'s task statuses.
+            variable = target.value.attr
+        else:
+            # A subscript or a call: ``self.dataset_map[name].status`` has no
+            # name to read at all, and each container needs its own reasoning.
             return None, UNRESOLVED
-
-        variable = target.value.id
-        certain = self._certain(variable, attribute, func, enclosing_class)
-        if certain is not None:
-            return certain, CERTAIN
 
         guess = self._heuristic(variable, attribute, imported)
         if guess is not None:
