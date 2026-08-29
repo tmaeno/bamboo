@@ -41,6 +41,23 @@ from pydantic import BaseModel, Field
 from bamboo.models.graph_element import BaseNode, NodeType
 
 
+class SourceModule(BaseModel):
+    """One parsed source file, shared by every recognizer in a build.
+
+    Parsing and hashing happen once per module rather than once per
+    recognizer: with several slices reading the same tree, re-reading it per
+    slice would multiply the build's cost for nothing.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    package: str
+    rel_path: str  # package-prefixed, e.g. "pandajedi/jediorder/JobGenerator.py"
+    tree: Any  # ast.Module
+    source: str
+    blob_sha: str
+
+
 class Anchor(BaseModel):
     """Where in the source a Code Map fact was found.
 

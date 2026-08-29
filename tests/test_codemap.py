@@ -19,11 +19,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from bamboo.codemap import gates
+from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
     Branch,
     JunctionNode,
     MapFragment,
+    SourceModule,
     ValueEnumNode,
 )
 from bamboo.codemap.panda.recognizers import errorcode
@@ -33,9 +35,15 @@ MAP_ID = "panda"
 VERSION = "panda-server-source 1.0.2"
 
 
-def _module(source: str, rel: str = "pandaserver/taskbuffer/ErrorCode.py"):
-    """Build the ``(package, rel, tree, source)`` tuple the recognizer takes."""
-    return (rel.split("/")[0], rel, ast.parse(source), source)
+def _module(source: str, rel: str = "pandaserver/taskbuffer/ErrorCode.py") -> SourceModule:
+    """Build the parsed module a recognizer takes."""
+    return SourceModule(
+        package=rel.split("/")[0],
+        rel_path=rel,
+        tree=ast.parse(source),
+        source=source,
+        blob_sha=blob_sha(source),
+    )
 
 
 def _extract(source: str, rel: str = "pandaserver/taskbuffer/ErrorCode.py"):
@@ -289,6 +297,45 @@ async def test_store_fragment_can_keep_existing_versions():
     await store_fragment(fragment, graph_db, replace_version=False)
 
     graph_db.clear_map.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+# version stamping
+# --------------------------------------------------------------------------- #
+
+
+def test_blob_sha_matches_git_for_lf_source():
+    """The hash equals ``git rev-parse HEAD:<path>`` for the same bytes.
+
+    That equality is what lets a map built from a checkout be compared file by
+    file with one built from the installed package.
+    """
+    # `git hash-object` on b"hello\n" -- the canonical example.
+    assert blob_sha("hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+
+
+def test_blob_sha_tracks_content_not_position():
+    assert blob_sha("EC_Kill = 100\n") != blob_sha("EC_Kill = 101\n")
+    assert blob_sha("EC_Kill = 100\n") == blob_sha("EC_Kill = 100\n")
+
+
+def test_anchors_carry_the_content_hash():
+    """Without it a rebuild cannot tell whether the enclosing file moved on."""
+    enums, _ = _extract("# killed\nEC_Kill = 100\n")
+
+    assert enums[0].anchor is not None
+    assert enums[0].anchor.blob_sha == blob_sha("# killed\nEC_Kill = 100\n")
+
+
+def test_describe_returns_none_outside_a_git_checkout(tmp_path):
+    """Not being a checkout is a source form, not a failure.
+
+    An installed distribution has no repository; the caller falls back to the
+    identity that form does offer rather than the build refusing to run.
+    """
+    from bamboo.codemap.gitsource import describe
+
+    assert describe(tmp_path) is None
 
 
 def test_code_map_labels_are_distinct_from_incident_labels():

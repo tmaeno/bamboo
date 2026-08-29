@@ -29,7 +29,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
 
-from bamboo.codemap.models import Anchor, CoverageStat, ValueEnumNode
+from bamboo.codemap.models import Anchor, CoverageStat, SourceModule, ValueEnumNode
 
 SLICE_NAME = "value-enum"
 
@@ -120,14 +120,14 @@ def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.Assign]]
 
 
 def extract(
-    modules: list[tuple[str, str, ast.Module, str]],
+    modules: list[SourceModule],
     map_id: str,
     derived_from: str,
 ) -> tuple[list[ValueEnumNode], list[CoverageStat]]:
     """Extract value enumerations and per-file coverage.
 
     Args:
-        modules:      ``(package, rel_path, tree, source)`` for every parsed module.
+        modules:      Every parsed module in the snapshot.
         map_id:       Map this fragment belongs to.
         derived_from: Version stamp recorded on every node.
 
@@ -143,16 +143,17 @@ def extract(
 
     # Reference counting runs over every module, not just the defining one:
     # a constant is only meaningfully part of the index if something reads it.
-    for _pkg, _rel, tree, _src in modules:
-        for node in ast.walk(tree):
+    for module in modules:
+        for node in ast.walk(module.tree):
             if isinstance(node, ast.Attribute) and _is_enum_name(node.attr):
                 references[node.attr] += 1
             elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                 if _is_enum_name(node.id):
                     references[node.id] += 1
 
-    for pkg, rel, tree, src in modules:
-        lines = src.splitlines()
+    for module in modules:
+        pkg, rel, tree = module.package, module.rel_path, module.tree
+        lines = module.source.splitlines()
         candidates = 0
         explained = 0
         # A prefix only counts as an enumeration group when several constants
@@ -201,6 +202,7 @@ def extract(
                         file=rel,
                         line_start=node.lineno,
                         line_end=node.end_lineno,
+                        blob_sha=module.blob_sha,
                     ),
                     references=references.get(name, 0),
                 )

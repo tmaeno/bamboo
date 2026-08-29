@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Optional
 
 from bamboo.codemap.base import CodeMapPlugin
-from bamboo.codemap.models import MapFragment
+from bamboo.codemap.gitsource import blob_sha
+from bamboo.codemap.gitsource import describe as _git_describe
+from bamboo.codemap.models import MapFragment, SourceModule
 from bamboo.codemap.panda.recognizers import errorcode
 
 logger = logging.getLogger(__name__)
@@ -36,8 +38,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def __init__(self) -> None:
         self._roots: dict[str, Path] = {}
         self._version: str = ""
-        # (package, rel_path, tree, source) for every parsed module.
-        self._modules: list[tuple[str, str, ast.Module, str]] = []
+        self._modules: list[SourceModule] = []
 
     @property
     def map_id(self) -> str:
@@ -117,9 +118,23 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     @staticmethod
     def _resolve_version(source_root: Optional[Path]) -> str:
-        """Return the stamp recorded on every node of this build."""
+        """Return the stamp recorded on every node of this build.
+
+        The stamp has to identify the *contents* that were analysed.  A
+        filesystem path does not: the same path holds different code tomorrow,
+        so two builds would carry the same stamp while describing different
+        systems -- which defeats the point of stamping at all, and silently
+        breaks the version diffing that condition drift depends on.
+
+        For a git checkout the description is used instead.  ``--dirty``
+        matters: a map built from a modified working tree cannot be
+        reproduced, and a stamp that hides that is worse than no stamp.
+        """
         if source_root is not None:
-            return f"source-root:{Path(source_root).expanduser().resolve()}"
+            root = Path(source_root).expanduser().resolve()
+            described = _git_describe(root)
+            return f"git:{described}" if described else f"source-root:{root}"
+
         from importlib.metadata import (
             Distribution,
             PackageNotFoundError,
@@ -134,16 +149,19 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return "unknown"
 
     @staticmethod
-    def _parse_modules(
-        roots: dict[str, Path],
-    ) -> list[tuple[str, str, ast.Module, str]]:
-        """Parse every ``.py`` once; files that will not parse are skipped.
+    def _parse_modules(roots: dict[str, Path]) -> list[SourceModule]:
+        """Parse and hash every ``.py`` once; files that will not parse are skipped.
 
         Recognizers are run over the whole tree rather than a file list, so a
         module added upstream is picked up on the next build with no
         configuration change.
+
+        The content hash is of what was actually read, not of what git has
+        committed -- in a modified working tree those differ, and an anchor
+        that pointed at the committed bytes would describe code the build never
+        saw.
         """
-        modules: list[tuple[str, str, ast.Module, str]] = []
+        modules: list[SourceModule] = []
         for pkg, root in roots.items():
             for path in sorted(root.rglob("*.py")):
                 try:
@@ -152,6 +170,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 except SyntaxError:
                     logger.debug("skipping unparseable module: %s", path)
                     continue
-                rel = f"{pkg}/{path.relative_to(root)}"
-                modules.append((pkg, rel, tree, source))
+                modules.append(
+                    SourceModule(
+                        package=pkg,
+                        rel_path=f"{pkg}/{path.relative_to(root)}",
+                        tree=tree,
+                        source=source,
+                        blob_sha=blob_sha(source),
+                    )
+                )
         return modules
