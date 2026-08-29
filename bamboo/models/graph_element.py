@@ -58,6 +58,16 @@ class NodeType(str, Enum):
     DEPENDENCY = "Dependency"
     USER = "User"
 
+    # Code Map types.  These live in the same Neo4j database but form a
+    # separate namespace: they are machine-derived from source and can be
+    # rebuilt at will, whereas the incident types above are human-validated
+    # and irreplaceable.  Keeping the labels distinct is what lets
+    # ``clear_map()`` drop a Code Map without touching incident knowledge.
+    JUNCTION_POINT = "JunctionPoint"
+    BOUNDARY = "Boundary"
+    SUBJECT = "Subject"
+    VALUE_ENUM = "ValueEnum"
+
 
 class RelationType(str, Enum):
     """Edge type enum.  Values are used verbatim as Neo4j relationship types.
@@ -93,6 +103,13 @@ class RelationType(str, Enum):
     REPORTED_BY = "reported_by"
     ASSIGNED_TO = "assigned_to"
     APPROVED_BY = "approved_by"
+
+    # Code Map relationships
+    WRITES = "writes"  # JunctionPoint → Subject
+    READS = "reads"  # JunctionPoint → Subject (input provenance)
+    BOUNDED_BY = "bounded_by"  # JunctionPoint → Boundary
+    UPSTREAM_OF = "upstream_of"  # JunctionPoint → JunctionPoint
+    IMPLEMENTED_BY = "implemented_by"  # Component → JunctionPoint (incident join)
 
 
 class BaseNode(BaseModel):

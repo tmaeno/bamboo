@@ -580,10 +580,21 @@ def collect_guarded_attributes(modules: list[Module]) -> set[str]:
 _TAG_RE = re.compile(r"\b([a-z_]+)=(-?)([a-zA-Z_][\w]*)")
 
 MP_TAG = "tagged log literal"
-MP_CONST_ENUM = "module constant enumeration"
+MP_VALUE_ENUM = "value enumeration (name <-> value)"
+MP_VALUE_SET = "declared value set"
 MP_FILTER_CHAIN = "filter-chain reassign idiom"
 MP_REQ_ENTRY = "request entry point (req arg)"
 MP_CONFIG_KEY = "config key literal"
+
+
+def _module_constant_name(node: ast.Assign) -> Optional[str]:
+    """Return the constant's name if *node* is a module-level CONSTANT = ... ."""
+    if not isinstance(getattr(node, "parent", None), ast.Module):
+        return None
+    for target in node.targets:
+        if isinstance(target, ast.Name) and (target.id.isupper() or target.id.startswith(("EC_", "ST_"))):
+            return target.id
+    return None
 
 
 def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
@@ -595,7 +606,8 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
     """
     found: dict[str, Counter] = {
         MP_TAG: Counter(),
-        MP_CONST_ENUM: Counter(),
+        MP_VALUE_ENUM: Counter(),
+        MP_VALUE_SET: Counter(),
         MP_FILTER_CHAIN: Counter(),
         MP_REQ_ENTRY: Counter(),
         MP_CONFIG_KEY: Counter(),
@@ -609,17 +621,21 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
                             if dash or key in ("criteria", "reason", "action"):
                                 found[MP_TAG][mod.rel] += 1
             elif isinstance(node, ast.Assign):
-                # module-level ``NAME = <int>`` with a preceding comment is the
-                # ErrorCode shape: an explicit enumeration, free to extract.
-                if (
-                    isinstance(getattr(node, "parent", None), ast.Module)
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, int)
-                    and any(isinstance(t, ast.Name) and t.id.isupper() or
-                            isinstance(t, ast.Name) and t.id.startswith("EC_")
-                            for t in node.targets)
-                ):
-                    found[MP_CONST_ENUM][mod.rel] += 1
+                # Two different things hide under "module constant", and they
+                # feed different consumers:
+                #   EC_Kill = 100 / ST_ready = 0   -> a name<->value pair, which
+                #       is what the (namespace, value) index is built from
+                #   FINAL_TASK_STATUSES = [...]    -> a declared vocabulary,
+                #       which is a gate oracle, not an index entry
+                # Counting them together made ErrorCode.py and DataCarousel.py
+                # look like the same kind of file.
+                if _module_constant_name(node):
+                    if isinstance(node.value, ast.Constant) and isinstance(
+                        node.value.value, (int, str)
+                    ):
+                        found[MP_VALUE_ENUM][mod.rel] += 1
+                    elif _literal_strings(node.value):
+                        found[MP_VALUE_SET][mod.rel] += 1
                 # ``newScanSiteList = []`` opens a filter stage.
                 if (
                     isinstance(node.value, ast.List)

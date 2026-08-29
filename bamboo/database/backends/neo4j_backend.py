@@ -423,6 +423,71 @@ class Neo4jBackend(GraphDatabaseBackend):
             await session.run("MATCH (n) DETACH DELETE n")
         logger.info("Neo4j: all nodes and relationships deleted")
 
+    async def merge_map_node(self, node: BaseNode) -> str:
+        """Merge a Code Map node on ``(label, map_id, name)``."""
+        import uuid
+
+        properties = node.model_dump(exclude={"node_type"})
+        map_id = properties.get("map_id")
+        version = properties.get("derived_from")
+        if not map_id:
+            raise ValueError("Code Map nodes must carry a map_id")
+        if not properties.get("id"):
+            properties["id"] = str(uuid.uuid4())
+        # Neo4j stores primitives and arrays only; nested structures (branches,
+        # anchors, metadata) are JSON-encoded.
+        for key, val in list(properties.items()):
+            if isinstance(val, (dict, list)) and any(
+                isinstance(item, (dict, list)) for item in (val.values() if isinstance(val, dict) else val)
+            ):
+                properties[key] = json.dumps(val, default=str)
+            elif isinstance(val, dict):
+                properties[key] = json.dumps(val, default=str)
+
+        async with self._session(database=self.settings.neo4j_database) as session:
+            result = await session.run(
+                f"MERGE (n:{node.node_type.value} {{map_id: $map_id, name: $name}}) "
+                "ON CREATE SET n = $properties "
+                "ON MATCH SET n += $properties "
+                "SET n.valid_for = CASE "
+                "  WHEN n.valid_for IS NULL THEN [$version] "
+                "  WHEN $version IN n.valid_for THEN n.valid_for "
+                "  ELSE n.valid_for + $version END "
+                "RETURN n.id AS id",
+                map_id=map_id,
+                name=properties["name"],
+                properties=properties,
+                version=version,
+            )
+            record = await result.single()
+            return record["id"]
+
+    async def clear_map(self, map_id: str, version: str | None = None) -> int:
+        """Delete one Code Map's nodes without touching the incident graph."""
+        labels = [
+            NodeType.JUNCTION_POINT.value,
+            NodeType.BOUNDARY.value,
+            NodeType.SUBJECT.value,
+            NodeType.VALUE_ENUM.value,
+        ]
+        label_filter = " OR ".join(f"n:{label}" for label in labels)
+        query = f"MATCH (n) WHERE ({label_filter}) AND n.map_id = $map_id "
+        params: dict[str, Any] = {"map_id": map_id}
+        if version is not None:
+            query += "AND n.derived_from = $version "
+            params["version"] = version
+        query += "WITH n, count(n) AS _ DETACH DELETE n RETURN count(*) AS deleted"
+
+        async with self._session(database=self.settings.neo4j_database) as session:
+            result = await session.run(query, **params)
+            record = await result.single()
+            deleted = record["deleted"] if record else 0
+        logger.info(
+            "Neo4j: cleared Code Map map_id=%s version=%s (%d node(s))",
+            map_id, version or "*", deleted,
+        )
+        return deleted
+
     async def find_causes(
         self,
         symptoms: list[str] = None,

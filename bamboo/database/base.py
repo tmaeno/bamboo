@@ -207,6 +207,43 @@ class GraphDatabaseBackend(ABC):
 
         .. warning::
             Irreversible.  Intended for development / testing resets only.
+            This includes Code Map nodes; use :meth:`clear_map` to drop a
+            Code Map without touching human-validated incident knowledge.
+        """
+        pass
+
+    @abstractmethod
+    async def merge_map_node(self, node: BaseNode) -> str:
+        """Merge a Code Map node on ``(label, map_id, name)`` and return its ID.
+
+        Code Map nodes are keyed by a semantic signature rather than a source
+        position, so a rebuild after an upstream refactor updates the existing
+        node instead of creating a duplicate.  Positions move even when the
+        thing they describe does not.
+
+        The build version is appended to a ``valid_for`` list rather than
+        overwriting, so one node can record that it was unchanged across
+        several releases.
+
+        Args:
+            node: A Code Map node carrying ``map_id`` and ``derived_from``.
+
+        Returns:
+            The node's ID string.
+        """
+        pass
+
+    @abstractmethod
+    async def clear_map(self, map_id: str, version: str | None = None) -> int:
+        """Delete a Code Map's nodes, leaving the incident graph untouched.
+
+        Args:
+            map_id:  Which map to drop.
+            version: Drop only nodes whose ``derived_from`` matches; ``None``
+                     drops every version of the map.
+
+        Returns:
+            Number of nodes deleted.
         """
         pass
 
