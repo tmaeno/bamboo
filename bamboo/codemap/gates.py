@@ -27,6 +27,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from bamboo.codemap import evidence
 from bamboo.codemap.models import MapFragment
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
@@ -40,11 +41,17 @@ class GateResult(BaseModel):
     passed: bool
     checked: int = 0
     failures: list[str] = Field(default_factory=list)
+    inconclusive: list[str] = Field(default_factory=list)
     note: Optional[str] = None
 
     def summary(self) -> str:
         status = "PASS" if self.passed else "FAIL"
-        detail = f" ({len(self.failures)} issue(s))" if self.failures else ""
+        parts = []
+        if self.failures:
+            parts.append(f"{len(self.failures)} issue(s)")
+        if self.inconclusive:
+            parts.append(f"{len(self.inconclusive)} inconclusive")
+        detail = f" ({', '.join(parts)})" if parts else ""
         return f"[{status}] {self.gate}: {self.checked} checked{detail}"
 
 
@@ -450,6 +457,103 @@ def unexplainable_rejections(fragment: MapFragment) -> list[tuple[str, list[str]
         rows.append((stage.criteria_tag or stage.funnel_label, stage.inputs[:4], where))
     rows.sort()
     return rows
+
+
+# ---------------------------------------------------------------------------
+# (ii) Production comparison
+# ---------------------------------------------------------------------------
+
+
+def log_format_recognised(ev: "evidence.Evidence") -> GateResult:
+    """(ii) The sampled log lines parse as log lines.
+
+    First and least interesting of the production gates, and the one that has
+    to run before any of the others mean anything.  Every later gate reads
+    production by matching a pattern against log text; if the format is not
+    what the map assumed -- a different formatter, a wrapper, the wrong file
+    -- those patterns match nothing, and a gate that matches nothing looks
+    exactly like a gate that passed.  So the format is checked directly, once,
+    against the one thing every line has.
+    """
+    failures: list[str] = []
+    checked = 0
+    for service in sorted(ev.services()):
+        results = ev.matching(evidence.ANY_LINE_PATTERN, service)
+        checked += len(results)
+        broken = [r for r in results if r.error]
+        for result in broken:
+            failures.append(f"{service}/{result.machine}: {result.error}")
+        if results and not broken and not evidence.level_histogram(ev, service):
+            failures.append(
+                f"{service}: sampled {sum(len(r.lines) for r in results)} line(s), "
+                "none of which carry a level -- the log format is not "
+                f"{evidence.ANY_LINE_PATTERN!r}"
+            )
+    return GateResult(
+        gate="log-format-recognised",
+        passed=not failures,
+        checked=checked,
+        failures=failures,
+        note="Later production gates read this format; unrecognised means they cannot conclude.",
+    )
+
+
+def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) What the map offers as an observable survives production's log level.
+
+    The map records the level of every diagnostic it points an investigation
+    at.  A line written at DEBUG does not exist in a service running at INFO,
+    so an observable below the threshold is a promise the map cannot keep --
+    worse than having no observable at all, because a strategy will spend a
+    step fetching it.
+
+    The threshold is measured per service: JEDI and the server are separate
+    machine groups under separate operation, so one level does not imply the
+    other.  A service that yielded no sample gets no verdict rather than an
+    optimistic one; those land in ``inconclusive``.
+    """
+    thresholds = {
+        service: evidence.effective_level(ev, service) for service in sorted(ev.services())
+    }
+    failures: list[str] = []
+    unknown: list[str] = []
+    checked = 0
+    for stage in fragment.filter_stages:
+        if not stage.log_level:
+            continue
+        checked += 1
+        service = evidence.service_for_module(stage.owner.split("::")[0])
+        threshold = thresholds.get(service)
+        where = stage.anchor.as_ref() if stage.anchor else stage.owner
+        label = f"{stage.criteria_tag or stage.funnel_label} at {where}"
+        if threshold is None:
+            unknown.append(f"{label}: no sample from {service}")
+        elif evidence.below_threshold(stage.log_level, threshold):
+            failures.append(
+                f"{label} emits at {stage.log_level.upper()} but {service} runs at {threshold}"
+            )
+    return GateResult(
+        gate="observables-are-emitted",
+        passed=not failures,
+        checked=checked,
+        failures=failures,
+        inconclusive=unknown,
+        note="An observable below the threshold must be dropped from strategies, not fetched.",
+    )
+
+
+def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateResult]:
+    """Run the gates that need production evidence.
+
+    Separate from ``run_all`` because the two have different preconditions and
+    different failure meanings: a code-internal gate fails when the extraction
+    or the source disagrees with itself, a production gate fails when the map
+    and the running system have drifted apart.
+    """
+    results = [log_format_recognised(ev)]
+    if fragment.filter_stages:
+        results.append(observables_are_emitted(fragment, ev))
+    return results
 
 
 def run_all(fragment: MapFragment) -> list[GateResult]:

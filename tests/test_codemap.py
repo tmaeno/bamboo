@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bamboo.codemap import gates
+from bamboo.codemap import evidence, gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
@@ -2158,3 +2158,259 @@ def test_a_statement_built_with_str_format_is_read():
         "SELECT jediTaskID FROM {}.JEDI_Tasks tabT "
     )
     assert sql.selected_literals(sql.reconstruct(func, "sqlR")) == [("status", "running")]
+
+
+# ---------------------------------------------------------------------------
+# Production evidence and the (ii) gates
+# ---------------------------------------------------------------------------
+#
+# These pin the distinction the whole production half rests on: an empty grep
+# result means three different things, and only one of them is a fact about
+# PanDA.  Everything else here follows from getting that wrong being silent.
+
+
+def _log_line(level: str, message: str, name: str = "JobBroker") -> str:
+    """One line in PandaLogger's format.
+
+    ``"%(asctime)s %(name)-12s: %(levelname)-8s %(message)s"`` -- the level is
+    the token after the first ``": "``, which is what the parser anchors on.
+    """
+    return f"2026-08-30 12:00:01,123 {name:<12}: {level:<8} {message}"
+
+
+def _sample(service: str, lines: list[str], **kwargs) -> evidence.GrepResult:
+    return evidence.GrepResult(
+        query=evidence.GrepQuery(
+            pattern=evidence.ANY_LINE_PATTERN,
+            log_filename="panda-x.log",
+            service=service,
+        ),
+        machine=kwargs.pop("machine", "m1"),
+        lines=lines,
+        return_code=kwargs.pop("return_code", 0),
+        **kwargs,
+    )
+
+
+def _evidence(*results: evidence.GrepResult) -> evidence.Evidence:
+    return evidence.Evidence(fetched_at="2026-08-30T00:00:00+00:00", results=list(results))
+
+
+def test_effective_level_is_the_lowest_one_present():
+    """The threshold is what production actually emits, not what it declares."""
+    ev = _evidence(
+        _sample(evidence.JEDI, [_log_line("INFO", "a"), _log_line("ERROR", "b")]),
+        _sample(evidence.SERVER, [_log_line("DEBUG", "c"), _log_line("INFO", "d")]),
+    )
+
+    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
+    assert evidence.effective_level(ev, evidence.SERVER) == "DEBUG"
+
+
+def test_the_two_services_are_measured_separately():
+    """JEDI and the server are separate machine groups under separate operation.
+
+    Measuring one and applying it to the other would drop observables on a
+    threshold that was never established for them.
+    """
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+
+    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
+    assert evidence.effective_level(ev, evidence.SERVER) is None
+
+
+def test_a_level_word_in_a_message_is_not_a_level():
+    """The separator is what makes it a level, not the word.
+
+    Counting the bare word would read a line that merely mentions DEBUG as
+    proof that DEBUG is enabled, and so keep an observable that production
+    never emits.
+    """
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "restarting in DEBUG mode")]))
+
+    assert evidence.level_histogram(ev, evidence.JEDI) == Counter({"INFO": 1})
+    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
+
+
+def test_a_continuation_line_carries_no_level():
+    """Tracebacks span lines, and only the first one is formatted."""
+    ev = _evidence(
+        _sample(evidence.JEDI, [_log_line("ERROR", "boom"), "  File 'x.py', line 3"])
+    )
+
+    assert evidence.level_histogram(ev, evidence.JEDI) == Counter({"ERROR": 1})
+
+
+def test_an_empty_result_is_conclusive_only_when_the_tool_read_everything():
+    """Three ways to come back empty, one of which is an answer.
+
+    ``rg`` exits 1 for "no match" and 2 for "could not read the file", and a
+    result over a megabyte is truncated.  A missing file and a cut sample look
+    exactly like "production never emits this", so only exit 1 on a whole
+    result licenses reading absence as evidence.
+    """
+    no_match = _sample(evidence.JEDI, [], return_code=1)
+    unreadable = _sample(evidence.JEDI, [], return_code=2, error="No such file or directory")
+    cut = _sample(evidence.JEDI, [_log_line("INFO", "a")], truncated=True)
+
+    assert no_match.conclusive
+    assert not unreadable.conclusive
+    assert not cut.conclusive
+
+
+def test_a_read_error_becomes_an_error_not_an_empty_answer():
+    """Exit 2 is usually a wrong filename; stderr turns that into a one-step fix."""
+    query = evidence.GrepQuery(pattern="x", log_filename="panda-typo.log", service=evidence.JEDI)
+    payload = {
+        "expected_machines": ["m1"],
+        "results": [
+            {
+                "machine_name": "m1",
+                "result": "",
+                "stderr": "panda-typo.log: No such file or directory",
+                "return_code": 2,
+            }
+        ],
+    }
+
+    (result,) = evidence._results_from(query, payload)
+
+    assert result.error == "panda-typo.log: No such file or directory"
+    assert not result.conclusive
+
+
+def test_a_machine_that_never_answered_is_recorded_as_silent():
+    """Silence and "found nothing" are different facts about a machine."""
+    query = evidence.GrepQuery(pattern="x", log_filename="panda-x.log", service=evidence.JEDI)
+    payload = {
+        "expected_machines": ["m1", "m2"],
+        "results": [{"machine_name": "m1", "result": "hit\n", "return_code": 0}],
+    }
+
+    results = {r.machine: r for r in evidence._results_from(query, payload)}
+
+    assert results["m1"].lines == ["hit"]
+    assert results["m2"].error == "no result returned"
+    assert not results["m2"].conclusive
+
+
+def test_lines_are_unioned_across_machines():
+    """The services run different knights, so a tag on one machine and not
+    another is normal.  Intersecting would report a false absence."""
+    ev = _evidence(
+        _sample(evidence.JEDI, [_log_line("INFO", "a")], machine="m1"),
+        _sample(evidence.JEDI, [_log_line("INFO", "b")], machine="m2"),
+    )
+
+    assert len(ev.lines(evidence.ANY_LINE_PATTERN, evidence.JEDI)) == 2
+
+
+def test_evidence_round_trips_through_a_file(tmp_path):
+    """Fetching and checking are separate steps, so the record has to survive
+    the gap intact -- that is what lets the gates re-run offline."""
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("DEBUG", "a")], truncated=True))
+    path = tmp_path / "nested" / "evidence.json"
+
+    ev.save(path)
+    back = evidence.Evidence.load(path)
+
+    assert back.fetched_at == ev.fetched_at
+    assert back.results[0].truncated
+    assert evidence.effective_level(back, evidence.JEDI) == "DEBUG"
+
+
+def test_log_format_recognised_fails_when_no_line_carries_a_level():
+    """A pattern that matches nothing looks exactly like a gate that passed.
+
+    Every later production gate reads the log by matching against this
+    format, so it is checked directly rather than assumed.
+    """
+    ev = _evidence(_sample(evidence.JEDI, ["something in another format"]))
+
+    result = gates.log_format_recognised(ev)
+
+    assert not result.passed
+    assert "log format is not" in result.failures[0]
+
+
+def test_log_format_recognised_names_a_query_that_did_not_run():
+    """Not authorized, or a wrong filename, is not production disagreeing."""
+    ev = _evidence(_sample(evidence.JEDI, [], return_code=2, error="'me' is not authorized"))
+
+    result = gates.log_format_recognised(ev)
+
+    assert not result.passed
+    assert result.failures == ["jedi/m1: 'me' is not authorized"]
+
+
+def test_log_format_recognised_passes_on_a_well_formed_sample():
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+
+    assert gates.log_format_recognised(ev).passed
+
+
+def _stage(tag: str, level: str, owner: str) -> FilterStageNode:
+    return FilterStageNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=f"f:{tag}",
+        owner=owner,
+        criteria_tag=tag,
+        log_level=level,
+    )
+
+
+def test_an_observable_below_the_threshold_is_a_promise_the_map_cannot_keep():
+    """A DEBUG line does not exist in a service running at INFO.
+
+    Worse than having no observable: a strategy would spend a step fetching
+    a line that is never written.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-diskIO", "debug", "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"),
+            _stage("-status", "info", "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"),
+        ],
+    )
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+
+    result = gates.observables_are_emitted(fragment, ev)
+
+    assert result.checked == 2
+    assert not result.passed
+    assert result.failures == ["-diskIO at pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage emits at DEBUG but jedi runs at INFO"]
+
+
+def test_an_observable_with_no_sample_is_inconclusive_not_passed():
+    """A service that yielded nothing gets no verdict rather than an optimistic one."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-rse", "debug", "pandaserver/dataservice/x.py::pick")],
+    )
+    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+
+    result = gates.observables_are_emitted(fragment, ev)
+
+    assert result.passed
+    assert result.failures == []
+    assert result.inconclusive == ["-rse at pandaserver/dataservice/x.py::pick: no sample from server"]
+
+
+def test_the_package_places_a_module_in_a_machine_group():
+    """A first approximation only: JEDI opens its own TaskBuffer, so
+    ``db_proxy_mods`` called from a knight logs to JEDI's files even though it
+    lives in ``pandaserver``.  Sound for brokerage, which has no such caller."""
+    assert evidence.service_for_module("pandajedi/jedibrokerage/x.py") == evidence.JEDI
+    assert evidence.service_for_module("pandaserver/api/v1/pilot_api.py") == evidence.SERVER
+
+
+def test_a_gate_summary_separates_issues_from_inconclusive():
+    """Conflating them is the failure mode this whole half is built to avoid."""
+    result = gates.GateResult(
+        gate="g", passed=False, checked=3, failures=["a"], inconclusive=["b", "c"]
+    )
+
+    assert result.summary() == "[FAIL] g: 3 checked (1 issue(s), 2 inconclusive)"
