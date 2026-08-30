@@ -260,10 +260,41 @@ class BoundaryNode(BaseNode):
     derived_from: str
     system: str
     kind: str = Field(default="reports_state", description="reports_state | transports_causation")
-    interface: str = Field(..., description="Receiving-side function.")
+    transport: str = Field(
+        default="http",
+        description=(
+            "http | shared_table.  A separate axis from ``kind``: that one says "
+            "whether evidence survives a failure to cross, this one says where "
+            "to go looking.  An endpoint is investigated through the arrival "
+            "log; a shared table is investigated by querying it, and the row "
+            "either exists or it does not."
+        ),
+    )
+    interface: str = Field(
+        ...,
+        description="Receiving-side function, or ``schema.table`` for a shared table.",
+    )
     carried_values: list[str] = Field(
         default_factory=list,
         description="Names the far side supplies, in the receiving side's spelling.",
+    )
+    handed_over: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names this map's code writes for the far side to read.  Empty for "
+            "an endpoint, which is inbound only; a shared table is a channel in "
+            "both directions, and which direction is broken is the first "
+            "question to ask about one."
+        ),
+    )
+    operations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "SQL verbs used against a shared table.  Recorded because the set "
+            "itself is a finding: a ``DELETE`` alongside an ``INSERT`` on a "
+            "command table means a second command silently replaces one that "
+            "was never picked up."
+        ),
     )
     access_conditions: dict[str, Any] = Field(
         default_factory=dict,

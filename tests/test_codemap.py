@@ -23,6 +23,7 @@ from bamboo.codemap import gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
+    BoundaryNode,
     Branch,
     JunctionNode,
     MapFragment,
@@ -1466,3 +1467,123 @@ def test_only_literal_writes_make_a_method_an_alias():
     modules = [_module(spec, "pandaserver/taskbuffer/JediTaskSpec.py")]
 
     assert alias.find_aliases(modules, progress.spec_attributes(modules)) == {}
+
+
+# --------------------------------------------------------------------------- #
+# shared-table boundaries
+# --------------------------------------------------------------------------- #
+
+_SCHEMAS = """
+if "schemaPANDA" not in tmpSelf.__dict__:
+    tmpSelf.__dict__["schemaPANDA"] = "ATLAS_PANDA"
+if "schemaDEFT" not in tmpSelf.__dict__:
+    tmpSelf.__dict__["schemaDEFT"] = "ATLAS_DEFT"
+"""
+
+
+def _channels(source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"):
+    modules = [
+        _module(_SCHEMAS, "pandaserver/config/panda_config.py"),
+        _module(source, rel),
+    ]
+    return boundary.extract_shared_tables(modules, MAP_ID, VERSION)
+
+
+def test_the_schema_qualifier_says_whose_table_it_is():
+    """``panda_config`` states which Oracle schema each name means.
+
+    Read rather than assumed, so the boundary's interface is the schema an
+    operator would type into a query.
+    """
+    modules = [_module(_SCHEMAS, "pandaserver/config/panda_config.py")]
+
+    assert boundary.schema_names(modules) == {
+        "PANDA": "ATLAS_PANDA",
+        "DEFT": "ATLAS_DEFT",
+    }
+
+
+def test_a_foreign_schema_table_is_a_boundary_in_both_directions():
+    """A shared table is a channel, and which way is broken is the first question.
+
+    An endpoint is inbound only; ``PRODSYS_COMM`` carries commands out to DEFT
+    and back, so recording one direction would describe half the channel.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def exec_command(self, jediTaskID):\n"
+        "        sqlR = f'SELECT comm_task,comm_cmd FROM {panda_config.schemaDEFT}.PRODSYS_COMM '\n"
+        "        sqlR += 'WHERE comm_owner=:comm_owner '\n"
+        "        varMap = {}\n"
+        "        self.cur.execute(sqlR + comment, varMap)\n"
+        "    def send_command(self, jediTaskID):\n"
+        "        sqlD = f'DELETE FROM {panda_config.schemaDEFT}.PRODSYS_COMM WHERE COMM_TASK=:t '\n"
+        "        self.cur.execute(sqlD + comment, varMap)\n"
+        "        sqlI = f'INSERT INTO {panda_config.schemaDEFT}.PRODSYS_COMM "
+        "(COMM_TASK,COMM_CMD) VALUES (:t,:c) '\n"
+        "        self.cur.execute(sqlI + comment, varMap)\n"
+    )
+    channels, _coverage = _channels(source)
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert (channel.system, channel.interface) == ("deft", "ATLAS_DEFT.PRODSYS_COMM")
+    assert channel.transport == "shared_table"
+    assert channel.carried_values == ["comm_cmd", "comm_task"]
+    assert channel.handed_over == ["COMM_CMD", "COMM_TASK"]
+    # A DELETE next to an INSERT on a command table is the finding: a second
+    # command silently replaces one that was never picked up.
+    assert channel.operations == ["DELETE", "INSERT", "SELECT"]
+
+
+def test_one_column_is_not_two_because_the_case_differs():
+    """SQL identifiers are case-insensitive and PanDA writes both spellings."""
+    source = (
+        "class TaskModule:\n"
+        "    def a(self):\n"
+        "        s1 = f'UPDATE {panda_config.schemaDEFT}.T_TASK SET status=:s '\n"
+        "        self.cur.execute(s1 + comment, varMap)\n"
+        "    def b(self):\n"
+        "        s2 = f'UPDATE {panda_config.schemaDEFT}.T_TASK SET STATUS=:s '\n"
+        "        self.cur.execute(s2 + comment, varMap)\n"
+    )
+    channels, _coverage = _channels(source)
+
+    assert channels[0].handed_over == ["status"]
+
+
+def test_a_statement_spanning_two_schemas_is_left_alone():
+    """A join no longer says which side of the boundary a column sits on."""
+    source = (
+        "class TaskModule:\n"
+        "    def joined(self):\n"
+        "        s = f'SELECT t.status FROM {panda_config.schemaDEFT}.T_TASK t, "
+        "{panda_config.schemaPANDA}.JEDI_Tasks j '\n"
+        "        self.cur.execute(s + comment, varMap)\n"
+    )
+    channels, coverage = _channels(source)
+
+    assert channels == []
+    assert coverage == []
+
+
+def test_a_shared_table_is_not_reported_as_unlogged():
+    """Asking whether a table was also logged inverts the question.
+
+    Its values are queryable afterwards precisely because nobody had to write
+    them down a second time.
+    """
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.boundaries.append(
+        BoundaryNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="b:deft",
+            system="deft",
+            transport="shared_table",
+            interface="ATLAS_DEFT.PRODSYS_COMM",
+            carried_values=["comm_task", "comm_cmd"],
+        )
+    )
+
+    assert gates.unobservable_boundaries(fragment) == []

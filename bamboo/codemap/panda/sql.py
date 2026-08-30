@@ -272,6 +272,28 @@ class Execution(NamedTuple):
     call: ast.Call
 
 
+def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
+    """Return the expressions interpolated into the fragments building *name*.
+
+    Reassembly blanks them, which is right for reading columns and wrong for
+    reading *whose* table this is: the schema is interpolated into the head of
+    the statement (``f"UPDATE {panda_config.schemaDEFT}.T_TASK "``) while the
+    columns arrive in later ``+=`` fragments, so neither half can be read
+    without the other.
+    """
+    found: list[str] = []
+    for _line, _operator, _text, node in _parts(func, name):
+        value = node.value if isinstance(node, (ast.Assign, ast.AugAssign)) else None
+        if not isinstance(value, ast.JoinedStr):
+            continue
+        found.extend(
+            ast.unparse(part.value)
+            for part in value.values
+            if isinstance(part, ast.FormattedValue)
+        )
+    return found
+
+
 def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     """Return one :class:`Execution` per cursor execution in *func*.
 
@@ -383,6 +405,38 @@ def declared_row_classes(
         if table and table != "{}":
             found[table] = classes[0]
     return found
+
+
+_SELECT = re.compile(r"\bSELECT\s+(?:DISTINCT\s+)?(.*?)\s+FROM\s+([\w{}.]+)", re.IGNORECASE | re.DOTALL)
+_DELETE = re.compile(r"\bDELETE\s+FROM\s+([\w{}.]+)", re.IGNORECASE)
+
+
+def reads(sql: str) -> list[tuple[str, list[str]]]:
+    """Return ``(table, selected columns)`` for each ``SELECT`` in *sql*.
+
+    Only the columns that are plain names are kept.  A projection built from
+    expressions (``COUNT(1)``, ``CASE WHEN ...``) says what the query computes
+    rather than what the row carries, and a boundary is about the latter.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for match in _SELECT.finditer(sql):
+        columns = [
+            part.strip().split(".")[-1]
+            for part in match.group(1).split(",")
+            if _IDENTIFIER.fullmatch(part.strip().split(".")[-1] or "_")
+        ]
+        found.append((_table_of(match.group(2)), columns))
+    return found
+
+
+def deletes(sql: str) -> list[str]:
+    """Return the tables *sql* deletes rows from.
+
+    Worth reading separately because a ``DELETE`` immediately followed by an
+    ``INSERT`` on a command table is not bookkeeping: it means a second command
+    silently replaces one that was never picked up.
+    """
+    return [_table_of(match.group(1)) for match in _DELETE.finditer(sql)]
 
 
 def bound_values(

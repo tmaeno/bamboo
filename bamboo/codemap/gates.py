@@ -248,7 +248,11 @@ def unobservable_boundaries(
     rows = [
         (b.interface, len(b.observable_values), len(b.carried_values))
         for b in fragment.boundaries
-        if b.carried_values
+        # A shared table *is* the record, so asking whether it was also logged
+        # inverts the question: the values are queryable afterwards precisely
+        # because nobody had to write them down a second time.
+        if b.transport == "http"
+        and b.carried_values
         and len(b.observable_values) / len(b.carried_values) < threshold
     ]
     rows.sort(key=lambda r: (r[1] / r[2], -r[2]))

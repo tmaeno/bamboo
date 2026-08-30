@@ -110,6 +110,18 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             "\nboundaries: "
             + ", ".join(f"{system}={count}" for system, count in systems.most_common())
         )
+        shared = [b for b in fragment.boundaries if b.transport == "shared_table"]
+        if shared:
+            # Listed rather than counted: a shared table is investigated by
+            # querying it, so the columns and the verbs are the investigation.
+            # "DELETE, INSERT" on a command table is a finding on its own.
+            click.echo(f"  through a shared table ({len(shared)}):")
+            for channel in shared:
+                click.echo(
+                    f"    {channel.interface}  [{', '.join(channel.operations)}]"
+                    f"  in {len(channel.carried_values)} / out {len(channel.handed_over)}"
+                )
+
         thin = gates.unobservable_boundaries(fragment)
         if thin:
             # What crossed a boundary and was never logged cannot be recovered

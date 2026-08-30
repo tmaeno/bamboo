@@ -139,6 +139,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.boundaries.extend(boundaries)
         fragment.coverage.extend(boundary_coverage)
 
+        channels, channel_coverage = boundary.extract_shared_tables(
+            self._modules, self.map_id, self._version
+        )
+        fragment.boundaries.extend(channels)
+        fragment.coverage.extend(channel_coverage)
+
         subjects, junctions, progress_coverage = progress.extract(
             self._modules, self.map_id, self._version
         )
