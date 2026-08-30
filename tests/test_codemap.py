@@ -2338,6 +2338,24 @@ def test_an_empty_result_is_conclusive_only_when_the_tool_read_everything():
     assert not _sample([_log_line("INFO", "a")], truncated=True).conclusive
 
 
+def test_every_query_carries_its_bounds():
+    """Unbounded is not an option: panda-DBProxy.log is six gigabytes and the
+    processor buffers a matcher's whole output before storing a slice of it."""
+    query = evidence.GrepQuery(pattern="x", log_filename=BROKER_LOG, service=evidence.JEDI)
+
+    assert query.max_matches == evidence.DEFAULT_MAX_MATCHES
+    assert query.tail_bytes == evidence.DEFAULT_TAIL_BYTES
+
+
+def test_hitting_the_match_cap_reaches_the_gates_as_truncated():
+    """The server sets truncated when it stops at the cap, and that is the
+    whole point of sending one: a capped answer must not read as an absent one."""
+    capped = _sample([_log_line("INFO", "a")], truncated=True, return_code=0)
+
+    assert not capped.conclusive
+    assert not _evidence(capped).conclusive(evidence.ANY_LINE_PATTERN)
+
+
 def test_a_file_absent_everywhere_says_the_code_never_ran():
     """The strongest thing production says about the map.
 

@@ -25,11 +25,18 @@ observation records where it came from.  That record is a deliverable rather
 than bookkeeping -- "which component's log holds this" is what the map is for.
 
 **Three ways a grep comes back empty, and only one of them is an answer.**
-``rg`` exits 1 when a file has no match, 2 when it could not read the file at
-all, and the processor truncates any result over a megabyte.  A missing file
-and a truncated sample both look exactly like "production never emits this",
-so they are kept distinct all the way into the gates: only exit 1 on an
-untruncated result licenses the conclusion that something is absent.
+``rg`` exits 1 when a file has no match, the file may not be there at all, and
+a result can be cut short -- by the megabyte the processor stores, or by the
+match cap the query carries.  A missing file and a truncated sample both look
+exactly like "production never emits this", so they are kept distinct all the
+way into the gates: only exit 1 on an untruncated result licenses the
+conclusion that something is absent.
+
+**Every query is bounded.**  ``panda-DBProxy.log`` is six gigabytes and the
+processor buffers a matcher's whole output before storing a slice of it, so an
+unbounded question is one the daemon pays for in memory.  Each query carries a
+match cap and a tail window; the window also makes the answer recent, which is
+what a check reported over a time window wants anyway.
 """
 
 from __future__ import annotations
@@ -69,6 +76,14 @@ _RG_NO_MATCH = 1
 # file when its logger first emits, so its absence says the code never ran.
 _MISSING_FILE = re.compile(r"No such file or directory", re.IGNORECASE)
 
+# Bounds sent with every query.  A sample is all any of these gates needs -- a
+# level histogram, the set of tags in use, the order of the funnel steps -- and
+# the alternative is asking a six-gigabyte file for all of itself.  The window
+# also makes the answer recent, which is what a check reported over a time
+# window should be reading in the first place.
+DEFAULT_MAX_MATCHES = 5000
+DEFAULT_TAIL_BYTES = 64 * 1024 * 1024
+
 # PandaLogger formats every record as
 # ``"%(asctime)s %(name)-12s: %(levelname)-8s %(message)s"``, so the level is
 # the token after the first ``": "``.  Anchoring on that separator rather than
@@ -85,11 +100,20 @@ _SEVERITY = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50
 
 
 class GrepQuery(BaseModel):
-    """One question put to one service's logs."""
+    """One question put to one service's logs, bounded on both axes.
+
+    Unbounded is not an option here.  ``panda-DBProxy.log`` is six gigabytes,
+    and the processor buffers a matcher's whole output before capping what it
+    stores, so a pattern matching most lines costs the daemon that much
+    memory.  Both bounds come back as ``truncated``, which is what keeps a
+    partial answer from being read as an absent one.
+    """
 
     pattern: str
     log_filename: str
     service: str
+    max_matches: int = DEFAULT_MAX_MATCHES
+    tail_bytes: int = DEFAULT_TAIL_BYTES
 
     def key(self) -> tuple[str, str, str]:
         return (self.pattern, self.log_filename, self.service)
@@ -223,6 +247,8 @@ async def _submit(query: GrepQuery) -> str:
         "pattern": query.pattern,
         "log_filename": query.log_filename,
         "service_name": query.service,
+        "max_matches": query.max_matches,
+        "tail_bytes": query.tail_bytes,
     }
     payload = await asyncio.to_thread(_call, "post", _SUBMIT_ENDPOINT, data)
     request_id = (payload or {}).get("request_id")
