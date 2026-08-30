@@ -275,6 +275,39 @@ def coverage_matrix(fragment: MapFragment) -> list[tuple[str, str, int, int, flo
     return rows
 
 
+def unexplainable_rejections(fragment: MapFragment) -> list[tuple[str, list[str], str]]:
+    """Filter stages whose message carries none of what their condition tested.
+
+    Two expressions of one fact again, and this time they are the condition and
+    the message beside it.  ``criteria=-max_io_intensity`` is logged as ``skip
+    site={} since ioIntensity={} is larger than site max_io_intensity={}``,
+    which carries both sides of its own comparison -- so the log alone settles
+    why that site went, with nothing re-fetched.
+
+    Where they disagree the map is promising an observation it cannot deliver.
+    ``criteria=-diskIO`` tests three values and logs only the site name, and
+    the numbers are on a separate line that a different code path emits: the
+    stage is still correct, but "which branch fired" cannot be answered from
+    the rejection alone.
+
+    Not a gate, for the same reason :func:`unobservable_boundaries` is not:
+    logging less is often deliberate.  The point is to know, before an incident
+    turns on it, which rejections can be explained from the record and which
+    can only be guessed at.
+    """
+    rows: list[tuple[str, list[str], str]] = []
+    for stage in fragment.filter_stages:
+        if not stage.emits or not stage.inputs:
+            continue
+        logged = " ".join(stage.emits)
+        if any(name in logged for name in stage.inputs):
+            continue
+        where = stage.anchor.as_ref() if stage.anchor else stage.owner
+        rows.append((stage.criteria_tag or stage.funnel_label, stage.inputs[:4], where))
+    rows.sort()
+    return rows
+
+
 def run_all(fragment: MapFragment) -> list[GateResult]:
     """Run every code-internal gate that applies to *fragment*."""
     results: list[GateResult] = []

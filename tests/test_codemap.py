@@ -26,6 +26,7 @@ from bamboo.codemap.models import (
     BoundaryNode,
     Branch,
     EntryPoint,
+    FilterStageNode,
     JunctionNode,
     MapFragment,
     SourceModule,
@@ -38,6 +39,7 @@ from bamboo.codemap.panda.recognizers import (
     boundary,
     errorcode,
     progress,
+    selection,
     sqlwrite,
     trigger,
 )
@@ -1783,3 +1785,212 @@ def test_a_subject_no_loop_reaches_does_not_repair_itself():
     once.entry_points = [EntryPoint(trigger="command", entry="b.py")]
 
     assert trigger.fragile_subjects([polled, once]) == [("T_TASK.vo", ["command"])]
+
+
+# --------------------------------------------------------------------------- #
+# selection
+# --------------------------------------------------------------------------- #
+
+_BROKER = '''
+class JobBrokerBase:
+    def add_summary_message(self, old_list, new_list, message, tmp_log, msg_map):
+        for site in msg_map:
+            tmp_log.info(msg_map[site])
+        tmp_log.info(f"{len(new_list)} candidates passed {message}")
+
+class AtlasProdJobBroker(JobBrokerBase):
+    def doBrokerage(self):
+        newScanSiteList = []
+        msg_map = {}
+        for tmpSiteName in scanSiteList:
+            if diskio_usage > diskio_limit and diskio_task > diskio_limit:
+                msg_map[tmpSiteName] = f"  skip site={tmpSiteName} due to diskIO overload criteria=-diskIO"
+            newScanSiteList.append(tmpSiteName)
+        self.add_summary_message(oldScanSiteList, scanSiteList, "diskIO check", tmpLog, msg_map)
+        newScanSiteList = []
+        for tmpSiteName in scanSiteList:
+            if taskSpec.ioIntensity > site_max:
+                msg_map[tmpSiteName] = f"  skip site={tmpSiteName} since ioIntensity={taskSpec.ioIntensity} criteria=-max_io_intensity"
+            newScanSiteList.append(tmpSiteName)
+        self.add_summary_message(oldScanSiteList, scanSiteList, "IO intensity check", tmpLog, msg_map)
+'''
+
+_UNTAGGED = '''
+class GenJobBroker:
+    def doBrokerage(self):
+        newScanSiteList = []
+        for tmpSiteName in scanSiteList:
+            if minDiskCount > tmpSiteSpec.maxwdir:
+                tmpLog.debug(f"  skip {tmpSiteName} due to small scratch disk")
+                continue
+            newScanSiteList.append(tmpSiteName)
+        scanSiteList = newScanSiteList
+        tmpLog.debug(f"{len(scanSiteList)} candidates passed scratch disk check")
+'''
+
+
+def _selection(*sources: tuple[str, str]):
+    modules = [_module(text, rel) for text, rel in sources]
+    return selection.extract(modules, MAP_ID, VERSION)
+
+
+def test_a_tagged_rejection_carries_its_condition():
+    """The tag and the guard that reaches it are the whole content of a stage.
+
+    ``criteria=-diskIO`` is what production logs carry per rejected site, so a
+    stage keyed on it can be counted from the logs and explained from the map
+    in one step.
+    """
+    stages, _cov, _gaps = _selection((_BROKER, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    diskio = next(s for s in stages if s.criteria_tag == "-diskIO")
+    assert diskio.funnel_label == "diskIO check"
+    assert diskio.conditions == [
+        "diskio_usage > diskio_limit and diskio_task > diskio_limit"
+    ]
+    assert diskio.inputs == ["diskio_usage", "diskio_limit", "diskio_task"]
+
+
+def test_stage_order_follows_the_chain():
+    """"Which step cut the candidates" is a question about position."""
+    stages, _cov, _gaps = _selection((_BROKER, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    assert [(s.criteria_tag, s.order) for s in stages] == [
+        ("-diskIO", 0),
+        ("-max_io_intensity", 1),
+    ]
+
+
+def test_the_level_comes_from_the_helper_that_logs_it():
+    """Most rejections are never logged where they are written.
+
+    The broker fills a ``msg_map`` and hands it to ``add_summary_message``.
+    Recording ``None`` would say the level is unknown when one hop settles it,
+    and the level is what decides whether the observation exists in production.
+    """
+    stages, _cov, _gaps = _selection((_BROKER, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    assert {s.log_level for s in stages} == {"info"}
+
+
+def test_a_named_step_with_no_tag_is_read_from_its_continues():
+    """``GenJobBroker`` names eight steps and tags one.
+
+    Without this, seven cuts in a production broker would be invisible -- and
+    it is the file the chain matcher handles best, so a recognizer that only
+    followed tags would have a hole exactly where the plan expected one.
+    """
+    stages, _cov, _gaps = _selection((_UNTAGGED, "pandajedi/jedibrokerage/GenJobBroker.py"))
+
+    assert len(stages) == 1
+    assert (stages[0].criteria_tag, stages[0].funnel_label) == ("", "scratch disk check")
+    assert stages[0].conditions == ["minDiskCount > tmpSiteSpec.maxwdir"]
+    assert stages[0].log_level == "debug"
+
+
+def test_a_templated_step_name_is_not_a_step():
+    """``f"{len(new_list)} candidates passed {message}"`` is the helper itself.
+
+    The code templated the step name rather than naming one, so counting it as
+    a step invents a cut inside the function that reports every other cut.
+    """
+    helper = (
+        "class JobBrokerBase:\n"
+        "    def add_summary_message(self, old_list, new_list, message, tmp_log, msg_map):\n"
+        "        tmp_log.info(f'{len(new_list)} candidates passed {message}')\n"
+    )
+    stages, coverage, gaps = _selection((helper, "pandajedi/jedibrokerage/JobBrokerBase.py"))
+
+    assert (stages, coverage, gaps) == ([], [], [])
+
+
+def test_one_tag_used_at_two_steps_stays_two_stages():
+    """``criteria=-disk`` is emitted by both "disk check" and "Storage check".
+
+    The tag alone is ambiguous within a chain; the funnel counter is what tells
+    a reader which of the two a log line came from, so folding them together
+    would lose one of the cuts.
+    """
+    source = (
+        "class B:\n"
+        "    def doBrokerage(self):\n"
+        "        if a > b:\n"
+        "            msg = f'skip criteria=-disk'\n"
+        "        self.add_summary_message(old, new, 'disk check', log, msg_map)\n"
+        "        if c > d:\n"
+        "            msg = f'skip criteria=-disk'\n"
+        "        self.add_summary_message(old, new, 'Storage check', log, msg_map)\n"
+    )
+    stages, _cov, _gaps = _selection((source, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    assert [(s.criteria_tag, s.funnel_label) for s in stages] == [
+        ("-disk", "disk check"),
+        ("-disk", "Storage check"),
+    ]
+
+
+def test_a_step_whose_reason_cannot_be_read_is_named():
+    """The funnel will report the cut and the map has nothing to say about it."""
+    source = (
+        "class B:\n"
+        "    def doBrokerage(self):\n"
+        "        scanSiteList = [s for s in scanSiteList if keep(s)]\n"
+        "        self.add_summary_message(old, new, 'link check', log, msg_map)\n"
+    )
+    _stages, _cov, gaps = _selection((source, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    assert gaps == [
+        "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage "
+        "counts a cut at 'link check' with no readable reason"
+    ]
+
+
+def test_a_field_a_filter_stage_gates_is_promoted():
+    """Criterion 1 reads SQL predicates, and brokerage gates in Python.
+
+    ``nucleus``, ``minRamCount`` and ``ioIntensity`` decide whether a site
+    survives the chain without appearing in any ``WHERE``, so the first
+    criterion cannot see them and the fifth restates it where it can.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "ioIntensity", [("x", 2)]))
+    assert promotion.criteria_for(fragment, Counter(), {}) == {}
+
+    fragment.filter_stages.append(
+        FilterStageNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="f:-max_io_intensity",
+            owner="AtlasProdJobBroker.py::doBrokerage",
+            criteria_tag="-max_io_intensity",
+            inputs=["ioIntensity", "max_io_intensity"],
+        )
+    )
+
+    assert promotion.criteria_for(fragment, Counter(), {}) == {
+        "JediTaskSpec.ioIntensity": ["5:gates-a-filter-stage"]
+    }
+
+
+def test_a_rejection_that_logs_none_of_what_it_tested_is_reported():
+    """What a rejection did not log cannot be checked afterwards.
+
+    ``criteria=-diskIO`` compares three numbers and logs only the site name;
+    the numbers are on a separate line a different path emits.
+    """
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.filter_stages.append(
+        FilterStageNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="f:-diskIO",
+            owner="b.py::doBrokerage",
+            criteria_tag="-diskIO",
+            conditions=["diskio_usage > diskio_limit"],
+            inputs=["diskio_usage", "diskio_limit"],
+            emits=["  skip site={} due to diskIO overload criteria=-diskIO"],
+        )
+    )
+
+    assert gates.unexplainable_rejections(fragment) == [
+        ("-diskIO", ["diskio_usage", "diskio_limit"], "b.py::doBrokerage")
+    ]

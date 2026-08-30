@@ -67,6 +67,7 @@ class NodeType(str, Enum):
     BOUNDARY = "Boundary"
     SUBJECT = "Subject"
     VALUE_ENUM = "ValueEnum"
+    FILTER_STAGE = "FilterStage"
 
 
 class RelationType(str, Enum):

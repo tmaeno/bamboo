@@ -37,7 +37,13 @@ async def store_fragment(
     Returns:
         Counts of what was written, per node kind.
     """
-    written = {"value_enums": 0, "subjects": 0, "junctions": 0, "boundaries": 0}
+    written = {
+        "value_enums": 0,
+        "subjects": 0,
+        "junctions": 0,
+        "boundaries": 0,
+        "filter_stages": 0,
+    }
 
     if replace_version:
         removed = await graph_db.clear_map(fragment.map_id, fragment.derived_from)
@@ -58,6 +64,9 @@ async def store_fragment(
     for boundary in fragment.boundaries:
         await graph_db.merge_map_node(boundary)
         written["boundaries"] += 1
+    for stage in fragment.filter_stages:
+        await graph_db.merge_map_node(stage)
+        written["filter_stages"] += 1
 
     logger.info("store_fragment: wrote %r", written)
     return written

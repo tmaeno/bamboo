@@ -33,6 +33,7 @@ from bamboo.codemap.panda.recognizers import (
     boundary,
     errorcode,
     progress,
+    selection,
     sqlwrite,
     trigger,
 )
@@ -146,6 +147,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.boundaries.extend(channels)
         fragment.coverage.extend(channel_coverage)
 
+        filter_stages, selection_coverage, self._unexplained_steps = selection.extract(
+            self._modules, self.map_id, self._version
+        )
+        fragment.filter_stages.extend(filter_stages)
+        fragment.coverage.extend(selection_coverage)
+
         subjects, junctions, progress_coverage = progress.extract(
             self._modules, self.map_id, self._version
         )
@@ -209,6 +216,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def unexplained_steps(self) -> list[str]:
+        """Funnel steps that count a cut the slice could not find a reason for."""
+        return getattr(self, "_unexplained_steps", [])
 
     @property
     def trigger_reach(self) -> tuple[int, int]:

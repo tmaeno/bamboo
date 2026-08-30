@@ -7,7 +7,7 @@ incident graph but under its own labels, because the two have opposite
 lifecycles -- the Code Map is regenerated from source at will, the incident
 graph is human-validated and irreplaceable.
 
-Three node kinds:
+The node kinds:
 
 ``SubjectNode``
     An attribute whose value is worth asking "why is it this?" about --
@@ -18,10 +18,16 @@ Three node kinds:
     junction does not *judge*; the branch taken follows deterministically from
     the conditions, which is why it is not called a decision point (that term
     is reserved for the constrained points where an LLM or a human chooses).
+``FilterStageNode``
+    One reason a candidate was dropped on the way to a selection.  Separate
+    from a junction because every stage of a chain runs and each removes some
+    candidates, where a junction's branches are alternatives and one wins.
 ``BoundaryNode``
     Where causation crosses into a system this map does not cover.  Modelled
     explicitly rather than left as an absence so that adding the other
     system's map later is a *binding* operation instead of a re-derivation.
+``ValueEnumNode``
+    One ``NAME = value`` constant, so an observed code can be decoded.
 
 Identity is a semantic signature, never a file position.  Positions move --
 between ``panda-server-source`` 0.8.1 and 1.0.2 the pilot boundary moved file
@@ -453,6 +459,7 @@ class MapFragment(BaseModel):
     junctions: list[JunctionNode] = Field(default_factory=list)
     boundaries: list[BoundaryNode] = Field(default_factory=list)
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
+    filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
 
     def extend(self, other: "MapFragment") -> None:
@@ -461,4 +468,60 @@ class MapFragment(BaseModel):
         self.junctions.extend(other.junctions)
         self.boundaries.extend(other.boundaries)
         self.value_enums.extend(other.value_enums)
+        self.filter_stages.extend(other.filter_stages)
         self.coverage.extend(other.coverage)
+
+
+class FilterStageNode(BaseNode):
+    """One reason a candidate was dropped on the way to a selection.
+
+    Brokerage does not pick a site; it narrows a list, twenty-odd times in a
+    row, and "the distribution is wrong" means asking *which step* threw the
+    candidates away.  That is not a branch table -- every step runs, and each
+    removes some -- so it is its own node rather than a junction whose
+    branches happen to be cumulative.
+
+    ``criteria_tag`` is the identity, because it is the semantic signature and
+    the log line at once: the code emits ``criteria=-diskIO`` per rejected site,
+    so a stage keyed on it can be counted directly from production logs and
+    survives any refactoring that keeps the tag.  ``funnel_label`` is the
+    coarser step the summary counter reports (``diskIO check``), which several
+    tags can share -- ``-lowmemory`` and ``-highmemory`` are both
+    ``memory check``.  Both appear in logs and they are read differently, so
+    both are kept.
+    """
+
+    node_type: NodeType = NodeType.FILTER_STAGE
+    map_id: str
+    derived_from: str
+    owner: str = Field(..., description="module::function holding the chain.")
+    criteria_tag: str = Field(
+        default="",
+        description="The tag the code emits, e.g. '-diskIO'.  Empty when the step is unnamed.",
+    )
+    funnel_label: str = Field(
+        default="",
+        description="Step name the candidate counter reports, e.g. 'diskIO check'.",
+    )
+    order: int = Field(default=0, description="Position in the chain, by source order.")
+    conditions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Guards under which a candidate is dropped.  Not solved: the values "
+            "come from observation and are substituted in, which is what turns "
+            "'120 sites became 3' into a reason."
+        ),
+    )
+    inputs: list[str] = Field(
+        default_factory=list,
+        description="Identifiers the conditions read -- where the backward walk continues.",
+    )
+    emits: list[str] = Field(
+        default_factory=list, description="Message templates the stage logs when it drops one."
+    )
+    log_level: Optional[str] = Field(default=None, description="Level of those messages.")
+    anchor: Optional[Anchor] = None
+
+    @staticmethod
+    def make_name(map_id: str, owner: str, signature: str) -> str:
+        return f"{map_id}:{owner}:{signature}"

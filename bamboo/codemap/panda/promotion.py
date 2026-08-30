@@ -33,6 +33,12 @@ passthrough edge, so a subject a promoted one copies its value from comes along.
 Without it the backward walk's first hop out of ``JediTaskSpec.status`` lands on
 a subject the map does not contain.
 
+A fifth restates the first where the first cannot see.  Criterion 1 reads SQL
+predicates, and brokerage gates in Python: ``nucleus``, ``minRamCount``,
+``ioIntensity`` and ``maxwdir`` decide whether a site survives the filter chain
+without appearing in any ``WHERE``.  Taking them from the selection slice keeps
+the evidence as strong -- the code tagged the rejection and counted the cut.
+
 Applied to junctions as well as subjects: a junction writing an attribute
 nobody investigates is the same noise one level down.
 """
@@ -50,6 +56,7 @@ WHERE_GATE = "1:state-gate-in-where"
 DECLARED_VOCABULARY = "2:declared-vocabulary"
 CLOSED_LITERAL_SET = "3:closed-literal-set"
 PASSTHROUGH_SOURCE = "4:carried-into-a-promoted-subject"
+FILTER_GATE = "5:gates-a-filter-stage"
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch carries its
 # value from.
@@ -92,6 +99,26 @@ def gated_fields(modules: list[SourceModule]) -> Counter:
     return counts
 
 
+def filter_gated_fields(fragment: MapFragment) -> set[str]:
+    """Return the attributes a filter stage's exclusion condition reads.
+
+    Criterion 1 asks whether a field decides that another component proceeds,
+    and answers it from SQL: ``WHERE t.status IN ('ready','running')``.  That
+    misses every field brokerage gates, because brokerage gates in Python --
+    ``nucleus``, ``coreCount``, ``minRamCount``, ``ioIntensity``, ``walltime``,
+    ``maxwdir``, ``pledgedCPU`` decide whether a site survives the chain and
+    none of them appears in a predicate.
+
+    Reading them from the selection slice rather than from Python conditions at
+    large is what makes this evidence instead of a guess: a census of names
+    compared against literals in an ``if`` matched 72 known column names over
+    540 sites, led by ``key``, ``name`` and ``value``.  A filter stage's
+    condition is different in kind -- the code tagged the rejection and counted
+    the cut, so it has stated that this test excludes candidates.
+    """
+    return {name for stage in fragment.filter_stages for name in stage.inputs}
+
+
 def criteria_for(
     fragment: MapFragment,
     gated: Counter,
@@ -114,11 +141,14 @@ def criteria_for(
                 literal[junction.subject] += 1
                 values.setdefault(junction.subject, set()).add(branch.outcome)
 
+    filtered = filter_gated_fields(fragment)
     found: dict[str, list[str]] = {}
     for subject in fragment.subjects:
         criteria: list[str] = []
         if gated.get(subject.attribute):
             criteria.append(WHERE_GATE)
+        if subject.attribute in filtered:
+            criteria.append(FILTER_GATE)
         if vocabularies.get((subject.spec_class, subject.attribute)):
             criteria.append(DECLARED_VOCABULARY)
         seen = values.get(subject.name, set())

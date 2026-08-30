@@ -104,6 +104,23 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             if len(drift) > top:
                 click.echo(f"    … {len(drift) - top} more")
 
+    if fragment.filter_stages:
+        chains = Counter(s.owner for s in fragment.filter_stages)
+        click.echo(f"\nfilter stages: {len(fragment.filter_stages)} in {len(chains)} chain(s)")
+        for owner, count in chains.most_common(top):
+            click.echo(f"  {count:>3}  {owner}")
+        blind = gates.unexplainable_rejections(fragment)
+        if blind:
+            # What a rejection did not log cannot be checked afterwards, so
+            # the map should not promise "read the log" for these.
+            click.echo(
+                f"  rejections logging none of what they tested ({len(blind)}):"
+            )
+            for tag, inputs, where in blind[:top]:
+                click.echo(f"    {tag:<22} tests {inputs}  ({where})")
+            if len(blind) > top:
+                click.echo(f"    … {len(blind) - top} more")
+
     if fragment.boundaries:
         systems = Counter(b.system for b in fragment.boundaries)
         click.echo(
@@ -277,6 +294,19 @@ def main(
             f"\nnot promoted: {dropped[0]} subject(s), {dropped[1]} junction(s) "
             "— no criterion fired"
         )
+    unexplained = getattr(plugin, "unexplained_steps", [])
+    if unexplained:
+        # The funnel will report candidates disappearing here and the map has
+        # nothing to say about where they went -- the one way this slice can be
+        # quietly wrong, so it is named rather than left in a ratio.
+        all_passed = False
+        click.echo(
+            f"\n[FAIL] selection-steps-explained: {len(unexplained)} step(s) count a cut "
+            "with no readable reason"
+        )
+        for step in unexplained[:top]:
+            click.echo(f"      - {step}")
+
     _report_triggers(fragment, plugin, top)
 
     uncovered = getattr(plugin, "uncovered_tables", set())
