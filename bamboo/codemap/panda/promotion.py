@@ -180,6 +180,7 @@ def close_over_passthrough(
     nothing.  A subject that decides a promoted one is worth asking about by the
     same argument that promoted the first, so the set is closed under the edge.
     """
+    known = {subject.name for subject in fragment.subjects}
     promoted = dict(criteria)
     while True:
         added = False
@@ -189,6 +190,13 @@ def close_over_passthrough(
             for branch in junction.branches:
                 match = _PASSTHROUGH.match(branch.outcome)
                 if match is None or match.group(1) in promoted:
+                    continue
+                if match.group(1) not in known:
+                    # ``currentPriority`` is carried from ``taskPriority``, and
+                    # nothing in this map writes ``taskPriority`` -- it arrives
+                    # with the task.  Promoting the name anyway would put a
+                    # criterion on a node that does not exist; the edge is a
+                    # provenance terminal, which ``gates`` reports as one.
                     continue
                 promoted[match.group(1)] = [PASSTHROUGH_SOURCE]
                 added = True

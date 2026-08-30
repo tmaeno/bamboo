@@ -63,6 +63,8 @@ _INSERT = re.compile(
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)\s*=\s*(:?[A-Za-z_]\w*|[^,]+?)(?=\s*,|\s*$)")
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 _WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+# ``{0}`` / ``{}`` / ``{schema}`` in a ``str.format`` template.
+_FIELD = re.compile(r"\{[^{}]*\}")
 
 _QUOTED = re.compile(r"^'([^']*)'$")
 _BARE = re.compile(r"^[A-Za-z_]\w*$")
@@ -162,6 +164,19 @@ def _literal(node: ast.expr) -> Optional[str]:
         if left is None and right is None:
             return None
         return (left or "") + (right or "")
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        # ``"FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        # ".format(panda_config.schemaJEDI)`` -- the older spelling of the same
+        # f-string, and 62 statements still use it.  Missing it did not merely
+        # lose coverage: those statements are where JEDI selects tasks by
+        # status, so the map read a dozen task states as ones nothing ever
+        # selects on.
+        text = _literal(node.func.value)
+        return None if text is None else _FIELD.sub("{}", text)
     return None
 
 
@@ -437,6 +452,53 @@ def deletes(sql: str) -> list[str]:
     silently replaces one that was never picked up.
     """
     return [_table_of(match.group(1)) for match in _DELETE.finditer(sql)]
+
+
+_PREDICATE_BIND = re.compile(
+    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=)\s*(:\w+)", re.IGNORECASE
+)
+_PREDICATE_IN = re.compile(
+    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s+IN\s*\(([^)]*)\)", re.IGNORECASE
+)
+_PREDICATE_LITERAL = re.compile(
+    r"(?:WHERE|AND|OR)\s+(?:\w+\.)?([A-Za-z_]\w*)\s*(?:=|<>|!=)\s*'([^']*)'", re.IGNORECASE
+)
+_BIND_KEY = re.compile(r":\w+")
+_QUOTED = re.compile(r"'([^']*)'")
+
+
+def predicates(sql: str) -> list[tuple[str, str]]:
+    """Return ``(column, bind key)`` for each predicate testing a bind.
+
+    The other half of the same statements.  ``writes`` reads the ``SET`` clause
+    to learn what a value becomes; this reads the ``WHERE`` clause to learn
+    which rows were asked for, and the two together are what makes a state
+    machine out of a pile of writes: a status nothing selects on is one nothing
+    ever moves a task out of.
+
+    Bind keys only; :func:`selected_literals` returns the values written into
+    the statement itself, which need no lookup in Python.
+    """
+    found = [(column, key) for column, key in _PREDICATE_BIND.findall(sql)]
+    for column, inner in _PREDICATE_IN.findall(sql):
+        found.extend((column, key) for key in _BIND_KEY.findall(inner))
+    return found
+
+
+def selected_literals(sql: str) -> list[tuple[str, str]]:
+    """Return ``(column, value)`` for each predicate testing a literal.
+
+    Both forms occur on the same fields and the pair is the whole answer:
+    ``WHERE status=:oldStatus`` puts the value in Python, ``AND status IN
+    ('running','scouting')`` puts it in the statement.  Reading only one of
+    them reports states nothing selects on that something plainly does.
+    """
+    found = [(column, value) for column, value in _PREDICATE_LITERAL.findall(sql)]
+    for column, inner in _PREDICATE_IN.findall(sql):
+        if "SELECT" in inner.upper():
+            continue  # The quotes belong to the subquery, not to this column.
+        found.extend((column, value) for value in _QUOTED.findall(inner))
+    return found
 
 
 def bound_values(

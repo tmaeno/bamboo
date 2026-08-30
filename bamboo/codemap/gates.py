@@ -21,12 +21,16 @@ attention.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from bamboo.codemap.models import MapFragment
+
+# ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
+_PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
 
 
 class GateResult(BaseModel):
@@ -275,6 +279,146 @@ def coverage_matrix(fragment: MapFragment) -> list[tuple[str, str, int, int, flo
     return rows
 
 
+def _tier_one_outcomes(fragment: MapFragment) -> dict[str, set[str]]:
+    """Return ``{subject: statically resolved outcomes}``."""
+    written: dict[str, set[str]] = {}
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            if branch.tier == 1:
+                written.setdefault(junction.subject, set()).add(branch.outcome)
+    return written
+
+
+def declared_status_is_written(fragment: MapFragment) -> GateResult:
+    """(i) A value the code declares must be one some writer produces.
+
+    The sound direction of the comparison that was tried the other way round
+    and refuted.  Checking that every extracted outcome sits inside a declared
+    list fails on correct code, because ``statusToUpdateContents()`` returns
+    ``["defined"]`` -- a purpose-built subset, not a vocabulary.  Checking that
+    every *declared* value is written somewhere is a genuine lower bound: a
+    status the code names in one of those lists and no writer produces is
+    unreachable, so either a write form is still missing or the declaration is
+    stale.
+
+    It could only be run once every write form was in: with the SQL bind, the
+    inline literal and the copied column all extracted, a miss now means
+    something.  Where the subject has tier-2 writers the value may simply be
+    computed -- ``commandStatusMap()[cmd]["doing"]`` produces ``aborting``
+    without the literal appearing anywhere -- so the count is reported with the
+    failure rather than left for the reader to guess at.
+    """
+    written = _tier_one_outcomes(fragment)
+    runtime: dict[str, int] = {}
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            if branch.tier != 1:
+                runtime[junction.subject] = runtime.get(junction.subject, 0) + 1
+
+    failures: list[str] = []
+    checked = 0
+    for subject in fragment.subjects:
+        if not subject.vocabulary:
+            continue
+        for value in subject.vocabulary:
+            checked += 1
+            if value in written.get(subject.name, set()):
+                continue
+            computed = runtime.get(subject.name, 0)
+            failures.append(
+                f"{subject.name} declares {value!r} and no writer produces it"
+                + (f" ({computed} run-time writer(s) could)" if computed else "")
+            )
+    return GateResult(
+        gate="declared-status-is-written",
+        passed=not failures,
+        checked=checked,
+        failures=sorted(failures),
+        note="A declared status nothing writes is unreachable: a missing write form, or a stale declaration.",
+    )
+
+
+def map_references_resolve(fragment: MapFragment) -> GateResult:
+    """(i) Every edge in the map lands on a node the map contains.
+
+    Cheap, and the only check that covers the *assembly* rather than any one
+    slice.  Two edges must land: a junction names the subject it writes, and a
+    subject is worth keeping only if something writes it.  Both are maintained
+    by construction, which is exactly why they are worth asserting -- a
+    promotion rule changed in isolation breaks them silently, and a backward
+    walk that steps onto a missing node has no way to say so.  Writing this
+    caught the promotion closure putting a criterion on a name that had no
+    node behind it.
+
+    A passthrough target that is *not* a subject is not a failure: see
+    :func:`carried_from_outside`.
+    """
+    subjects = {subject.name for subject in fragment.subjects}
+    failures: list[str] = []
+    checked = 0
+    for junction in fragment.junctions:
+        checked += 1
+        if junction.attribution != "unresolved" and junction.subject not in subjects:
+            failures.append(f"{junction.owner} writes {junction.subject}, which is not a subject")
+    written = {junction.subject for junction in fragment.junctions}
+    for subject in fragment.subjects:
+        checked += 1
+        if subject.name not in written:
+            failures.append(f"{subject.name} is a subject nothing writes")
+    return GateResult(
+        gate="map-references-resolve",
+        passed=not failures,
+        checked=checked,
+        failures=sorted(set(failures)),
+        note="A backward walk that steps onto a missing node cannot report that it did.",
+    )
+
+
+def carried_from_outside(fragment: MapFragment) -> list[tuple[str, str]]:
+    """Subjects whose value is copied from a field the map does not explain.
+
+    ``JediTaskSpec.currentPriority`` is set from ``taskPriority``, and nothing
+    in this map writes ``taskPriority`` -- it arrives with the task.  That is a
+    terminal, in the same sense as a boundary: the backward walk stops there,
+    and the answer "it was whatever the submitter asked for" is complete rather
+    than missing.  Reported so the stop is visible instead of looking like a
+    gap in extraction.
+    """
+    subjects = {subject.name for subject in fragment.subjects}
+    rows = {
+        (junction.subject, match.group(1))
+        for junction in fragment.junctions
+        for branch in junction.branches
+        if (match := _PASSTHROUGH.match(branch.outcome)) and match.group(1) not in subjects
+    }
+    return sorted(rows)
+
+
+def unreachable_values(fragment: MapFragment) -> list[tuple[str, list[str]]]:
+    """Values something writes that nothing selects rows on.  **Reported.**
+
+    The plan's "in-edges but no out-edge" invariant, and it cannot be a gate:
+    a terminal status is *supposed* to be a sink, and nothing in the source
+    declares which ones those are.  What it can do is keep the list short
+    enough to read -- ``JediTaskSpec.status`` comes out as ``broken``, ``lost``,
+    ``finishing``, ``staging`` and ``waiting``, of which the first two are
+    plainly terminal and the last three are transitional names that no query in
+    this map ever acts on.
+
+    Subjects nothing selects on at all are skipped.  There the map has no read
+    side to compare against, so every value would appear to be a sink -- which
+    is not an answer of "nothing moves away from these" but an absence of the
+    question.
+    """
+    written = _tier_one_outcomes(fragment)
+    rows = [
+        (subject.name, sorted(written.get(subject.name, set()) - set(subject.selected_values)))
+        for subject in fragment.subjects
+        if subject.selected_values
+    ]
+    return sorted((name, sinks) for name, sinks in rows if sinks)
+
+
 def unexplainable_rejections(fragment: MapFragment) -> list[tuple[str, list[str], str]]:
     """Filter stages whose message carries none of what their condition tested.
 
@@ -318,6 +462,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(boundary_ownership_param_declared(fragment))
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
+        results.append(declared_status_is_written(fragment))
+        results.append(map_references_resolve(fragment))
     return results
 
 

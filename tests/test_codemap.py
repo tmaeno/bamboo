@@ -1994,3 +1994,167 @@ def test_a_rejection_that_logs_none_of_what_it_tested_is_reported():
     assert gates.unexplainable_rejections(fragment) == [
         ("-diskIO", ["diskio_usage", "diskio_limit"], "b.py::doBrokerage")
     ]
+
+
+# --------------------------------------------------------------------------- #
+# graph invariants
+# --------------------------------------------------------------------------- #
+
+
+def _graph(*, subjects, junctions):
+    return MapFragment(
+        map_id=MAP_ID, derived_from=VERSION, subjects=subjects, junctions=junctions
+    )
+
+
+def test_a_declared_status_nothing_writes_is_unreachable():
+    """The sound direction of the comparison that was refuted the other way.
+
+    Checking that every outcome sits inside a declared list fails on correct
+    code -- those lists are purpose-built subsets.  Checking that every
+    declared value is written somewhere is a genuine lower bound, and it could
+    only be run once every write form was in.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "status", [("defined", 1)]))
+    fragment.subjects[0].vocabulary = ["defined", "aborting"]
+    result = gates.declared_status_is_written(fragment)
+
+    assert not result.passed
+    assert result.checked == 2
+    assert result.failures == [
+        "JediTaskSpec.status declares 'aborting' and no writer produces it"
+    ]
+
+
+def test_a_run_time_writer_is_named_alongside_the_miss():
+    """``commandStatusMap()[cmd]["doing"]`` produces 'aborting' with no literal.
+
+    The writer is in the map and the value is not, which is a different thing
+    from nothing writing it at all -- so the count goes in the failure rather
+    than being left for the reader to work out.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "status", [("runtime(newStatus)", 2)]))
+    fragment.subjects[0].vocabulary = ["aborting"]
+
+    assert gates.declared_status_is_written(fragment).failures == [
+        "JediTaskSpec.status declares 'aborting' and no writer produces it "
+        "(1 run-time writer(s) could)"
+    ]
+
+
+def test_every_junction_lands_on_a_subject_the_map_contains():
+    """A backward walk that steps onto a missing node cannot report that it did."""
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+    fragment.junctions.append(
+        JunctionNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="j:ghost",
+            subject="JediTaskSpec.ghost",
+            owner="x.py::f",
+            branches=[Branch(outcome="ready")],
+        )
+    )
+    result = gates.map_references_resolve(fragment)
+
+    assert not result.passed
+    assert result.failures == ["x.py::f writes JediTaskSpec.ghost, which is not a subject"]
+
+
+def test_a_subject_nothing_writes_does_not_belong_in_the_map():
+    fragment = _graph(
+        subjects=[
+            SubjectNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name="JediTaskSpec.status",
+                spec_class="JediTaskSpec",
+                attribute="status",
+            )
+        ],
+        junctions=[],
+    )
+
+    assert gates.map_references_resolve(fragment).failures == [
+        "JediTaskSpec.status is a subject nothing writes"
+    ]
+
+
+def test_promotion_does_not_follow_a_passthrough_to_a_node_that_is_absent():
+    """``currentPriority`` is carried from ``taskPriority``, which nothing writes.
+
+    Promoting the name anyway put a criterion on a node that did not exist --
+    caught by the reference gate, which is what a gate over the assembly is
+    for.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "currentPriority", [("x", 2)]))
+    fragment.junctions[0].branches.append(
+        Branch(outcome="passthrough(JediTaskSpec.taskPriority)", tier=2)
+    )
+    closed = promotion.close_over_passthrough(
+        fragment, {"JediTaskSpec.currentPriority": ["5:gates-a-filter-stage"]}
+    )
+
+    assert "JediTaskSpec.taskPriority" not in closed
+    assert gates.carried_from_outside(fragment) == [
+        ("JediTaskSpec.currentPriority", "JediTaskSpec.taskPriority")
+    ]
+
+
+def test_a_value_nothing_selects_on_is_reported_not_failed():
+    """A terminal status is supposed to be a sink and nothing declares which."""
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1), ("broken", 1)]))
+    fragment.subjects[0].selected_values = ["ready"]
+
+    assert gates.unreachable_values(fragment) == [("JediTaskSpec.status", ["broken"])]
+
+
+def test_a_subject_with_no_read_side_is_not_reported_as_all_sinks():
+    """There the map has no question to answer, which is not an answer of no."""
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+
+    assert gates.unreachable_values(fragment) == []
+
+
+def test_a_where_clause_says_which_values_something_acts_on():
+    """The other half of the same statements, and the half that makes it a graph."""
+    source = (
+        "class TaskModule:\n"
+        "    def find(self, vo):\n"
+        "        varMap = {}\n"
+        "        varMap[':oldStatus'] = 'pending'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "        sqlU += 'SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += \"WHERE status=:oldStatus AND vo IN ('atlas','test') \"\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    selected = sqlwrite.selected_values(modules, attributor)
+    assert selected["JediTaskSpec.status"] == {"pending"}
+    assert selected["JEDI_Tasks.vo"] == {"atlas", "test"}
+
+
+def test_a_statement_built_with_str_format_is_read():
+    """62 statements still use ``.format`` rather than an f-string.
+
+    Missing them did not merely lose coverage: those are where JEDI selects
+    tasks by status, so a dozen task states read as ones nothing selects on.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def find(self):\n"
+        "        sqlR = 'SELECT jediTaskID FROM {0}.JEDI_Tasks tabT '.format(schemaJEDI)\n"
+        "        sqlR += \"WHERE tabT.status='running' \"\n"
+        "        self.cur.execute(sqlR + comment, varMap)\n"
+    )
+    func = ast.parse(source).body[0].body[0]
+
+    assert sql.reconstruct(func, "sqlR").startswith(
+        "SELECT jediTaskID FROM {}.JEDI_Tasks tabT "
+    )
+    assert sql.selected_literals(sql.reconstruct(func, "sqlR")) == [("status", "running")]

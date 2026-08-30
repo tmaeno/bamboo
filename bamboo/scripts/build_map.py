@@ -93,6 +93,25 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             if len(thin) > top:
                 click.echo(f"    … {len(thin) - top} more")
 
+        sinks = gates.unreachable_values(fragment)
+        if sinks:
+            # The plan's "in-edges but no out-edge" invariant, as a report:
+            # a terminal status is supposed to be a sink and nothing in the
+            # source says which ones those are.
+            click.echo(f"  written but nothing selects rows on ({len(sinks)} subject(s)):")
+            for subject, values in sinks[:top]:
+                click.echo(f"    {subject:<30} {values}")
+            if len(sinks) > top:
+                click.echo(f"    … {len(sinks) - top} more")
+
+        outside = gates.carried_from_outside(fragment)
+        if outside:
+            # A terminal, in the same sense as a boundary: the walk stops and
+            # the answer is complete rather than missing.
+            click.echo(f"  carried from a field the map does not explain ({len(outside)}):")
+            for subject, source in outside[:top]:
+                click.echo(f"    {subject} <- {source}")
+
         drift = gates.outcomes_outside_declared_subsets(fragment)
         if drift:
             # Not a gate: the declared lists are purpose-built subsets, so an

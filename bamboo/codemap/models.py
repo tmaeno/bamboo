@@ -122,6 +122,15 @@ class SubjectNode(BaseNode):
         default_factory=list,
         description="Declared or observed value set, when the code states one.",
     )
+    selected_values: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Values some query selects rows on.  The counterpart of the "
+            "outcomes the junctions write: together they make a state machine "
+            "out of a pile of writes, since a value nothing selects on is one "
+            "nothing ever moves away from."
+        ),
+    )
 
     @staticmethod
     def make_name(spec_class: str, attribute: str) -> str:

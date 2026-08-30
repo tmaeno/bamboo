@@ -180,6 +180,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)
 
+        # The predicate side of the same statements: which values something
+        # selects rows on.  Attached to the subject rather than kept apart, so
+        # the invariants can compare it with what the junctions write.
+        selected = sqlwrite.selected_values(self._modules, attributor)
+        for subject in fragment.subjects:
+            subject.selected_values = sorted(selected.get(subject.name, ()))
+
         # A function that writes a status both ways produces one junction from
         # each recognizer under the same name.  Storage merges on the name, so
         # without this the second silently replaces the first's branches.

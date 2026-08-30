@@ -36,6 +36,10 @@ The last one is how a task comes back out of ``pending``.  Missing it did not
 merely lose a write: it removed "the release path never fired" from the
 candidate causes of a task stuck in ``pending``, which is one of the two
 symptoms this map exists to explain.
+
+``selected_values`` reads the same statements the other way, for the graph
+invariants: a ``WHERE`` clause says which rows were asked for, and a status
+nothing selects on is a status nothing moves a task out of.
 """
 
 from __future__ import annotations
@@ -329,3 +333,66 @@ def _record(
             )
         )
 
+
+
+def selected_values(
+    modules: list[SourceModule], attributor: SpecAttributor
+) -> dict[str, set[str]]:
+    """Return ``{subject: values some query selects rows on}``.
+
+    The same statements read the other way.  A write says what a value becomes;
+    a predicate says which rows were asked for, and only both together make a
+    state machine out of a pile of writes -- a status nothing ever selects on
+    is a status nothing ever moves a task out of, which is the shape of "stuck"
+    that no branch table can show.
+
+    Attributed exactly like a write, so ``JediTaskSpec.status`` means the same
+    thing on both sides and the two can be compared at all.
+    """
+    found: dict[str, set[str]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            seen: set[str] = set()
+            for run in sql.executions(func):
+                if run.sql in seen:
+                    continue
+                seen.add(run.sql)
+                for table in _tables_of(run.sql):
+                    spec_class = attributor.class_for_table(table)
+                    for column, key in sql.predicates(run.sql):
+                        qualifier, attribute, _kind = _subject_of(
+                            attributor, spec_class, table, column
+                        )
+                        subject = SubjectNode.make_name(qualifier, attribute)
+                        for bind in sql.bound_values(func, run.varmap or "", key):
+                            value = bind.value
+                            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                                found.setdefault(subject, set()).add(value.value)
+                    for column, value in sql.selected_literals(run.sql):
+                        qualifier, attribute, _kind = _subject_of(
+                            attributor, spec_class, table, column
+                        )
+                        found.setdefault(
+                            SubjectNode.make_name(qualifier, attribute), set()
+                        ).add(value)
+    return found
+
+
+def _tables_of(statement: str) -> list[str]:
+    """Return the tables a statement names, so a predicate can be qualified.
+
+    All four verbs, not just ``SELECT``: most of the interesting predicates are
+    on an ``UPDATE`` -- ``SET status=:status WHERE status=:oldStatus`` is one
+    statement that both writes a status and says which one it is willing to
+    move away from, and reading only the queries loses every one of them.
+
+    A statement joining two tables qualifies its predicates against both, which
+    over-reads: ``status`` in a task/dataset join is attributed to each.  That
+    is the safe direction here -- the values answer whether *anything* selects
+    on a status, so one credited too widely weakens a report while a missing
+    one would invent a dead end.
+    """
+    tables = {table for table, _columns in sql.reads(statement)}
+    tables.update(write.table for write in sql.writes(statement))
+    tables.update(sql.deletes(statement))
+    return sorted(tables)
