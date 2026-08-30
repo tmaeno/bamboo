@@ -477,17 +477,22 @@ def log_format_recognised(ev: "evidence.Evidence") -> GateResult:
     """
     failures: list[str] = []
     checked = 0
-    for service in sorted(ev.services()):
-        results = ev.matching(evidence.ANY_LINE_PATTERN, service)
+    for filename in sorted(ev.log_filenames()):
+        results = ev.matching(evidence.ANY_LINE_PATTERN, log_filename=filename)
         checked += len(results)
-        broken = [r for r in results if r.error]
+        # A file that is not there is reported by ``code_paths_are_live`` as
+        # the finding it is; only some other error means the query itself
+        # failed, and that has to be visible before anything is concluded.
+        broken = [
+            r for r in results if r.error and not evidence._MISSING_FILE.search(r.error)
+        ]
         for result in broken:
-            failures.append(f"{service}/{result.machine}: {result.error}")
-        if results and not broken and not evidence.level_histogram(ev, service):
+            failures.append(f"{result.query.service}/{result.machine}: {result.error}")
+        sampled = sum(len(r.lines) for r in results)
+        if sampled and not evidence.level_histogram(ev, log_filename=filename):
             failures.append(
-                f"{service}: sampled {sum(len(r.lines) for r in results)} line(s), "
-                "none of which carry a level -- the log format is not "
-                f"{evidence.ANY_LINE_PATTERN!r}"
+                f"{filename}: sampled {sampled} line(s), none of which carry a "
+                f"level -- the log format is not {evidence.ANY_LINE_PATTERN!r}"
             )
     return GateResult(
         gate="log-format-recognised",
@@ -512,9 +517,6 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
     other.  A service that yielded no sample gets no verdict rather than an
     optimistic one; those land in ``inconclusive``.
     """
-    thresholds = {
-        service: evidence.effective_level(ev, service) for service in sorted(ev.services())
-    }
     failures: list[str] = []
     unknown: list[str] = []
     checked = 0
@@ -522,16 +524,30 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
         if not stage.log_level:
             continue
         checked += 1
-        service = evidence.service_for_module(stage.owner.split("::")[0])
-        threshold = thresholds.get(service)
         where = stage.anchor.as_ref() if stage.anchor else stage.owner
         label = f"{stage.criteria_tag or stage.funnel_label} at {where}"
-        if threshold is None:
-            unknown.append(f"{label}: no sample from {service}")
-        elif evidence.below_threshold(stage.log_level, threshold):
-            failures.append(
-                f"{label} emits at {stage.log_level.upper()} but {service} runs at {threshold}"
+        if not stage.log_files:
+            unknown.append(f"{label}: the source does not name a log file")
+            continue
+        # Any candidate that carries the line is enough: the proxy mixins run
+        # under two processes and emitting in either one makes the observable
+        # real.  Absent everywhere is reported by ``code_paths_are_live``, not
+        # here -- a path that never ran is not a broken promise about logging.
+        verdicts = []
+        for filename in stage.log_files:
+            if ev.file_status(filename) != "present":
+                continue
+            threshold = evidence.effective_level(ev, log_filename=filename)
+            if threshold is None:
+                continue
+            verdicts.append(
+                (filename, threshold, evidence.below_threshold(stage.log_level, threshold))
             )
+        if not verdicts:
+            unknown.append(f"{label}: no sample from {', '.join(stage.log_files)}")
+        elif all(suppressed for _, _, suppressed in verdicts):
+            detail = ", ".join(f"{name} at {level}" for name, level, _ in verdicts)
+            failures.append(f"{label} emits at {stage.log_level.upper()} but {detail}")
     return GateResult(
         gate="observables-are-emitted",
         passed=not failures,
@@ -539,6 +555,39 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
         failures=failures,
         inconclusive=unknown,
         note="An observable below the threshold must be dropped from strategies, not fetched.",
+    )
+
+
+def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Every mapped log file exists in the deployment.
+
+    PandaLogger opens ``panda-<logger>.log`` the first time that logger
+    emits, so a file none of the machines has is not a gap in the evidence --
+    it says the code writing to it has never run there.  That is the strongest
+    statement production makes about the map, and it outranks the level check:
+    a stage nobody executes is not an observability problem, it is a part of
+    the map that does not apply to this deployment.
+
+    Reported rather than silently dropped.  The map is built from the source,
+    and the source is right about the code existing; what this adds is that
+    the deployment does not exercise it, which an investigation needs to know
+    before it starts looking for lines that will never be there.
+    """
+    owners: dict[str, set[str]] = {}
+    for node in list(fragment.filter_stages) + list(fragment.junctions):
+        for filename in node.log_files:
+            owners.setdefault(filename, set()).add(node.owner.split("::")[0])
+    failures = [
+        f"{filename} is on no machine: " + ", ".join(sorted(modules)[:3]) + " never ran"
+        for filename, modules in sorted(owners.items())
+        if ev.file_status(filename) == "absent"
+    ]
+    return GateResult(
+        gate="code-paths-are-live",
+        passed=not failures,
+        checked=len(owners),
+        failures=failures,
+        note="A log file is created on first emit, so its absence means the path never ran here.",
     )
 
 
@@ -551,6 +600,8 @@ def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateR
     and the running system have drifted apart.
     """
     results = [log_format_recognised(ev)]
+    # Liveness first: it decides how the level verdicts should be read.
+    results.append(code_paths_are_live(fragment, ev))
     if fragment.filter_stages:
         results.append(observables_are_emitted(fragment, ev))
     return results

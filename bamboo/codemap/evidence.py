@@ -65,6 +65,10 @@ POLL_TIMEOUT_SECONDS = 330.0
 # distinguishing "not in production" from "we did not look".
 _RG_NO_MATCH = 1
 
+# A log file that is not there is a fact, not a failure: PandaLogger opens the
+# file when its logger first emits, so its absence says the code never ran.
+_MISSING_FILE = re.compile(r"No such file or directory", re.IGNORECASE)
+
 # PandaLogger formats every record as
 # ``"%(asctime)s %(name)-12s: %(levelname)-8s %(message)s"``, so the level is
 # the token after the first ``": "``.  Anchoring on that separator rather than
@@ -128,32 +132,70 @@ class Evidence(BaseModel):
     fetched_at: str
     results: list[GrepResult] = Field(default_factory=list)
 
-    def matching(self, pattern: str, service: Optional[str] = None) -> list[GrepResult]:
+    def matching(
+        self,
+        pattern: str,
+        service: Optional[str] = None,
+        log_filename: Optional[str] = None,
+    ) -> list[GrepResult]:
         return [
             r
             for r in self.results
-            if r.query.pattern == pattern and (service is None or r.query.service == service)
+            if r.query.pattern == pattern
+            and (service is None or r.query.service == service)
+            and (log_filename is None or r.query.log_filename == log_filename)
         ]
 
-    def lines(self, pattern: str, service: Optional[str] = None) -> list[str]:
+    def lines(self, pattern: str, **where) -> list[str]:
         """Every line any machine returned, in the order the machines answered.
 
         A union, not an intersection: the services run different knights, so a
         tag emitted on one machine and not another is normal.
         """
-        return [line for result in self.matching(pattern, service) for line in result.lines]
+        return [line for result in self.matching(pattern, **where) for line in result.lines]
 
-    def conclusive(self, pattern: str, service: Optional[str] = None) -> bool:
+    def conclusive(self, pattern: str, **where) -> bool:
         """Whether every machine's answer to this query can be read negatively."""
-        results = self.matching(pattern, service)
+        results = self.matching(pattern, **where)
         return bool(results) and all(r.conclusive for r in results)
 
     def services(self) -> set[str]:
         return {r.query.service for r in self.results}
 
+    def log_filenames(self) -> set[str]:
+        return {r.query.log_filename for r in self.results}
+
+    def file_status(self, log_filename: str) -> str:
+        """``present`` | ``absent`` | ``unknown`` for one log file.
+
+        ``absent`` is the strongest thing production can say about a piece of
+        the map: PandaLogger creates a file the first time its logger emits,
+        so no file means that logger has never emitted on any machine asked --
+        the code path is not merely quiet, it has not run in this deployment.
+        Distinguishing it from ``unknown`` matters because a query that failed
+        for some other reason must not be read as that.
+        """
+        results = self.matching(ANY_LINE_PATTERN, log_filename=log_filename)
+        if not results:
+            return "unknown"
+        if any(r.error is None for r in results):
+            return "present"
+        if all(r.error and _MISSING_FILE.search(r.error) for r in results):
+            return "absent"
+        return "unknown"
+
     def failures(self) -> list[GrepResult]:
-        """Queries that did not run -- a missing file, or a tool error."""
-        return [r for r in self.results if r.error is not None]
+        """Queries that did not run, excluding a file simply not being there.
+
+        A missing log file is an answer -- ``code-paths-are-live`` reports it
+        as one -- so listing it here alongside "not authorized" would bury the
+        errors that mean the check itself could not be trusted.
+        """
+        return [
+            r
+            for r in self.results
+            if r.error is not None and not _MISSING_FILE.search(r.error)
+        ]
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,17 +322,21 @@ async def collect(queries: list[GrepQuery], timeout: float = POLL_TIMEOUT_SECOND
     )
 
 
-def sample_queries(log_files: dict[str, str]) -> list[GrepQuery]:
-    """The queries that establish what each service's logs look like.
+def sample_queries(targets: dict[str, str]) -> list[GrepQuery]:
+    """The queries that establish what each log file contains.
 
-    One per service, matching any well-formed log line.  The result is the
-    first megabyte of that service's log, which is enough to see which levels
-    are being emitted -- and, because it matches on the format itself, it
-    fails loudly if the format is not what the map assumed.
+    One per file, matching any well-formed log line.  Per file rather than per
+    service because PanDA writes one file per logger: a question about
+    brokerage goes to ``panda-AtlasProdJobBroker.log`` and comes back narrow,
+    where the same question against a whole service's output would arrive as a
+    truncated slice of everything.  Matching on the log format itself also
+    makes the query fail loudly if the format is not what the map assumed.
+
+    *targets* maps log filename to the service that writes it.
     """
     return [
         GrepQuery(pattern=ANY_LINE_PATTERN, log_filename=filename, service=service)
-        for service, filename in sorted(log_files.items())
+        for filename, service in sorted(targets.items())
     ]
 
 
@@ -316,24 +362,29 @@ def service_for_module(rel_path: str) -> str:
     return SERVER if rel_path.startswith("pandaserver") else JEDI
 
 
-def level_histogram(evidence: Evidence, service: Optional[str] = None) -> Counter:
-    """Count log lines by level in the sample taken from *service*."""
+def level_histogram(evidence: Evidence, **where) -> Counter:
+    """Count log lines by level in the sample, filtered by service or file."""
     counts: Counter = Counter()
-    for line in evidence.lines(ANY_LINE_PATTERN, service):
+    for line in evidence.lines(ANY_LINE_PATTERN, **where):
         found = _LEVEL_IN_LINE.search(line)
         if found:
             counts[found.group(1)] += 1
     return counts
 
 
-def effective_level(evidence: Evidence, service: Optional[str] = None) -> Optional[str]:
+def effective_level(evidence: Evidence, **where) -> Optional[str]:
     """The lowest level actually present, or None when nothing was sampled.
 
-    This is a lower bound in the safe direction.  Seeing a DEBUG line proves
-    DEBUG is enabled; not seeing one in a sample only suggests it is not, so
-    callers treat the absence as evidence rather than proof and say so.
+    Measured per log file, because that is the grain PanDA configures: two
+    loggers in the same service can sit at different levels, so a threshold
+    taken from one and applied to the other would drop observables on a
+    number that was never established for them.
+
+    A lower bound in the safe direction.  Seeing a DEBUG line proves DEBUG is
+    enabled; not seeing one in a sample only suggests it is not, so callers
+    treat the absence as evidence rather than proof and say so.
     """
-    counts = level_histogram(evidence, service)
+    counts = level_histogram(evidence, **where)
     if not counts:
         return None
     return min(counts, key=lambda level: _SEVERITY[level])

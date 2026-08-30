@@ -228,6 +228,16 @@ class JunctionNode(BaseNode):
     derived_from: str
     subject: str = Field(..., description="Qualified subject name this junction writes.")
     owner: str = Field(..., description="module::qualname that contains the write.")
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Log files an observed transition through this junction can be "
+            "found in, e.g. 'panda-ContentsFeeder.log'.  More than one when the "
+            "code runs in more than one process: the proxy mixins land in "
+            "'panda-DBProxy.log' under the server and 'panda-JediDBProxy.log' "
+            "under a knight, and which one is a runtime fact, so both are named."
+        ),
+    )
     attribution: str = Field(
         default="certain",
         description=(
@@ -529,6 +539,17 @@ class FilterStageNode(BaseNode):
         default_factory=list, description="Message templates the stage logs when it drops one."
     )
     log_level: Optional[str] = Field(default=None, description="Level of those messages.")
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Log files this stage's messages can land in, e.g. "
+            "'panda-AtlasProdJobBroker.log'.  Part of the answer rather than a "
+            "fetching detail: the map exists to say which component's log to "
+            "read.  Empty when the module declares no logger and is mixed into "
+            "nothing, so its output goes to a caller's file that the source "
+            "does not name."
+        ),
+    )
     anchor: Optional[Anchor] = None
 
     @staticmethod

@@ -32,6 +32,7 @@ from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
     errorcode,
+    logfile,
     progress,
     selection,
     sqlwrite,
@@ -214,6 +215,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             {b.interface.split(".")[-1] for b in channels},
         )
 
+        # Which file each node's diagnostics land in.  After promotion for the
+        # same reason as the trigger reach: it describes the map that is kept.
+        self._log_files = logfile.attach(fragment, self._modules)
+        self._declared_files = logfile.declared_files(self._modules)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -233,6 +239,21 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def trigger_reach(self) -> tuple[int, int]:
         """``(junctions with an entry point, total)``."""
         return getattr(self, "_reached", (0, 0))
+
+    @property
+    def log_file_reach(self) -> tuple[int, int]:
+        """``(nodes whose log file is known, total)``."""
+        return getattr(self, "_log_files", (0, 0))
+
+    @property
+    def declared_log_files(self) -> dict[str, str]:
+        """``{module: log filename}`` for modules that declare their own logger.
+
+        Exposed so a caller can work out which machine group writes a file --
+        the module that declares the logger is the one that names it, and its
+        package is what places it.
+        """
+        return getattr(self, "_declared_files", {})
 
     @property
     def unpromoted(self) -> tuple[int, int]:

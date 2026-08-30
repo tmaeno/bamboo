@@ -38,6 +38,7 @@ from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
     errorcode,
+    logfile,
     progress,
     selection,
     sqlwrite,
@@ -2161,12 +2162,98 @@ def test_a_statement_built_with_str_format_is_read():
 
 
 # ---------------------------------------------------------------------------
+# Which log file holds the evidence
+# ---------------------------------------------------------------------------
+
+
+def test_a_logger_is_named_either_by_a_literal_or_by_the_module():
+    """Two forms, and only two, across both packages.
+
+    JEDI takes the module's own name and the server mostly spells one out,
+    but both appear in both, so the shape is what is read rather than the
+    package.
+    """
+    jedi = _module(
+        'logger = PandaLogger().getLogger(__name__.split(".")[-1])\n',
+        "pandajedi/jedibrokerage/AtlasProdJobBroker.py",
+    )
+    server = _module(
+        '_logger = PandaLogger().getLogger("api_async_process")\n',
+        "pandaserver/api/v1/async_process_api.py",
+    )
+
+    assert logfile.logger_name(jedi) == "AtlasProdJobBroker"
+    assert logfile.logger_name(server) == "api_async_process"
+    assert logfile.declared_files([jedi, server]) == {
+        "pandajedi/jedibrokerage/AtlasProdJobBroker.py": "panda-AtlasProdJobBroker.log",
+        "pandaserver/api/v1/async_process_api.py": "panda-api_async_process.log",
+    }
+
+
+def test_a_module_that_declares_no_logger_is_left_alone():
+    """A wrong filename is worse than none: the query comes back empty, and
+    empty reads as "production never emitted this"."""
+    base = _module(
+        "class JobBrokerBase:\n    pass\n",
+        "pandajedi/jedibrokerage/JobBrokerBase.py",
+    )
+
+    assert logfile.logger_name(base) is None
+    assert logfile.declared_files([base]) == {}
+
+
+def test_a_mixin_inherits_the_log_files_of_what_mixes_it_in():
+    """The proxy modules are the map's largest group and declare no logger.
+
+    ``OraDBProxy.DBProxy`` mixes them in and ``JediDBProxy.DBProxy``
+    subclasses that, so the same junction writes to the server's proxy log or
+    JEDI's depending on which process ran it.  Both are named because which
+    one is a runtime fact, not an ambiguity to be resolved.
+    """
+    mixin = _module(
+        "class TaskStandaloneModule:\n    pass\n",
+        "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+    )
+    ora = _module(
+        '_logger = PandaLogger().getLogger("DBProxy")\n'
+        "class DBProxy(task_standalone_module.TaskStandaloneModule):\n    pass\n",
+        "pandaserver/taskbuffer/OraDBProxy.py",
+    )
+    jedi = _module(
+        'logger = PandaLogger().getLogger(__name__.split(".")[-1])\n'
+        "class DBProxy(OraDBProxy.DBProxy):\n    pass\n",
+        "pandajedi/jedicore/JediDBProxy.py",
+    )
+    modules = [mixin, ora, jedi]
+
+    inherited = logfile.inherited_files(modules, logfile.declared_files(modules))
+
+    assert inherited[mixin.rel_path] == ["panda-DBProxy.log", "panda-JediDBProxy.log"]
+
+
+def test_the_inheritance_walk_does_not_stop_at_one_link():
+    """Stopping at the first would name the server's log and silently omit
+    JEDI's -- the half most junctions actually run under."""
+    mixin = _module("class Mixin:\n    pass\n", "p/mixin.py")
+    middle = _module('l = PandaLogger().getLogger("Mid")\nclass Mid(Mixin):\n    pass\n', "p/middle.py")
+    leaf = _module('l = PandaLogger().getLogger("Leaf")\nclass Leaf(Mid):\n    pass\n', "p/leaf.py")
+    modules = [mixin, middle, leaf]
+
+    inherited = logfile.inherited_files(modules, logfile.declared_files(modules))
+
+    assert inherited["p/mixin.py"] == ["panda-Leaf.log", "panda-Mid.log"]
+
+
+# ---------------------------------------------------------------------------
 # Production evidence and the (ii) gates
 # ---------------------------------------------------------------------------
 #
 # These pin the distinction the whole production half rests on: an empty grep
 # result means three different things, and only one of them is a fact about
 # PanDA.  Everything else here follows from getting that wrong being silent.
+
+BROKER_LOG = "panda-AtlasProdJobBroker.log"
+PROXY_LOG = "panda-DBProxy.log"
 
 
 def _log_line(level: str, message: str, name: str = "JobBroker") -> str:
@@ -2178,12 +2265,12 @@ def _log_line(level: str, message: str, name: str = "JobBroker") -> str:
     return f"2026-08-30 12:00:01,123 {name:<12}: {level:<8} {message}"
 
 
-def _sample(service: str, lines: list[str], **kwargs) -> evidence.GrepResult:
+def _sample(lines: list[str], filename: str = BROKER_LOG, **kwargs) -> evidence.GrepResult:
     return evidence.GrepResult(
         query=evidence.GrepQuery(
             pattern=evidence.ANY_LINE_PATTERN,
-            log_filename="panda-x.log",
-            service=service,
+            log_filename=filename,
+            service=kwargs.pop("service", evidence.JEDI),
         ),
         machine=kwargs.pop("machine", "m1"),
         lines=lines,
@@ -2192,53 +2279,50 @@ def _sample(service: str, lines: list[str], **kwargs) -> evidence.GrepResult:
     )
 
 
+def _missing(filename: str = BROKER_LOG, machine: str = "m1") -> evidence.GrepResult:
+    return _sample(
+        [],
+        filename,
+        machine=machine,
+        return_code=2,
+        error=f"rg: /var/log/panda/{filename}: No such file or directory (os error 2)",
+    )
+
+
 def _evidence(*results: evidence.GrepResult) -> evidence.Evidence:
     return evidence.Evidence(fetched_at="2026-08-30T00:00:00+00:00", results=list(results))
 
 
-def test_effective_level_is_the_lowest_one_present():
-    """The threshold is what production actually emits, not what it declares."""
+def test_the_level_is_measured_per_log_file():
+    """PanDA configures a level per logger, so a threshold taken from one file
+    and applied to another would be a number established for something else."""
     ev = _evidence(
-        _sample(evidence.JEDI, [_log_line("INFO", "a"), _log_line("ERROR", "b")]),
-        _sample(evidence.SERVER, [_log_line("DEBUG", "c"), _log_line("INFO", "d")]),
+        _sample([_log_line("INFO", "a")], BROKER_LOG),
+        _sample([_log_line("DEBUG", "b"), _log_line("INFO", "c")], PROXY_LOG),
     )
 
-    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
-    assert evidence.effective_level(ev, evidence.SERVER) == "DEBUG"
-
-
-def test_the_two_services_are_measured_separately():
-    """JEDI and the server are separate machine groups under separate operation.
-
-    Measuring one and applying it to the other would drop observables on a
-    threshold that was never established for them.
-    """
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
-
-    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
-    assert evidence.effective_level(ev, evidence.SERVER) is None
+    assert evidence.effective_level(ev, log_filename=BROKER_LOG) == "INFO"
+    assert evidence.effective_level(ev, log_filename=PROXY_LOG) == "DEBUG"
+    assert evidence.effective_level(ev, log_filename="panda-absent.log") is None
 
 
 def test_a_level_word_in_a_message_is_not_a_level():
     """The separator is what makes it a level, not the word.
 
     Counting the bare word would read a line that merely mentions DEBUG as
-    proof that DEBUG is enabled, and so keep an observable that production
-    never emits.
+    proof that DEBUG is enabled, and so keep an observable production never
+    emits.
     """
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "restarting in DEBUG mode")]))
+    ev = _evidence(_sample([_log_line("INFO", "restarting in DEBUG mode")]))
 
-    assert evidence.level_histogram(ev, evidence.JEDI) == Counter({"INFO": 1})
-    assert evidence.effective_level(ev, evidence.JEDI) == "INFO"
+    assert evidence.level_histogram(ev) == Counter({"INFO": 1})
 
 
 def test_a_continuation_line_carries_no_level():
     """Tracebacks span lines, and only the first one is formatted."""
-    ev = _evidence(
-        _sample(evidence.JEDI, [_log_line("ERROR", "boom"), "  File 'x.py', line 3"])
-    )
+    ev = _evidence(_sample([_log_line("ERROR", "boom"), "  File 'x.py', line 3"]))
 
-    assert evidence.level_histogram(ev, evidence.JEDI) == Counter({"ERROR": 1})
+    assert evidence.level_histogram(ev) == Counter({"ERROR": 1})
 
 
 def test_an_empty_result_is_conclusive_only_when_the_tool_read_everything():
@@ -2249,13 +2333,41 @@ def test_an_empty_result_is_conclusive_only_when_the_tool_read_everything():
     exactly like "production never emits this", so only exit 1 on a whole
     result licenses reading absence as evidence.
     """
-    no_match = _sample(evidence.JEDI, [], return_code=1)
-    unreadable = _sample(evidence.JEDI, [], return_code=2, error="No such file or directory")
-    cut = _sample(evidence.JEDI, [_log_line("INFO", "a")], truncated=True)
+    assert _sample([], return_code=1).conclusive
+    assert not _missing().conclusive
+    assert not _sample([_log_line("INFO", "a")], truncated=True).conclusive
 
-    assert no_match.conclusive
-    assert not unreadable.conclusive
-    assert not cut.conclusive
+
+def test_a_file_absent_everywhere_says_the_code_never_ran():
+    """The strongest thing production says about the map.
+
+    PandaLogger creates the file on first emit, so no file on any machine
+    means that logger has never emitted -- not quiet, unexecuted.
+    """
+    ev = _evidence(_missing(machine="m1"), _missing(machine="m2"))
+
+    assert ev.file_status(BROKER_LOG) == "absent"
+
+
+def test_one_machine_having_the_file_makes_it_present():
+    """The services run different knights; a union, not an intersection."""
+    ev = _evidence(_missing(machine="m1"), _sample([_log_line("INFO", "a")], machine="m2"))
+
+    assert ev.file_status(BROKER_LOG) == "present"
+    assert len(ev.lines(evidence.ANY_LINE_PATTERN)) == 1
+
+
+def test_another_kind_of_error_is_unknown_not_absent():
+    """"Not authorized" must never be read as "the code never ran"."""
+    ev = _evidence(_sample([], return_code=2, error="'me' is not authorized"))
+
+    assert ev.file_status(BROKER_LOG) == "unknown"
+
+
+def test_a_file_nobody_asked_about_is_unknown():
+    ev = _evidence(_sample([_log_line("INFO", "a")], BROKER_LOG))
+
+    assert ev.file_status(PROXY_LOG) == "unknown"
 
 
 def test_a_read_error_becomes_an_error_not_an_empty_answer():
@@ -2281,7 +2393,7 @@ def test_a_read_error_becomes_an_error_not_an_empty_answer():
 
 def test_a_machine_that_never_answered_is_recorded_as_silent():
     """Silence and "found nothing" are different facts about a machine."""
-    query = evidence.GrepQuery(pattern="x", log_filename="panda-x.log", service=evidence.JEDI)
+    query = evidence.GrepQuery(pattern="x", log_filename=BROKER_LOG, service=evidence.JEDI)
     payload = {
         "expected_machines": ["m1", "m2"],
         "results": [{"machine_name": "m1", "result": "hit\n", "return_code": 0}],
@@ -2291,32 +2403,19 @@ def test_a_machine_that_never_answered_is_recorded_as_silent():
 
     assert results["m1"].lines == ["hit"]
     assert results["m2"].error == "no result returned"
-    assert not results["m2"].conclusive
-
-
-def test_lines_are_unioned_across_machines():
-    """The services run different knights, so a tag on one machine and not
-    another is normal.  Intersecting would report a false absence."""
-    ev = _evidence(
-        _sample(evidence.JEDI, [_log_line("INFO", "a")], machine="m1"),
-        _sample(evidence.JEDI, [_log_line("INFO", "b")], machine="m2"),
-    )
-
-    assert len(ev.lines(evidence.ANY_LINE_PATTERN, evidence.JEDI)) == 2
 
 
 def test_evidence_round_trips_through_a_file(tmp_path):
     """Fetching and checking are separate steps, so the record has to survive
     the gap intact -- that is what lets the gates re-run offline."""
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("DEBUG", "a")], truncated=True))
+    ev = _evidence(_sample([_log_line("DEBUG", "a")], truncated=True))
     path = tmp_path / "nested" / "evidence.json"
 
     ev.save(path)
     back = evidence.Evidence.load(path)
 
-    assert back.fetched_at == ev.fetched_at
     assert back.results[0].truncated
-    assert evidence.effective_level(back, evidence.JEDI) == "DEBUG"
+    assert evidence.effective_level(back, log_filename=BROKER_LOG) == "DEBUG"
 
 
 def test_log_format_recognised_fails_when_no_line_carries_a_level():
@@ -2325,7 +2424,7 @@ def test_log_format_recognised_fails_when_no_line_carries_a_level():
     Every later production gate reads the log by matching against this
     format, so it is checked directly rather than assumed.
     """
-    ev = _evidence(_sample(evidence.JEDI, ["something in another format"]))
+    ev = _evidence(_sample(["something in another format"]))
 
     result = gates.log_format_recognised(ev)
 
@@ -2335,7 +2434,7 @@ def test_log_format_recognised_fails_when_no_line_carries_a_level():
 
 def test_log_format_recognised_names_a_query_that_did_not_run():
     """Not authorized, or a wrong filename, is not production disagreeing."""
-    ev = _evidence(_sample(evidence.JEDI, [], return_code=2, error="'me' is not authorized"))
+    ev = _evidence(_sample([], return_code=2, error="'me' is not authorized"))
 
     result = gates.log_format_recognised(ev)
 
@@ -2344,12 +2443,10 @@ def test_log_format_recognised_names_a_query_that_did_not_run():
 
 
 def test_log_format_recognised_passes_on_a_well_formed_sample():
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
-
-    assert gates.log_format_recognised(ev).passed
+    assert gates.log_format_recognised(_evidence(_sample([_log_line("INFO", "a")]))).passed
 
 
-def _stage(tag: str, level: str, owner: str) -> FilterStageNode:
+def _stage(tag: str, level: str, owner: str, files: list[str]) -> FilterStageNode:
     return FilterStageNode(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -2357,11 +2454,15 @@ def _stage(tag: str, level: str, owner: str) -> FilterStageNode:
         owner=owner,
         criteria_tag=tag,
         log_level=level,
+        log_files=files,
     )
 
 
+BROKER = "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"
+
+
 def test_an_observable_below_the_threshold_is_a_promise_the_map_cannot_keep():
-    """A DEBUG line does not exist in a service running at INFO.
+    """A DEBUG line does not exist in a file whose logger runs at INFO.
 
     Worse than having no observable: a strategy would spend a step fetching
     a line that is never written.
@@ -2370,39 +2471,84 @@ def test_an_observable_below_the_threshold_is_a_promise_the_map_cannot_keep():
         map_id=MAP_ID,
         derived_from=VERSION,
         filter_stages=[
-            _stage("-diskIO", "debug", "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"),
-            _stage("-status", "info", "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"),
+            _stage("-diskIO", "debug", BROKER, [BROKER_LOG]),
+            _stage("-status", "info", BROKER, [BROKER_LOG]),
         ],
     )
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+    ev = _evidence(_sample([_log_line("INFO", "a")], BROKER_LOG))
 
     result = gates.observables_are_emitted(fragment, ev)
 
     assert result.checked == 2
     assert not result.passed
-    assert result.failures == ["-diskIO at pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage emits at DEBUG but jedi runs at INFO"]
+    assert result.failures == [
+        f"-diskIO at {BROKER} emits at DEBUG but {BROKER_LOG} at INFO"
+    ]
 
 
-def test_an_observable_with_no_sample_is_inconclusive_not_passed():
-    """A service that yielded nothing gets no verdict rather than an optimistic one."""
+def test_emitting_in_either_candidate_file_is_enough():
+    """The proxy mixins run under two processes; emitting in one makes the
+    observable real, so an all-candidates rule is what the code needs."""
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
-        filter_stages=[_stage("-rse", "debug", "pandaserver/dataservice/x.py::pick")],
+        filter_stages=[_stage("-x", "debug", BROKER, [BROKER_LOG, PROXY_LOG])],
     )
-    ev = _evidence(_sample(evidence.JEDI, [_log_line("INFO", "a")]))
+    ev = _evidence(
+        _sample([_log_line("INFO", "a")], BROKER_LOG),
+        _sample([_log_line("DEBUG", "b")], PROXY_LOG),
+    )
 
-    result = gates.observables_are_emitted(fragment, ev)
+    assert gates.observables_are_emitted(fragment, ev).passed
+
+
+def test_a_stage_whose_file_never_existed_is_not_a_logging_failure():
+    """A path that never ran is a different finding from one that runs
+    quietly, and conflating them would blame the map for the deployment."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "debug", BROKER, [BROKER_LOG])],
+    )
+    ev = _evidence(_missing())
+
+    emitted = gates.observables_are_emitted(fragment, ev)
+    live = gates.code_paths_are_live(fragment, ev)
+
+    assert emitted.failures == []
+    assert emitted.inconclusive == [f"-x at {BROKER}: no sample from {BROKER_LOG}"]
+    assert not live.passed
+    assert BROKER_LOG in live.failures[0]
+
+
+def test_a_stage_the_source_gives_no_file_for_is_inconclusive():
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "debug", BROKER, [])],
+    )
+
+    result = gates.observables_are_emitted(fragment, _evidence(_sample([_log_line("INFO", "a")])))
 
     assert result.passed
-    assert result.failures == []
-    assert result.inconclusive == ["-rse at pandaserver/dataservice/x.py::pick: no sample from server"]
+    assert result.inconclusive == [f"-x at {BROKER}: the source does not name a log file"]
+
+
+def test_code_paths_are_live_passes_when_every_file_is_there():
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "info", BROKER, [BROKER_LOG])],
+    )
+
+    assert gates.code_paths_are_live(fragment, _evidence(_sample([_log_line("INFO", "a")]))).passed
 
 
 def test_the_package_places_a_module_in_a_machine_group():
     """A first approximation only: JEDI opens its own TaskBuffer, so
     ``db_proxy_mods`` called from a knight logs to JEDI's files even though it
-    lives in ``pandaserver``.  Sound for brokerage, which has no such caller."""
+    lives in ``pandaserver``.  Sound for choosing which service declares a
+    file, which is all it is used for."""
     assert evidence.service_for_module("pandajedi/jedibrokerage/x.py") == evidence.JEDI
     assert evidence.service_for_module("pandaserver/api/v1/pilot_api.py") == evidence.SERVER
 

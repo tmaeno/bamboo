@@ -46,48 +46,65 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_EVIDENCE = Path(".bamboo") / "codemap-evidence.json"
 
-# Filenames the API will accept must start with "panda-" and end .log/.gz.
-# These are a starting guess: a wrong name comes back as a read error naming
-# the path, which turns discovery into one short round trip.
-DEFAULT_LOG_FILES = {
-    evidence.JEDI: "panda-jedi.log",
-    evidence.SERVER: "panda-server.log",
-}
+
+def _targets(fragment: MapFragment, declared: dict[str, str]) -> dict[str, str]:
+    """``{log filename: the service that writes it}`` for the files the map uses.
+
+    Derived from the map rather than configured, because the map is what
+    knows: each node carries the file its module logs to, so the set of
+    questions to ask production is a property of what was extracted.  The
+    service comes from the module that *declares* the logger -- the proxy
+    mixins name two files, and each of those is declared in one package, so
+    the pair resolves without guessing.
+    """
+    declaring = {filename: rel_path for rel_path, filename in declared.items()}
+    targets: dict[str, str] = {}
+    for node in list(fragment.filter_stages) + list(fragment.junctions):
+        for filename in node.log_files:
+            owner = declaring.get(filename)
+            if owner:
+                targets[filename] = evidence.service_for_module(owner)
+    return targets
 
 
-def _parse_log_files(specs: tuple[str, ...]) -> dict[str, str]:
-    """Turn ``service:filename`` options into a mapping."""
-    if not specs:
-        return dict(DEFAULT_LOG_FILES)
-    files: dict[str, str] = {}
+def _parse_overrides(specs: tuple[str, ...]) -> dict[str, str]:
+    """Turn ``service:filename`` options into extra targets."""
+    extra: dict[str, str] = {}
     for spec in specs:
         service, _, filename = spec.partition(":")
         if not service or not filename:
             raise click.BadParameter(f"expected service:filename, got {spec!r}")
-        files[service] = filename
-    return files
+        extra[filename] = service
+    return extra
 
 
-def _report_levels(ev: evidence.Evidence) -> dict[str, Optional[str]]:
-    """Print what each service's logs actually contain, and return thresholds."""
-    thresholds: dict[str, Optional[str]] = {}
-    click.echo("\neffective log level:")
-    for service in sorted(ev.services()):
-        counts = evidence.level_histogram(ev, service)
-        threshold = evidence.effective_level(ev, service)
-        thresholds[service] = threshold
-        sampled = sum(counts.values())
-        truncated = any(r.truncated for r in ev.matching(evidence.ANY_LINE_PATTERN, service))
-        machines = len(ev.matching(evidence.ANY_LINE_PATTERN, service))
-        detail = ", ".join(f"{level}={counts[level]}" for level in evidence.LEVELS if counts[level])
+def _report_levels(ev: evidence.Evidence, top: int) -> None:
+    """Print what each log file actually contains.
+
+    Per file, not per service: PanDA configures a level per logger, so one
+    threshold for a whole machine group would be a number established for
+    something else.
+    """
+    click.echo("\nlog files:")
+    rows = sorted(ev.log_filenames())
+    for filename in rows[:top]:
+        status = ev.file_status(filename)
+        results = ev.matching(evidence.ANY_LINE_PATTERN, log_filename=filename)
+        if status != "present":
+            click.echo(f"  {filename:<34} {status}")
+            continue
+        counts = evidence.level_histogram(ev, log_filename=filename)
+        threshold = evidence.effective_level(ev, log_filename=filename) or "unknown"
+        detail = ", ".join(f"{lv}={counts[lv]}" for lv in evidence.LEVELS if counts[lv])
+        truncated = " [truncated]" if any(r.truncated for r in results) else ""
         click.echo(
-            f"  {service:<8} {threshold or 'unknown':<8} "
-            f"{sampled} line(s) from {machines} machine(s)"
-            + (" [sample truncated]" if truncated else "")
+            f"  {filename:<34} {threshold:<8} {sum(counts.values())} line(s) "
+            f"from {len(results)} machine(s){truncated}"
         )
         if detail:
-            click.echo(f"           {detail}")
-    return thresholds
+            click.echo(f"    {detail}")
+    if len(rows) > top:
+        click.echo(f"  … {len(rows) - top} more")
 
 
 def _report_dropped(fragment: MapFragment, ev: evidence.Evidence, top: int) -> None:
@@ -95,15 +112,23 @@ def _report_dropped(fragment: MapFragment, ev: evidence.Evidence, top: int) -> N
 
     The point of the command: an observable below the threshold has to come
     out of the strategy, because a step that fetches a line which does not
-    exist is worse than having no step at all.
+    exist is worse than having no step at all.  Stages whose file is absent
+    are left out here -- ``code-paths-are-live`` reports those, and a path
+    that never ran is a different finding from one that runs quietly.
     """
-    thresholds = {s: evidence.effective_level(ev, s) for s in ev.services()}
     dropped = []
     for stage in fragment.filter_stages:
-        if not stage.log_level:
+        if not stage.log_level or not stage.log_files:
             continue
-        service = evidence.service_for_module(stage.owner.split("::")[0])
-        if evidence.below_threshold(stage.log_level, thresholds.get(service)):
+        live = [f for f in stage.log_files if ev.file_status(f) == "present"]
+        if not live:
+            continue
+        if all(
+            evidence.below_threshold(
+                stage.log_level, evidence.effective_level(ev, log_filename=f)
+            )
+            for f in live
+        ):
             where = stage.anchor.as_ref() if stage.anchor else stage.owner
             dropped.append((stage.criteria_tag or stage.funnel_label, stage.log_level, where))
     if not dropped:
@@ -146,8 +171,9 @@ def _report_dropped(fragment: MapFragment, ev: evidence.Evidence, top: int) -> N
     multiple=True,
     metavar="SERVICE:FILENAME",
     help=(
-        "Which log file to sample per service, e.g. jedi:panda-jedi.log.  "
-        "Repeatable.  Names must start with 'panda-' and end .log or .gz."
+        "Sample an extra log file the map does not name, e.g. "
+        "jedi:panda-JediTaskBuffer.log.  Repeatable.  The files the map does "
+        "name are queried anyway; this is for looking beyond them."
     ),
 )
 @click.option(
@@ -199,12 +225,14 @@ def main(
     fragment = plugin.run()
 
     if fetch:
-        log_files = _parse_log_files(log_file_specs)
-        click.echo(
-            "querying: "
-            + ", ".join(f"{service}:{name}" for service, name in sorted(log_files.items()))
-        )
-        ev = asyncio.run(evidence.collect(evidence.sample_queries(log_files), timeout=timeout))
+        targets = _targets(fragment, getattr(plugin, "declared_log_files", {}))
+        targets.update(_parse_overrides(log_file_specs))
+        if not targets:
+            raise click.ClickException(
+                "The map names no log files, so there is nothing to ask production."
+            )
+        click.echo(f"querying {len(targets)} log file(s) across {len(set(targets.values()))} service(s)")
+        ev = asyncio.run(evidence.collect(evidence.sample_queries(targets), timeout=timeout))
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
     else:
@@ -229,7 +257,7 @@ def main(
         if len(broken) > top:
             click.echo(f"  … {len(broken) - top} more")
 
-    _report_levels(ev)
+    _report_levels(ev, top)
     _report_dropped(fragment, ev, top)
 
     click.echo("\ngates:")
