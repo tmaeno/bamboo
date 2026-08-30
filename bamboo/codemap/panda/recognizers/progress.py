@@ -42,6 +42,12 @@ from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     class_bases,
 )
+from bamboo.codemap.panda.pathcond import (
+    attach_parents,
+    enclosing_class,
+    enclosing_function,
+    path_condition,
+)
 
 SLICE_NAME = "progress"
 
@@ -126,108 +132,6 @@ def declared_vocabularies(
 
 
 # --------------------------------------------------------------------------- #
-# path conditions
-# --------------------------------------------------------------------------- #
-
-
-def _attach_parents(tree: ast.AST) -> None:
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            child.parent = parent  # type: ignore[attr-defined]
-
-
-def _ancestors(node: ast.AST) -> Iterator[ast.AST]:
-    current = getattr(node, "parent", None)
-    while current is not None:
-        yield current
-        current = getattr(current, "parent", None)
-
-
-def _enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
-    for ancestor in _ancestors(node):
-        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return ancestor
-    return None
-
-
-def _single_definition(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> Optional[str]:
-    """Return the expression assigned to *name*, when exactly one assigns it.
-
-    A condition written as a bare local name says nothing on its own: ``if not
-    allowed:`` names no predicate.  Substituting the single expression that
-    produced it recovers which check decides -- typically a call such as
-    ``self._check_command_allowed(...)``, whose own branches are a deeper
-    expansion than this slice attempts.
-
-    Returns ``None`` when several statements assign the name.  That is the
-    fan-out case (a flag set from many places), where one expression would
-    misrepresent the branch rather than explain it.
-    """
-    found: list[ast.AST] = []
-    for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    found.append(node.value)
-                elif isinstance(target, ast.Tuple):
-                    for index, element in enumerate(target.elts):
-                        if isinstance(element, ast.Name) and element.id == name:
-                            found.append(node.value)
-                            del index
-    if len(found) != 1:
-        return None
-    try:
-        return ast.unparse(found[0])
-    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
-        return None
-
-
-def path_condition(node: ast.AST) -> list[str]:
-    """Return the conjunction of tests dominating *node*, outermost first.
-
-    Walks the ancestor chain rather than the call stack: an ``else`` branch
-    contributes ``not <test>``, because "the condition did not hold" is as much
-    a reason for the outcome as the condition holding.
-    """
-    conditions: list[str] = []
-    func = _enclosing_function(node)
-    previous = node
-    for ancestor in _ancestors(node):
-        if isinstance(ancestor, ast.If):
-            try:
-                test = ast.unparse(ancestor.test)
-            except Exception:  # noqa: BLE001
-                previous = ancestor
-                continue
-            if previous in ancestor.orelse:
-                test = f"not ({test})"
-            elif previous not in ancestor.body:
-                previous = ancestor
-                continue
-            if func is not None:
-                test = _substitute_bare_name(test, ancestor.test, func)
-            conditions.append(test)
-        previous = ancestor
-    conditions.reverse()
-    return conditions
-
-
-def _substitute_bare_name(
-    rendered: str, test: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef
-) -> str:
-    """Annotate a test that is a bare local name with the expression behind it."""
-    target = test.operand if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) else test
-    if not isinstance(target, ast.Name):
-        return rendered
-    definition = _single_definition(func, target.id)
-    if definition is None or definition == target.id:
-        return rendered
-    return f"{rendered}  [{target.id} := {definition}]"
-
-
-# --------------------------------------------------------------------------- #
 # extraction
 # --------------------------------------------------------------------------- #
 
@@ -278,13 +182,6 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
     return declarations
 
 
-def _enclosing_class(node: ast.AST) -> Optional[str]:
-    for ancestor in _ancestors(node):
-        if isinstance(ancestor, ast.ClassDef):
-            return ancestor.name
-    return None
-
-
 def extract(
     modules: list[SourceModule],
     map_id: str,
@@ -315,17 +212,17 @@ def extract(
     attributed: set[tuple[str, str]] = set()
 
     for module in modules:
-        _attach_parents(module.tree)
+        attach_parents(module.tree)
         candidates = 0
         explained = 0
         for target, literal, node in _literal_attribute_writes(module.tree):
             if target.attr not in spec_attribute_names:
                 continue
-            func = _enclosing_function(node)
+            func = enclosing_function(node)
             spec_class, basis = attributor.attribute_write(
                 target,
                 func=func,
-                enclosing_class=_enclosing_class(node),
+                enclosing_class=enclosing_class(node),
             )
             if basis == NOT_A_SPEC:
                 # Not a candidate at all, so it is not counted as one: a

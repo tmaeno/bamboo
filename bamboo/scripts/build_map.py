@@ -209,6 +209,26 @@ def main(
     results = gates.run_all(fragment)
     all_passed = _report(fragment, results, top)
 
+    # Plugin-specific findings.  Kept out of the fragment because they describe
+    # the target system rather than the map: a table holding no spec is not a
+    # node, and a contradiction about one is a fact about PanDA's schema.
+    conflicts = getattr(plugin, "table_conflicts", {})
+    if conflicts:
+        all_passed = False
+        click.echo(f"\n[FAIL] table-class-agrees: {len(conflicts)} table(s) disagree")
+        for table, classes in sorted(conflicts.items()):
+            click.echo(f"      - {table} reads as {sorted(classes)}")
+        click.echo("      note: a table holds one kind of row; two answers means one reading is wrong.")
+    uncovered = getattr(plugin, "uncovered_tables", set())
+    if uncovered:
+        # Not a gap in extraction: these are written by the code and hold no
+        # spec, so nothing about them can become a subject.  Named because
+        # "the map is silent here" is worth knowing before an incident needs it.
+        click.echo(f"\ntables written but holding no spec ({len(uncovered)}):")
+        click.echo("  " + ", ".join(sorted(uncovered)[:top]))
+        if len(uncovered) > top:
+            click.echo(f"  … {len(uncovered) - top} more")
+
     if dry_run:
         click.echo("\n--dry-run: nothing written.")
     else:

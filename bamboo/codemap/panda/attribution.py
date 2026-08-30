@@ -49,9 +49,11 @@ The gate that does work compares the stated class against the structural one
 from __future__ import annotations
 
 import ast
-from typing import Iterator, Optional
+from typing import Optional
 
 from bamboo.codemap.models import SourceModule
+from bamboo.codemap.panda import sql
+from bamboo.codemap.panda.pathcond import functions_with_owner
 
 CERTAIN = "certain"
 # One hop through the adder idiom: what the code put into the container.
@@ -69,25 +71,6 @@ NOT_A_SPEC = "not-a-spec"
 # with a character no Python identifier can contain, so an unresolved subject
 # can never collide with a real one.
 UNRESOLVED_CLASS = "?"
-
-
-def _functions_with_owner(
-    node: ast.AST, owner: Optional[str] = None
-) -> Iterator[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[str]]]:
-    """Yield every function in *node* paired with the class enclosing it.
-
-    Carried down the walk rather than read back from a ``parent`` link, so
-    this works on a bare tree -- the element-type pass runs before the
-    recognizer attaches parents.
-    """
-    for child in ast.iter_child_nodes(node):
-        if isinstance(child, ast.ClassDef):
-            yield from _functions_with_owner(child, child.name)
-        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child, owner
-            yield from _functions_with_owner(child, owner)
-        else:
-            yield from _functions_with_owner(child, owner)
 
 
 def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
@@ -132,6 +115,7 @@ class SpecAttributor:
         )
         self._accessed_cache: dict[ast.AST, dict[str, set[str]]] = {}
         self._element_types: dict[tuple[str, str], set[str]] = {}
+        self._table_classes: dict[str, str] = {}
 
     # -- container element types ----------------------------------------- #
 
@@ -163,7 +147,7 @@ class SpecAttributor:
         """
         adders = self._adder_methods(modules)
         for module in modules:
-            for func, owner in _functions_with_owner(module.tree):
+            for func, owner in functions_with_owner(module.tree):
                 for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
                     if not isinstance(call.func, ast.Attribute) or not call.args:
                         continue
@@ -187,6 +171,96 @@ class SpecAttributor:
                             element
                         )
 
+    # -- table -> spec class --------------------------------------------- #
+
+    def learn_table_classes(self, modules: list[SourceModule]) -> dict[str, set[str]]:
+        """Work out which spec class each SQL table holds, and return conflicts.
+
+        Nothing in PanDA declares this -- no spec names its table -- but the
+        column names give it away: a statement writing ``status``,
+        ``modificationTime``, ``lockedBy``, ``frozenTime`` and ``errorDialog``
+        can only be about ``JediTaskSpec``, because no other spec declares all
+        five.  It is the structural argument again, applied to a table instead
+        of a variable.
+
+        Evidence is pooled per table across the corpus before being applied.  A
+        single statement is often too narrow to decide -- ``SET gshare=:gshare``
+        fits both ``JediTaskSpec`` and ``JobSpec`` -- while a seven-column
+        ``SET`` elsewhere on the same table settles it, and then the narrow one
+        inherits the answer.  Deciding statement by statement leaves a third of
+        them open for no reason.
+
+        ``SELECT`` looks like a richer source and must not be used: its column
+        list frequently belongs to a joined table rather than the one named
+        after ``FROM``, which produced exactly the contradictions this returns
+        (``JEDI_Tasks`` reading as both task and dataset) and dropped coverage
+        by half.  ``UPDATE`` and ``INSERT`` name one table and mean it.
+
+        Returns the tables whose evidence disagreed, for the gate to report.
+        Tables that match no spec are left out, not forced: ``async_results``
+        and DEFT's ``T_TASK`` are real tables that hold no spec.
+        """
+        stated: dict[str, set[str]] = {}
+        inferred: dict[str, set[str]] = {}
+        for module in modules:
+            for func, _owner in functions_with_owner(module.tree):
+                for table, spec_class in sql.declared_row_classes(
+                    func, set(self._declarations)
+                ).items():
+                    stated.setdefault(table, set()).add(spec_class)
+                seen: set[str] = set()
+                for text, _varmap, _call in sql.executions(func):
+                    if text in seen:
+                        continue
+                    seen.add(text)
+                    for write in sql.writes(text):
+                        only = self._only_class_declaring(set(write.columns))
+                        if only is not None:
+                            inferred.setdefault(write.table, set()).add(only)
+
+        conflicts = {
+            table: classes
+            for source in (stated, inferred)
+            for table, classes in source.items()
+            if len(classes) > 1
+        }
+        # Where both sources answer they must agree -- two independent readings
+        # of one fact, the same shape as the attribution gate.
+        for table in set(stated) & set(inferred):
+            if len(stated[table]) == 1 and len(inferred[table]) == 1 and stated[table] != inferred[table]:
+                conflicts[table] = stated[table] | inferred[table]
+
+        # What the code states wins where it speaks; inference fills the rest.
+        self._table_classes = {
+            table: next(iter(classes))
+            for source in (inferred, stated)
+            for table, classes in source.items()
+            if len(classes) == 1 and table not in conflicts
+        }
+        return conflicts
+
+    def _only_class_declaring(self, columns: set[str]) -> Optional[str]:
+        """Return the sole spec declaring every column, matched case-insensitively.
+
+        SQL is written in the column's own spelling but not reliably in the
+        spec's -- ``modificationTime`` appears as ``modificationtime`` -- and a
+        case-sensitive comparison silently loses most of the wide statements
+        that are the only ones able to decide anything.
+        """
+        lowered = {column.lower() for column in columns}
+        if not lowered:
+            return None
+        matches = [
+            spec_class
+            for spec_class, declared in self._declarations.items()
+            if lowered <= {attribute.lower() for attribute in declared}
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def class_for_table(self, table: str) -> Optional[str]:
+        """Return the spec class *table* holds, if it was learned."""
+        return self._table_classes.get(table)
+
     def _adder_methods(self, modules: list[SourceModule]) -> dict[str, str]:
         """Return ``{method name: attribute}`` for ``self.<attr>.append(<param>)``.
 
@@ -198,7 +272,7 @@ class SpecAttributor:
         """
         adders: dict[str, str] = {}
         for module in modules:
-            for func, _owner in _functions_with_owner(module.tree):
+            for func, _owner in functions_with_owner(module.tree):
                 parameters = {a.arg for a in (*func.args.posonlyargs, *func.args.args)}
                 for call in (n for n in ast.walk(func) if isinstance(n, ast.Call)):
                     if (
@@ -334,6 +408,10 @@ class SpecAttributor:
         return next(iter(found)) if len(found) == 1 else None
 
     # -- per-site resolution --------------------------------------------- #
+
+    def declared_attributes(self, spec_class: str) -> set[str]:
+        """Return the attributes *spec_class* declares, in their own spelling."""
+        return self._declarations.get(spec_class, set())
 
     def _declares(self, spec_class: str, attribute: str) -> bool:
         return attribute in self._declarations.get(spec_class, ())

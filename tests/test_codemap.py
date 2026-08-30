@@ -28,8 +28,8 @@ from bamboo.codemap.models import (
     SourceModule,
     ValueEnumNode,
 )
-from bamboo.codemap.panda import attribution
-from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
+from bamboo.codemap.panda import attribution, sql
+from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
 from bamboo.models.graph_element import NodeType
 
 MAP_ID = "panda"
@@ -963,3 +963,144 @@ def test_a_copy_holds_what_the_original_held():
 
     assert junctions[0].subject == "FileSpec.status"
     assert junctions[0].attribution == "certain"
+
+
+# --------------------------------------------------------------------------- #
+# sql-write: statements, table classes, bind writes
+# --------------------------------------------------------------------------- #
+
+# The flagship shape, cut down: one statement writing and another reading
+# through the identically named bind, in one function.
+_SQL_SOURCE = '''
+class TaskModule:
+    def updateTaskStatus(self, jediTaskID, taskStatus, broken):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status,oldStatus=:oldStatus "
+        sqlU += "WHERE jediTaskID=:jediTaskID "
+        sqlL = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlL += "SET lockedBy=NULL WHERE status=:status "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if broken:
+            varMap[":status"] = "tobroken"
+        else:
+            varMap[":status"] = "finishing"
+        self.cur.execute(sqlU + comment, varMap)
+'''
+
+
+def _sql_extract(source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"):
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, rel)]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    conflicts = attributor.learn_table_classes(modules)
+    subjects, junctions, coverage, uncovered = sqlwrite.extract(
+        modules, MAP_ID, VERSION, attributor
+    )
+    return subjects, junctions, coverage, uncovered, conflicts, attributor
+
+
+def test_statement_is_reassembled_from_its_concatenation():
+    """A statement is built by ``=`` then a run of ``+=``, interleaved with others."""
+    module = _module(_SQL_SOURCE, "x.py")
+    func = next(
+        n for n in ast.walk(module.tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "updateTaskStatus"
+    )
+    text = sql.reconstruct(func, "sqlU")
+
+    assert "UPDATE {}.JEDI_Tasks" in text
+    assert "SET status=:status" in text
+    # The other statement being built in the same function must not bleed in.
+    assert "lockedBy" not in text
+
+
+def test_a_bind_in_a_where_clause_is_not_a_write():
+    """``:status`` is a write in one statement and a predicate in another.
+
+    Both are in the same function, so the bind key alone cannot tell them
+    apart; only the ``SET`` clause can.
+    """
+    writes = sql.writes("UPDATE {}.JEDI_Tasks SET lockedBy=NULL WHERE status=:status ")
+
+    assert writes[0].columns == {"lockedBy": None}
+
+
+def test_inline_values_are_kept_without_a_bind():
+    """``stateChangeTime=CURRENT_DATE`` is a write whose value is in the statement."""
+    writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=:status,stateChangeTime=CURRENT_DATE ")
+
+    assert writes[0].columns == {"status": ":status", "stateChangeTime": None}
+
+
+def test_table_class_is_inferred_from_the_column_names():
+    """Nothing declares which spec a table holds; the columns give it away."""
+    _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)
+
+    assert conflicts == {}
+    assert attributor.class_for_table("JEDI_Tasks") == "JediTaskSpec"
+
+
+def test_the_statement_can_name_the_class_outright():
+    """``INSERT INTO filesTable4 ({FileSpec.columnNames()})`` says it in the f-string.
+
+    The stronger source, and the only one that settles ``filesTable4``: every
+    ``UPDATE`` on it sets columns ``FileSpec`` and ``JediFileSpec`` both
+    declare, so no column set ever separates the two.
+    """
+    source = (
+        "def insert_file(self):\n"
+        "    sqlF = f'INSERT INTO ATLAS_PANDA.filesTable4 ({FileSpec.columnNames()}) '\n"
+        "    self.cur.execute(sqlF + comment, varMap)\n"
+    )
+    _s, _j, _c, _u, conflicts, attributor = _sql_extract(source)
+
+    assert conflicts == {}
+    assert attributor.class_for_table("filesTable4") == "FileSpec"
+
+
+def test_bind_writes_become_branches_with_their_conditions():
+    """The junction is anchored at the bind, where the value and its ``if`` are."""
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(_SQL_SOURCE)
+    status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    by_outcome = {b.outcome: b.path_condition for b in status[0].branches}
+    assert by_outcome["tobroken"] == ["broken"]
+    assert by_outcome["finishing"] == ["not (broken)"]
+    assert status[0].attribution == "certain"
+
+
+def test_a_value_decided_at_run_time_is_recorded_not_dropped():
+    """The writer is known even when the value is not."""
+    source = (
+        "class M:\n"
+        "    def f(self, newStatus):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus=:oldStatus '\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = newStatus\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    branch = junctions[0].branches[0]
+    assert branch.tier == 2
+    assert branch.outcome == "runtime(newStatus)"
+
+
+def test_a_table_holding_no_spec_is_out_of_scope_not_a_gap():
+    """``worker_node_gpus`` is a real table with no spec; it cannot become a subject."""
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.worker_node_gpus SET vendor=:vendor '\n"
+        "        varMap = {}\n"
+        "        varMap[':vendor'] = 'nvidia'\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, coverage, uncovered, _conf, _a = _sql_extract(source)
+
+    assert junctions == []
+    assert coverage == []
+    assert uncovered == {"worker_node_gpus"}

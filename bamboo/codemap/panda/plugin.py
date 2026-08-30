@@ -25,10 +25,51 @@ from typing import Optional
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
-from bamboo.codemap.models import MapFragment, SourceModule
-from bamboo.codemap.panda.recognizers import boundary, errorcode, progress
+from bamboo.codemap.models import JunctionNode, MapFragment, SourceModule, SubjectNode
+from bamboo.codemap.panda.attribution import SpecAttributor, class_bases
+from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
+    """Combine junctions sharing a name, keeping every branch.
+
+    Two recognizers can reach the same write site -- ``updateTaskStatus...``
+    sets ``taskSpec.status`` *and* binds ``:status`` -- and both readings are
+    real branches of the same junction rather than rival descriptions of it.
+    """
+    merged: dict[str, JunctionNode] = {}
+    for junction in junctions:
+        existing = merged.get(junction.name)
+        if existing is None:
+            merged[junction.name] = junction
+            continue
+        known = {(b.outcome, tuple(b.path_condition)) for b in existing.branches}
+        for branch in junction.branches:
+            if (branch.outcome, tuple(branch.path_condition)) in known:
+                continue
+            branch.order = len(existing.branches)
+            existing.branches.append(branch)
+        if existing.structural_subject is None:
+            existing.structural_subject = junction.structural_subject
+    return list(merged.values())
+
+
+def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
+    """Collapse subjects the slices found independently, pooling their evidence."""
+    merged: dict[str, SubjectNode] = {}
+    for subject in subjects:
+        existing = merged.get(subject.name)
+        if existing is None:
+            merged[subject.name] = subject
+            continue
+        for criterion in subject.criteria:
+            if criterion not in existing.criteria:
+                existing.criteria.append(criterion)
+        if subject.vocabulary and not existing.vocabulary:
+            existing.vocabulary = subject.vocabulary
+    return list(merged.values())
 
 PACKAGES = ("pandaserver", "pandajedi")
 
@@ -98,15 +139,44 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(junctions)
         fragment.coverage.extend(progress_coverage)
 
+        # The SQL slice needs an attributor that already knows the table map,
+        # which is learned from the whole corpus rather than from one module.
+        attributor = SpecAttributor(
+            progress.spec_attributes(self._modules), class_bases(self._modules)
+        )
+        self._table_conflicts = attributor.learn_table_classes(self._modules)
+        sql_subjects, sql_junctions, sql_coverage, self._uncovered_tables = sqlwrite.extract(
+            self._modules, self.map_id, self._version, attributor
+        )
+        fragment.subjects.extend(sql_subjects)
+        fragment.junctions.extend(sql_junctions)
+        fragment.coverage.extend(sql_coverage)
+
+        # A function that writes a status both ways produces one junction from
+        # each recognizer under the same name.  Storage merges on the name, so
+        # without this the second silently replaces the first's branches.
+        fragment.junctions = _merge_junctions(fragment.junctions)
+        fragment.subjects = _unique_subjects(fragment.subjects)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
             len(enums),
             len(boundaries),
-            len(subjects),
-            len(junctions),
+            len(fragment.subjects),
+            len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def uncovered_tables(self) -> set[str]:
+        """Tables written by the code that hold no spec class."""
+        return getattr(self, "_uncovered_tables", set())
+
+    @property
+    def table_conflicts(self) -> dict[str, set[str]]:
+        """Tables whose column evidence named more than one spec class."""
+        return getattr(self, "_table_conflicts", {})
 
     # -- source discovery ------------------------------------------------- #
 
