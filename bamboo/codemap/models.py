@@ -91,7 +91,22 @@ class SubjectNode(BaseNode):
     node_type: NodeType = NodeType.SUBJECT
     map_id: str
     derived_from: str
-    spec_class: str
+    spec_class: str = Field(
+        ...,
+        description=(
+            "What qualifies the attribute: a spec class, or a table where no "
+            "spec holds that row.  Named for the common case; ``qualifier_kind`` "
+            "says which it is."
+        ),
+    )
+    qualifier_kind: str = Field(
+        default="spec",
+        description=(
+            "spec | table.  Recorded so a reader can tell ``JEDI_Events.status`` "
+            "from ``JediTaskSpec.status`` -- one names a table, the other a "
+            "class, and they are different kinds of claim."
+        ),
+    )
     attribute: str
     criteria: list[str] = Field(
         default_factory=list,

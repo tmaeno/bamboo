@@ -1,0 +1,147 @@
+"""Which attributes are worth asking "why is it this?" about.
+
+The spec classes declare 421 attributes and the tables add more, but most are
+identifiers, timestamps and counters.  A map that made every one of them a
+subject would answer "where is this written" for things nobody investigates,
+and bury the dozen that matter.
+
+Three criteria promote, and at least one must fire.  They were derived by
+census over the whole corpus, and each was narrowed by watching something
+absurd come out on top:
+
+**1. Gated by a SQL selection predicate.**  ``WHERE t.status IN ('ready',
+'running')`` means the field decides whether another component proceeds, which
+is what makes "why is it this?" a question worth asking.  The narrowing was
+threefold -- ``WHERE PandaID=:PandaID`` is a lookup key, ``WHERE
+t.jediTaskID=f.jediTaskID`` is a join, and a quote inside ``IN (SELECT ...)``
+belongs to the subquery -- and each was found because ``lfn``, then
+``jediTaskID``, ranked first.
+
+**2. A declared vocabulary.**  The rarest and strongest: the class states the
+value set outright.
+
+**3. A closed set of literals dominates the writes.**  Existence of two
+literals is not enough -- ``jediTaskID`` has 528 writes of which a few are
+literal -- so the literal writes must be a majority.
+
+Two further signals (the field is mentioned in logs; it is written under a
+guard) fire on 69% and 79% of everything and so corroborate rather than
+promote.
+
+Applied to junctions as well as subjects: a junction writing an attribute
+nobody investigates is the same noise one level down.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from collections import Counter
+
+from bamboo.codemap.models import MapFragment, SourceModule
+from bamboo.codemap.panda.attribution import UNRESOLVED
+
+WHERE_GATE = "1:state-gate-in-where"
+DECLARED_VOCABULARY = "2:declared-vocabulary"
+CLOSED_LITERAL_SET = "3:closed-literal-set"
+
+# Share of a subject's outcomes that must be literals for the set to count as
+# closed.  A majority keeps identifiers out while tolerating the passthrough
+# and computed writes real status fields also have.
+CLOSED_SET_SHARE = 0.5
+# Two values are a set; forty are a free-form field wearing one.
+_CLOSED_SET_RANGE = range(2, 41)
+
+# ``WHERE status='ready'`` / ``AND type IN ('input','pseudo_input')``.  The
+# literal is what distinguishes a state gate from a lookup: a predicate against
+# a bind variable selects a row, a predicate against literals selects a state.
+_PREDICATE = re.compile(
+    r"(?:WHERE|AND|OR)\s+(?:[a-zA-Z_]\w*\.)?([a-zA-Z_]\w*)\s*"
+    r"(?:(?:=|<>|!=|<|>)\s*'[^']*'|\bIN\b\s*\((?P<inlist>[^)]*)\))",
+    re.IGNORECASE,
+)
+
+
+def gated_fields(modules: list[SourceModule]) -> Counter:
+    """Count fields a SQL predicate tests against literal values."""
+    counts: Counter = Counter()
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if "WHERE" not in node.value.upper():
+                continue
+            for match in _PREDICATE.finditer(node.value):
+                inlist = match.group("inlist")
+                if inlist is not None:
+                    if "'" not in inlist:
+                        continue  # ``IN (:a,:b)`` -- a lookup, not a state gate.
+                    if "SELECT" in inlist.upper():
+                        continue  # The quote belongs to the subquery.
+                counts[match.group(1)] += 1
+    return counts
+
+
+def criteria_for(
+    fragment: MapFragment,
+    gated: Counter,
+    vocabularies: dict[tuple[str, str], set[str]],
+) -> dict[str, list[str]]:
+    """Return ``{subject name: criteria satisfied}`` for every candidate.
+
+    Criterion 3 reads the extracted junctions rather than rescanning the
+    source: they already hold every outcome of every write site, which is
+    exactly the evidence -- and it means a subject reached through SQL is
+    judged by the same rule as one reached through an attribute.
+    """
+    literal = Counter()
+    total = Counter()
+    values: dict[str, set[str]] = {}
+    for junction in fragment.junctions:
+        for branch in junction.branches:
+            total[junction.subject] += 1
+            if branch.tier == 1:
+                literal[junction.subject] += 1
+                values.setdefault(junction.subject, set()).add(branch.outcome)
+
+    found: dict[str, list[str]] = {}
+    for subject in fragment.subjects:
+        criteria: list[str] = []
+        if gated.get(subject.attribute):
+            criteria.append(WHERE_GATE)
+        if vocabularies.get((subject.spec_class, subject.attribute)):
+            criteria.append(DECLARED_VOCABULARY)
+        seen = values.get(subject.name, set())
+        written = total.get(subject.name, 0)
+        if (
+            len(seen) in _CLOSED_SET_RANGE
+            and written
+            and literal[subject.name] / written >= CLOSED_SET_SHARE
+        ):
+            criteria.append(CLOSED_LITERAL_SET)
+        if criteria:
+            found[subject.name] = criteria
+    return found
+
+
+def apply(fragment: MapFragment, criteria: dict[str, list[str]]) -> tuple[int, int]:
+    """Keep only promoted subjects and the junctions that write them.
+
+    Returns ``(subjects dropped, junctions dropped)``.  Dropping is the point:
+    an unpromoted subject is not a gap in extraction, it is a field nobody
+    investigates, and reporting it as coverage would make the map look larger
+    and less useful at once.
+    """
+    before = (len(fragment.subjects), len(fragment.junctions))
+    for subject in fragment.subjects:
+        subject.criteria = criteria.get(subject.name, subject.criteria)
+    fragment.subjects = [s for s in fragment.subjects if s.name in criteria]
+    fragment.junctions = [
+        junction
+        for junction in fragment.junctions
+        # A junction whose subject could not be settled is kept regardless: it
+        # has no subject to judge, and dropping it would turn a known and
+        # reported gap into a silent one.
+        if junction.subject in criteria or junction.attribution == UNRESOLVED
+    ]
+    return before[0] - len(fragment.subjects), before[1] - len(fragment.junctions)

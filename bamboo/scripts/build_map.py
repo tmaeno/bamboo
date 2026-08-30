@@ -219,6 +219,15 @@ def main(
         for table, classes in sorted(conflicts.items()):
             click.echo(f"      - {table} reads as {sorted(classes)}")
         click.echo("      note: a table holds one kind of row; two answers means one reading is wrong.")
+    dropped = getattr(plugin, "unpromoted", (0, 0))
+    if any(dropped):
+        # Not a coverage gap: an attribute no predicate gates, no vocabulary
+        # declares and no closed literal set fills is a field nobody
+        # investigates.  Reporting the count keeps the filter visible.
+        click.echo(
+            f"\nnot promoted: {dropped[0]} subject(s), {dropped[1]} junction(s) "
+            "— no criterion fired"
+        )
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:
         # Not a gap in extraction: these are written by the code and hold no

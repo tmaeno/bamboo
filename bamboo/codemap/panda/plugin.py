@@ -26,6 +26,7 @@ from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import JunctionNode, MapFragment, SourceModule, SubjectNode
+from bamboo.codemap.panda import promotion
 from bamboo.codemap.panda.attribution import SpecAttributor, class_bases
 from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
 
@@ -158,6 +159,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
 
+        # Promotion last, because criterion 3 reads the extracted branches.
+        # Everything the slices found is a *candidate*; what survives is what
+        # the code treats as deciding something.
+        criteria = promotion.criteria_for(
+            fragment,
+            promotion.gated_fields(self._modules),
+            progress.declared_vocabularies(
+                self._modules, progress.spec_attributes(self._modules)
+            ),
+        )
+        self._dropped = promotion.apply(fragment, criteria)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -167,6 +180,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def unpromoted(self) -> tuple[int, int]:
+        """``(subjects, junctions)`` dropped for satisfying no promotion criterion."""
+        return getattr(self, "_dropped", (0, 0))
 
     @property
     def uncovered_tables(self) -> set[str]:

@@ -67,6 +67,40 @@ def _declared_spelling(
     return None
 
 
+def _subject_of(
+    attributor: SpecAttributor,
+    spec_class: Optional[str],
+    table: str,
+    column: str,
+) -> tuple[str, Optional[str], str]:
+    """Return ``(qualifier, attribute, qualifier kind)`` for a written column.
+
+    A subject's key needs a qualifier that disambiguates -- ``status`` means
+    eight different things unqualified -- and a *table* qualifies as well as a
+    class does.  For a SQL write it is arguably the better name: the class is
+    inferred from the columns, while the table is what the statement says.
+
+    **The class stays canonical wherever one exists**, though, because
+    ``jobsActive4``, ``jobsDefined4`` and ``jobsArchived4`` are one
+    ``JobSpec.jobStatus`` split across a job's lifetime.  Keying on the table
+    would make three subjects out of one, and would file an attribute write and
+    a SQL write to the same field under different names.
+
+    Where no class exists the table qualifies instead, which is how
+    ``ddm_endpoint.blacklisted`` -- the writer behind a blacklisted RSE, and a
+    root cause the map is supposed to reach -- becomes reachable at all.  What
+    keeps the bookkeeping out is promotion, not the absence of a spec class.
+    """
+    if spec_class is not None:
+        attribute = _declared_spelling(attributor, spec_class, column)
+        if attribute is not None:
+            return spec_class, attribute, "spec"
+        # The table holds this spec but the column is not a declared attribute
+        # -- a join key or a housekeeping column.  It is still a column of a
+        # real table, so it is qualified by the table like any other.
+    return table, column, "table"
+
+
 def extract(
     modules: list[SourceModule],
     map_id: str,
@@ -84,7 +118,7 @@ def extract(
     """
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
-    attributed: set[tuple[str, str]] = set()
+    attributed: set[tuple[str, str, str]] = set()
     uncovered: set[str] = set()
 
     for module in modules:
@@ -98,39 +132,30 @@ def extract(
                 for statement in sql.writes(text):
                     spec_class = attributor.class_for_table(statement.table)
                     if spec_class is None:
-                        # Not every table holds a spec.  ``worker_node_gpus``,
-                        # ``ddm_endpoint`` and DEFT's ``T_TASK`` are real tables
-                        # with no spec class, so writes to them are out of the
-                        # slice rather than missed by it -- counting them as
-                        # candidates would report a permanent 60% gap that no
-                        # amount of work could close.  They are listed by
-                        # ``gates.tables_without_a_spec`` instead.
                         uncovered.add(statement.table)
-                        continue
                     for column, key in statement.columns.items():
                         if key is None:
                             # ``stateChangeTime=CURRENT_DATE``: a write, but the
                             # value is in the statement and carries no branch.
                             continue
                         candidates += 1
-                        attribute = _declared_spelling(attributor, spec_class, column)
+                        qualifier, attribute, kind = _subject_of(
+                            attributor, spec_class, statement.table, column
+                        )
                         if attribute is None:
-                            # The table holds this spec but the column is not a
-                            # declared attribute -- a join key or a housekeeping
-                            # column.  Not a subject.
                             continue
                         binds = sql.bound_values(func, varmap, key)
                         if not binds:
                             continue
                         explained += 1
-                        attributed.add((spec_class, attribute))
+                        attributed.add((qualifier, attribute, kind))
                         _record(
                             junctions,
                             map_id=map_id,
                             derived_from=derived_from,
                             module=module,
                             func=func,
-                            spec_class=spec_class,
+                            spec_class=qualifier,
                             attribute=attribute,
                             binds=binds,
                         )
@@ -148,12 +173,13 @@ def extract(
         SubjectNode(
             map_id=map_id,
             derived_from=derived_from,
-            name=SubjectNode.make_name(spec_class, attribute),
-            spec_class=spec_class,
+            name=SubjectNode.make_name(qualifier, attribute),
+            spec_class=qualifier,
+            qualifier_kind=kind,
             attribute=attribute,
             criteria=["sql-write"],
         )
-        for spec_class, attribute in sorted(attributed)
+        for qualifier, attribute, kind in sorted(attributed)
     ]
     return subjects, list(junctions.values()), coverage, uncovered
 

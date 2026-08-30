@@ -14,6 +14,7 @@ PanDA source forced corrections to:
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,9 +27,10 @@ from bamboo.codemap.models import (
     JunctionNode,
     MapFragment,
     SourceModule,
+    SubjectNode,
     ValueEnumNode,
 )
-from bamboo.codemap.panda import attribution, sql
+from bamboo.codemap.panda import attribution, promotion, sql
 from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
 from bamboo.models.graph_element import NodeType
 
@@ -1089,18 +1091,150 @@ def test_a_value_decided_at_run_time_is_recorded_not_dropped():
     assert branch.outcome == "runtime(newStatus)"
 
 
-def test_a_table_holding_no_spec_is_out_of_scope_not_a_gap():
-    """``worker_node_gpus`` is a real table with no spec; it cannot become a subject."""
+def test_a_table_with_no_spec_is_qualified_by_the_table():
+    """A subject's key needs a qualifier that disambiguates, not a Python class.
+
+    Requiring a spec class was doing filtering work it should not: it dropped
+    ``ddm_endpoint.blacklisted``, the writer behind a blacklisted RSE, along
+    with the bookkeeping.  What keeps bookkeeping out is promotion.
+    """
     source = (
         "class M:\n"
         "    def f(self):\n"
-        "        sqlU = 'UPDATE ATLAS_PANDA.worker_node_gpus SET vendor=:vendor '\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted '\n"
         "        varMap = {}\n"
-        "        varMap[':vendor'] = 'nvidia'\n"
+        "        varMap[':blacklisted'] = 'Y'\n"
         "        self.cur.execute(sqlU + comment, varMap)\n"
     )
-    _s, junctions, coverage, uncovered, _conf, _a = _sql_extract(source)
+    subjects, junctions, _c, uncovered, _conf, _a = _sql_extract(source)
 
-    assert junctions == []
-    assert coverage == []
-    assert uncovered == {"worker_node_gpus"}
+    assert junctions[0].subject == "ddm_endpoint.blacklisted"
+    assert subjects[0].qualifier_kind == "table"
+    assert uncovered == {"ddm_endpoint"}
+
+
+def test_a_spec_backed_table_keeps_the_class_as_its_qualifier():
+    """``jobsActive4`` and ``jobsArchived4`` are one JobSpec.jobStatus, not two.
+
+    Keying on the table would split a subject across a job's lifetime, and
+    would file an attribute write and a SQL write to the same field under
+    different names.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlA = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus,PandaID=:p '\n"
+        "        varMap = {}\n"
+        "        varMap[':jobStatus'] = 'running'\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+    )
+    subjects, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    assert junctions[0].subject == "JobSpec.jobStatus"
+    assert [s.qualifier_kind for s in subjects if s.attribute == "jobStatus"] == ["spec"]
+
+
+# --------------------------------------------------------------------------- #
+# promotion
+# --------------------------------------------------------------------------- #
+
+
+def _fragment_with(*subject_specs):
+    """Build a fragment of subjects and their junctions for promotion tests."""
+    subjects, junctions = [], []
+    for qualifier, attribute, outcomes in subject_specs:
+        name = f"{qualifier}.{attribute}"
+        subjects.append(
+            SubjectNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name=name,
+                spec_class=qualifier,
+                attribute=attribute,
+            )
+        )
+        junctions.append(
+            JunctionNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name=f"j:{name}",
+                subject=name,
+                owner="x.py::f",
+                branches=[Branch(outcome=o, tier=t) for o, t in outcomes],
+            )
+        )
+    return MapFragment(map_id=MAP_ID, derived_from=VERSION, subjects=subjects, junctions=junctions)
+
+
+def test_a_predicate_against_literals_is_a_state_gate():
+    """``WHERE t.status IN ('ready','running')`` gates another component."""
+    modules = [_module("sql = \"SELECT x FROM t WHERE t.status IN ('ready','running') \"\n", "x.py")]
+
+    assert promotion.gated_fields(modules)["status"] == 1
+
+
+def test_a_predicate_against_bind_variables_is_a_lookup():
+    """``WHERE PandaID=:PandaID`` selects a row, not a state.
+
+    Without this ``lfn`` and ``jediTaskID`` rank first among subjects, which is
+    how the narrowing was found.
+    """
+    modules = [
+        _module('sql = "SELECT x FROM t WHERE PandaID=:PandaID "\n', "x.py"),
+        _module('sql2 = "SELECT x FROM t WHERE fileID IN (:a,:b) "\n', "y.py"),
+    ]
+    gated = promotion.gated_fields(modules)
+
+    assert gated["PandaID"] == 0
+    assert gated["fileID"] == 0
+
+
+def test_a_quote_inside_a_subquery_does_not_promote_the_outer_field():
+    """``IN (SELECT ... WHERE x='y')`` -- the literal belongs to the subquery."""
+    source = "sql = \"SELECT a FROM t WHERE jediTaskID IN (SELECT id FROM u WHERE type='x') \"\n"
+
+    assert promotion.gated_fields([_module(source, "x.py")])["jediTaskID"] == 0
+
+
+def test_two_literals_are_not_enough_to_close_a_set():
+    """``jediTaskID`` has 528 writes of which a few are literal; that is not a set."""
+    fragment = _fragment_with(
+        ("JediTaskSpec", "jediTaskID", [("a", 1), ("b", 1)] + [("x", 2)] * 8),
+        ("JediTaskSpec", "status", [("ready", 1), ("running", 1), ("done", 1)]),
+    )
+    criteria = promotion.criteria_for(fragment, Counter(), {})
+
+    assert "JediTaskSpec.jediTaskID" not in criteria
+    assert criteria["JediTaskSpec.status"] == ["3:closed-literal-set"]
+
+
+def test_unpromoted_subjects_and_their_junctions_are_dropped():
+    """An attribute nobody investigates is noise at both levels."""
+    fragment = _fragment_with(
+        ("JediTaskSpec", "status", [("ready", 1), ("done", 1)]),
+        ("JobSpec", "modificationTime", [("now", 2)]),
+    )
+    dropped = promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+
+    assert dropped == (1, 1)
+    assert [s.name for s in fragment.subjects] == ["JediTaskSpec.status"]
+    assert [j.subject for j in fragment.junctions] == ["JediTaskSpec.status"]
+
+
+def test_an_unresolved_junction_survives_promotion():
+    """It has no subject to judge, so dropping it would hide a reported gap."""
+    fragment = _fragment_with(("JobSpec", "modificationTime", [("now", 2)]))
+    fragment.junctions.append(
+        JunctionNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="j:?",
+            subject="?.status",
+            owner="x.py::f",
+            attribution="unresolved",
+            branches=[Branch(outcome="failed")],
+        )
+    )
+    promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+
+    assert [j.subject for j in fragment.junctions] == ["?.status"]
