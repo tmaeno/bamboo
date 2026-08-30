@@ -12,11 +12,16 @@ regular enough to read naively::
     varMap[":status"] = taskStatus
     self.cur.execute(sqlU + comment, varMap)
 
-Three things follow, each of which cost a wrong assumption to learn:
+Four things follow, each of which cost a wrong assumption to learn:
 
 **The statement has to be reassembled.**  It is built by ``=`` then a run of
 ``+=``, often with an f-string holding the schema, and interleaved with other
 statements being built in the same function.  Reassembly is per variable name.
+
+**Reassembly is the wrong unit for reading a branch.**  The fragments are
+appended conditionally -- ``getTasksToExecCommand_JEDI`` appends either ``SET
+status=:status`` or ``SET status=oldStatus`` -- so the ``if`` that explains the
+value is on the fragment, not on the statement.  ``fragments`` keeps them.
 
 **The bind key does not say whether it is a write.**  ``:status`` appears in
 ``SET status=:status`` *and* in another statement's ``WHERE status=:status``
@@ -37,19 +42,90 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
-# ``UPDATE <schema>.<table> SET <assignments> [WHERE ...]``.  The schema is
-# usually an f-string placeholder, which reassembly leaves as ``{}``.
-_UPDATE = re.compile(r"\bUPDATE\s+([\w{}.]+)\s+SET\s+(.*?)(?:\bWHERE\b|$)", re.IGNORECASE | re.DOTALL)
+# ``UPDATE [/*+ hint */] <schema>.<table> [alias] SET <assignments> [WHERE ...]``.
+# The schema is usually an f-string placeholder, which reassembly leaves as
+# ``{}``.  The optimizer hint and the table alias are both optional and both
+# occur: ``UPDATE /*+ index(tab ...) */ ATLAS_PANDA.filesTable4 tab SET
+# status='ready'`` is one statement, and without either allowance it reads as no
+# statement at all.
+_UPDATE = re.compile(
+    r"\bUPDATE\s+(?:/\*.*?\*/\s*)?([\w{}.]+)(?:\s+(?!SET\b)\w+)?\s+SET\s+(.*?)(?:\bWHERE\b|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 _INSERT = re.compile(
     r"\bINSERT\s+INTO\s+([\w{}.]+)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)",
     re.IGNORECASE | re.DOTALL,
 )
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)\s*=\s*(:?[A-Za-z_]\w*|[^,]+?)(?=\s*,|\s*$)")
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+_WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+
+_QUOTED = re.compile(r"^'([^']*)'$")
+_BARE = re.compile(r"^[A-Za-z_]\w*$")
+# Bare words that are SQL, not columns.  This has to stay a list of *keywords*
+# rather than of names that look like plumbing: ``T_TASK`` really does have a
+# column called ``timeStamp``, and ``JEDI_Events`` one called ``event_offset``,
+# both of which are copied into other columns.
+_KEYWORDS = frozenset(
+    {"NULL", "CURRENT_DATE", "CURRENT_TIMESTAMP", "SYSDATE", "SYSTIMESTAMP", "DEFAULT", "TRUE", "FALSE"}
+)
+
+
+class ColumnValue(BaseModel):
+    """Where one column's new value comes from.
+
+    The four forms are four different kinds of branch, which is why the
+    distinction is drawn here rather than left to the caller:
+
+    ``bind``
+        ``SET status=:status`` -- the value is decided in Python, at the
+        assignment filling the bind, and that is where the ``if`` explaining it
+        is too.
+    ``literal``
+        ``SET status='ready'`` -- decided in the statement itself.
+    ``column``
+        ``SET status=oldStatus`` -- carried from another column of the same
+        row.  This is the form the recognizers were blind to, and it is not a
+        curiosity: it is how a task returns from ``pending``, so without it the
+        map cannot offer "the release did not fire" as a candidate at all.
+    ``expression``
+        ``NULL``, ``CURRENT_DATE``, ``nFiles+1``, a subquery.  A write, but not
+        one that settles a subject to a traceable value.
+    """
+
+    kind: str = Field(..., description="bind | literal | column | expression")
+    text: str = Field(
+        ...,
+        description="Bind key, literal value, source column, or the raw SQL, per ``kind``.",
+    )
+
+
+def classify(value: str) -> ColumnValue:
+    """Classify the right-hand side of one SQL column assignment."""
+    value = value.strip()
+    if value.startswith(":"):
+        return ColumnValue(kind="bind", text=value)
+    quoted = _QUOTED.match(value)
+    if quoted is not None:
+        return ColumnValue(kind="literal", text=quoted.group(1))
+    if _BARE.match(value) and value.upper() not in _KEYWORDS:
+        return ColumnValue(kind="column", text=value)
+    return ColumnValue(kind="expression", text=value)
+
+
+def assigns_in(fragment: str) -> list[tuple[str, ColumnValue]]:
+    """Return the ``column = value`` pairs a SQL *fragment* sets.
+
+    Everything from the first ``WHERE`` on is dropped: a predicate uses the
+    same ``column = value`` spelling as an assignment, so a fragment carrying
+    both would report its selection criteria as writes.
+    """
+    head = _WHERE.split(fragment, maxsplit=1)[0]
+    return [(column, classify(value)) for column, value in _ASSIGNMENT.findall(head)]
 
 
 class SqlWrite(BaseModel):
@@ -57,13 +133,12 @@ class SqlWrite(BaseModel):
 
     kind: str = Field(..., description="update | insert")
     table: str = Field(..., description="Table name, schema stripped.")
-    columns: dict[str, Optional[str]] = Field(
+    columns: dict[str, ColumnValue] = Field(
         default_factory=dict,
         description=(
-            "Column -> bind key it is set from, or ``None`` when the value is "
-            "written inline (``stateChangeTime=CURRENT_DATE``, ``lockedBy=NULL``). "
-            "Inline values are kept because they are part of what identifies "
-            "the table, even though they carry no bind to trace."
+            "Column -> where its new value comes from.  Columns written to an "
+            "expression are kept even though they carry nothing to trace: they "
+            "are part of what identifies the table."
         ),
     )
 
@@ -90,23 +165,32 @@ def _literal(node: ast.expr) -> Optional[str]:
     return None
 
 
-def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
-    """Reassemble the SQL string held by local *name*.
-
-    Statements are ordered by line, with ``=`` restarting the string and ``+=``
-    extending it.  This is not flow-sensitive: a statement built differently in
-    two branches comes back as one concatenation.  That over-reads rather than
-    under-reads, and the table and column names -- the parts used here -- are
-    the same in both branches when it happens.
-    """
-    parts: list[tuple[int, str, str]] = []
+def _parts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    seen: frozenset[str] = frozenset(),
+) -> list[tuple[int, str, str, ast.stmt]]:
+    """Return ``(line, operator, text, node)`` for each statement building *name*."""
+    if name in seen:
+        return []
+    seen = seen | {name}
+    parts: list[tuple[int, str, str, ast.stmt]] = []
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    text = _literal(node.value)
-                    if text is not None:
-                        parts.append((node.lineno, "=", text))
+                if not (isinstance(target, ast.Name) and target.id == name):
+                    continue
+                text = _literal(node.value)
+                if text is None and isinstance(node.value, ast.Name):
+                    # ``sql = sqlTU`` -- the statement was built under another
+                    # name and *chosen* here.  The choosing assignment is the
+                    # better anchor of the two: in ``reactivatePendingTasks_JEDI``
+                    # the release statement is appended unconditionally and
+                    # picked in the ``else`` of the timeout test, so the reason
+                    # is on the alias and nowhere else.
+                    text = _fold(_parts(func, node.value.id, seen))
+                if text:
+                    parts.append((node.lineno, "=", text, node))
         elif (
             isinstance(node, ast.AugAssign)
             and isinstance(node.target, ast.Name)
@@ -115,25 +199,88 @@ def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
         ):
             text = _literal(node.value)
             if text is not None:
-                parts.append((node.lineno, "+=", text))
-    parts.sort()
+                parts.append((node.lineno, "+=", text, node))
+    parts.sort(key=lambda part: part[0])
+    return parts
+
+
+def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
+    """Concatenate one ``=``-started run of fragments."""
     assembled = ""
-    for _line, operator, text in parts:
+    for _line, operator, text, _node in parts:
         assembled = text if operator == "=" else assembled + text
     return assembled
 
 
-def executions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> list[tuple[str, Optional[str], ast.Call]]:
-    """Return ``(sql text, varmap name, call)`` for each cursor execution.
+def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
+    """Return every statement local *name* can hold, one per ``=`` it is given.
+
+    A name reassigned mid-function holds a different statement each time, and
+    reading only the last quietly drops the others: ``reactivatePendingTasks_JEDI``
+    picks between a timeout statement and a release statement through one
+    variable, so keeping one of the two loses half of what the method does.
+
+    They are returned separately rather than concatenated because concatenating
+    would run one statement's ``SET`` clause into the next one's, which the
+    column regexes cannot tell from a wider ``SET``.
+    """
+    runs: list[list[tuple[int, str, str, ast.stmt]]] = []
+    for part in _parts(func, name):
+        if part[1] == "=" or not runs:
+            runs.append([])
+        runs[-1].append(part)
+    return [text for text in (_fold(run) for run in runs) if text]
+
+
+def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
+    """Reassemble the SQL string held by local *name*, as last assigned.
+
+    Fragments are ordered by line, with ``=`` restarting the string and ``+=``
+    extending it.  This is not flow-sensitive: a statement built differently in
+    two branches comes back as one concatenation.  That over-reads rather than
+    under-reads, and the table and column names -- the parts used here -- are
+    the same in both branches when it happens.
+
+    Where the branches disagree about the *value*, ``fragments`` recovers what
+    this cannot: ``getTasksToExecCommand_JEDI`` appends ``SET status=:status``
+    or ``SET status=oldStatus`` depending on the command, and both appear here.
+    """
+    return _fold(_parts(func, name))
+
+
+def fragments(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[ast.stmt, str]]:
+    """Return the statements building *name*, each with the text it contributes.
+
+    Reassembly deliberately flattens a conditionally built statement, which is
+    right for reading the table and the columns and wrong for reading *why*.
+    A fragment appended under an ``else`` carries that ``else`` in its own path
+    condition, so the fragment is the anchor for any value written inline --
+    a literal or a copied column, neither of which has a bind assignment to
+    point at instead.
+    """
+    return [(node, text) for _line, _operator, text, node in _parts(func, name)]
+
+
+class Execution(NamedTuple):
+    """One ``cursor.execute(<statement>, <binds>)``."""
+
+    sql: str
+    varmap: Optional[str]
+    variable: str
+    call: ast.Call
+
+
+def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
+    """Return one :class:`Execution` per cursor execution in *func*.
 
     The call is what pairs a statement with its binds.  Reading them separately
     -- every statement in the function against every bind in the function --
     would attach a task's status write to a dataset's statement whenever both
     appear in one method, which in ``db_proxy_mods`` is most of them.
     """
-    found: list[tuple[str, Optional[str], ast.Call]] = []
+    found: list[Execution] = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
@@ -145,11 +292,9 @@ def executions(
         base = expression.left if isinstance(expression, ast.BinOp) else expression
         if not isinstance(base, ast.Name):
             continue
-        text = reconstruct(func, base.id)
-        if not text:
-            continue
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
-        found.append((text, varmap, node))
+        for text in variants(func, base.id):
+            found.append(Execution(sql=text, varmap=varmap, variable=base.id, call=node))
     return found
 
 
@@ -157,10 +302,9 @@ def writes(sql: str) -> list[SqlWrite]:
     """Return the write statements in *sql*, as far as they can be read."""
     found: list[SqlWrite] = []
     for match in _UPDATE.finditer(sql):
-        columns: dict[str, Optional[str]] = {}
-        for column, value in _ASSIGNMENT.findall(match.group(2)):
-            value = value.strip()
-            columns[column] = value if value.startswith(":") else None
+        columns = {
+            column: classify(value) for column, value in _ASSIGNMENT.findall(match.group(2))
+        }
         if columns:
             found.append(
                 SqlWrite(kind="update", table=_table_of(match.group(1)), columns=columns)
@@ -168,11 +312,17 @@ def writes(sql: str) -> list[SqlWrite]:
     for match in _INSERT.finditer(sql):
         names = [c.strip().split(".")[-1] for c in match.group(2).split(",")]
         values = [v.strip() for v in match.group(3).split(",")]
-        columns = {
-            name: value if value.startswith(":") else None
-            for name, value in zip(names, values, strict=False)
-            if _IDENTIFIER.fullmatch(name)
-        }
+        columns = {}
+        for name, value in zip(names, values, strict=False):
+            if not _IDENTIFIER.fullmatch(name):
+                continue
+            supplied = classify(value)
+            if supplied.kind == "column":
+                # An INSERT has no prior row to copy from, so a bare word in
+                # its VALUES list is a sequence or a function, not a source
+                # column.  Calling it one would invent a passthrough edge.
+                supplied = ColumnValue(kind="expression", text=supplied.text)
+            columns[name] = supplied
         if columns:
             found.append(
                 SqlWrite(kind="insert", table=_table_of(match.group(1)), columns=columns)

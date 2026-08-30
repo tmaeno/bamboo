@@ -209,11 +209,11 @@ class SpecAttributor:
                 ).items():
                     stated.setdefault(table, set()).add(spec_class)
                 seen: set[str] = set()
-                for text, _varmap, _call in sql.executions(func):
-                    if text in seen:
+                for run in sql.executions(func):
+                    if run.sql in seen:
                         continue
-                    seen.add(text)
-                    for write in sql.writes(text):
+                    seen.add(run.sql)
+                    for write in sql.writes(run.sql):
                         only = self._only_class_declaring(set(write.columns))
                         if only is not None:
                             inferred.setdefault(write.table, set()).add(only)

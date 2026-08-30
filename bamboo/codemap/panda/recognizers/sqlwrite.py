@@ -20,9 +20,22 @@ Two things had to be settled before this could be read at all, and both are in
 * which spec class a table holds -- nothing declares it, so it is inferred
   from the column names and pooled per table.
 
-The junction is anchored at the **bind assignment**, not at the ``execute``:
-the bind is where the value is decided and where the surrounding ``if`` says
-why, which is what a reader following the map back needs to see.
+The junction is anchored where the value is *decided*, not at the ``execute``:
+that is where the surrounding ``if`` says why, which is what a reader following
+the map back needs to see.  Which statement that is depends on the form -- a
+bind is decided at the Python assignment filling it, a value written inline at
+the fragment that appended it to the statement.
+
+Three forms reach a subject, and the third was the plan's named blind spot::
+
+    SET status=:status      # decided in Python
+    SET status='ready'      # decided in the statement
+    SET status=oldStatus    # carried from another column
+
+The last one is how a task comes back out of ``pending``.  Missing it did not
+merely lose a write: it removed "the release path never fired" from the
+candidate causes of a task stuck in ``pending``, which is one of the two
+symptoms this map exists to explain.
 """
 
 from __future__ import annotations
@@ -72,7 +85,7 @@ def _subject_of(
     spec_class: Optional[str],
     table: str,
     column: str,
-) -> tuple[str, Optional[str], str]:
+) -> tuple[str, str, str]:
     """Return ``(qualifier, attribute, qualifier kind)`` for a written column.
 
     A subject's key needs a qualifier that disambiguates -- ``status`` means
@@ -126,26 +139,38 @@ def extract(
         candidates = 0
         explained = 0
         for func, _owner in functions_with_owner(module.tree):
-            for text, varmap, _call in sql.executions(func):
-                if varmap is None:
+            # A method that runs one statement from two places yields the same
+            # run twice.  Counting both would inflate the coverage denominator
+            # with duplicates and make the slice look worse than it reads.
+            seen: set[tuple[str, str, Optional[str]]] = set()
+            for run in sql.executions(func):
+                if (run.variable, run.sql, run.varmap) in seen:
                     continue
-                for statement in sql.writes(text):
+                seen.add((run.variable, run.sql, run.varmap))
+                for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
                     if spec_class is None:
                         uncovered.add(statement.table)
-                    for column, key in statement.columns.items():
-                        if key is None:
-                            # ``stateChangeTime=CURRENT_DATE``: a write, but the
-                            # value is in the statement and carries no branch.
+                    for column, supplied in statement.columns.items():
+                        if supplied.kind == "expression":
+                            # ``stateChangeTime=CURRENT_DATE``, ``nFiles+1``: a
+                            # write, but not one that settles a subject to a
+                            # value anything can be traced back through.
                             continue
                         candidates += 1
                         qualifier, attribute, kind = _subject_of(
                             attributor, spec_class, statement.table, column
                         )
-                        if attribute is None:
-                            continue
-                        binds = sql.bound_values(func, varmap, key)
-                        if not binds:
+                        outcomes = _outcomes(
+                            attributor,
+                            func=func,
+                            run=run,
+                            statement=statement,
+                            column=column,
+                            supplied=supplied,
+                            spec_class=spec_class,
+                        )
+                        if not outcomes:
                             continue
                         explained += 1
                         attributed.add((qualifier, attribute, kind))
@@ -157,7 +182,7 @@ def extract(
                             func=func,
                             spec_class=qualifier,
                             attribute=attribute,
-                            binds=binds,
+                            outcomes=outcomes,
                         )
         if candidates:
             coverage.append(
@@ -184,6 +209,75 @@ def extract(
     return subjects, list(junctions.values()), coverage, uncovered
 
 
+def _deciding_fragment(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    variable: str,
+    column: str,
+    supplied: sql.ColumnValue,
+) -> Optional[ast.stmt]:
+    """Return the statement fragment that put ``<column>=<value>`` into the SQL.
+
+    For a value written inline there is no bind assignment to anchor at, and
+    anchoring at the ``execute`` instead would throw away the reason: the two
+    forms of ``getTasksToExecCommand_JEDI``'s update are appended in the two
+    arms of one ``if``, so the fragment carries the condition and the statement
+    does not.
+    """
+    for node, text in sql.fragments(func, variable):
+        for found, value in sql.assigns_in(text):
+            if found == column and value == supplied:
+                return node
+    return None
+
+
+def _outcomes(
+    attributor: SpecAttributor,
+    *,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    run: sql.Execution,
+    statement: sql.SqlWrite,
+    column: str,
+    supplied: sql.ColumnValue,
+    spec_class: Optional[str],
+) -> list[tuple[str, int, ast.stmt]]:
+    """Return ``(outcome, tier, node)`` for one written column.
+
+    The node is where the value was decided, which differs by form: a bind is
+    decided at the Python assignment filling it, and a literal or a copied
+    column at the fragment that put it in the statement.
+    """
+    if supplied.kind == "bind":
+        if run.varmap is None:
+            return []
+        found = []
+        for bind in sql.bound_values(func, run.varmap, supplied.text):
+            value = bind.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                found.append((value.value, 1, bind))
+            else:
+                # The writer is known, the value is not until run time.
+                # Recorded rather than dropped: localize and prune read
+                # observed values, so they work from the writer alone.
+                found.append((f"runtime({ast.unparse(value)})", 2, bind))
+        return found
+
+    node = _deciding_fragment(func, run.variable, column, supplied)
+    if node is None:
+        return []
+    if supplied.kind == "literal":
+        return [(supplied.text, 1, node)]
+
+    # A copied column.  The source is named as a subject rather than as a bare
+    # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
+    # at a node the backward walk can continue from, ``passthrough(oldStatus)``
+    # at a string.
+    source, attribute, _kind = _subject_of(
+        attributor, spec_class, statement.table, supplied.text
+    )
+    outcome = f"passthrough({SubjectNode.make_name(source, attribute)})"
+    return [(outcome, 2, node)]
+
+
 def _record(
     junctions: dict[str, JunctionNode],
     *,
@@ -193,9 +287,9 @@ def _record(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec_class: str,
     attribute: str,
-    binds: list[ast.Assign],
+    outcomes: list[tuple[str, int, ast.stmt]],
 ) -> None:
-    """Add one branch per bind assignment to this write site's junction."""
+    """Add one branch per decided value to this write site's junction."""
     subject = SubjectNode.make_name(spec_class, attribute)
     owner = f"{module.rel_path}::{func.name}"
     name = JunctionNode.make_name(map_id, subject, owner)
@@ -213,24 +307,16 @@ def _record(
             anchor=Anchor(
                 package=module.package,
                 file=module.rel_path,
-                line_start=binds[0].lineno,
-                line_end=binds[-1].end_lineno,
+                line_start=outcomes[0][2].lineno,
+                line_end=outcomes[-1][2].end_lineno,
                 blob_sha=module.blob_sha,
             ),
         )
         junctions[name] = junction
 
     known = {(branch.outcome, tuple(branch.path_condition)) for branch in junction.branches}
-    for bind in binds:
-        value = bind.value
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            outcome, tier = value.value, 1
-        else:
-            # The writer is known, the value is not until run time.  Recorded
-            # rather than dropped: localize and prune read observed values, so
-            # they work from the writer alone.
-            outcome, tier = f"runtime({ast.unparse(value)})", 2
-        condition = path_condition(bind)
+    for outcome, tier, node in outcomes:
+        condition = path_condition(node)
         if (outcome, tuple(condition)) in known:
             continue
         known.add((outcome, tuple(condition)))

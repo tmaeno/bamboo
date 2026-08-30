@@ -28,6 +28,11 @@ Two further signals (the field is mentioned in logs; it is written under a
 guard) fire on 69% and 79% of everything and so corroborate rather than
 promote.
 
+A fourth criterion promotes nothing on its own: it closes the set under the
+passthrough edge, so a subject a promoted one copies its value from comes along.
+Without it the backward walk's first hop out of ``JediTaskSpec.status`` lands on
+a subject the map does not contain.
+
 Applied to junctions as well as subjects: a junction writing an attribute
 nobody investigates is the same noise one level down.
 """
@@ -44,6 +49,11 @@ from bamboo.codemap.panda.attribution import UNRESOLVED
 WHERE_GATE = "1:state-gate-in-where"
 DECLARED_VOCABULARY = "2:declared-vocabulary"
 CLOSED_LITERAL_SET = "3:closed-literal-set"
+PASSTHROUGH_SOURCE = "4:carried-into-a-promoted-subject"
+
+# ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch carries its
+# value from.
+_PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
 
 # Share of a subject's outcomes that must be literals for the set to count as
 # closed.  A majority keeps identifiers out while tolerating the passthrough
@@ -122,6 +132,38 @@ def criteria_for(
         if criteria:
             found[subject.name] = criteria
     return found
+
+
+def close_over_passthrough(
+    fragment: MapFragment, criteria: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Promote the subjects a promoted subject carries its value from.
+
+    ``UPDATE JEDI_Tasks SET status=oldStatus`` is how a task leaves ``pending``,
+    so the branch reads ``passthrough(JediTaskSpec.oldStatus)``.  On its own
+    ``oldStatus`` satisfies no criterion -- no predicate compares it to a
+    literal, and every write to it is a copy or a ``NULL`` -- so it would be
+    dropped, and the branch would point at a subject the map does not contain.
+
+    That is not a tidy gap.  The backward walk exists to answer "why is it this
+    value", and its very first hop out of the flagship symptom would land on
+    nothing.  A subject that decides a promoted one is worth asking about by the
+    same argument that promoted the first, so the set is closed under the edge.
+    """
+    promoted = dict(criteria)
+    while True:
+        added = False
+        for junction in fragment.junctions:
+            if junction.subject not in promoted:
+                continue
+            for branch in junction.branches:
+                match = _PASSTHROUGH.match(branch.outcome)
+                if match is None or match.group(1) in promoted:
+                    continue
+                promoted[match.group(1)] = [PASSTHROUGH_SOURCE]
+                added = True
+        if not added:
+            return promoted
 
 
 def apply(fragment: MapFragment, criteria: dict[str, list[str]]) -> tuple[int, int]:

@@ -31,7 +31,13 @@ from bamboo.codemap.models import (
     ValueEnumNode,
 )
 from bamboo.codemap.panda import attribution, promotion, sql
-from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
+from bamboo.codemap.panda.recognizers import (
+    alias,
+    boundary,
+    errorcode,
+    progress,
+    sqlwrite,
+)
 from bamboo.models.graph_element import NodeType
 
 MAP_ID = "panda"
@@ -1026,14 +1032,75 @@ def test_a_bind_in_a_where_clause_is_not_a_write():
     """
     writes = sql.writes("UPDATE {}.JEDI_Tasks SET lockedBy=NULL WHERE status=:status ")
 
-    assert writes[0].columns == {"lockedBy": None}
+    assert set(writes[0].columns) == {"lockedBy"}
 
 
 def test_inline_values_are_kept_without_a_bind():
     """``stateChangeTime=CURRENT_DATE`` is a write whose value is in the statement."""
     writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=:status,stateChangeTime=CURRENT_DATE ")
 
-    assert writes[0].columns == {"status": ":status", "stateChangeTime": None}
+    assert writes[0].columns["status"] == sql.ColumnValue(kind="bind", text=":status")
+    assert writes[0].columns["stateChangeTime"] == sql.ColumnValue(
+        kind="expression", text="CURRENT_DATE"
+    )
+
+
+def test_a_column_copied_from_another_column_is_told_from_a_literal():
+    """``SET status=oldStatus`` is a passthrough; ``SET status='ready'`` is not.
+
+    The distinction has to survive the fact that both are bare-looking text on
+    the right of an ``=``.  It is what turns "a task left pending" into an edge
+    the backward walk can follow.
+    """
+    writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=oldStatus,oldStatus=NULL ")
+
+    assert writes[0].columns["status"] == sql.ColumnValue(kind="column", text="oldStatus")
+    assert writes[0].columns["oldStatus"].kind == "expression"
+
+    literal = sql.writes("UPDATE ATLAS_PANDA.filesTable4 SET status='ready' ")
+    assert literal[0].columns["status"] == sql.ColumnValue(kind="literal", text="ready")
+
+
+def test_an_update_is_read_through_a_hint_and_a_table_alias():
+    """``UPDATE /*+ index(tab ...) */ ... filesTable4 tab SET ...`` is one statement.
+
+    Both forms occur on ``filesTable4`` and neither is exotic; without the
+    allowance the statement reads as no statement at all, which is silent.
+    """
+    writes = sql.writes(
+        "UPDATE /*+ index(tab FILESTABLE4_IDX) */ ATLAS_PANDA.filesTable4 tab "
+        "SET status='ready' WHERE PandaID=:PandaID "
+    )
+
+    assert len(writes) == 1
+    assert writes[0].table == "filesTable4"
+    assert writes[0].columns["status"] == sql.ColumnValue(kind="literal", text="ready")
+
+
+def test_a_statement_chosen_through_another_variable_is_still_read():
+    """``sql = sqlTU`` then ``execute(sql, ...)`` -- and the alias carries the reason.
+
+    ``reactivatePendingTasks_JEDI`` builds a timeout statement and a release
+    statement unconditionally and picks between them in an ``if``/``else``, so
+    reading only the statement loses which one ran and why.
+    """
+    source = (
+        "def reactivate(self):\n"
+        "    sqlTO = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "    sqlTO += 'SET status=:newStatus '\n"
+        "    sqlTU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "    sqlTU += 'SET status=oldStatus '\n"
+        "    if timeout:\n"
+        "        sql = sqlTO\n"
+        "    else:\n"
+        "        sql = sqlTU\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = ast.parse(source).body[0]
+
+    statements = [w for text in sql.variants(func, "sql") for w in sql.writes(text)]
+
+    assert [w.columns["status"].text for w in statements] == [":newStatus", "oldStatus"]
 
 
 def test_table_class_is_inferred_from_the_column_names():
@@ -1238,3 +1305,164 @@ def test_an_unresolved_junction_survives_promotion():
     promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
 
     assert [j.subject for j in fragment.junctions] == ["?.status"]
+
+
+def test_a_column_copied_from_another_becomes_a_passthrough_branch():
+    """``SET status=oldStatus`` is how a task leaves ``pending``.
+
+    The outcome names the source as a *subject*, not as a column, so the
+    backward walk has somewhere to go: ``passthrough(oldStatus)`` would be a
+    string, ``passthrough(JediTaskSpec.oldStatus)`` is an edge.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def release(self, jediTaskID):\n"
+        "        sqlTU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "        sqlTU += 'SET status=oldStatus,oldStatus=NULL '\n"
+        "        sqlTU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        varMap = {}\n"
+        "        self.cur.execute(sqlTU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    branches = [b for j in junctions if j.subject == "JediTaskSpec.status" for b in j.branches]
+    assert [(b.outcome, b.tier) for b in branches] == [
+        ("passthrough(JediTaskSpec.oldStatus)", 2)
+    ]
+
+
+def test_a_conditionally_appended_fragment_carries_its_own_condition():
+    """Reassembly flattens the ``if``; the fragment is what still holds it.
+
+    ``getTasksToExecCommand_JEDI`` appends ``SET status=:status`` or ``SET
+    status=oldStatus`` in the two arms of one test, so anchoring an inline value
+    at the ``execute`` would report no reason at all.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def exec_command(self, newTaskStatus):\n"
+        "        sqlTU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "        if newTaskStatus != 'dummy':\n"
+        "            sqlTU += 'SET status=:status,'\n"
+        "        else:\n"
+        "            sqlTU += 'SET status=oldStatus,'\n"
+        "        sqlTU += 'oldStatus=NULL '\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'running'\n"
+        "        self.cur.execute(sqlTU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    branches = {
+        b.outcome: b.path_condition
+        for j in junctions
+        if j.subject == "JediTaskSpec.status"
+        for b in j.branches
+    }
+    assert branches["passthrough(JediTaskSpec.oldStatus)"] == ["not (newTaskStatus != 'dummy')"]
+
+
+def test_promotion_follows_a_passthrough_into_its_source():
+    """A subject a promoted one copies from is worth asking about too.
+
+    Otherwise the first hop of the backward walk out of the flagship symptom
+    points at a subject the map does not contain.
+    """
+    fragment = _fragment_with(
+        ("JediTaskSpec", "status", [("ready", 1), ("done", 1)]),
+        ("JediTaskSpec", "oldStatus", [("x", 2)]),
+    )
+    fragment.junctions[0].branches.append(
+        Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2)
+    )
+    criteria = promotion.criteria_for(fragment, Counter(), {})
+    assert "JediTaskSpec.oldStatus" not in criteria
+
+    closed = promotion.close_over_passthrough(fragment, criteria)
+    promotion.apply(fragment, closed)
+
+    assert closed["JediTaskSpec.oldStatus"] == ["4:carried-into-a-promoted-subject"]
+    assert {s.name for s in fragment.subjects} == {
+        "JediTaskSpec.status",
+        "JediTaskSpec.oldStatus",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# write alias
+# --------------------------------------------------------------------------- #
+
+_ON_HOLD = """
+class JediTaskSpec(object):
+    _attributes = ("jediTaskID", "status", "oldStatus")
+
+    def setOnHold(self):
+        if self.status in ["ready", "running"]:
+            self.oldStatus = self.status
+            self.status = "pending"
+"""
+
+
+def _alias_extract(*sources: tuple[str, str]):
+    modules = [_module(_ON_HOLD, "pandaserver/taskbuffer/JediTaskSpec.py")]
+    modules += [_module(text, rel) for text, rel in sources]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    return alias.extract(
+        modules, MAP_ID, VERSION, progress.spec_attributes(modules), attributor
+    )
+
+
+def test_a_call_site_of_a_write_alias_is_a_junction():
+    """The map must answer *why* ``pending``, not merely that ``setOnHold`` ran.
+
+    Recorded only at the definition, the most contended value in the system has
+    exactly one writer and no reason attached to it.
+    """
+    caller = (
+        "def generate(self, taskSpec, inputChunk):\n"
+        "    if not inputChunk.hasCandidates():\n"
+        "        taskSpec.setOnHold()\n"
+    )
+    _subjects, junctions, _cov = _alias_extract((caller, "pandajedi/jediorder/JobGenerator.py"))
+
+    assert [j.owner for j in junctions] == ["pandajedi/jediorder/JobGenerator.py::generate"]
+    branch = junctions[0].branches[0]
+    assert (junctions[0].subject, branch.outcome) == ("JediTaskSpec.status", "pending")
+    assert branch.path_condition == [
+        "not inputChunk.hasCandidates()",
+        "self.status in ['ready', 'running']  [in setOnHold()]",
+    ]
+
+
+def test_the_aliases_own_guard_is_marked_as_its_own():
+    """Reaching ``pending`` needs both conditions and they fail differently.
+
+    A caller that never ran and a guard that refused the status are different
+    diagnoses, and a flat conjunction cannot tell them apart.
+    """
+    caller = "def refine(self, taskSpec):\n    taskSpec.setOnHold()\n"
+    _subjects, junctions, _cov = _alias_extract((caller, "pandajedi/jediorder/TaskRefiner.py"))
+
+    assert junctions[0].branches[0].path_condition == [
+        "self.status in ['ready', 'running']  [in setOnHold()]"
+    ]
+
+
+def test_only_literal_writes_make_a_method_an_alias():
+    """Widened to any declared-attribute write, the rule matches serialization.
+
+    On real PanDA that is 36 methods and 600 call sites led by ``__init__``,
+    ``pack`` and ``setErrDiag`` -- none of which settle anything.
+    """
+    spec = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'status', 'errorDialog')\n"
+        "\n"
+        "    def setErrDiag(self, diag):\n"
+        "        self.errorDialog = diag\n"
+    )
+    modules = [_module(spec, "pandaserver/taskbuffer/JediTaskSpec.py")]
+
+    assert alias.find_aliases(modules, progress.spec_attributes(modules)) == {}

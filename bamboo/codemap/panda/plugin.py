@@ -28,7 +28,13 @@ from bamboo.codemap.gitsource import describe as _git_describe
 from bamboo.codemap.models import JunctionNode, MapFragment, SourceModule, SubjectNode
 from bamboo.codemap.panda import promotion
 from bamboo.codemap.panda.attribution import SpecAttributor, class_bases
-from bamboo.codemap.panda.recognizers import boundary, errorcode, progress, sqlwrite
+from bamboo.codemap.panda.recognizers import (
+    alias,
+    boundary,
+    errorcode,
+    progress,
+    sqlwrite,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,10 +148,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
-        attributor = SpecAttributor(
-            progress.spec_attributes(self._modules), class_bases(self._modules)
-        )
+        declarations = progress.spec_attributes(self._modules)
+        attributor = SpecAttributor(declarations, class_bases(self._modules))
         self._table_conflicts = attributor.learn_table_classes(self._modules)
+
+        alias_subjects, alias_junctions, alias_coverage = alias.extract(
+            self._modules, self.map_id, self._version, declarations, attributor
+        )
+        fragment.subjects.extend(alias_subjects)
+        fragment.junctions.extend(alias_junctions)
+        fragment.coverage.extend(alias_coverage)
+
         sql_subjects, sql_junctions, sql_coverage, self._uncovered_tables = sqlwrite.extract(
             self._modules, self.map_id, self._version, attributor
         )
@@ -169,6 +182,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 self._modules, progress.spec_attributes(self._modules)
             ),
         )
+        criteria = promotion.close_over_passthrough(fragment, criteria)
         self._dropped = promotion.apply(fragment, criteria)
 
         logger.info(

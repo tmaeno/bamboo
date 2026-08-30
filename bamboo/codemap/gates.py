@@ -140,12 +140,13 @@ def structural_attribution_agrees(fragment: MapFragment) -> GateResult:
     role and did not survive contact with the source (see
     :func:`outcomes_outside_declared_subsets`).  Where that one could check 27
     branches and failed on two correct ones, this checks every attributed
-    junction and, on PanDA, disagrees nowhere -- including on all 27 writes
-    attributed from the variable's name, which is what makes those defensible
-    rather than merely marked.
+    junction and, on PanDA, disagrees nowhere.
 
     Junctions with no structural answer are skipped: too few attributes were
-    touched to imply anything, which is not a disagreement.
+    touched to imply anything, which is not a disagreement.  Only the attribute
+    slice produces one, so the count is well below the junction total -- the
+    SQL and alias slices settle their class from the table and from the method's
+    defining class, neither of which the object's usage can corroborate.
     """
     failures: list[str] = []
     checked = 0
