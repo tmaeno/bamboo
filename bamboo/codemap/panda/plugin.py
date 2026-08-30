@@ -34,6 +34,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     progress,
     sqlwrite,
+    trigger,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         criteria = promotion.close_over_passthrough(fragment, criteria)
         self._dropped = promotion.apply(fragment, criteria)
 
+        # After promotion, so the reach figure describes the map that is kept
+        # rather than every candidate the slices produced.
+        self._reached = trigger.attach(
+            fragment.junctions,
+            self._modules,
+            {b.interface.split(".")[-1] for b in channels},
+        )
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -200,6 +209,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def trigger_reach(self) -> tuple[int, int]:
+        """``(junctions with an entry point, total)``."""
+        return getattr(self, "_reached", (0, 0))
 
     @property
     def unpromoted(self) -> tuple[int, int]:

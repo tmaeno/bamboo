@@ -73,7 +73,7 @@ def _system_of(rel_path: str) -> str:
     return _SYSTEM_BY_MODULE.get(Path(rel_path).stem, _DEFAULT_SYSTEM)
 
 
-def _endpoint_decorator(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[ast.Call]:
+def endpoint_decorator(func: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[ast.Call]:
     """Return the ``@request_validation(...)`` call decorating *func*, if any."""
     for decorator in func.decorator_list:
         if not isinstance(decorator, ast.Call):
@@ -150,7 +150,7 @@ def extract(
         for node in ast.walk(module.tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            decorator = _endpoint_decorator(node)
+            decorator = endpoint_decorator(node)
             if decorator is None:
                 continue
             candidates += 1

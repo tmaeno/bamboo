@@ -148,6 +148,43 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
     return all_passed
 
 
+def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
+    """Print how junctions are reached, and what follows from it.
+
+    Plugin-specific, like the table findings: what counts as an entry point is
+    a fact about how the target system is deployed, not about the map model.
+    """
+    from bamboo.codemap.panda.recognizers import trigger
+
+    reached, total = getattr(plugin, "trigger_reach", (0, 0))
+    if not total:
+        return
+    kinds = Counter(e.trigger for j in fragment.junctions for e in j.entry_points)
+    click.echo(
+        f"\nentry points: {reached}/{total} junction(s) reached  ("
+        + ", ".join(f"{k}={v}" for k, v in kinds.most_common())
+        + ")"
+    )
+
+    fragile = trigger.fragile_subjects(fragment.junctions)
+    if fragile:
+        # The question the map exists to answer for a stalled task: nothing
+        # re-evaluates these, so waiting will not help.
+        click.echo(f"  no self-repairing trigger reaches ({len(fragile)}):")
+        for subject, triggers in fragile[:top]:
+            click.echo(f"    {subject:<34} only {', '.join(triggers)}")
+
+    differing = trigger.differing_arguments(fragment.junctions)
+    if differing:
+        # Structure, not trivia: an argument one entry omits is a guard that
+        # cannot fire on that path, so the candidate causes differ by entry.
+        click.echo(f"  entries handing over different arguments ({len(differing)}):")
+        for subject, owner, supplied in differing[:top]:
+            click.echo(f"    {subject} at {owner.split('::')[-1]}")
+            for entry, args in supplied.items():
+                click.echo(f"      {entry.split('/')[-1]:<38} {args}")
+
+
 async def _store(fragment: MapFragment) -> dict[str, int]:
     from bamboo.database.graph_database_client import GraphDatabaseClient
 
@@ -240,6 +277,8 @@ def main(
             f"\nnot promoted: {dropped[0]} subject(s), {dropped[1]} junction(s) "
             "— no criterion fired"
         )
+    _report_triggers(fragment, plugin, top)
+
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:
         # Not a gap in extraction: these are written by the code and hold no

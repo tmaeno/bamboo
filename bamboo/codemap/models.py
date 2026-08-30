@@ -171,6 +171,35 @@ class Branch(BaseModel):
     )
 
 
+class EntryPoint(BaseModel):
+    """One way control reaches a junction, and what it hands over on the way.
+
+    Plural on purpose.  ``getTasksToBeProcessed_JEDI`` is called by
+    ``JobGenerator`` with ``minPriority`` and ``maxNumJobs`` and by the message
+    processor without them, so the throttle guard cannot fire on the message
+    path at all -- the set of reasons a task was not picked up differs by entry,
+    which makes the entry part of the structure rather than context.
+    """
+
+    trigger: str = Field(
+        ...,
+        description=(
+            "polled | command | message.  How work arrives, which decides "
+            "whether missing it repairs itself: a loop re-evaluates, a command "
+            "row and a broker message are each consumed once."
+        ),
+    )
+    entry: str = Field(..., description="Module that carries the trigger.")
+    via: Optional[str] = Field(
+        default=None,
+        description="Method through which the entry reaches this junction, if not its own.",
+    )
+    arg_binding: dict[str, str] = Field(
+        default_factory=dict,
+        description="Keyword arguments this entry supplies at that call.",
+    )
+
+
 class JunctionNode(BaseNode):
     """A place where the code settles a subject's value.
 
@@ -209,6 +238,14 @@ class JunctionNode(BaseNode):
         ),
     )
     branches: list[Branch] = Field(default_factory=list)
+    entry_points: list[EntryPoint] = Field(
+        default_factory=list,
+        description=(
+            "How this junction is reached.  Empty means nothing the map "
+            "recognises starts it -- reported rather than defaulted, since "
+            "assuming a loop would make the self-repair property unusable."
+        ),
+    )
     anchor: Optional[Anchor] = None
 
     @staticmethod

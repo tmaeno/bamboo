@@ -25,6 +25,7 @@ from bamboo.codemap.models import (
     Anchor,
     BoundaryNode,
     Branch,
+    EntryPoint,
     JunctionNode,
     MapFragment,
     SourceModule,
@@ -38,6 +39,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     progress,
     sqlwrite,
+    trigger,
 )
 from bamboo.models.graph_element import NodeType
 
@@ -1587,3 +1589,197 @@ def test_a_shared_table_is_not_reported_as_unlogged():
     )
 
     assert gates.unobservable_boundaries(fragment) == []
+
+
+# --------------------------------------------------------------------------- #
+# entry points and triggers
+# --------------------------------------------------------------------------- #
+
+_KNIGHT = """
+class TaskCommando:
+    def start(self):
+        while True:
+            time.sleep(jedi_config.taskcommando.loopCycle)
+            self.doAction()
+
+    def doAction(self):
+        tasks = self.taskBufferIF.getTasksToExecCommand_JEDI(vo, label, pid=self.pid)
+"""
+
+_PROXY = """
+class TaskModule:
+    def getTasksToExecCommand_JEDI(self, vo, prodSourceLabel, pid=None):
+        sqlC = f'SELECT comm_task FROM {panda_config.schemaDEFT}.PRODSYS_COMM '
+        self.cur.execute(sqlC + comment, varMap)
+        self.markTask()
+
+    def markTask(self):
+        pass
+"""
+
+
+def _junction(owner: str, subject: str = "JediTaskSpec.status") -> JunctionNode:
+    return JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=f"j:{owner}",
+        subject=subject,
+        owner=owner,
+    )
+
+
+def _attach(*sources: tuple[str, str], junctions, tables=None):
+    modules = [_module(text, rel) for text, rel in sources]
+    return trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})
+
+
+def test_a_sleeping_forever_loop_is_a_polled_entry():
+    """A ``while True`` that sleeps starts something; a conditional loop retries.
+
+    Accepting any sleeping loop matched 33 modules including ``Interaction``
+    and ``ddm``, neither of which starts anything.
+    """
+    modules = [
+        _module(_KNIGHT, "pandajedi/jediorder/TaskCommando.py"),
+        _module(
+            "def fetch(self):\n"
+            "    while not done:\n"
+            "        time.sleep(1)\n",
+            "pandaserver/dataservice/ddm.py",
+        ),
+    ]
+    kinds = trigger.classify(modules, set())
+
+    assert kinds["pandajedi/jediorder/TaskCommando.py"] == {"polled"}
+    assert "pandaserver/dataservice/ddm.py" not in kinds
+
+
+def test_polling_for_a_foreign_row_is_also_a_command_entry():
+    """It runs again next cycle; the command it failed to act on does not."""
+    kinds = trigger.classify(
+        [
+            _module(_KNIGHT, "pandajedi/jediorder/TaskCommando.py"),
+            _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        ],
+        {"PRODSYS_COMM"},
+    )
+
+    assert kinds["pandajedi/jediorder/TaskCommando.py"] == {"polled", "command"}
+    # The module that merely *contains* the read starts nothing.
+    assert "pandaserver/taskbuffer/db_proxy_mods/task_module.py" not in kinds
+
+
+def test_reach_follows_self_calls_past_the_door():
+    """The door and the write are rarely the same method.
+
+    ``add_main`` starts ``AdderGen.run``; the ``jobStatus`` writes are several
+    ``self`` calls further in, and stopping at the door reported them as though
+    nothing ran them.
+    """
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::markTask")
+    _attach(
+        (_KNIGHT, "pandajedi/jediorder/TaskCommando.py"),
+        (_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        junctions=[junction],
+    )
+
+    assert {(e.trigger, e.via) for e in junction.entry_points} == {
+        ("polled", "getTasksToExecCommand_JEDI"),
+        ("command", "getTasksToExecCommand_JEDI"),
+    }
+
+
+def test_a_name_several_modules_implement_carries_no_edge():
+    """``run`` is defined by every daemon, so following it invents callers.
+
+    Before this, one ``datasetManager`` junction collected fourteen entry
+    points, thirteen of them from daemons that have never heard of it.
+    """
+    daemon = "class D:\n    def run(self):\n        self.act()\n    def act(self):\n        pass\n"
+    other = "class O:\n    def run(self):\n        pass\n"
+    junction = _junction("pandaserver/daemons/scripts/first.py::act")
+    _attach(
+        (daemon, "pandaserver/daemons/scripts/first.py"),
+        (other, "pandaserver/daemons/scripts/second.py"),
+        junctions=[junction],
+    )
+
+    # Its own module is polled, so it is reached -- but not *by* the other
+    # daemon, which shares only the method name.
+    assert {e.entry for e in junction.entry_points} == {
+        "pandaserver/daemons/scripts/first.py"
+    }
+
+
+def test_an_import_evidences_an_edge_a_shared_name_cannot():
+    """``from ...adder_gen import AdderGen`` says which ``run`` is meant."""
+    worker = (
+        "class AdderGen:\n"
+        "    def run(self):\n"
+        "        self.finalize()\n"
+        "    def finalize(self):\n"
+        "        pass\n"
+    )
+    daemon = (
+        "from pandaserver.dataservice.adder_gen import AdderGen\n"
+        "def main():\n"
+        "    AdderGen().run()\n"
+    )
+    other = "class O:\n    def run(self):\n        pass\n"
+    junction = _junction("pandaserver/dataservice/adder_gen.py::finalize")
+    _attach(
+        (worker, "pandaserver/dataservice/adder_gen.py"),
+        (daemon, "pandaserver/daemons/scripts/add_main.py"),
+        (other, "pandaserver/daemons/scripts/other.py"),
+        junctions=[junction],
+    )
+
+    assert {e.entry for e in junction.entry_points} == {
+        "pandaserver/daemons/scripts/add_main.py"
+    }
+
+
+def test_a_facade_that_forwards_is_not_a_second_implementation():
+    """``TaskBuffer`` and ``JediTaskBuffer`` are doors, not rival definitions."""
+    facade = (
+        "class TaskBuffer:\n"
+        "    def markTask(self):\n"
+        "        ret = proxy.markTask()\n"
+        "        return ret\n"
+    )
+    modules = [
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(facade, "pandaserver/taskbuffer/TaskBuffer.py"),
+    ]
+
+    assert (
+        trigger.sole_definitions(modules)["markTask"]
+        == "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    )
+
+
+def test_entries_that_hand_over_different_arguments_are_reported():
+    """An argument one entry omits is a guard that cannot fire on that path."""
+    junction = _junction("x.py::f")
+    junction.entry_points = [
+        EntryPoint(trigger="polled", entry="JobGenerator.py", via="get", arg_binding={"minPriority": "p"}),
+        EntryPoint(trigger="message", entry="msg.py", via="get", arg_binding={"target_tasks": "t"}),
+    ]
+
+    assert trigger.differing_arguments([junction]) == [
+        (
+            "JediTaskSpec.status",
+            "x.py::f",
+            {"JobGenerator.py": ["minPriority"], "msg.py": ["target_tasks"]},
+        )
+    ]
+
+
+def test_a_subject_no_loop_reaches_does_not_repair_itself():
+    """The question a stalled task actually asks: will waiting help?"""
+    polled = _junction("a.py::f", "JediTaskSpec.status")
+    polled.entry_points = [EntryPoint(trigger="polled", entry="a.py")]
+    once = _junction("b.py::g", "T_TASK.vo")
+    once.entry_points = [EntryPoint(trigger="command", entry="b.py")]
+
+    assert trigger.fragile_subjects([polled, once]) == [("T_TASK.vo", ["command"])]
