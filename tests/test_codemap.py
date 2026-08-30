@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bamboo.codemap import evidence, gates
+from bamboo.codemap import diff, evidence, gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
@@ -2578,3 +2578,181 @@ def test_a_gate_summary_separates_issues_from_inconclusive():
     )
 
     assert result.summary() == "[FAIL] g: 3 checked (1 issue(s), 2 inconclusive)"
+
+
+# ---------------------------------------------------------------------------
+# Comparing two builds
+# ---------------------------------------------------------------------------
+#
+# The only check that can see a threshold move.  Comparing the map with its
+# own source agrees with whatever the source now says, and a condition is
+# never echoed to a log, so a build from the wrong release explains a decision
+# with a number that has since changed -- convincingly.
+
+
+def _stage_for_diff(tag: str, conditions: list[str], line: int, **kwargs) -> FilterStageNode:
+    return FilterStageNode(
+        map_id=MAP_ID,
+        derived_from=kwargs.pop("version", VERSION),
+        name=f"f:{tag}",
+        owner="pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage",
+        criteria_tag=tag,
+        conditions=conditions,
+        anchor=Anchor(
+            package="pandajedi",
+            file="pandajedi/jedibrokerage/AtlasProdJobBroker.py",
+            line_start=line,
+            line_end=line,
+        ),
+        **kwargs,
+    )
+
+
+def _fragment_of(*nodes, version: str = VERSION) -> MapFragment:
+    fragment = MapFragment(map_id=MAP_ID, derived_from=version)
+    for node in nodes:
+        if isinstance(node, FilterStageNode):
+            fragment.filter_stages.append(node)
+        elif isinstance(node, JunctionNode):
+            fragment.junctions.append(node)
+        elif isinstance(node, BoundaryNode):
+            fragment.boundaries.append(node)
+    return fragment
+
+
+def test_a_node_that_only_moved_is_not_a_change():
+    """The reason node identity is a signature and not a position.
+
+    ``update_job`` moved file and line between two releases; a key built from
+    those would have called one boundary two.  In a refactor this is most of
+    the map, so it has to generate no noise.
+    """
+    old = _fragment_of(_stage_for_diff("-disk", ["a < b"], line=100))
+    new = _fragment_of(_stage_for_diff("-disk", ["a < b"], line=140))
+
+    result = diff.compare(old, new)
+
+    assert result.changes == []
+    assert result.moved == ["FilterStage f:-disk"]
+    assert result.unchanged == 0
+
+
+def test_an_edited_condition_is_reported_as_drift():
+    """The failure no gate can see: the escape hatch is gone, and a map built
+    from the older release would still offer it as the reason a site survived."""
+    old = _fragment_of(
+        _stage_for_diff("-disk", ["size < threshold and 'skip_RSE_check' not in catchall"], 100)
+    )
+    new = _fragment_of(_stage_for_diff("-disk", ["size < threshold"], 100))
+
+    result = diff.compare(old, new)
+
+    (drifted,) = result.drift()
+    assert drifted.field == "conditions"
+    assert "skip_RSE_check" in drifted.before
+    assert "skip_RSE_check" not in drifted.after
+
+
+def test_a_changed_interface_is_a_change_but_not_drift():
+    """Both matter; only one of them silently rewrites an explanation."""
+    def boundary(values):
+        return BoundaryNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="b:pilot:update_job",
+            system="pilot",
+            interface="pilot_api::update_job",
+            carried_values=values,
+        )
+
+    result = diff.compare(
+        _fragment_of(boundary(["job_id"])), _fragment_of(boundary(["job_id", "job_status"]))
+    )
+
+    assert result.drift() == []
+    (change,) = result.other()
+    assert change.field == "carried_values"
+
+
+def _junction_for_diff(branches: list[Branch]) -> JunctionNode:
+    return JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j:setStatus",
+        subject="JediTaskSpec.status",
+        owner="pandajedi/jediorder/ContentsFeeder.py::feed",
+        branches=branches,
+    )
+
+
+def test_branches_are_matched_by_outcome_not_position():
+    """A branch keeps its outcome while the condition reaching it is edited.
+
+    Comparing by position would render an inserted branch as "everything
+    below here changed" and bury the one edit that matters.
+    """
+    old = _fragment_of(
+        _junction_for_diff(
+            [
+                Branch(outcome="ready", path_condition=["nFiles > 0"], order=0),
+                Branch(outcome="pending", path_condition=["else"], order=1),
+            ]
+        )
+    )
+    new = _fragment_of(
+        _junction_for_diff(
+            [
+                Branch(outcome="broken", path_condition=["corrupt"], order=0),
+                Branch(outcome="ready", path_condition=["nFiles > 2"], order=1),
+                Branch(outcome="pending", path_condition=["else"], order=2),
+            ]
+        )
+    )
+
+    result = diff.compare(old, new)
+
+    drifted = result.drift()
+    assert [c.node for c in drifted] == ["j:setStatus → ready"]
+    assert drifted[0].before == "[nFiles > 0]"
+    assert drifted[0].after == "[nFiles > 2]"
+    assert any(c.field == "branch" and c.after == "broken" for c in result.other())
+
+
+def test_losing_a_polled_entry_is_reported():
+    """Not cosmetic: it is the difference between a stall that clears itself
+    and one that does not."""
+    def junction(entries):
+        node = _junction_for_diff([Branch(outcome="ready", path_condition=[], order=0)])
+        node.entry_points = entries
+        return node
+
+    polled = EntryPoint(trigger="polled", entry="jediorder/ContentsFeeder.py")
+    message = EntryPoint(trigger="message", entry="jedimsgprocessor/feeder.py")
+
+    result = diff.compare(
+        _fragment_of(junction([polled, message])), _fragment_of(junction([message]))
+    )
+
+    (change,) = [c for c in result.changes if c.field == "entry_points"]
+    assert "polled" in change.before
+    assert "polled" not in change.after
+
+
+def test_added_and_removed_nodes_are_named():
+    old = _fragment_of(_stage_for_diff("-disk", ["a"], 100))
+    new = _fragment_of(_stage_for_diff("-rse", ["a"], 100))
+
+    result = diff.compare(old, new)
+
+    assert result.removed == ["FilterStage f:-disk"]
+    assert result.added == ["FilterStage f:-rse"]
+
+
+def test_two_identical_builds_report_as_identical():
+    old = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
+    new = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
+
+    result = diff.compare(old, new)
+
+    assert result.identical
+    assert result.unchanged == 1
