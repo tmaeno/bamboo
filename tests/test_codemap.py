@@ -1269,6 +1269,85 @@ def test_a_statement_chosen_through_another_variable_is_still_read():
     assert [w.columns["status"].text for w in statements] == [":newStatus", "oldStatus"]
 
 
+def test_a_statement_assembled_across_an_if_else_is_two_statements():
+    """Folding the arms together builds a statement that cannot exist::
+
+        UPDATE ... SET status=:status,SET status=oldStatus,...
+
+    and the damage is not that it reads oddly: the second ``SET`` overwrote the
+    first in the column map, so the bind arm of the write vanished.  That is the
+    same shape as the attribute-slice if/else whose second arm was missing --
+    one arm on the map, one lost.
+    """
+    source = (
+        "def f(self, newTaskStatus):\n"
+        "    sqlTU = 'UPDATE ATLAS_PANDA.JEDI_Tasks '\n"
+        "    if newTaskStatus != 'dummy':\n"
+        "        sqlTU += 'SET status=:status,'\n"
+        "    else:\n"
+        "        sqlTU += 'SET status=oldStatus,'\n"
+        "    sqlTU += 'modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+    )
+    func = _func(source)
+
+    statements = [w for text in sql.variants(func, "sqlTU") for w in sql.writes(text)]
+
+    assert [w.columns["status"].kind for w in statements] == ["bind", "column"]
+    assert [w.columns["status"].text for w in statements] == [":status", "oldStatus"]
+    # The head is never dropped -- it is what the statement is.
+    assert all(w.table == "JEDI_Tasks" for w in statements)
+
+
+def test_two_independent_if_elses_give_every_combination():
+    """``getTasksToExecCommand_JEDI`` picks the status arm and the oldStatus arm
+    on unrelated tests, so all four statements are reachable."""
+    source = (
+        "def f(self, newTaskStatus, taskStatus):\n"
+        "    sqlTU = 'UPDATE ATLAS_PANDA.JEDI_Tasks '\n"
+        "    if newTaskStatus != 'dummy':\n"
+        "        sqlTU += 'SET status=:status,'\n"
+        "    else:\n"
+        "        sqlTU += 'SET status=oldStatus,'\n"
+        "    if taskStatus in ['paused']:\n"
+        "        sqlTU += 'oldStatus=NULL,'\n"
+        "    else:\n"
+        "        sqlTU += 'oldStatus=status,'\n"
+        "    sqlTU += 'modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+    )
+    func = _func(source)
+
+    statements = [w for text in sql.variants(func, "sqlTU") for w in sql.writes(text)]
+
+    assert [(w.columns["status"].text, w.columns["oldStatus"].text) for w in statements] == [
+        (":status", "NULL"),
+        (":status", "status"),
+        ("oldStatus", "NULL"),
+        ("oldStatus", "status"),
+    ]
+
+
+def test_an_optional_fragment_does_not_split_the_statement():
+    """An ``if`` with no ``else`` makes the fragment optional, not alternative.
+
+    Splitting on those too would double the count for every one of them, and
+    the over-read is the safe direction: an extra clause is read, where a
+    mis-split would attribute a value to a statement that never carries it.
+    """
+    source = (
+        "def f(self, resetFrozenTime):\n"
+        "    sqlTU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,'\n"
+        "    if resetFrozenTime:\n"
+        "        sqlTU += 'frozenTime=NULL,'\n"
+        "    sqlTU += 'modificationTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+    )
+    func = _func(source)
+
+    texts = sql.variants(func, "sqlTU")
+
+    assert len(texts) == 1
+    assert "frozenTime=NULL" in texts[0]
+
+
 def test_table_class_is_inferred_from_the_column_names():
     """Nothing declares which spec a table holds; the columns give it away."""
     _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)

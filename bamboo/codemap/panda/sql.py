@@ -41,10 +41,22 @@ than guessed at, which is what the coverage matrix is for.
 from __future__ import annotations
 
 import ast
+import itertools
+import logging
+import math
 import re
 from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
+
+from bamboo.codemap.panda.pathcond import exclusive, path_condition
+
+logger = logging.getLogger(__name__)
+
+# A run with this many branch combinations is folded rather than split.  Set
+# well above the corpus's worst case (12, in ``propagateResultToJEDI``) so it is
+# a guard against a pathological method rather than a working limit.
+_MAX_BRANCH_VARIANTS = 24
 
 # ``UPDATE [/*+ hint */] <schema>.<table> [alias] SET <assignments> [WHERE ...]``.
 # The schema is usually an f-string placeholder, which reassembly leaves as
@@ -227,24 +239,115 @@ def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
     return assembled
 
 
+def _exclusive_groups(
+    parts: list[tuple[int, str, str, ast.stmt]], start: int
+) -> list[list[int]]:
+    """Return the index groups whose members cannot all be in one statement.
+
+    Connected components rather than pairs, because an ``if``/``elif``/``else``
+    appending a fragment from each arm makes three alternatives, not three
+    pairs.  The test is :func:`pathcond.exclusive`, reading the negations the
+    path condition already carries.
+    """
+    conditions = {index: path_condition(parts[index][3]) for index in range(start, len(parts))}
+    parent = {index: index for index in conditions}
+
+    def root(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    indices = sorted(conditions)
+    for position, one in enumerate(indices):
+        for other in indices[position + 1 :]:
+            if exclusive(conditions[one], conditions[other]):
+                parent[root(one)] = root(other)
+    grouped: dict[int, list[int]] = {}
+    for index in indices:
+        grouped.setdefault(root(index), []).append(index)
+    return [members for members in grouped.values() if len(members) > 1]
+
+
+def _run_variants(parts: list[tuple[int, str, str, ast.stmt]], name: str) -> list[str]:
+    """Return the statements one ``=``-started run of fragments can produce.
+
+    Fragments appended under mutually exclusive branches are *alternatives*, not
+    parts of one statement, and folding them together builds a statement that
+    cannot exist::
+
+        UPDATE {}.JEDI_Tasks SET status=:status,SET status=oldStatus,...
+
+    which is not merely unreadable -- the second ``SET`` overwrote the first in
+    the column map, so the map lost the bind arm of the write entirely and, in
+    another method, gained a column no statement ever assigns.
+
+    Only mutual exclusion splits.  A fragment appended under an ``if`` with no
+    ``else`` is left in every variant: splitting on optional fragments too would
+    double the count for each one, and the resulting over-read is the safe
+    direction -- an extra ``AND`` clause is read, not a value invented.
+
+    The head of the run is never dropped.  It is what the statement *is*; the
+    alternatives are among the fragments appended to it.
+    """
+    start = 1 if parts and parts[0][1] == "=" else 0
+    groups = _exclusive_groups(parts, start)
+    if not groups:
+        return [_fold(parts)]
+    total = math.prod(len(members) for members in groups)
+    if total > _MAX_BRANCH_VARIANTS:
+        # Folded as before rather than split into an arbitrary subset: a
+        # truncated list of statements reads as the complete one.  Said out
+        # loud, because a silent cap is indistinguishable from full coverage.
+        logger.warning(
+            "%s at line %d is built across %d branch combinations, over the cap "
+            "of %d: read as one folded statement, so a conditionally assembled "
+            "column may be misread here",
+            name,
+            parts[0][0],
+            total,
+            _MAX_BRANCH_VARIANTS,
+        )
+        return [_fold(parts)]
+
+    alternatives = {index for members in groups for index in members}
+    texts: list[str] = []
+    for combination in itertools.product(*groups):
+        keep = set(combination)
+        text = _fold(
+            [part for index, part in enumerate(parts) if index not in alternatives or index in keep]
+        )
+        if text and text not in texts:
+            texts.append(text)
+    return texts
+
+
 def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
-    """Return every statement local *name* can hold, one per ``=`` it is given.
+    """Return every statement local *name* can hold.
 
-    A name reassigned mid-function holds a different statement each time, and
-    reading only the last quietly drops the others: ``reactivatePendingTasks_JEDI``
-    picks between a timeout statement and a release statement through one
-    variable, so keeping one of the two loses half of what the method does.
+    Two things make one name hold several statements, and both were learned by
+    getting them wrong.
 
-    They are returned separately rather than concatenated because concatenating
-    would run one statement's ``SET`` clause into the next one's, which the
-    column regexes cannot tell from a wider ``SET``.
+    **Reassignment.**  A name given a new ``=`` mid-function holds a different
+    statement from then on, and reading only the last quietly drops the others:
+    ``reactivatePendingTasks_JEDI`` picks between a timeout statement and a
+    release statement through one variable, so keeping one of the two loses half
+    of what the method does.
+
+    **Mutually exclusive fragments.**  A statement assembled across an
+    ``if``/``else`` is as much two statements as a reassigned one is -- see
+    :func:`_run_variants`.
+
+    Either way they are returned separately rather than concatenated, because
+    concatenating runs one statement's ``SET`` clause into the next one's, which
+    the column regexes cannot tell from a wider ``SET``.
     """
     runs: list[list[tuple[int, str, str, ast.stmt]]] = []
     for part in _parts(func, name):
         if part[1] == "=" or not runs:
             runs.append([])
         runs[-1].append(part)
-    return [text for text in (_fold(run) for run in runs) if text]
+    return [text for run in runs for text in _run_variants(run, name) if text]
 
 
 def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:

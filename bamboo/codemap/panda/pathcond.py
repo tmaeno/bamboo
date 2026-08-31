@@ -139,7 +139,7 @@ def own_test(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _exclusive(one: list[str], other: list[str]) -> bool:
+def exclusive(one: list[str], other: list[str]) -> bool:
     """Whether two path conditions cannot both hold.
 
     Detected from the negations :func:`path_condition` already writes down: an
@@ -147,10 +147,12 @@ def _exclusive(one: list[str], other: list[str]) -> bool:
     one chain each hold a negation of something the other asserts.
 
     Deliberately conservative -- an annotated test will not match textually, so
-    some exclusive pairs read as compatible.  That is the safe direction: the
-    caller uses this to decide whether a later write could overwrite an earlier
-    one, and a missed exclusion adds a condition that is true but redundant,
-    where a missed *overlap* would drop a condition that is required.
+    some exclusive pairs read as compatible.  That is the safe direction for
+    both callers.  Deciding whether a later write overwrites an earlier one, a
+    missed exclusion adds a condition that is true but redundant where a missed
+    *overlap* would drop a required one; splitting a SQL statement built across
+    branches, a missed exclusion leaves the statement folded as it was before,
+    where a missed overlap would split a statement that is really one.
     """
     return any(f"not ({test})" in other for test in one) or any(
         f"not ({test})" in one for test in other
@@ -218,7 +220,7 @@ def literal_values(
         for other, _ in found:
             if other.lineno <= assignment.lineno:
                 continue
-            if _exclusive(conditions[assignment], conditions[other]):
+            if exclusive(conditions[assignment], conditions[other]):
                 continue
             test = own_test(other)
             if test and f"not ({test})" not in guards:
