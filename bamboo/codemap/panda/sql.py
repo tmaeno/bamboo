@@ -79,10 +79,13 @@ _WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 
 _QUOTED = re.compile(r"^'([^']*)'$")
 _BARE = re.compile(r"^[A-Za-z_]\w*$")
+_NUMBER = re.compile(r"^[+-]?\d+(\.\d+)?$")
 # Bare words that are SQL, not columns.  This has to stay a list of *keywords*
 # rather than of names that look like plumbing: ``T_TASK`` really does have a
 # column called ``timeStamp``, and ``JEDI_Events`` one called ``event_offset``,
-# both of which are copied into other columns.
+# both of which are copied into other columns.  ``NULL`` is settled earlier as
+# a literal and never reaches here; it stays listed because what the set means
+# is "not a column name", which is true of it however it is read.
 _KEYWORDS = frozenset(
     {"NULL", "CURRENT_DATE", "CURRENT_TIMESTAMP", "SYSDATE", "SYSTIMESTAMP", "DEFAULT", "TRUE", "FALSE"}
 )
@@ -99,15 +102,20 @@ class ColumnValue(BaseModel):
         assignment filling the bind, and that is where the ``if`` explaining it
         is too.
     ``literal``
-        ``SET status='ready'`` -- decided in the statement itself.
+        ``SET status='ready'``, ``SET oldStatus=NULL``, ``SET coreCount=0`` --
+        decided in the statement itself.  Quoting is a property of the type,
+        not of how settled the value is, and reading only the quoted ones was
+        the same mistake the attribute slice made in only reading string
+        right-hand sides.
     ``column``
         ``SET status=oldStatus`` -- carried from another column of the same
         row.  This is the form the recognizers were blind to, and it is not a
         curiosity: it is how a task returns from ``pending``, so without it the
         map cannot offer "the release did not fire" as a candidate at all.
     ``expression``
-        ``NULL``, ``CURRENT_DATE``, ``nFiles+1``, a subquery.  A write, but not
-        one that settles a subject to a traceable value.
+        ``CURRENT_DATE``, ``nFiles+1``, a subquery.  A write whose value the
+        statement does not settle: the clock and the row's own prior contents
+        are read when it runs.
     """
 
     kind: str = Field(..., description="bind | literal | column | expression")
@@ -118,13 +126,26 @@ class ColumnValue(BaseModel):
 
 
 def classify(value: str) -> ColumnValue:
-    """Classify the right-hand side of one SQL column assignment."""
+    """Classify the right-hand side of one SQL column assignment.
+
+    ``NULL`` is reported as Python's ``None`` because the two spell one fact,
+    and the column it clears is one subject: ``JediTaskSpec.oldStatus`` is
+    written ``= None`` through the attribute slice and ``=NULL`` through this
+    one, and a branch table offering both spellings would read as two outcomes
+    where the source has one.  Python's is the spelling that wins for the same
+    reason ``runtime(...)`` holds unparsed Python -- everything downstream that
+    compares an outcome to an observed value is reading PanDA through Python.
+    """
     value = value.strip()
     if value.startswith(":"):
         return ColumnValue(kind="bind", text=value)
     quoted = _QUOTED.match(value)
     if quoted is not None:
         return ColumnValue(kind="literal", text=quoted.group(1))
+    if value.upper() == "NULL":
+        return ColumnValue(kind="literal", text="None")
+    if _NUMBER.match(value):
+        return ColumnValue(kind="literal", text=value)
     if _BARE.match(value) and value.upper() not in _KEYWORDS:
         return ColumnValue(kind="column", text=value)
     return ColumnValue(kind="expression", text=value)

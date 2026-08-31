@@ -263,14 +263,23 @@ def resolver(mappings: dict[str, Mapping]):
     literal does.  That is where the two statuses this closes actually live:
     ``newTaskStatus = commandStatusMap[commandStr]["doing"]`` reaches the
     database through a bind, not through the subscript directly.
+
+    **Any constant is settled, not only a string.**  ``varMap[":frozenTime"] =
+    None`` is as decided as ``= "ready"``; recording it as ``runtime(None)``
+    would claim the value waits for run time when the source has already
+    written it down.  Non-strings are spelled as Python spells them, which is
+    the spelling the attribute slice already gives a constant right-hand side,
+    so one subject does not end up carrying the same value under two names.
     """
 
     def resolve(
         expression: ast.expr,
         func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
     ) -> list[str]:
-        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
-            return [expression.value]
+        if isinstance(expression, ast.Constant):
+            if isinstance(expression.value, str):
+                return [expression.value]
+            return [ast.unparse(expression)]
         return mapping_values(expression, func=func, mappings=mappings)
 
     return resolve

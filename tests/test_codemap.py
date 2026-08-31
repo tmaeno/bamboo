@@ -1266,7 +1266,9 @@ def test_a_column_copied_from_another_column_is_told_from_a_literal():
     writes = sql.writes("UPDATE {}.JEDI_Tasks SET status=oldStatus,oldStatus=NULL ")
 
     assert writes[0].columns["status"] == sql.ColumnValue(kind="column", text="oldStatus")
-    assert writes[0].columns["oldStatus"].kind == "expression"
+    # ``NULL`` is bare-looking too, and it is neither a column nor unsettled:
+    # the statement says exactly what the field will hold afterwards.
+    assert writes[0].columns["oldStatus"] == sql.ColumnValue(kind="literal", text="None")
 
     literal = sql.writes("UPDATE ATLAS_PANDA.filesTable4 SET status='ready' ")
     assert literal[0].columns["status"] == sql.ColumnValue(kind="literal", text="ready")
@@ -1364,9 +1366,9 @@ def test_two_independent_if_elses_give_every_combination():
     statements = [w for text in sql.variants(func, "sqlTU") for w in sql.writes(text)]
 
     assert [(w.columns["status"].text, w.columns["oldStatus"].text) for w in statements] == [
-        (":status", "NULL"),
+        (":status", "None"),
         (":status", "status"),
-        ("oldStatus", "NULL"),
+        ("oldStatus", "None"),
         ("oldStatus", "status"),
     ]
 
@@ -1446,6 +1448,89 @@ def test_a_value_decided_at_run_time_is_recorded_not_dropped():
     branch = junctions[0].branches[0]
     assert branch.tier == 2
     assert branch.outcome == "runtime(newStatus)"
+
+
+def test_clearing_a_column_is_spelled_the_way_the_attribute_slice_spells_it():
+    """``SET oldStatus=NULL`` and ``taskSpec.oldStatus = None`` are one fact.
+
+    They reach the same subject, so two spellings would make the branch table
+    offer two outcomes where the source has one -- and everything downstream
+    compares an outcome to a value observed through Python.
+    """
+    sql_source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET oldStatus=NULL '\n"
+        "        self.cur.execute(sqlU + comment, {})\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(sql_source)
+    from_sql = [(b.outcome, b.tier) for b in junctions[0].branches]
+
+    attribute_source = (
+        "from pandaserver.taskbuffer.Specs import JediTaskSpec\n"
+        "class M:\n"
+        "    def f(self):\n"
+        "        taskSpec = JediTaskSpec()\n"
+        "        taskSpec.oldStatus = None\n"
+    )
+    _s, attribute_junctions, _c = _progress(attribute_source, "pandajedi/jediorder/W.py")
+    from_attribute = [(b.outcome, b.tier) for b in attribute_junctions[0].branches]
+
+    assert from_sql == from_attribute == [("None", 1)]
+
+
+def test_a_number_settles_a_column_as_firmly_as_a_quoted_string():
+    """Quoting is a property of the type, not of how decided the value is."""
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET coreCount=0 '\n"
+        "        self.cur.execute(sqlU + comment, {})\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    assert [(b.outcome, b.tier) for b in junctions[0].branches] == [("0", 1)]
+
+
+def test_what_the_database_itself_decides_is_a_branch_not_a_dropped_write():
+    """The clock and the row's own contents are tier 2, on the same grounds a
+    bind filled at run time is: the writer is known, and that is what prune
+    reads.
+
+    Dropping them was not neutral.  Promotion weighs a subject's literal writes
+    against all of them, so a counter the source only ever increments looked,
+    from its lone ``= 0``, like a field with a closed vocabulary.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Datasets SET nFiles=nFiles+:iFiles,'\n"
+        "        sqlU += 'modificationTime=CURRENT_DATE '\n"
+        "        self.cur.execute(sqlU + comment, {})\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    outcomes = {j.subject: [(b.outcome, b.tier) for b in j.branches] for j in junctions}
+
+    # Table-qualified: neither column name belongs to one declaring class, so
+    # the statement cannot say which spec owns the row and the table does.
+    assert outcomes["JEDI_Datasets.nFiles"] == [("runtime(nFiles+:iFiles)", 2)]
+    assert outcomes["JEDI_Datasets.modificationTime"] == [("runtime(CURRENT_DATE)", 2)]
+
+
+def test_a_bind_filled_with_a_non_string_constant_is_settled():
+    """``varMap[':frozenTime'] = None`` is decided, and ``runtime(None)`` --
+    which is what the slice used to record -- says it is not."""
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET frozenTime=:frozenTime '\n"
+        "        varMap = {}\n"
+        "        varMap[':frozenTime'] = None\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+
+    assert [(b.outcome, b.tier) for b in junctions[0].branches] == [("None", 1)]
 
 
 def test_a_bind_filled_from_a_local_is_resolved_like_an_attribute_write_is():

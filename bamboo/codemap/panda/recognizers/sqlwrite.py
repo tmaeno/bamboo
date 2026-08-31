@@ -168,11 +168,6 @@ def extract(
                     if spec_class is None:
                         uncovered.add(statement.table)
                     for column, supplied in statement.columns.items():
-                        if supplied.kind == "expression":
-                            # ``stateChangeTime=CURRENT_DATE``, ``nFiles+1``: a
-                            # write, but not one that settles a subject to a
-                            # value anything can be traced back through.
-                            continue
                         candidates += 1
                         qualifier, attribute, kind = _subject_of(
                             attributor, spec_class, statement.table, column
@@ -332,6 +327,16 @@ def _outcomes(
         return []
     if supplied.kind == "literal":
         return [(supplied.text, 1, node, [])]
+    if supplied.kind == "expression":
+        # ``stateChangeTime=CURRENT_DATE``, ``nFiles=nFiles+:iFiles``: the
+        # database decides, from the clock or from the row's own prior
+        # contents.  Tier 2 for the reason a bind filled at run time is --
+        # the writer is known and that is what localize and prune read -- and
+        # dropping it instead was not neutral.  Promotion weighs a subject's
+        # literal writes against all of them, so a column the source only ever
+        # increments looked, from its one ``= 0``, like a field with a closed
+        # vocabulary of one.
+        return [(f"runtime({supplied.text})", 2, node, [])]
 
     # A copied column.  The source is named as a subject rather than as a bare
     # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
