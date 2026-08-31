@@ -1102,10 +1102,15 @@ def test_an_attribute_of_something_that_is_not_a_spec_is_a_run_time_outcome():
     assert _outcomes(junctions) == [("runtime(self.status)", 2)]
 
 
-def test_assembled_text_keeps_its_template():
+def test_assembled_text_carries_its_own_search_key():
     """Free text is not a state, so there is no outcome to enumerate -- but the
-    template is the search key that finds this write from a diagnostic seen in
-    production, which is the whole basis of reverse-indexing a message."""
+    rendered expression keeps the literal frame, which is what a diagnostic seen
+    in production is matched against.
+
+    It is deliberately not copied into ``emits``: that field means the branch
+    logs this line, which is true of a diagnostic and false of a computed
+    ``lfn``, and no structural reading separates the two.
+    """
     source = (
         "class JobSpec(object):\n"
         "    _attributes = ('PandaID', 'jobStatus', 'ddmErrorDiag')\n"
@@ -1115,7 +1120,7 @@ def test_assembled_text_keeps_its_template():
     _subjects, junctions, _cov = _progress(source, "pandaserver/taskbuffer/JobSpec.py")
 
     assert _outcomes(junctions) == [("runtime(f'failed to get {n} files')", 2)]
-    assert junctions[0].branches[0].emits == ["failed to get {} files"]
+    assert junctions[0].branches[0].emits == []
 
 
 def test_the_return_alias_shape_is_left_to_its_own_slice():

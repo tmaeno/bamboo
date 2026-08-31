@@ -176,15 +176,13 @@ class Resolved(NamedTuple):
 
     ``conditions`` are guards *beyond* the write's own path condition -- what
     left a local holding this value -- and are kept separate so the caller can
-    drop the ones it already has.  ``emits`` carries the template when the value
-    is assembled text rather than a state.  Both are tuples: a shared mutable
-    default on a NamedTuple is one edit away from a bug.
+    drop the ones it already has.  A tuple, because a shared mutable default on
+    a NamedTuple is one edit away from a bug.
     """
 
     outcome: str
     tier: int
     conditions: tuple[str, ...] = ()
-    emits: tuple[str, ...] = ()
 
 
 def _runtime(value: ast.expr) -> str:
@@ -198,29 +196,6 @@ def _runtime(value: ast.expr) -> str:
         return f"runtime({ast.unparse(value)})"
     except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
         return "runtime(?)"
-
-
-def _template(value: ast.expr) -> Optional[str]:
-    """Render assembled text as a template, interpolations as ``{}``.
-
-    ``job.ddmErrorDiag = f"failed to get {n} files"`` has no outcome worth
-    enumerating -- free text is not a state -- but the template is the search
-    key that finds this write site from a diagnostic observed in production,
-    which is the whole basis of reverse-indexing an error message.  It goes in
-    ``emits`` because that is already where a branch's templates live.
-    """
-    if isinstance(value, ast.Constant):
-        return value.value if isinstance(value.value, str) else None
-    if isinstance(value, ast.JoinedStr):
-        rendered = "".join(_template(piece) or "{}" for piece in value.values)
-        # Nothing but placeholders is not a search key.
-        return rendered if rendered.strip("{}") else None
-    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
-        left, right = _template(value.left), _template(value.right)
-        if left is None and right is None:
-            return None
-        return f"{left or '{}'}{right or '{}'}"
-    return None
 
 
 def _defers_to_return_alias(value: ast.expr) -> bool:
@@ -298,8 +273,15 @@ def _resolve(
             outcome = f"passthrough({SubjectNode.make_name(source, value.attr)})"
             return [Resolved(outcome, 2)]
 
-    template = _template(value)
-    return [Resolved(_runtime(value), 2, (), (template,) if template else ())]
+    # Assembled text lands here too, and the rendered expression is its own
+    # search key: ``runtime(f'no files for {name}')`` carries the literal frame
+    # a production diagnostic can be matched against.  It is deliberately not
+    # copied into ``emits``, which means "the branch logs this" -- true of a
+    # diagnostic, false of a computed ``lfn``, and nothing distinguishes the two
+    # from structure alone (measured: the readings that look like they would --
+    # the template reading as prose, the field never being compared -- misclassify
+    # ``errorDialog`` and ``datasetName`` in opposite directions).
+    return [Resolved(_runtime(value), 2)]
 
 
 def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
@@ -430,7 +412,6 @@ def extract(
                     Branch(
                         outcome=resolved.outcome,
                         path_condition=dominating + list(resolved.conditions),
-                        emits=list(resolved.emits),
                         order=len(junction.branches),
                         tier=resolved.tier,
                     )
