@@ -96,10 +96,12 @@ def _report_levels(ev: evidence.Evidence, top: int) -> None:
         counts = evidence.level_histogram(ev, log_filename=filename)
         threshold = evidence.effective_level(ev, log_filename=filename) or "unknown"
         detail = ", ".join(f"{lv}={counts[lv]}" for lv in evidence.LEVELS if counts[lv])
-        truncated = " [truncated]" if any(r.truncated for r in results) else ""
+        # A truncated sample cannot say what production does *not* emit, so the
+        # mark is on the line that reports the threshold rather than buried.
+        truncated = "" if ev.conclusive(evidence.ANY_LINE_PATTERN, log_filename=filename) else " [partial]"
         click.echo(
-            f"  {filename:<34} {threshold:<8} {sum(counts.values())} line(s) "
-            f"from {len(results)} machine(s){truncated}"
+            f"  {filename:<34} {threshold:<8}{truncated:<10} {sum(counts.values())} line(s) "
+            f"from {len(results)} machine(s)"
         )
         if detail:
             click.echo(f"    {detail}")
@@ -231,8 +233,21 @@ def main(
             raise click.ClickException(
                 "The map names no log files, so there is nothing to ask production."
             )
-        click.echo(f"querying {len(targets)} log file(s) across {len(set(targets.values()))} service(s)")
-        ev = asyncio.run(evidence.collect(evidence.sample_queries(targets), timeout=timeout))
+        # Two kinds of question per file: what levels it carries (a histogram,
+        # over a small recent window) and what its rejection and funnel lines
+        # say (the lines themselves, over a wide one).  Only the stages'
+        # own files are worth the second kind.
+        stage_files = {
+            name: service
+            for name, service in targets.items()
+            if any(name in stage.log_files for stage in fragment.filter_stages)
+        }
+        queries = evidence.sample_queries(targets) + evidence.reading_queries(stage_files)
+        click.echo(
+            f"querying {len(queries)} question(s) over {len(targets)} log file(s) "
+            f"across {len(set(targets.values()))} service(s)"
+        )
+        ev = asyncio.run(evidence.collect(queries, timeout=timeout))
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
     else:
@@ -259,6 +274,17 @@ def main(
 
     _report_levels(ev, top)
     _report_dropped(fragment, ev, top)
+
+    confirmed, promised, unconfirmed = gates.templates_confirmed(fragment, ev)
+    if promised:
+        # A report and not a gate: asserting a template has *gone* needs every
+        # matching line, which a busy broker log does not yield under a cap.
+        # An unconfirmed template is unknown, not missing.
+        click.echo(f"\ndiagnostics confirmed in production: {confirmed}/{promised}")
+        for label in unconfirmed[:top]:
+            click.echo(f"  unconfirmed  {label}")
+        if len(unconfirmed) > top:
+            click.echo(f"  … {len(unconfirmed) - top} more")
 
     click.echo("\ngates:")
     all_passed = True

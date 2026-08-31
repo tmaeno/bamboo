@@ -76,13 +76,42 @@ _RG_NO_MATCH = 1
 # file when its logger first emits, so its absence says the code never ran.
 _MISSING_FILE = re.compile(r"No such file or directory", re.IGNORECASE)
 
-# Bounds sent with every query.  A sample is all any of these gates needs -- a
-# level histogram, the set of tags in use, the order of the funnel steps -- and
-# the alternative is asking a six-gigabyte file for all of itself.  The window
-# also makes the answer recent, which is what a check reported over a time
-# window should be reading in the first place.
+# Bounds sent with every query.  A sample is all any of these gates needs, and
+# the alternative is asking a six-gigabyte file for all of itself.
 DEFAULT_MAX_MATCHES = 5000
 DEFAULT_TAIL_BYTES = 64 * 1024 * 1024
+
+# How many matched lines a result keeps.  Separate from the match cap because
+# the two answer different questions: the cap bounds what the server reads, and
+# this bounds what is written down.  The level query needs no lines at all --
+# its answer is a histogram -- and storing them made a 112 MB evidence file out
+# of what fits in twenty rows.
+DEFAULT_KEEP_LINES = 2000
+
+# The level query is deliberately unselective: it matches every well-formed log
+# line, because what it measures is which levels appear at all.  That makes the
+# window, not the cap, the thing that has to be small -- ``tail -c N | rg -m M``
+# returns the *first* M matches inside the window, so a wide window with a cap
+# yields the oldest lines in it and comes back truncated, which is worse than
+# useless: a truncated sample cannot license "production does not emit this".
+# A window this size holds a few thousand lines, so the cap is never reached,
+# the sample runs up to the present, and the result is conclusive.
+LEVEL_TAIL_BYTES = 256 * 1024
+LEVEL_MAX_MATCHES = 20000
+
+# Patterns for the questions that need to read lines.  Both mirror what the
+# selection recognizer reads out of the source, which is the point: the same
+# convention seen from the other side.
+TAG_PATTERN = r"criteria=-[A-Za-z0-9_.]+"
+FUNNEL_PATTERN = r"candidates passed"
+
+_TAG_IN_LINE = re.compile(r"\bcriteria=(-[\w.]+)")
+_FUNNEL_IN_LINE = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
+
+# ``<jediTaskID=52266181 datasetID=685030095>`` -- what the log wrapper puts in
+# front of every line of one chain run, and so the only trustworthy way to tell
+# where one run ends and the next begins.
+_RUN_KEY = re.compile(r"<([^>]*)>")
 
 # PandaLogger formats every record as
 # ``"%(asctime)s %(name)-12s: %(levelname)-8s %(message)s"``, so the level is
@@ -114,6 +143,7 @@ class GrepQuery(BaseModel):
     service: str
     max_matches: int = DEFAULT_MAX_MATCHES
     tail_bytes: int = DEFAULT_TAIL_BYTES
+    keep_lines: int = DEFAULT_KEEP_LINES
 
     def key(self) -> tuple[str, str, str]:
         return (self.pattern, self.log_filename, self.service)
@@ -128,7 +158,26 @@ class GrepResult(BaseModel):
 
     query: GrepQuery
     machine: str
-    lines: list[str] = Field(default_factory=list)
+    lines: list[str] = Field(
+        default_factory=list,
+        description="The matched lines that were kept -- see the query's keep_lines.",
+    )
+    matched: int = Field(
+        default=0,
+        description=(
+            "How many lines matched, whether or not they were kept.  Read "
+            "instead of len(lines) wherever the question is 'did anything "
+            "match', so that a query keeping no lines still answers it."
+        ),
+    )
+    level_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Lines per log level over everything that matched, computed before "
+            "any were dropped.  The level question's whole answer, at a size "
+            "that can be written down."
+        ),
+    )
     truncated: bool = False
     return_code: Optional[int] = None
     error: Optional[str] = None
@@ -142,6 +191,19 @@ class GrepResult(BaseModel):
         still be in the part that was cut.
         """
         return self.error is None and not self.truncated and self.return_code in (0, _RG_NO_MATCH)
+
+    @property
+    def complete(self) -> bool:
+        """Whether the *lines* here are all of them, not just all the tool found.
+
+        A second, stricter condition than :attr:`conclusive`, and the two are
+        about different halves of the trip: conclusive says the server returned
+        everything it matched, complete says nothing was dropped writing it
+        down.  A gate that searches the lines for something and concludes it is
+        missing needs this one -- with only conclusive, trimming to
+        ``keep_lines`` would turn a kept sample into a false absence.
+        """
+        return self.conclusive and len(self.lines) == self.matched
 
 
 class Evidence(BaseModel):
@@ -182,6 +244,15 @@ class Evidence(BaseModel):
         """Whether every machine's answer to this query can be read negatively."""
         results = self.matching(pattern, **where)
         return bool(results) and all(r.conclusive for r in results)
+
+    def complete(self, pattern: str, **where) -> bool:
+        """Whether every matched line is here to be searched.
+
+        What a gate needs before reporting that something is *not* in the log:
+        conclusive alone allows a sample that was trimmed on the way in.
+        """
+        results = self.matching(pattern, **where)
+        return bool(results) and all(r.complete for r in results)
 
     def services(self) -> set[str]:
         return {r.query.service for r in self.results}
@@ -302,10 +373,16 @@ def _results_from(query: GrepQuery, payload: dict) -> list[GrepResult]:
             # Exit 2 is the log file not being readable -- a wrong filename,
             # usually.  Surfacing stderr turns that into a one-step fix.
             error = stderr or f"grep exited {return_code}"
+        lines = stdout.splitlines()
         answered[machine] = GrepResult(
             query=query,
             machine=machine,
-            lines=stdout.splitlines(),
+            # Counted and tallied over everything that came back, then trimmed:
+            # the histogram has to describe the whole sample, not the part that
+            # happened to be kept.
+            matched=len(lines),
+            level_counts=dict(_levels_in(lines)),
+            lines=lines[: query.keep_lines],
             truncated=bool(row.get("truncated")),
             return_code=return_code,
             error=error,
@@ -361,9 +438,64 @@ def sample_queries(targets: dict[str, str]) -> list[GrepQuery]:
     *targets* maps log filename to the service that writes it.
     """
     return [
-        GrepQuery(pattern=ANY_LINE_PATTERN, log_filename=filename, service=service)
+        GrepQuery(
+            pattern=ANY_LINE_PATTERN,
+            log_filename=filename,
+            service=service,
+            tail_bytes=LEVEL_TAIL_BYTES,
+            max_matches=LEVEL_MAX_MATCHES,
+            keep_lines=0,
+        )
         for filename, service in sorted(targets.items())
     ]
+
+
+def reading_queries(targets: dict[str, str]) -> list[GrepQuery]:
+    """The queries whose answers are the lines themselves.
+
+    Rejection tags and funnel steps, both selective enough that a whole window
+    fits under the cap -- which is what lets their absence mean something.  The
+    level query cannot make that claim and these can.
+    """
+    return [
+        GrepQuery(pattern=pattern, log_filename=filename, service=service)
+        for pattern in (TAG_PATTERN, FUNNEL_PATTERN)
+        for filename, service in sorted(targets.items())
+    ]
+
+
+def observed_tags(evidence: Evidence, log_filename: Optional[str] = None) -> Counter:
+    """Rejection tags production actually emitted, and how often."""
+    counts: Counter = Counter()
+    for line in evidence.lines(TAG_PATTERN, log_filename=log_filename):
+        for tag in _TAG_IN_LINE.findall(line):
+            counts[tag] += 1
+    return counts
+
+
+def observed_runs(evidence: Evidence, log_filename: str) -> list[list[str]]:
+    """Funnel step labels per chain run, in the order production logged them.
+
+    Splitting by run is not a refinement, it is the difference between a
+    working check and noise.  The chain runs once per task and dataset, and a
+    sample spans thousands of them; read as one sequence, the last step of one
+    run followed by the first step of the next is indistinguishable from a
+    transposition.  Read that way against real logs this reported 2416
+    disagreements, none of them real.
+
+    The run key is the log wrapper's own prefix --
+    ``<jediTaskID=52266181 datasetID=685030095>`` -- so the segmentation comes
+    from the code's own idea of what one run is rather than from a guess about
+    timing.
+    """
+    runs: dict[str, list[str]] = {}
+    for line in evidence.lines(FUNNEL_PATTERN, log_filename=log_filename):
+        found = _FUNNEL_IN_LINE.search(line)
+        if not found:
+            continue
+        key = _RUN_KEY.search(line)
+        runs.setdefault(key.group(1) if key else "", []).append(found.group(1).strip())
+    return list(runs.values())
 
 
 # ---------------------------------------------------------------------------
@@ -388,13 +520,26 @@ def service_for_module(rel_path: str) -> str:
     return SERVER if rel_path.startswith("pandaserver") else JEDI
 
 
-def level_histogram(evidence: Evidence, **where) -> Counter:
-    """Count log lines by level in the sample, filtered by service or file."""
+def _levels_in(lines: list[str]) -> Counter:
+    """Tally log levels over *lines*."""
     counts: Counter = Counter()
-    for line in evidence.lines(ANY_LINE_PATTERN, **where):
+    for line in lines:
         found = _LEVEL_IN_LINE.search(line)
         if found:
             counts[found.group(1)] += 1
+    return counts
+
+
+def level_histogram(evidence: Evidence, **where) -> Counter:
+    """Count log lines by level in the sample, filtered by service or file.
+
+    Read from each result's stored tally rather than recounted from its lines,
+    because the level query keeps no lines: the tally is what survives, and it
+    covers the whole sample instead of the part that fit.
+    """
+    counts: Counter = Counter()
+    for result in evidence.matching(ANY_LINE_PATTERN, **where):
+        counts.update(result.level_counts)
     return counts
 
 

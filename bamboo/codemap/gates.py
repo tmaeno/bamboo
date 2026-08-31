@@ -488,7 +488,9 @@ def log_format_recognised(ev: "evidence.Evidence") -> GateResult:
         ]
         for result in broken:
             failures.append(f"{result.query.service}/{result.machine}: {result.error}")
-        sampled = sum(len(r.lines) for r in results)
+        # Counted from what matched, not from what was kept: the level query
+        # keeps no lines, so len(lines) would read as "nothing matched".
+        sampled = sum(r.matched for r in results)
         if sampled and not evidence.level_histogram(ev, log_filename=filename):
             failures.append(
                 f"{filename}: sampled {sampled} line(s), none of which carry a "
@@ -533,21 +535,43 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
         # under two processes and emitting in either one makes the observable
         # real.  Absent everywhere is reported by ``code_paths_are_live``, not
         # here -- a path that never ran is not a broken promise about logging.
-        verdicts = []
+        emitted = False
+        suppressed: list[str] = []
+        unproven: list[str] = []
         for filename in stage.log_files:
-            if ev.file_status(filename) != "present":
+            # Only an *absent* file is a reason to skip.  "unknown" merely means
+            # this particular question was never put to it, and treating that as
+            # a reason to say nothing would silence the gate whenever the level
+            # query was not among the ones issued.
+            if ev.file_status(filename) == "absent":
                 continue
             threshold = evidence.effective_level(ev, log_filename=filename)
             if threshold is None:
                 continue
-            verdicts.append(
-                (filename, threshold, evidence.below_threshold(stage.log_level, threshold))
+            if not evidence.below_threshold(stage.log_level, threshold):
+                # A line at or under this level was seen.  Positive evidence,
+                # so how much of the log was read does not matter.
+                emitted = True
+                break
+            # The opposite direction is not symmetric.  "No line this low in
+            # the sample" only means production suppresses it if the sample was
+            # everything the query asked for; a capped one may simply have
+            # stopped before reaching one.
+            if ev.conclusive(evidence.ANY_LINE_PATTERN, log_filename=filename):
+                suppressed.append(f"{filename} at {threshold}")
+            else:
+                unproven.append(f"{filename} (sample incomplete)")
+        if emitted:
+            continue
+        if suppressed:
+            failures.append(
+                f"{label} emits at {stage.log_level.upper()} but "
+                + ", ".join(suppressed)
             )
-        if not verdicts:
+        elif unproven:
+            unknown.append(f"{label}: {', '.join(unproven)}")
+        else:
             unknown.append(f"{label}: no sample from {', '.join(stage.log_files)}")
-        elif all(suppressed for _, _, suppressed in verdicts):
-            detail = ", ".join(f"{name} at {level}" for name, level, _ in verdicts)
-            failures.append(f"{label} emits at {stage.log_level.upper()} but {detail}")
     return GateResult(
         gate="observables-are-emitted",
         passed=not failures,
@@ -591,6 +615,190 @@ def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateR
     )
 
 
+def _stage_files(fragment: MapFragment) -> dict[str, list]:
+    """Filter stages grouped by the log file they write to."""
+    grouped: dict[str, list] = {}
+    for stage in fragment.filter_stages:
+        for filename in stage.log_files:
+            grouped.setdefault(filename, []).append(stage)
+    return grouped
+
+
+def tags_are_known(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Every rejection tag production emits is a tag the map extracted.
+
+    The strongest direction of the (a) slice's check, and the reason it is
+    worth running against production at all: a tag in the log that the map has
+    no stage for is a cut the map cannot explain -- a blind spot, stated by the
+    system itself rather than inferred.
+
+    It is also the direction that survives an incomplete sample.  Seeing a tag
+    proves it exists no matter how much of the log was read; *not* seeing one
+    proves nothing unless every matched line came back and was kept.
+
+    **Compared across the whole map, not per log file.**  Per file it looked
+    like fourteen blind spots and thirteen were the gate's own fault: shared
+    helpers such as ``AtlasBrokerUtils`` declare no logger, so their stages
+    carry no log file, and the tags they emit surface in whichever broker's log
+    called them.  Grouping by file therefore accuses the map of missing stages
+    it has.  The mismatch is still worth knowing -- it points at exactly those
+    stages whose log file is unresolved -- so it is counted and reported, not
+    turned into a finding about coverage.
+    """
+    extracted = {s.criteria_tag for s in fragment.filter_stages if s.criteria_tag}
+    observed = evidence.observed_tags(ev)
+    failures = [
+        f"production logs {tag} ({observed[tag]}x) and the map has no stage for it"
+        for tag in sorted(set(observed) - extracted)
+    ]
+
+    unknown: list[str] = []
+    misfiled = 0
+    for filename, stages in sorted(_stage_files(fragment).items()):
+        if ev.file_status(filename) == "absent":
+            continue
+        here = evidence.observed_tags(ev, filename)
+        mine = {s.criteria_tag for s in stages if s.criteria_tag}
+        misfiled += len(set(here) & extracted - mine)
+        if ev.complete(evidence.TAG_PATTERN, log_filename=filename):
+            for tag in sorted(mine - set(here)):
+                unknown.append(f"{filename}: the map has {tag} and production never emitted it")
+    if misfiled:
+        unknown.append(
+            f"{misfiled} tag/file pair(s) appear in a log no stage of theirs claims "
+            "-- those stages' log file is unresolved, not their tag"
+        )
+    return GateResult(
+        gate="tags-are-known",
+        passed=not failures,
+        checked=len(observed),
+        failures=failures,
+        inconclusive=unknown,
+        note="A tag with no stage is a cut the map cannot explain -- the system naming its own blind spot.",
+    )
+
+
+def _precedence(runs: list[list[int]]) -> dict[tuple[int, int], list[int]]:
+    """For each pair of steps, how often each order was observed.
+
+    Returns ``{(lower rank, higher rank): [in map order, reversed]}``.
+
+    Counting orders rather than cutting the log into traversals is what makes
+    this answerable at all.  Brokerage walks the chain many times under one
+    ``<jediTaskID=... datasetID=...>`` -- thirteen times in one observed run --
+    and the log marks no boundary between them, so every attempt to segment it
+    was a guess that cost false findings: reading the run as one sequence gave
+    22, splitting on a return to the start gave 8, splitting on the size of the
+    backward jump gave 2, and all of them were wraps rather than disagreements.
+
+    A majority needs no boundary.  Each wrap contributes one reversed pair
+    against many in order, so noise stays a minority, while a step production
+    really does run out of place is reversed every time.
+    """
+    counts: dict[tuple[int, int], list[int]] = {}
+    for run in runs:
+        seen: Counter = Counter()
+        for rank in run:
+            for earlier, times in seen.items():
+                if earlier == rank:
+                    continue
+                key = (min(earlier, rank), max(earlier, rank))
+                tally = counts.setdefault(key, [0, 0])
+                tally[0 if earlier < rank else 1] += times
+            seen[rank] += 1
+    return counts
+
+
+def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Production runs the chain in the order the map extracted.
+
+    "Which step cut the candidates" is a question about position, so an order
+    that disagrees makes every answer off by one step.  Compared as a
+    subsequence rather than an equality: the sample spans many tasks and a
+    chain can exit early, so production shows a prefix or a gapped run of the
+    map's order, and only a genuine transposition is a finding.
+    """
+    grouped = _stage_files(fragment)
+    failures: list[str] = []
+    checked = 0
+    for filename, stages in sorted(grouped.items()):
+        expected = [s.funnel_label for s in sorted(stages, key=lambda s: s.order) if s.funnel_label]
+        rank = {label: i for i, label in enumerate(expected)}
+        runs = [
+            [rank[label] for label in run if label in rank]
+            for run in evidence.observed_runs(ev, filename)
+        ]
+        for (lower, higher), (in_order, reversed_) in sorted(_precedence(runs).items()):
+            checked += 1
+            if reversed_ > in_order:
+                failures.append(
+                    f"{filename}: production logs {expected[lower]!r} after "
+                    f"{expected[higher]!r} in {reversed_} of {in_order + reversed_} "
+                    "observations, the map has it before"
+                )
+    return GateResult(
+        gate="funnel-order-matches",
+        passed=not failures,
+        checked=checked,
+        failures=failures,
+        note="Which step cut the candidates is a question about position.",
+    )
+
+
+def templates_confirmed(
+    fragment: MapFragment, ev: "evidence.Evidence"
+) -> tuple[int, int, list[str]]:
+    """Which promised diagnostics production was actually seen to write.
+
+    Returns ``(confirmed, checked, unconfirmed)``.
+
+    **A report, not a gate, and the reason is a real limit of this method.**
+    The map points an investigation at a template, and between releases the
+    wording is exactly what moves -- ``AtlasProdTaskBroker``'s space check went
+    from "free ... reserved" to "usable ... projected demand" -- so it would be
+    valuable to fail when a template has gone.  But asserting a template is
+    *absent* needs every matching line, and a busy broker log yields tens of
+    thousands under a cap: the complete sample that claim requires is not
+    obtainable through this transport at all.
+
+    So only the direction that works is reported.  A confirmed template is one
+    an investigation can rely on; an unconfirmed one is unknown, not missing,
+    and saying otherwise would be exactly the "cut sample read as absence"
+    mistake the rest of this module is built to avoid.
+    """
+    confirmed: list[str] = []
+    unconfirmed: list[str] = []
+    for filename, stages in sorted(_stage_files(fragment).items()):
+        haystack = "\n".join(ev.lines(evidence.TAG_PATTERN, log_filename=filename))
+        if not haystack:
+            continue
+        for stage in stages:
+            for template in stage.emits:
+                stem = _template_stem(template)
+                if not stem:
+                    continue
+                label = f"{stage.criteria_tag or stage.funnel_label} ({filename})"
+                (confirmed if stem in haystack else unconfirmed).append(label)
+    return len(confirmed), len(confirmed) + len(unconfirmed), unconfirmed
+
+
+# A template's longest run of fixed words.  Taking the prefix instead was the
+# obvious choice and the wrong one: ``"  skip site={} due to disk shortage
+# criteria=-disk"`` begins with ten characters shared by half the messages in
+# the file, so a prefix rule either matched everything or, with a floor high
+# enough to be distinctive, skipped nearly every template there is.  What
+# identifies the message is on the other side of the interpolation.
+_MIN_STEM = 12
+_FIELD = re.compile(r"\{[^{}]*\}")
+
+
+def _template_stem(template: str) -> Optional[str]:
+    """The longest literal fragment, or None when none is distinctive enough."""
+    fragments = [part.strip() for part in _FIELD.split(template)]
+    longest = max(fragments, key=len, default="")
+    return longest if len(longest) >= _MIN_STEM else None
+
+
 def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateResult]:
     """Run the gates that need production evidence.
 
@@ -604,6 +812,8 @@ def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateR
     results.append(code_paths_are_live(fragment, ev))
     if fragment.filter_stages:
         results.append(observables_are_emitted(fragment, ev))
+        results.append(tags_are_known(fragment, ev))
+        results.append(funnel_order_matches(fragment, ev))
     return results
 
 

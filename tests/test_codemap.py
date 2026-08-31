@@ -2266,14 +2266,23 @@ def _log_line(level: str, message: str, name: str = "JobBroker") -> str:
 
 
 def _sample(lines: list[str], filename: str = BROKER_LOG, **kwargs) -> evidence.GrepResult:
+    """A result shaped the way the fetch path shapes one.
+
+    ``matched`` and ``level_counts`` are filled in here for the same reason the
+    fetch fills them: the level query keeps no lines, so a fixture that only
+    set ``lines`` would be testing a result that cannot occur.
+    """
+    pattern = kwargs.pop("pattern", evidence.ANY_LINE_PATTERN)
     return evidence.GrepResult(
         query=evidence.GrepQuery(
-            pattern=evidence.ANY_LINE_PATTERN,
+            pattern=pattern,
             log_filename=filename,
             service=kwargs.pop("service", evidence.JEDI),
         ),
         machine=kwargs.pop("machine", "m1"),
         lines=lines,
+        matched=len(lines),
+        level_counts=dict(evidence._levels_in(lines)),
         return_code=kwargs.pop("return_code", 0),
         **kwargs,
     )
@@ -2464,7 +2473,7 @@ def test_log_format_recognised_passes_on_a_well_formed_sample():
     assert gates.log_format_recognised(_evidence(_sample([_log_line("INFO", "a")]))).passed
 
 
-def _stage(tag: str, level: str, owner: str, files: list[str]) -> FilterStageNode:
+def _stage(tag: str, level: str, owner: str, files: list[str], **kwargs) -> FilterStageNode:
     return FilterStageNode(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -2473,6 +2482,7 @@ def _stage(tag: str, level: str, owner: str, files: list[str]) -> FilterStageNod
         criteria_tag=tag,
         log_level=level,
         log_files=files,
+        **kwargs,
     )
 
 
@@ -2756,3 +2766,321 @@ def test_two_identical_builds_report_as_identical():
 
     assert result.identical
     assert result.unchanged == 1
+
+
+# ---------------------------------------------------------------------------
+# Reading absence correctly, and the gates that depend on it
+# ---------------------------------------------------------------------------
+#
+# Seeing a line proves it is emitted however little of the log was read.  Not
+# seeing one proves nothing unless everything the query matched came back.
+# Every gate below turns on that asymmetry.
+
+
+def _tag_sample(lines: list[str], filename: str = BROKER_LOG, **kwargs):
+    return _sample(lines, filename, pattern=evidence.TAG_PATTERN, **kwargs)
+
+
+def test_the_level_query_keeps_a_histogram_and_no_lines():
+    """A 112 MB evidence file was 626,041 lines standing in for twenty rows."""
+    (query,) = evidence.sample_queries({BROKER_LOG: evidence.JEDI})
+
+    assert query.keep_lines == 0
+    assert query.tail_bytes == evidence.LEVEL_TAIL_BYTES
+
+
+def test_the_level_window_is_small_so_the_cap_is_not_reached():
+    """``tail -c N | rg -m M`` returns the *first* M matches inside the window.
+
+    A wide window with a cap therefore yields the oldest lines in it and comes
+    back truncated, and a truncated sample cannot license "production does not
+    emit this".  The window is what has to be small, not the cap.
+    """
+    assert evidence.LEVEL_TAIL_BYTES < evidence.DEFAULT_TAIL_BYTES
+    assert evidence.LEVEL_MAX_MATCHES > evidence.DEFAULT_MAX_MATCHES
+
+
+def test_a_kept_line_budget_does_not_hide_that_something_matched():
+    """``matched`` is read wherever the question is "did anything match", so a
+    query keeping no lines still answers it."""
+    query = evidence.GrepQuery(
+        pattern=evidence.ANY_LINE_PATTERN,
+        log_filename=BROKER_LOG,
+        service=evidence.JEDI,
+        keep_lines=0,
+    )
+    payload = {
+        "expected_machines": ["m1"],
+        "results": [
+            {
+                "machine_name": "m1",
+                "result": _log_line("INFO", "a") + "\n" + _log_line("DEBUG", "b") + "\n",
+                "return_code": 0,
+            }
+        ],
+    }
+
+    (result,) = evidence._results_from(query, payload)
+
+    assert result.lines == []
+    assert result.matched == 2
+    assert result.level_counts == {"INFO": 1, "DEBUG": 1}
+
+
+def test_a_suppressed_observable_needs_a_complete_sample_to_fail():
+    """The bug this exists to stop: a capped sample that happened to contain no
+    DEBUG line would have been read as "production runs at INFO"."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-diskIO", "debug", BROKER, [BROKER_LOG])],
+    )
+
+    complete = gates.observables_are_emitted(
+        fragment, _evidence(_sample([_log_line("INFO", "a")]))
+    )
+    partial = gates.observables_are_emitted(
+        fragment, _evidence(_sample([_log_line("INFO", "a")], truncated=True))
+    )
+
+    assert not complete.passed
+    assert partial.passed
+    assert "sample incomplete" in partial.inconclusive[0]
+
+
+def test_seeing_the_line_needs_no_complete_sample():
+    """The other half of the asymmetry: positive evidence stands on its own."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-diskIO", "debug", BROKER, [BROKER_LOG])],
+    )
+    ev = _evidence(_sample([_log_line("DEBUG", "a")], truncated=True))
+
+    result = gates.observables_are_emitted(fragment, ev)
+
+    assert result.passed
+    assert result.inconclusive == []
+
+
+def test_a_tag_production_emits_with_no_stage_is_a_blind_spot():
+    """The system naming a cut the map cannot explain.
+
+    Positive evidence, so it fails the gate even from a partial read.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-disk", "info", BROKER, [BROKER_LOG])],
+    )
+    ev = _evidence(
+        _tag_sample(
+            [
+                _log_line("INFO", "skip site=X criteria=-disk"),
+                _log_line("INFO", "skip site=Y criteria=-newcut"),
+            ],
+            truncated=True,
+        )
+    )
+
+    result = gates.tags_are_known(fragment, ev)
+
+    assert not result.passed
+    assert result.failures == ["production logs -newcut (1x) and the map has no stage for it"]
+
+
+def test_a_tag_the_map_has_and_production_did_not_show_needs_a_complete_sample():
+    """Otherwise the gate accuses the extraction of inventing a stage that is
+    merely quiet."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-disk", "info", BROKER, [BROKER_LOG]),
+            _stage("-rse", "info", BROKER, [BROKER_LOG]),
+        ],
+    )
+    lines = [_log_line("INFO", "skip site=X criteria=-disk")]
+
+    partial = gates.tags_are_known(fragment, _evidence(_tag_sample(lines, truncated=True)))
+    complete = gates.tags_are_known(fragment, _evidence(_tag_sample(lines)))
+
+    assert partial.inconclusive == []
+    assert complete.inconclusive == [
+        f"{BROKER_LOG}: the map has -rse and production never emitted it"
+    ]
+
+
+def test_a_transposed_funnel_step_is_a_finding():
+    """"Which step cut the candidates" is a question about position, so an
+    order that disagrees makes every answer off by one step."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="memory check", order=1),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "100 candidates passed memory check"),
+                _log_line("INFO", "80 candidates passed disk check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    result = gates.funnel_order_matches(fragment, ev)
+
+    assert not result.passed
+    assert "after" in result.failures[0]
+
+
+def test_repeated_traversals_do_not_read_as_transpositions():
+    """Brokerage walks the chain many times under one task and dataset -- once
+    observed thirteen times -- and the log marks no boundary between them.
+
+    Every attempt to cut the run into traversals cost false findings: read as
+    one sequence 22, splitting on a return to the start 8, splitting on the
+    size of the backward jump 2.  A majority needs no boundary, because each
+    wrap is one reversed pair against many in order.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="status check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="backlog check", order=1),
+        ],
+    )
+    # Three traversals of a two-step chain: the wrap from "backlog" back to
+    # "status" is exactly the shape a size rule cannot tell from a swap.
+    run = ["status check", "backlog check"] * 3
+    ev = _evidence(
+        _sample(
+            [_log_line("INFO", f"<jediTaskID=1 datasetID=2> 5 candidates passed {label}") for label in run],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    assert gates.funnel_order_matches(fragment, ev).passed
+
+
+def test_an_early_exit_is_not_a_transposition():
+    """The sample spans many tasks and a chain can exit early, so production
+    shows a prefix or a gapped run of the map's order."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="memory check", order=1),
+            _stage("-c", "info", BROKER, [BROKER_LOG], funnel_label="pilot check", order=2),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "100 candidates passed disk check"),
+                _log_line("INFO", "40 candidates passed pilot check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    assert gates.funnel_order_matches(fragment, ev).passed
+
+
+def test_a_template_seen_in_production_is_confirmed():
+    """The only direction this transport can answer.
+
+    Asserting a template is *gone* needs every matching line, and a busy broker
+    log yields tens of thousands under a cap -- so an unconfirmed template is
+    unknown, not missing.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage(
+                "-disk",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                emits=["  skip site={} due to disk shortage criteria=-disk"],
+            ),
+            _stage(
+                "-space",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                emits=["skip nucleus since disk shortage ({0} TB) criteria=-space"],
+            ),
+        ],
+    )
+    ev = _evidence(
+        _tag_sample([_log_line("INFO", "  skip site=X due to disk shortage criteria=-disk")])
+    )
+
+    confirmed, checked, unconfirmed = gates.templates_confirmed(fragment, ev)
+
+    assert (confirmed, checked) == (1, 2)
+    assert unconfirmed == [f"-space ({BROKER_LOG})"]
+
+
+def test_the_stem_is_the_longest_fixed_run_not_the_prefix():
+    """``"  skip site={} due to disk shortage"`` begins with ten characters
+    shared by half the file; what identifies the message is on the other side
+    of the interpolation.  Taking the prefix skipped nearly every template."""
+    assert gates._template_stem("  skip site={} due to disk shortage") == "due to disk shortage"
+    # Below the floor, so not distinctive enough to search for.
+    assert gates._template_stem("{} sites left") is None
+    assert gates._template_stem("skip={}") is None
+    assert gates._template_stem("{} of {}") is None
+
+
+def test_returning_everything_and_writing_it_all_down_are_different():
+    """Two halves of the trip.  A gate that searches the lines and concludes
+    something is missing needs the stricter one, or trimming to keep_lines
+    turns a kept sample into a false absence."""
+    kept_all = evidence.GrepResult(
+        query=evidence.GrepQuery(
+            pattern=evidence.TAG_PATTERN, log_filename=BROKER_LOG, service=evidence.JEDI
+        ),
+        machine="m1",
+        lines=["a", "b"],
+        matched=2,
+        return_code=0,
+    )
+    trimmed = kept_all.model_copy(update={"lines": ["a"]})
+
+    assert kept_all.conclusive and kept_all.complete
+    assert trimmed.conclusive and not trimmed.complete
+
+
+def test_an_unconfirmed_template_is_never_called_missing():
+    """A cut sample read as absence is the mistake this module exists to avoid,
+    so the report has no failing direction to get wrong."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage(
+                "-space",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                emits=["skip nucleus since disk shortage ({0} TB) criteria=-space"],
+            )
+        ],
+    )
+    trimmed = _tag_sample([_log_line("INFO", "something else criteria=-space")]).model_copy(
+        update={"matched": 900, "truncated": True}
+    )
+
+    confirmed, checked, unconfirmed = gates.templates_confirmed(fragment, _evidence(trimmed))
+
+    assert (confirmed, checked) == (0, 1)
+    assert unconfirmed == [f"-space ({BROKER_LOG})"]
