@@ -17,7 +17,7 @@ such a helper between two releases.
 from __future__ import annotations
 
 import ast
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 
 def functions_with_owner(
@@ -57,9 +57,9 @@ def enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFun
     return None
 
 
-def _single_definition(
+def single_definition(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> Optional[str]:
+) -> Optional[ast.expr]:
     """Return the expression assigned to *name*, when exactly one assigns it.
 
     A condition written as a bare local name says nothing on its own: ``if not
@@ -71,8 +71,12 @@ def _single_definition(
     Returns ``None`` when several statements assign the name.  That is the
     fan-out case (a flag set from many places), where one expression would
     misrepresent the branch rather than explain it.
+
+    The node rather than its text, because the other caller resolves what the
+    expression *evaluates to* -- a local holding a declared mapping, which needs
+    the tree.
     """
-    found: list[ast.AST] = []
+    found: list[ast.expr] = []
     for node in ast.walk(func):
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -83,12 +87,7 @@ def _single_definition(
                         if isinstance(element, ast.Name) and element.id == name:
                             found.append(node.value)
                             del index
-    if len(found) != 1:
-        return None
-    try:
-        return ast.unparse(found[0])
-    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
-        return None
+    return found[0] if len(found) == 1 else None
 
 
 def path_condition(node: ast.AST) -> list[str]:
@@ -159,9 +158,11 @@ def _exclusive(one: list[str], other: list[str]) -> bool:
 
 
 def literal_values(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    resolve: Optional[Callable[[ast.expr, ast.AST], list[str]]] = None,
 ) -> list[tuple[str, list[str], int]]:
-    """``(literal, conditions, line)`` for every ``name = "<literal>"`` in *func*.
+    """``(value, conditions, line)`` for every settled ``name = ...`` in *func*.
 
     The line is the assignment's, because that is where the value is decided --
     an anchor pointing at the use would send a reader to the place that merely
@@ -182,20 +183,37 @@ def literal_values(
     Exclusive siblings are skipped, or every branch of a chain would carry the
     negation of every other: ``-dest_blacklisted`` would come out requiring
     ``not (totalQueued >= limit)``, a condition with nothing to do with it.
+
+    What counts as settled is the caller's to widen.  By default a string
+    literal, and nothing here knows anything else; *resolve* lets a caller that
+    does -- one holding the corpus's declared mappings -- settle
+    ``newTaskStatus = commandStatusMap[commandStr]["doing"]`` to the six statuses
+    it can hold.  One assignment may then contribute several values, all under
+    the same guards, since the guards are what reached the assignment and the
+    mapping is what chose among its entries.
     """
-    found: list[tuple[ast.Assign, str]] = [
-        (node, node.value.value)
-        for node in ast.walk(func)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)
-        and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
-        and enclosing_function(node) is func
-    ]
+
+    def literal_only(expression: ast.expr, _func: ast.AST) -> list[str]:
+        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+            return [expression.value]
+        return []
+
+    settle = resolve or literal_only
+    found: list[tuple[ast.Assign, list[str]]] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        if enclosing_function(node) is not func:
+            continue
+        settled = settle(node.value, func)
+        if settled:
+            found.append((node, settled))
     found.sort(key=lambda pair: pair[0].lineno)
     conditions = {node: path_condition(node) for node, _ in found}
     values: list[tuple[str, list[str], int]] = []
-    for assignment, literal in found:
+    for assignment, settled in found:
         guards = list(conditions[assignment])
         for other, _ in found:
             if other.lineno <= assignment.lineno:
@@ -205,7 +223,9 @@ def literal_values(
             test = own_test(other)
             if test and f"not ({test})" not in guards:
                 guards.append(f"not ({test})")
-        values.append((literal, guards, assignment.lineno))
+        # A copy per value: two branches sharing one condition list is a
+        # mutation away from one of them rewriting the other's reason.
+        values.extend((value, list(guards), assignment.lineno) for value in settled)
     return values
 
 
@@ -216,8 +236,14 @@ def _substitute_bare_name(
     target = test.operand if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) else test
     if not isinstance(target, ast.Name):
         return rendered
-    definition = _single_definition(func, target.id)
-    if definition is None or definition == target.id:
+    node = single_definition(func, target.id)
+    if node is None:
+        return rendered
+    try:
+        definition = ast.unparse(node)
+    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+        return rendered
+    if definition == target.id:
         return rendered
     return f"{rendered}  [{target.id} := {definition}]"
 

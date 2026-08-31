@@ -55,11 +55,12 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import sql, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
+    literal_values,
     path_condition,
 )
 
@@ -137,6 +138,7 @@ def extract(
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
     uncovered: set[str] = set()
+    settle = values.resolver(values.declared_mappings(modules))
 
     for module in modules:
         attach_parents(module.tree)
@@ -173,6 +175,7 @@ def extract(
                             column=column,
                             supplied=supplied,
                             spec_class=spec_class,
+                            settle=settle,
                         )
                         if not outcomes:
                             continue
@@ -243,12 +246,19 @@ def _outcomes(
     column: str,
     supplied: sql.ColumnValue,
     spec_class: Optional[str],
-) -> list[tuple[str, int, ast.stmt]]:
-    """Return ``(outcome, tier, node)`` for one written column.
+    settle,
+) -> list[tuple[str, int, ast.stmt, list[str]]]:
+    """Return ``(outcome, tier, node, extra conditions)`` for one written column.
 
     The node is where the value was decided, which differs by form: a bind is
     decided at the Python assignment filling it, and a literal or a copied
     column at the fragment that put it in the statement.
+
+    The extra conditions are for the one form where the deciding node is not the
+    whole story.  A bind filled from a local is decided twice over -- the guards
+    that reached ``varMap[":status"] = newTaskStatus`` say the write happened,
+    and the guards on the assignment that gave the local its value say which
+    value.  Both are needed, and neither is derivable from the other's node.
     """
     if supplied.kind == "bind":
         if run.varmap is None:
@@ -256,20 +266,33 @@ def _outcomes(
         found = []
         for bind in sql.bound_values(func, run.varmap, supplied.text):
             value = bind.value
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                found.append((value.value, 1, bind))
-            else:
-                # The writer is known, the value is not until run time.
-                # Recorded rather than dropped: localize and prune read
-                # observed values, so they work from the writer alone.
-                found.append((f"runtime({ast.unparse(value)})", 2, bind))
+            settled = settle(value, func)
+            if settled:
+                found.extend((outcome, 1, bind, []) for outcome in settled)
+                continue
+            if isinstance(value, ast.Name):
+                # Reaching definitions, the same reading the attribute slice
+                # makes of a local: 19% of the corpus's writes fill the bind
+                # from a variable a guarded chain assigned above it.
+                reached = literal_values(func, value.id, settle)
+                if reached:
+                    dominating = path_condition(bind)
+                    found.extend(
+                        (outcome, 1, bind, [c for c in conditions if c not in dominating])
+                        for outcome, conditions, _line in reached
+                    )
+                    continue
+            # The writer is known, the value is not until run time.
+            # Recorded rather than dropped: localize and prune read
+            # observed values, so they work from the writer alone.
+            found.append((f"runtime({ast.unparse(value)})", 2, bind, []))
         return found
 
     node = _deciding_fragment(func, run.variable, column, supplied)
     if node is None:
         return []
     if supplied.kind == "literal":
-        return [(supplied.text, 1, node)]
+        return [(supplied.text, 1, node, [])]
 
     # A copied column.  The source is named as a subject rather than as a bare
     # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
@@ -279,7 +302,7 @@ def _outcomes(
         attributor, spec_class, statement.table, supplied.text
     )
     outcome = f"passthrough({SubjectNode.make_name(source, attribute)})"
-    return [(outcome, 2, node)]
+    return [(outcome, 2, node, [])]
 
 
 def _record(
@@ -291,7 +314,7 @@ def _record(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec_class: str,
     attribute: str,
-    outcomes: list[tuple[str, int, ast.stmt]],
+    outcomes: list[tuple[str, int, ast.stmt, list[str]]],
 ) -> None:
     """Add one branch per decided value to this write site's junction."""
     subject = SubjectNode.make_name(spec_class, attribute)
@@ -319,8 +342,8 @@ def _record(
         junctions[name] = junction
 
     known = {(branch.outcome, tuple(branch.path_condition)) for branch in junction.branches}
-    for outcome, tier, node in outcomes:
-        condition = path_condition(node)
+    for outcome, tier, node, extra in outcomes:
+        condition = path_condition(node) + extra
         if (outcome, tuple(condition)) in known:
             continue
         known.add((outcome, tuple(condition)))

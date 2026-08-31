@@ -47,6 +47,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
+from bamboo.codemap.panda import values
 from bamboo.codemap.panda.attribution import (
     NOT_A_SPEC,
     UNRESOLVED_CLASS,
@@ -227,6 +228,7 @@ def _resolve(
     attributor: SpecAttributor,
     owner_class: Optional[str],
     spec_names: set[str],
+    settle,
 ) -> list[Resolved]:
     """Return every outcome *value* can settle to, with the tier of each.
 
@@ -243,6 +245,9 @@ def _resolve(
     cannot exist.  Nothing catches it either: the reference gate deliberately
     excuses a passthrough that lands off the promoted set, because a genuine
     provenance terminal looks exactly like that.
+
+    *settle* is the corpus-level value resolver, which is what lets a subscript
+    of a declared mapping come out as the values it can hold.
     """
     if isinstance(value, ast.Constant):
         if isinstance(value.value, str):
@@ -254,7 +259,7 @@ def _resolve(
         return [Resolved(ast.unparse(value), 1)]
 
     if isinstance(value, ast.Name) and func is not None:
-        resolved = literal_values(func, value.id)
+        resolved = literal_values(func, value.id, settle)
         if resolved:
             return [
                 Resolved(
@@ -264,6 +269,12 @@ def _resolve(
                 )
                 for literal, conditions, _line in resolved
             ]
+
+    settled = settle(value, func)
+    if settled:
+        # ``commandStatusMap()[commandStr]["done"]`` -- the key is only known at
+        # run time, the values it can select are not.
+        return [Resolved(outcome, 1) for outcome in settled]
 
     if isinstance(value, ast.Attribute) and value.attr in spec_names:
         source, _basis = attributor.attribute_write(
@@ -331,6 +342,7 @@ def extract(
     vocabularies = declared_vocabularies(modules, declarations)
     attributor = SpecAttributor(declarations, class_bases(modules))
     attributor.learn_element_types(modules)
+    settle = values.resolver(values.declared_mappings(modules))
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -407,6 +419,7 @@ def extract(
                 attributor=attributor,
                 owner_class=owner_class,
                 spec_names=spec_attribute_names,
+                settle=settle,
             ):
                 junction.branches.append(
                     Branch(
