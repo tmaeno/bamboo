@@ -1853,6 +1853,124 @@ def test_a_tagged_rejection_carries_its_condition():
     assert diskio.inputs == ["diskio_usage", "diskio_limit", "diskio_task"]
 
 
+_VARIABLE_TAG = '''
+class JobBrokerBase:
+    def add_summary_message(self, old_list, new_list, message, tmp_log, msg_map):
+        for site in msg_map:
+            tmp_log.info(msg_map[site])
+
+class AtlasProdJobBroker(JobBrokerBase):
+    def doBrokerage(self, taskSpec, scanSiteList):
+        nucleus = taskSpec.nucleus
+        if nucleus:
+            msg_map = {}
+            for tmpPandaSiteName in scanSiteList:
+                criteria = "-link_unusable"
+                reason = ""
+                if nucleus == tmpAtlasSiteName:
+                    pass
+                elif nucleus in unwritable_over_wan:
+                    reason = "unwritable over WAN"
+                    criteria = "-dest_blacklisted"
+                elif totalQueued >= self.total_queue_threshold:
+                    reason = "too many queued"
+                    criteria = "-links_full"
+                elif closeness == BLOCKED_LINK:
+                    reason = "blocked link"
+                tmpStr = f"  skip site={tmpPandaSiteName} due to {reason}"
+                tmpStr += f": criteria={criteria}"
+                msg_map[tmpPandaSiteName] = tmpStr
+            self.add_summary_message(oldScanSiteList, scanSiteList, "link check", tmpLog, msg_map)
+'''
+
+
+def test_a_tag_assigned_to_a_variable_is_still_a_tag():
+    """The blind spot ``tags-are-known`` found from the other side.
+
+    ``AtlasProdJobBroker`` decides three of its reasons by assigning them to a
+    variable and interpolating it later, so nothing in the message names a tag.
+    Production logs ``criteria=-link_unusable`` and the map had no stage for it,
+    while the funnel counted a cut at "link check" the slice could not explain --
+    the same hole seen twice.
+    """
+    stages, _cov, gaps = _selection(
+        (_VARIABLE_TAG, "pandajedi/jedibrokerage/AtlasProdJobBroker.py")
+    )
+
+    by_tag = {s.criteria_tag: s for s in stages}
+    assert set(by_tag) == {"-link_unusable", "-dest_blacklisted", "-links_full"}
+    assert {s.funnel_label for s in stages} == {"link check"}
+    # Anchored where the reason is decided, not where the message is built.
+    assert by_tag["-dest_blacklisted"].anchor.line_start < by_tag["-links_full"].anchor.line_start
+    assert gaps == []
+
+
+def test_a_default_tag_carries_what_would_have_replaced_it():
+    """Reassignment is the one thing dominating-guard analysis cannot see.
+
+    ``criteria = "-link_unusable"`` sits above the chain that overwrites it, so
+    its own guard is necessary and not sufficient; left at that the map would
+    claim this cut happens whenever the task has a nucleus.
+    """
+    stages, _cov, _gaps = _selection(
+        (_VARIABLE_TAG, "pandajedi/jedibrokerage/AtlasProdJobBroker.py")
+    )
+
+    default = next(s for s in stages if s.criteria_tag == "-link_unusable")
+
+    assert default.conditions == [
+        "nucleus  [nucleus := taskSpec.nucleus]",
+        "not (nucleus in unwritable_over_wan)",
+        "not (totalQueued >= self.total_queue_threshold)",
+    ]
+
+
+def test_a_sibling_branch_is_not_treated_as_overwriting():
+    """Comparing nesting depth looked right and was not: Python nests an ``elif``
+    inside the previous ``if``'s ``orelse``, so a sibling is always deeper.  That
+    put ``not (totalQueued >= limit)`` on the cut for a blacklisted destination,
+    a condition with nothing to do with it."""
+    stages, _cov, _gaps = _selection(
+        (_VARIABLE_TAG, "pandajedi/jedibrokerage/AtlasProdJobBroker.py")
+    )
+
+    blacklisted = next(s for s in stages if s.criteria_tag == "-dest_blacklisted")
+
+    assert blacklisted.conditions == [
+        "nucleus  [nucleus := taskSpec.nucleus]",
+        "not (nucleus == tmpAtlasSiteName)",
+        "nucleus in unwritable_over_wan",
+    ]
+
+
+def test_a_variable_tag_promises_no_template():
+    """``": criteria={}"`` is the tail of a message assembled across statements
+    and is shared by every rejection in the file, so offering it as the line to
+    look for would confirm nothing."""
+    stages, _cov, _gaps = _selection(
+        (_VARIABLE_TAG, "pandajedi/jedibrokerage/AtlasProdJobBroker.py")
+    )
+
+    assert all(s.emits == [] for s in stages)
+    # The level still comes from the helper that logs the map.
+    assert {s.log_level for s in stages} == {"info"}
+
+
+def test_an_interpolated_criteria_that_is_not_a_bare_name_is_not_a_tag():
+    """``f"start with criteria={str(criteria)}"`` is a progress log, not a
+    rejection.  Requiring a bare name keeps the two other interpolated
+    ``criteria=`` messages in the corpus out without naming them."""
+    source = '''
+class TaskEventModule:
+    def send_command(self, criteria):
+        tmpLog.debug(f"start with criteria={str(criteria)}")
+'''
+
+    stages, _cov, _gaps = _selection((source, "pandaserver/taskbuffer/task_event_module.py"))
+
+    assert stages == []
+
+
 def test_stage_order_follows_the_chain():
     """"Which step cut the candidates" is a question about position."""
     stages, _cov, _gaps = _selection((_BROKER, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))

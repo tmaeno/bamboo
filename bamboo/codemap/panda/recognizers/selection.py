@@ -39,6 +39,7 @@ from typing import Iterator, Optional
 
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
 from bamboo.codemap.panda.pathcond import (
+    ancestors,
     attach_parents,
     enclosing_function,
     functions_with_owner,
@@ -49,6 +50,10 @@ SLICE_NAME = "selection"
 
 # ``criteria=-diskIO`` -- the reason, per rejected candidate.
 _TAG = re.compile(r"\bcriteria=(-?[\w.]+)")
+# The same reason assigned to a variable first: ``criteria = "-link_unusable"``.
+# Only a signed word, so an unrelated string assigned to the same name is not
+# swept up as a tag.
+_TAG_LITERAL = re.compile(r"[-+][\w.]+\Z")
 # ``f"{len(scanSiteList)} candidates passed scratch disk check"`` -- the step.
 _FUNNEL = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 _SUMMARY = "add_summary_message"
@@ -110,6 +115,112 @@ def _identifiers(expression: str) -> list[str]:
         elif isinstance(node, ast.Name):
             names.append(node.id)
     return names
+
+
+def _interpolated_tag_name(node: ast.AST) -> Optional[str]:
+    """The variable a ``criteria=`` value is read from, when it is one.
+
+    ``tmpStr += f": criteria={criteria}"`` names no tag.  The reason was decided
+    earlier, by whichever branch last assigned that variable, so a recognizer
+    reading only the literal form sees a step that cuts candidates and has
+    nothing to say about why -- which is what ``tags-are-known`` caught from the
+    other side: production logs ``criteria=-link_unusable`` and the map had no
+    stage for it.
+
+    Requiring a bare name is what keeps this narrow.  The two other interpolated
+    ``criteria=`` messages in the corpus render ``str(criteria)`` and are
+    progress logs rather than rejections; a call is not a name, so they stay out
+    without needing to be excluded by hand.
+    """
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    for index, value in enumerate(node.values[:-1]):
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        if not value.value.endswith("criteria="):
+            continue
+        following = node.values[index + 1]
+        if isinstance(following, ast.FormattedValue) and isinstance(following.value, ast.Name):
+            return following.value.id
+    return None
+
+
+def _tag_assignments(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[ast.Assign, str]]:
+    """Every ``name = "<tag>"`` in *func*, in source order."""
+    found = [
+        (node, node.value.value)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and _TAG_LITERAL.match(node.value.value)
+        and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        and enclosing_function(node) is func
+    ]
+    found.sort(key=lambda pair: pair[0].lineno)
+    return found
+
+
+def _own_test(node: ast.AST) -> Optional[str]:
+    """The test of the innermost ``if``/``elif`` whose body contains *node*.
+
+    Read from the tree rather than taken as the last entry of
+    :func:`path_condition`, whose entries may carry the ``[name := expr]``
+    annotation -- wrapping that in ``not (...)`` produces text nothing can read
+    back.
+    """
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, ast.If) and previous in ancestor.body:
+            try:
+                return ast.unparse(ancestor.test)
+            except Exception:  # noqa: BLE001
+                return None
+        previous = ancestor
+    return None
+
+
+def _conditions_for_assignment(
+    assignment: ast.Assign, siblings: list[ast.Assign]
+) -> list[str]:
+    """The guards on *assignment*, plus the negation of what would overwrite it.
+
+    Reassignment is the one thing dominating-guard analysis cannot see on its
+    own.  ``criteria = "-link_unusable"`` sits above the ``if``/``elif`` chain
+    that replaces it, so its own guards are necessary and not sufficient: the
+    tag reaches the message only where none of the later branches fired.  Left
+    at its own guards the map would claim that cut happens far more often than
+    it does.
+
+    A later write overwrites this one only where it is reached under the same
+    conditions, which is exactly the test that its path condition *starts with*
+    this one's.  Comparing depths instead looks right and is not: Python nests
+    an ``elif`` inside the previous ``if``'s ``orelse``, so a sibling branch is
+    always deeper, and negating its test put ``not (totalQueued >= limit)`` on a
+    cut that happens when the destination is blacklisted -- a condition with
+    nothing to do with it.  With the prefix test the branch's own test is
+    enough, because the negations of everything before it are already there.
+
+    What remains outside this is the flag deciding whether the assembled message
+    is recorded at all (``skipFlag``/``tempFlag`` here): a further hop, and one
+    the whole slice already leaves to ``inputs``.
+    """
+    # The prefix is compared against the guards alone, not against the list the
+    # negations are being added to: growing the thing being matched would make
+    # every sibling after the first fail to match.
+    dominating = path_condition(assignment)
+    conditions = list(dominating)
+    for other in siblings:
+        if other.lineno <= assignment.lineno:
+            continue
+        if path_condition(other)[: len(dominating)] != dominating:
+            continue
+        test = _own_test(other)
+        if test and f"not ({test})" not in conditions:
+            conditions.append(f"not ({test})")
+    return conditions
 
 
 def _emitting_call(node: ast.AST) -> Optional[ast.Call]:
@@ -267,18 +378,44 @@ def extract(
             # tells a reader which of the two a log line came from.
             found: dict[tuple[str, str], _Stage] = {}
             for node, text in _strings(func):
-                match = _TAG.search(text)
-                if match is None or enclosing_function(node) is not func:
+                if enclosing_function(node) is not func:
                     continue
-                tag = match.group(1)
+                match = _TAG.search(text)
+                if match:
+                    # The tag is in the message: the guards on the message are
+                    # the guards on the cut, and the message is the template an
+                    # investigation will look for.
+                    tagged = [(match.group(1), path_condition(node), text, node.lineno)]
+                else:
+                    name = _interpolated_tag_name(node)
+                    assignments = _tag_assignments(func, name) if name else []
+                    siblings = [assignment for assignment, _ in assignments]
+                    # One message, one stage per value the variable can hold --
+                    # the branch that set it is what distinguishes the cuts, so
+                    # each assignment is its own stage, anchored where the reason
+                    # is decided rather than where the message is built.  No
+                    # template: this fragment is the tail of a message assembled
+                    # across statements, and ``": criteria={}"`` is shared by
+                    # every rejection in the file, so offering it as the line to
+                    # look for would confirm nothing.
+                    tagged = [
+                        (
+                            tag,
+                            _conditions_for_assignment(assignment, siblings),
+                            "",
+                            assignment.lineno,
+                        )
+                        for assignment, tag in assignments
+                    ]
                 step = _step_at(steps, node.lineno)
                 label = step.label if step else ""
-                stage = found.get((label, tag))
-                if stage is None:
-                    stage = _Stage(tag, label, node.lineno)
-                    stage.level = step.level if step else None
-                    found[(label, tag)] = stage
-                stage.add(path_condition(node), text, _log_level(node))
+                for tag, conditions, template, line in tagged:
+                    stage = found.get((label, tag))
+                    if stage is None:
+                        stage = _Stage(tag, label, line)
+                        stage.level = step.level if step else None
+                        found[(label, tag)] = stage
+                    stage.add(conditions, template, _log_level(node))
             named = _untagged_steps(func, steps, found)
             # A tag repeated at several sites is one reason, so the denominator
             # counts reasons and steps rather than lines -- otherwise a stage
