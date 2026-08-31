@@ -491,16 +491,22 @@ def main(
             raise click.ClickException(
                 "The map names no log files, so there is nothing to ask production."
             )
-        # Two kinds of question per file: what levels it carries (a histogram,
-        # over a small recent window) and what its rejection and funnel lines
-        # say (the lines themselves, over a wide one).  Only the stages'
-        # own files are worth the second kind.
+        # Three kinds of question.  What levels a file carries (a histogram,
+        # over a small recent window); what its rejection and funnel lines say
+        # (the lines themselves, over a wide one), which only the stages' own
+        # files are worth; and which task statuses were set (a sequence, so
+        # nothing may be trimmed), which every file is asked because where a
+        # transition is logged is the thing being established.
         stage_files = {
             name: service
             for name, service in targets.items()
             if any(name in stage.log_files for stage in fragment.filter_stages)
         }
-        queries = evidence.sample_queries(targets) + evidence.reading_queries(stage_files)
+        queries = (
+            evidence.sample_queries(targets)
+            + evidence.reading_queries(stage_files)
+            + evidence.transition_queries(targets)
+        )
         click.echo(
             f"querying {len(queries)} question(s) over {len(targets)} log file(s) "
             f"across {len(set(targets.values()))} service(s)"

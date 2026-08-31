@@ -105,6 +105,19 @@ LEVEL_MAX_MATCHES = 20000
 TAG_PATTERN = r"criteria=-[A-Za-z0-9_.]+"
 FUNNEL_PATTERN = r"candidates passed"
 
+# ``set task_status=running`` -- what the knights log when they move a task.
+# The database keeps only the current status and the one before it, so this is
+# the only place a *sequence* of transitions can be recovered from, and it is
+# written at the very sites the map already holds as junctions.
+TRANSITION_PATTERN = r"set task_status="
+
+# Bounds for the transition query.  Narrower window and, unlike the other
+# reading queries, ``keep_lines`` equal to the cap: the answer is a sequence, so
+# a trimmed result is not a smaller sample of it but a different one -- dropping
+# lines from the middle invents transitions that never happened.
+TRANSITION_TAIL_BYTES = 8 * 1024 * 1024
+TRANSITION_MAX_MATCHES = 2000
+
 _TAG_IN_LINE = re.compile(r"\bcriteria=(-[\w.]+)")
 _FUNNEL_IN_LINE = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 
@@ -112,6 +125,13 @@ _FUNNEL_IN_LINE = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 # front of every line of one chain run, and so the only trustworthy way to tell
 # where one run ends and the next begins.
 _RUN_KEY = re.compile(r"<([^>]*)>")
+
+# The three things a transition line has to yield.  The timestamp is compared as
+# text: PandaLogger writes ``asctime`` as ``%Y-%m-%d %H:%M:%S,%f``, which sorts
+# lexicographically, so ordering needs no parsing and cannot fail on a locale.
+_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
+_TASK_ID = re.compile(r"jediTaskID=(\d+)")
+_NEW_STATUS = re.compile(r"set task_status=([A-Za-z0-9_.]+)")
 
 # PandaLogger formats every record as
 # ``"%(asctime)s %(name)-12s: %(levelname)-8s %(message)s"``, so the level is
@@ -501,6 +521,96 @@ def bounds_hit(evidence: Evidence) -> tuple[int, int, set[tuple[int, int]]]:
         len(evidence.results),
         {(r.query.tail_bytes, r.query.max_matches) for r in capped},
     )
+
+
+def transition_queries(targets: dict[str, str]) -> list[GrepQuery]:
+    """The queries that recover which task statuses production actually set.
+
+    Put to every log file the map names rather than to the ones whose modules
+    are known to write status.  Two reasons, and the second is the point of the
+    exercise: the pattern is selective enough that asking widely costs little,
+    and "which component's log holds this" is the answer the map exists to give
+    -- deriving the file list from what the map already believes would only
+    confirm the belief.
+    """
+    return [
+        GrepQuery(
+            pattern=TRANSITION_PATTERN,
+            log_filename=filename,
+            service=service,
+            tail_bytes=TRANSITION_TAIL_BYTES,
+            max_matches=TRANSITION_MAX_MATCHES,
+            keep_lines=TRANSITION_MAX_MATCHES,
+        )
+        for filename, service in sorted(targets.items())
+    ]
+
+
+def observed_task_status(evidence: Evidence) -> dict[str, list[tuple[str, str, str]]]:
+    """``{jediTaskID: [(timestamp, status, log file), ...]}``, in time order.
+
+    Merged across files and machines, because one task's history is spread over
+    both: the refiner, the generator, the post-processor and the watchdog each
+    write to their own file, and a knight runs on whichever machine picked the
+    task up.  Ordering therefore has to come from the timestamps rather than
+    from the order the lines were returned in.
+
+    Runs of one repeated value are collapsed.  Two knights logging ``running``
+    in sequence is not a transition, and counting it as one would put a
+    self-loop in every task's history.
+    """
+    seen: dict[str, list[tuple[str, str, str]]] = {}
+    for result in evidence.matching(TRANSITION_PATTERN):
+        for line in result.lines:
+            stamp = _STAMP.match(line)
+            task = _TASK_ID.search(line)
+            status = _NEW_STATUS.search(line)
+            if not (stamp and task and status):
+                continue
+            seen.setdefault(task.group(1), []).append(
+                (stamp.group(1), status.group(1), result.query.log_filename)
+            )
+    histories: dict[str, list[tuple[str, str, str]]] = {}
+    for task, rows in seen.items():
+        ordered: list[tuple[str, str, str]] = []
+        for row in sorted(rows):
+            if not ordered or ordered[-1][1] != row[1]:
+                ordered.append(row)
+        histories[task] = ordered
+    return histories
+
+
+def observed_departures(histories: dict[str, list[tuple[str, str, str]]]) -> Counter:
+    """How often a task was seen to leave each status.
+
+    Sound under an incomplete sample, which is why it is separated from the
+    adjacent pairs.  Seeing a task in ``finishing`` and later in anything else
+    proves it left ``finishing``, whether or not the step in between was
+    sampled; the *pair* is what a gap can invent.
+    """
+    counts: Counter = Counter()
+    for rows in histories.values():
+        # Every status but the last: something moved the task on from each of
+        # them, and the last one is where the sample stops rather than where
+        # the task stopped.
+        for _stamp, status, _file in rows[:-1]:
+            counts[status] += 1
+    return counts
+
+
+def observed_pairs(histories: dict[str, list[tuple[str, str, str]]]) -> Counter:
+    """How often each adjacent ``(from, to)`` was observed.
+
+    **A report, not evidence for a gate.**  A transition the sample did not
+    catch -- a file that was not queried, a window that cut mid-history --
+    leaves its neighbours next to each other, and ``a -> c`` then looks like a
+    step the code takes.  Nothing in the log marks the gap.
+    """
+    counts: Counter = Counter()
+    for rows in histories.values():
+        for (_, before, _), (_, after, _) in zip(rows, rows[1:], strict=False):
+            counts[(before, after)] += 1
+    return counts
 
 
 def observed_tags(evidence: Evidence, log_filename: Optional[str] = None) -> Counter:

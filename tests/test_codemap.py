@@ -3113,6 +3113,121 @@ def test_repeated_traversals_do_not_read_as_transpositions():
     assert gates.funnel_order_matches(fragment, ev).passed
 
 
+def test_two_chains_in_one_log_file_are_told_apart():
+    """One log file is not one chain.  ``AtlasProdTaskBroker`` runs its own
+    steps and then calls the job broker, whose steps are written through the log
+    slot it was handed, so both chains land in the task broker's file.  Both
+    begin with a step named ``status check``, so read as one chain every
+    traversal contributed one pair in order and one reversed -- 4836 against
+    4833 in production, a majority decided by nothing.
+
+    The map cannot say which chains share a file; the evidence can, without
+    segmenting anything.  A label only one chain uses names that chain, so the
+    chains present are the ones whose unique labels appear, and a label shared
+    by two of *those* is dropped.
+    """
+    task_log, job_log = "panda-AtlasProdTaskBroker.log", "panda-AtlasProdJobBroker.log"
+    task_chain = "pandajedi/jedibrokerage/AtlasProdTaskBroker.py::runImpl"
+    job_chain = "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-x", "info", task_chain, [task_log], funnel_label="status check", order=0),
+            _stage("-y", "info", task_chain, [task_log], funnel_label="backlog check", order=1),
+            _stage("-z", "info", task_chain, [task_log], funnel_label="endpoint check", order=2),
+            _stage("-p", "info", job_chain, [job_log], funnel_label="status check", order=0),
+            _stage("-q", "info", job_chain, [job_log], funnel_label="opportunistic check", order=1),
+            _stage("-r", "info", job_chain, [job_log], funnel_label="memory check", order=2),
+        ],
+    )
+    # What production shows, twice over: the task broker's three steps, then the
+    # job broker's three, the second of which starts with the shared label.
+    run = [
+        "status check", "backlog check", "endpoint check",
+        "status check", "opportunistic check", "memory check",
+    ] * 3
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", f"<jediTaskID=1> 5 candidates passed {label}")
+                for label in run
+            ],
+            filename=task_log,
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    result = gates.funnel_order_matches(fragment, ev)
+
+    assert result.passed, result.failures
+    # Both chains were recognised as writing here, and only the shared label was
+    # given up -- the unshared ones are still compared.
+    assert result.checked > 0
+
+
+def test_a_transposition_in_a_shared_file_is_still_found():
+    """Dropping the ambiguous label must not turn the gate off: the steps only
+    one of the two chains names are still compared."""
+    task_log, job_log = "panda-AtlasProdTaskBroker.log", "panda-AtlasProdJobBroker.log"
+    task_chain = "pandajedi/jedibrokerage/AtlasProdTaskBroker.py::runImpl"
+    job_chain = "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-x", "info", task_chain, [task_log], funnel_label="status check", order=0),
+            _stage("-y", "info", task_chain, [task_log], funnel_label="backlog check", order=1),
+            _stage("-z", "info", task_chain, [task_log], funnel_label="endpoint check", order=2),
+            _stage("-p", "info", job_chain, [job_log], funnel_label="status check", order=0),
+        ],
+    )
+    # "endpoint" consistently before "backlog", against the map.
+    run = ["status check", "endpoint check", "backlog check"] * 3
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", f"<jediTaskID=1> 5 candidates passed {label}")
+                for label in run
+            ],
+            filename=task_log,
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    result = gates.funnel_order_matches(fragment, ev)
+
+    assert not result.passed
+    assert "backlog check" in result.failures[0]
+    # The chain is named, because a file can hold more than one.
+    assert "runImpl" in result.failures[0]
+
+
+def test_stages_sharing_a_step_count_as_one_position():
+    """The funnel counts steps, not stages: ``AtlasAnalJobBroker`` rejects for
+    two reasons under "disk check", and a position has to mean the step."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=1),
+            _stage("-c", "info", BROKER, [BROKER_LOG], funnel_label="memory check", order=2),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "<jediTaskID=1> 9 candidates passed disk check"),
+                _log_line("INFO", "<jediTaskID=1> 8 candidates passed memory check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    assert gates.funnel_order_matches(fragment, ev).passed
+
+
 def test_an_early_exit_is_not_a_transposition():
     """The sample spans many tasks and a chain can exit early, so production
     shows a prefix or a gapped run of the map's order."""

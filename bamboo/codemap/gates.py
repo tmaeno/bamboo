@@ -875,37 +875,103 @@ def _precedence(runs: list[list[int]]) -> dict[tuple[int, int], list[int]]:
     return counts
 
 
+def _chains(fragment: MapFragment) -> dict[str, list]:
+    """Stages carrying a funnel label, grouped by the chain that owns them."""
+    chains: dict[str, list] = {}
+    for stage in fragment.filter_stages:
+        if stage.funnel_label:
+            chains.setdefault(stage.owner, []).append(stage)
+    return chains
+
+
+def _label_owners(chains: dict[str, list]) -> dict[str, set[str]]:
+    """``{funnel label: the chains that use it}``.
+
+    Sibling brokers name their steps alike -- ``status check`` is used by three
+    of them -- so a label does not identify a chain on its own.
+    """
+    owners: dict[str, set[str]] = {}
+    for owner, stages in chains.items():
+        for stage in stages:
+            owners.setdefault(stage.funnel_label, set()).add(owner)
+    return owners
+
+
+def _steps_in_order(stages: list, comparable) -> list[str]:
+    """One entry per step, in map order, keeping only comparable labels.
+
+    Deduplicated: several stages can share a step -- ``AtlasAnalJobBroker``
+    rejects for two reasons under "disk check" -- and the funnel counts steps,
+    not stages, so a position has to mean the step.
+    """
+    ordered: list[str] = []
+    for stage in sorted(stages, key=lambda s: s.order):
+        if stage.funnel_label in comparable and stage.funnel_label not in ordered:
+            ordered.append(stage.funnel_label)
+    return ordered
+
+
 def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
-    """(ii) Production runs the chain in the order the map extracted.
+    """(ii) Production runs each chain in the order the map extracted.
 
     "Which step cut the candidates" is a question about position, so an order
     that disagrees makes every answer off by one step.  Compared as a
     subsequence rather than an equality: the sample spans many tasks and a
     chain can exit early, so production shows a prefix or a gapped run of the
     map's order, and only a genuine transposition is a finding.
+
+    **Per chain, and which chains a file holds is read off the evidence.**  One
+    log file is not one chain: ``AtlasProdTaskBroker`` runs its own three steps
+    and then calls the job broker, whose forty-six steps are written through the
+    log slot it was handed, so both chains land in
+    ``panda-AtlasProdTaskBroker.log``.  Both begin with a step named ``status
+    check``, so read as one chain every traversal contributed one pair in order
+    and one reversed -- 4836 against 4833, a majority decided by nothing.
+
+    The map cannot say which chains share a file: it records where a stage's own
+    module logs, and this delegation is invisible there.  The evidence can, and
+    without segmenting anything: a label only one chain uses names that chain,
+    so the chains present in a file are the ones whose unique labels appear in
+    it, and a label shared by two of *those* is dropped as unattributable.  In
+    ``AtlasProdTaskBroker``'s log that costs exactly ``status check``; in the
+    single-chain files it costs nothing, because a label shared with a sibling
+    broker that does not write there is not ambiguous here.
     """
-    grouped = _stage_files(fragment)
+    chains = _chains(fragment)
+    label_owners = _label_owners(chains)
     failures: list[str] = []
     checked = 0
-    for filename, stages in sorted(grouped.items()):
-        expected = [s.funnel_label for s in sorted(stages, key=lambda s: s.order) if s.funnel_label]
-        rank = {label: i for i, label in enumerate(expected)}
-        runs = [
-            [rank[label] for label in run if label in rank]
-            for run in evidence.observed_runs(ev, filename)
-        ]
-        for (lower, higher), (in_order, reversed_) in sorted(_precedence(runs).items()):
-            checked += 1
-            if reversed_ > in_order:
-                failures.append(
-                    f"{filename}: production logs {expected[lower]!r} after "
-                    f"{expected[higher]!r} in {reversed_} of {in_order + reversed_} "
-                    "observations, the map has it before"
-                )
+    files = sorted({f for stages in chains.values() for s in stages for f in s.log_files})
+    for filename in files:
+        runs = evidence.observed_runs(ev, filename)
+        observed = {label for run in runs for label in run}
+        present = {
+            owner
+            for label in observed
+            if len(label_owners.get(label, ())) == 1
+            for owner in label_owners[label]
+        }
+        for owner in sorted(present):
+            comparable = {
+                label
+                for label in label_owners
+                if len(label_owners[label] & present) == 1 and owner in label_owners[label]
+            }
+            expected = _steps_in_order(chains[owner], comparable)
+            rank = {label: index for index, label in enumerate(expected)}
+            ranked = [[rank[label] for label in run if label in rank] for run in runs]
+            for (lower, higher), (in_order, reversed_) in sorted(_precedence(ranked).items()):
+                checked += 1
+                if reversed_ > in_order:
+                    failures.append(
+                        f"{filename} ({owner.split('::')[-1]}): production logs "
+                        f"{expected[lower]!r} after {expected[higher]!r} in {reversed_} "
+                        f"of {in_order + reversed_} observations, the map has it before"
+                    )
     whole, asked = evidence.sample_state(
         ev,
         evidence.FUNNEL_PATTERN,
-        [f for f in sorted(grouped) if ev.file_status(f) != "absent"],
+        [f for f in files if ev.file_status(f) != "absent"],
     )
     return GateResult(
         gate="funnel-order-matches",
