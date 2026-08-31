@@ -2916,6 +2916,86 @@ def test_a_templated_step_name_is_not_a_step():
     assert (stages, coverage, gaps) == ([], [], [])
 
 
+def test_a_step_named_after_a_run_time_value_is_still_a_step():
+    """A hole with words around it is a name; a hole alone is not.
+
+    ``endpoint check with DISK_THRESHOLD={} TB`` is a step this broker runs
+    1176 times in a day's logs, and requiring the name to be fixed left the
+    funnel counting a cut the map could not place.
+    """
+    source = (
+        "class B:\n"
+        "    def runImpl(self):\n"
+        "        for n in nucleusList:\n"
+        "            if bad(n):\n"
+        "                tmpLog.info(f'  skip nucleus={n} criteria=-space')\n"
+        "                continue\n"
+        "        tmpLog.info(f'{len(nucleusList)} candidates passed endpoint check "
+        "with DISK_THRESHOLD={thr} TB')\n"
+    )
+    stages, _cov, gaps = _selection((source, "pandajedi/jedibrokerage/AtlasProdTaskBroker.py"))
+
+    assert [s.funnel_label for s in stages] == ["endpoint check with DISK_THRESHOLD={} TB"]
+    assert gaps == []
+
+
+def test_a_step_reported_twice_is_one_step_named_by_its_funnel_line():
+    """``AtlasProdTaskBroker`` writes its own funnel line and then files a
+    summary entry, and at one step the two disagree on the name.
+
+    Read as two steps the summary entry counts a cut whose every reason
+    attached to the line above it.  The funnel line's name wins: it is the one
+    production puts on a ``candidates passed`` line.
+    """
+    source = (
+        "class B:\n"
+        "    def runImpl(self):\n"
+        "        for n in nucleusList:\n"
+        "            if bad(n):\n"
+        "                tmpLog.info(f'  skip nucleus={n} criteria=-space')\n"
+        "                continue\n"
+        "        tmpLog.info(f'{len(nucleusList)} candidates passed endpoint check "
+        "with DISK_THRESHOLD={thr} TB')\n"
+        "        self.add_summary_message(old, new, 'storage endpoint check')\n"
+    )
+    stages, _cov, gaps = _selection((source, "pandajedi/jedibrokerage/AtlasProdTaskBroker.py"))
+
+    assert [(s.criteria_tag, s.funnel_label) for s in stages] == [
+        ("-space", "endpoint check with DISK_THRESHOLD={} TB")
+    ]
+    assert gaps == []
+
+
+def test_a_candidate_not_appended_is_cut_as_surely_as_one_skipped():
+    """A loop can drop a candidate by skipping ahead or by keeping the
+    survivors elsewhere, and the two are the same cut written differently.
+
+    This is ``AtlasProdJobBroker``'s deferred "temporary problem check" -- 1111
+    runs of it in a day's logs, and the reason the funnel could count
+    candidates disappearing where the map had nothing to say.
+    """
+    source = (
+        "class B:\n"
+        "    def doBrokerage(self):\n"
+        "        for tmpSiteName in scanSiteList:\n"
+        "            if tmpSiteName in siteSkippedTmp:\n"
+        "                msg_map[tmpSiteName] = siteSkippedTmp[tmpSiteName]\n"
+        "            else:\n"
+        "                newScanSiteList.append(tmpSiteName)\n"
+        "        self.add_summary_message(old, new, 'temporary problem check', log, msg_map)\n"
+    )
+    stages, _cov, gaps = _selection((source, "pandajedi/jedibrokerage/AtlasProdJobBroker.py"))
+
+    assert [(s.criteria_tag, s.funnel_label) for s in stages] == [
+        ("", "temporary problem check")
+    ]
+    # The condition is the arm that does not append, positively: no negation to
+    # compose, and no passthrough invented for a local that is not a place a
+    # value lives.
+    assert stages[0].conditions == ["tmpSiteName in siteSkippedTmp"]
+    assert gaps == []
+
+
 def test_one_tag_used_at_two_steps_stays_two_stages():
     """``criteria=-disk`` is emitted by both "disk check" and "Storage check".
 
@@ -4304,6 +4384,108 @@ def test_an_early_exit_is_not_a_transposition():
     )
 
     assert gates.funnel_order_matches(fragment, ev).passed
+
+
+def test_a_step_production_counts_and_the_map_lacks_is_a_finding():
+    """The funnel counter's positive direction: candidates demonstrably went
+    somewhere and the map has no step to name it.
+
+    Sample-size independent -- the line proves the step -- which is why the
+    other direction is not reported at all.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=0),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "100 candidates passed disk check"),
+                _log_line("INFO", "80 candidates passed temporary problem check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    result = gates.funnel_steps_are_known(fragment, ev)
+
+    assert not result.passed
+    assert result.failures == [
+        "production counts a cut at 'temporary problem check' (1x) "
+        "and the map has no step for it"
+    ]
+    # A step the map has and the window does not is never reported: reaching it
+    # is what writes the line, so absence has two causes and no sample size
+    # separates them.
+    assert result.inconclusive == []
+
+
+def test_a_step_named_after_a_run_time_value_is_matched_by_its_frame():
+    """``AtlasProdTaskBroker`` names a step after a threshold it reads from
+    configuration, so production writes two names for one step."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage(
+                "-a",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                funnel_label="endpoint check with DISK_THRESHOLD={} TB",
+                order=0,
+            ),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "9 candidates passed endpoint check with DISK_THRESHOLD=10 TB"),
+                _log_line("INFO", "4 candidates passed endpoint check with DISK_THRESHOLD=1000 TB"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    assert gates.funnel_steps_are_known(fragment, ev).passed
+
+
+def test_a_step_the_map_places_twice_cannot_testify_about_order():
+    """``AtlasProdJobBroker`` runs "temporary problem check" early and returns
+    when it was called for a task-brokerage hint, and otherwise runs it last.
+
+    Order takes the first position, production mostly runs the other, and the
+    chain is doing exactly what the map says -- so the label is dropped for the
+    same reason a label two chains share is.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="temporary problem check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="IO check", order=1),
+            _stage("-c", "info", BROKER, [BROKER_LOG], funnel_label="temporary problem check", order=2),
+        ],
+    )
+    ev = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "100 candidates passed IO check"),
+                _log_line("INFO", "80 candidates passed temporary problem check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+
+    result = gates.funnel_order_matches(fragment, ev)
+
+    assert result.passed
+    # Nothing left to compare: the other label is alone once the ambiguous one
+    # is dropped, so the gate says so rather than passing on a pair it read.
+    assert result.checked == 0
 
 
 def test_a_template_seen_in_production_is_confirmed():

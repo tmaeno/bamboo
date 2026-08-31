@@ -94,6 +94,31 @@ def rendered_text(node: ast.expr) -> Optional[str]:
     return None
 
 
+def has_literal_text(template: str) -> bool:
+    """Whether anything but the holes is left of *template*.
+
+    The line between a frame and a hole with nothing around it, and both slices
+    that read rendered text need it drawn the same way.  ``"{}"`` on its own is
+    a name the code did not write -- it says the caller supplies one -- and
+    treating it as text gives every caller the same name.
+    """
+    return bool(_FIELD.sub("", template).strip())
+
+
+def template_matches(template: str, text: str) -> bool:
+    """Whether *text* is something *template* could have rendered.
+
+    Anchored, and the holes are the only wildcards: a step named ``endpoint
+    check with DISK_THRESHOLD={} TB`` is the same step whether production ran
+    it at 10 TB or 1000 TB, and nothing else in the corpus should answer to
+    that name.  What keeps the wildcards from swallowing the corpus is
+    :func:`has_literal_text`, which is what admits a template in the first
+    place.
+    """
+    pattern = ".*".join(re.escape(part) for part in _FIELD.split(template))
+    return re.fullmatch(pattern, text) is not None
+
+
 def diagnostic_template(node: ast.expr) -> Optional[str]:
     """The template *node* assembles, if it is one worth indexing.
 
@@ -118,7 +143,7 @@ def diagnostic_template(node: ast.expr) -> Optional[str]:
     if not assembled:
         return None
     text = rendered_text(node)
-    return text if text and _FIELD.sub("", text).strip() else None
+    return text if text and has_literal_text(text) else None
 
 
 def _literal_mapping(node: ast.expr) -> Optional[Mapping]:

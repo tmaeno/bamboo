@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from bamboo.codemap import evidence
 from bamboo.codemap.models import MapFragment
+from bamboo.codemap.panda import values
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
@@ -903,6 +904,49 @@ def _label_owners(chains: dict[str, list]) -> dict[str, set[str]]:
     return owners
 
 
+def _step_names(fragment: MapFragment) -> set[str]:
+    """Every step name the map holds, templates included."""
+    return {s.funnel_label for s in fragment.filter_stages if s.funnel_label}
+
+
+def _as_mapped(observed: str, names) -> Optional[str]:
+    """The map's name for a step production called *observed*, if it has one.
+
+    Exact first, then the templates: ``AtlasProdTaskBroker`` names one of its
+    steps after a threshold it reads from configuration, so production writes
+    ``endpoint check with DISK_THRESHOLD=10 TB`` and ``... =1000 TB`` for the
+    step the map holds as ``... ={} TB``.  Exact wins so a template can never
+    take a name another step already owns.
+    """
+    if observed in names:
+        return observed
+    for name in sorted(names):
+        if values.has_literal_text(name) and values.template_matches(name, observed):
+            return name
+    return None
+
+
+def _positionally_ambiguous(stages: list) -> set[str]:
+    """Labels the map places at more than one point in one chain.
+
+    Not the same as a step with several reasons, which is common and fine --
+    those stages sit together.  This is the same step written twice on paths
+    that exclude each other: ``AtlasProdJobBroker`` runs "temporary problem
+    check" early and returns when it was called for a task-brokerage hint, and
+    otherwise runs it last.  The map holds both, order takes the first, and
+    production mostly runs the other -- 110 observations "out of order" for a
+    chain doing exactly what the map says.  A label with two positions cannot
+    testify about position, so it is dropped for the same reason a label two
+    chains share is.
+    """
+    sequence = [s.funnel_label for s in sorted(stages, key=lambda s: s.order)]
+    runs: Counter = Counter()
+    for index, label in enumerate(sequence):
+        if index == 0 or sequence[index - 1] != label:
+            runs[label] += 1
+    return {label for label, times in runs.items() if times > 1}
+
+
 def _steps_in_order(stages: list, comparable) -> list[str]:
     """One entry per step, in map order, keeping only comparable labels.
 
@@ -915,6 +959,57 @@ def _steps_in_order(stages: list, comparable) -> list[str]:
         if stage.funnel_label in comparable and stage.funnel_label not in ordered:
             ordered.append(stage.funnel_label)
     return ordered
+
+
+def funnel_steps_are_known(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Every step production counts a cut at is a step the map extracted.
+
+    The funnel counter's positive direction, and the same shape as
+    :func:`tags_are_known`: a ``candidates passed <name>`` line production
+    writes for a step the map does not hold is a place candidates demonstrably
+    disappear and the map has nothing to say about where they went.  Stated by
+    the system about itself, and true whatever fraction of the log came back --
+    seeing the line proves the step.
+
+    The other direction is not reported, and not because the sample is short.
+    A step logs its count only when the chain reaches it, so a name the map has
+    and the window lacks may be a stale name or may be a chain that returned
+    early; nothing in the log separates those, and neither would a complete
+    read.  ``GenJobBroker``'s eight steps are the standing example -- absent
+    because that broker does not run in this deployment at all.
+
+    **Across the whole map rather than per file**, for the reason
+    :func:`tags_are_known` is: which chains write into which log is something
+    the evidence knows and the map does not, so a per-file comparison accuses
+    the map of missing the forty-six steps ``AtlasProdJobBroker`` writes
+    through the log slot ``AtlasProdTaskBroker`` handed it.
+    """
+    names = _step_names(fragment)
+    files = sorted({f for s in fragment.filter_stages if s.funnel_label for f in s.log_files})
+    observed: Counter = Counter()
+    for filename in files:
+        for run in evidence.observed_runs(ev, filename):
+            observed.update(run)
+    failures = [
+        f"production counts a cut at {label!r} ({observed[label]}x) "
+        "and the map has no step for it"
+        for label in sorted(observed)
+        if _as_mapped(label, names) is None
+    ]
+    whole, asked = evidence.sample_state(
+        ev, evidence.FUNNEL_PATTERN, [f for f in files if ev.file_status(f) != "absent"]
+    )
+    return GateResult(
+        gate="funnel-steps-are-known",
+        passed=not failures,
+        checked=len(observed),
+        unit="observed steps",
+        question="is every step production counts a cut at in the map?",
+        finding="the map is missing a step production counts a cut at",
+        sample=_sample_word(whole, asked),
+        failures=failures,
+        note="A counted cut with no step is candidates going somewhere the map cannot name.",
+    )
 
 
 def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
@@ -945,11 +1040,18 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
     """
     chains = _chains(fragment)
     label_owners = _label_owners(chains)
+    names = _step_names(fragment)
     failures: list[str] = []
     checked = 0
     files = sorted({f for stages in chains.values() for s in stages for f in s.log_files})
     for filename in files:
-        runs = evidence.observed_runs(ev, filename)
+        # Production writes the step's name with its run-time detail filled in;
+        # the map holds the frame.  Resolving here keeps everything downstream
+        # comparing one vocabulary.
+        runs = [
+            [name for label in run if (name := _as_mapped(label, names)) is not None]
+            for run in evidence.observed_runs(ev, filename)
+        ]
         observed = {label for run in runs for label in run}
         present = {
             owner
@@ -958,10 +1060,13 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
             for owner in label_owners[label]
         }
         for owner in sorted(present):
+            ambiguous = _positionally_ambiguous(chains[owner])
             comparable = {
                 label
                 for label in label_owners
-                if len(label_owners[label] & present) == 1 and owner in label_owners[label]
+                if len(label_owners[label] & present) == 1
+                and owner in label_owners[label]
+                and label not in ambiguous
             }
             expected = _steps_in_order(chains[owner], comparable)
             rank = {label: index for index, label in enumerate(expected)}
@@ -1165,6 +1270,7 @@ def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateR
     if fragment.filter_stages:
         results.append(observables_are_emitted(fragment, ev))
         results.append(tags_are_known(fragment, ev))
+        results.append(funnel_steps_are_known(fragment, ev))
         results.append(funnel_order_matches(fragment, ev))
     if ev.matching(evidence.TRANSITION_PATTERN):
         results.append(transitions_are_explained(fragment, ev))

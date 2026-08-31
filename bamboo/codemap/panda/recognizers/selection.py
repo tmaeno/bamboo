@@ -38,6 +38,7 @@ import re
 from typing import Iterator, Optional
 
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
+from bamboo.codemap.panda import values
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
     enclosing_function,
@@ -211,10 +212,49 @@ def helper_log_levels(modules: list[SourceModule]) -> dict[str, Optional[str]]:
 class _Step:
     """One named step of a chain: where the funnel counter reports a cut."""
 
-    def __init__(self, line: int, label: str, level: Optional[str]) -> None:
+    def __init__(
+        self, line: int, label: str, level: Optional[str], funnel_line: bool = False
+    ) -> None:
         self.line = line
         self.label = label
         self.level = level
+        # Whether the name was read off a ``candidates passed`` line here, as
+        # opposed to off an ``add_summary_message`` argument.  Only matters
+        # where a step reports itself both ways; see :func:`_merged`.
+        self.funnel_line = funnel_line
+
+
+def _merged(steps: list[_Step]) -> list[_Step]:
+    """Collapse the two ways one step reports itself.
+
+    ``AtlasProdTaskBroker`` writes its own funnel line and then calls its own
+    ``add_summary_message``, which -- unlike ``JobBrokerBase``'s, where the
+    funnel line is emitted inside the helper -- only files a summary entry.
+    Two statements, one cut, and nothing rejected between them, so no funnel
+    count and no rejection can tell them apart.
+
+    The corpus draws the line itself: consecutive steps are one line apart
+    seven times and never again nearer than sixteen.  Six of the seven give
+    both statements the same name and already read as one step.  The seventh
+    calls the funnel line ``endpoint check with DISK_THRESHOLD={} TB`` and the
+    summary entry ``storage endpoint check``; read as two steps, the second
+    counts a cut whose every reason attached to the line above it.
+
+    The funnel line's name wins, because it is the one production puts on a
+    ``candidates passed`` line and that is where anything comparing the map
+    against a log reads a step's name.  Where the helper is the one logging,
+    the pair names the step alike and the choice does not arise.
+    """
+    kept: list[_Step] = []
+    for step in steps:
+        if not kept or step.line - kept[-1].line > 1:
+            kept.append(step)
+            continue
+        previous = kept[-1]
+        winner = step if step.funnel_line and not previous.funnel_line else previous
+        winner.line = step.line
+        kept[-1] = winner
+    return kept
 
 
 def _steps(
@@ -241,14 +281,19 @@ def _steps(
         if match is None:
             continue
         label = match.group(1).strip()
-        if not label or "{}" in label:
+        if not values.has_literal_text(label):
             # ``f"{len(new_list)} candidates passed {message}"`` inside the
-            # helper itself: the code templated the step name rather than
-            # naming one, so there is no step here.
+            # helper itself: the whole name is a hole, so the code templated
+            # the step name rather than naming one and there is no step here.
             continue
-        found.append(_Step(node.lineno, label, _log_level(node)))
+        # A hole with words around it is different, and the difference is not
+        # cosmetic: ``endpoint check with DISK_THRESHOLD={} TB`` is a step this
+        # broker runs 1176 times in a day's logs, and requiring the name to be
+        # fixed left the funnel counting cuts the map could not place.  The
+        # threshold is a detail of the run; the frame is the step's name.
+        found.append(_Step(node.lineno, label, _log_level(node), funnel_line=True))
     found.sort(key=lambda step: step.line)
-    return found
+    return _merged(found)
 
 
 def _step_at(steps: list[_Step], line: int) -> Optional[_Step]:
@@ -387,6 +432,17 @@ def extract(
     return stages, coverage, sorted(set(unexplained))
 
 
+def _appends(statements: list[ast.stmt]) -> bool:
+    """Whether one arm of a branch puts the candidate on the surviving list."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "append"
+        for statement in statements
+        for node in ast.walk(statement)
+    )
+
+
 def _untagged_steps(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     steps: list[_Step],
@@ -399,6 +455,29 @@ def _untagged_steps(
     a ``continue`` under a guard -- the loop skips to the next candidate rather
     than appending it -- which is the same evidence the tag would have carried,
     minus the name.
+
+    **Not appending is the other way out of the iteration.**  A loop can drop a
+    candidate by skipping ahead or by keeping the survivors elsewhere, and the
+    two are the same cut written differently::
+
+        for tmpSiteName in scanSiteList:
+            if tmpSiteName in siteSkippedTmp:
+                msg_map[...] = siteSkippedTmp[tmpSiteName]      # excluded
+            else:
+                newScanSiteList.append(tmpSiteName)             # kept
+
+    So an ``if`` whose one arm appends and whose other does not has stated its
+    exclusion condition, positively, in the arm that does not: no negation to
+    compose and no reachability to reason about.  This is the deferred cut in
+    ``AtlasProdJobBroker`` -- "temporary problem check", 1111 runs of it in a
+    day's logs -- and it is the whole reason the funnel could count candidates
+    disappearing where the map had nothing to say.
+
+    Its reason is carried rather than stated: ``siteSkippedTmp`` was filled by
+    earlier steps, whose tags the map already holds.  It is deliberately *not*
+    recorded as a passthrough -- that names a place a value lives, a spec field
+    or a table column, and a local is neither -- and the condition names the
+    variable anyway, which is as much as the source says.
     """
     labelled = {stage.label for stage in tagged.values() if stage.label}
     found: list[_Stage] = []
@@ -410,13 +489,17 @@ def _untagged_steps(
         stage = _Stage("", step.label, step.line)
         stage.level = step.level
         for node in ast.walk(func):
-            if not isinstance(node, ast.Continue):
+            if not isinstance(node, (ast.Continue, ast.If)):
                 continue
             if not previous < node.lineno <= step.line:
                 continue
             if enclosing_function(node) is not func:
                 continue
-            stage.add(path_condition(node), "", None)
+            if isinstance(node, ast.Continue):
+                stage.add(path_condition(node), "", None)
+            elif node.orelse and _appends(node.body) != _appends(node.orelse):
+                excluded = node.orelse if _appends(node.body) else node.body
+                stage.add(path_condition(excluded[0]), "", None)
         previous = step.line
         if stage.conditions:
             found.append(stage)
