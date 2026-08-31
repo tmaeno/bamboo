@@ -179,7 +179,10 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
                 click.echo(f"      - {failure}")
             if len(result.failures) > top:
                 click.echo(f"      … {len(result.failures) - top} more")
-        if result.note:
+        if result.note and not result.passed:
+            # A note explains why a failure matters; on a passing gate it is
+            # prose nobody needs, and it made the least interesting gates as
+            # loud as the ones that found something.
             click.echo(f"      note: {result.note}")
     return all_passed
 

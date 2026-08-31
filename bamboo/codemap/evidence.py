@@ -464,6 +464,45 @@ def reading_queries(targets: dict[str, str]) -> list[GrepQuery]:
     ]
 
 
+def sample_state(
+    evidence: Evidence,
+    pattern: str,
+    log_filenames,
+    needs_lines: bool = True,
+) -> tuple[int, int]:
+    """``(files whose answer is whole, files that answered at all)``.
+
+    How much of what was asked actually came back, per query.  The gates
+    already establish this to decide what they may conclude, and kept it to
+    themselves; a reader cannot tell which verdicts are load-bearing without
+    it, so it is computed once here and reported.
+
+    *needs_lines* picks which standard applies.  A gate searching the text for
+    something needs :attr:`GrepResult.complete` -- every matched line written
+    down.  The level histogram needs only :attr:`GrepResult.conclusive`,
+    because its answer is the tally, which is computed over everything that
+    matched before any line is dropped.
+    """
+    asked = [f for f in log_filenames if evidence.matching(pattern, log_filename=f)]
+    test = evidence.complete if needs_lines else evidence.conclusive
+    return sum(1 for f in asked if test(pattern, log_filename=f)), len(asked)
+
+
+def bounds_hit(evidence: Evidence) -> tuple[int, int, set[tuple[int, int]]]:
+    """``(answers that hit a bound, answers in all, the bounds involved)``.
+
+    The bounds are reported with the count because they are the reason: a
+    reader deciding whether to trust an absence needs to know the window and
+    the cap that produced it, not just that something was cut.
+    """
+    capped = [r for r in evidence.results if r.truncated]
+    return (
+        len(capped),
+        len(evidence.results),
+        {(r.query.tail_bytes, r.query.max_matches) for r in capped},
+    )
+
+
 def observed_tags(evidence: Evidence, log_filename: Optional[str] = None) -> Counter:
     """Rejection tags production actually emitted, and how often."""
     counts: Counter = Counter()

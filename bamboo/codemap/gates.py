@@ -33,6 +33,29 @@ from bamboo.codemap.models import MapFragment
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
 
+# What a failing gate is a statement *about*.  Not decoration: these three ask
+# for three different things, and printing them all as "FAIL" is what made the
+# report unreadable.  A mapped log file that no machine has means the map is
+# right and this deployment differs -- there is nothing to fix -- while a tag
+# production emits and the map has no stage for is an extraction miss.  Telling
+# them apart is the difference between a work item and a fact.
+MAP_DEFECT = "map_defect"
+DEPLOYMENT_FACT = "deployment_fact"
+CHECK_BROKEN = "check_broken"
+
+# Severity, worst first.  A check that did not run makes every other verdict
+# unsafe to read, so it outranks a real defect; a deployment difference asks
+# for no change at all, so it comes last.
+KIND_ORDER = (CHECK_BROKEN, MAP_DEFECT, DEPLOYMENT_FACT)
+
+_VERDICT = {MAP_DEFECT: "FAIL", DEPLOYMENT_FACT: "DIFFERS", CHECK_BROKEN: "BROKEN"}
+
+# How much of what a gate read was actually read.  Carried on the result
+# because the gates already establish it and until now kept it to themselves:
+# a reader cannot tell which conclusions are load-bearing without it.
+COMPLETE = "complete"
+PARTIAL = "partial"
+
 
 class GateResult(BaseModel):
     """Outcome of one gate."""
@@ -40,19 +63,56 @@ class GateResult(BaseModel):
     gate: str
     passed: bool
     checked: int = 0
+    unit: str = Field(
+        default="checked",
+        description=(
+            "What ``checked`` counts.  Named per gate because the units are not "
+            "comparable -- query answers, log files, filter stages, observed "
+            "tags and step pairs all printed as 'checked' invited exactly the "
+            "comparison that means nothing."
+        ),
+    )
+    kind: str = MAP_DEFECT
+    question: Optional[str] = Field(
+        default=None, description="The gate's question in plain words, for the report."
+    )
+    finding: Optional[str] = Field(
+        default=None, description="What a failure of this gate is, as a statement."
+    )
+    sample: Optional[str] = Field(
+        default=None,
+        description=(
+            "``complete`` or ``partial`` for a gate that read a sample of "
+            "production, None where the question is not answered from a sample."
+        ),
+    )
     failures: list[str] = Field(default_factory=list)
     inconclusive: list[str] = Field(default_factory=list)
     note: Optional[str] = None
 
+    @property
+    def verdict(self) -> str:
+        """PASS, or the word for what kind of failure this is."""
+        return "PASS" if self.passed else _VERDICT.get(self.kind, "FAIL")
+
+    @property
+    def actionable(self) -> bool:
+        """Whether this failure asks for a change to the map or the query.
+
+        A deployment difference does not: the map and the source agree, and the
+        deployment simply does not exercise that code.  Which is why it must
+        not fail a pipeline either.
+        """
+        return not self.passed and self.kind in (MAP_DEFECT, CHECK_BROKEN)
+
     def summary(self) -> str:
-        status = "PASS" if self.passed else "FAIL"
         parts = []
         if self.failures:
             parts.append(f"{len(self.failures)} issue(s)")
         if self.inconclusive:
             parts.append(f"{len(self.inconclusive)} inconclusive")
         detail = f" ({', '.join(parts)})" if parts else ""
-        return f"[{status}] {self.gate}: {self.checked} checked{detail}"
+        return f"[{self.verdict}] {self.gate}: {self.checked} {self.unit}{detail}"
 
 
 def value_enum_referenced(fragment: MapFragment) -> GateResult:
@@ -76,6 +136,9 @@ def value_enum_referenced(fragment: MapFragment) -> GateResult:
         gate="value-enum-referenced",
         passed=not unreferenced,
         checked=len(fragment.value_enums),
+        unit="constants",
+        question="is every constant in the index read by something?",
+        finding="the index holds constants nothing reads",
         failures=unreferenced,
         note="Unreferenced constants are dead or mis-classified, not index entries.",
     )
@@ -102,6 +165,9 @@ def namespace_disambiguates(fragment: MapFragment) -> GateResult:
         gate="namespace-disambiguates",
         passed=not collisions,
         checked=len(seen),
+        unit="namespaced values",
+        question="does one value identify one constant inside its namespace?",
+        finding="a namespace reuses a value, so the index key identifies nothing",
         failures=collisions,
         note="Cross-namespace reuse is expected; within one namespace it breaks the key.",
     )
@@ -131,6 +197,9 @@ def boundary_ownership_param_declared(fragment: MapFragment) -> GateResult:
         gate="boundary-ownership-param",
         passed=not failures,
         checked=checked,
+        unit="owner checks",
+        question="does an ownership check name a parameter the endpoint declares?",
+        finding="an endpoint's access check reads a parameter that is not there",
         failures=failures,
         note="The decorator and the signature must agree on which parameter carries the task.",
     )
@@ -175,6 +244,9 @@ def structural_attribution_agrees(fragment: MapFragment) -> GateResult:
         gate="structural-attribution-agrees",
         passed=not failures,
         checked=checked,
+        unit="attributed junctions",
+        question="do the declared type and the object's usage name one class?",
+        finding="what the code declares and what it does with the object disagree",
         failures=sorted(set(failures)),
         note="What the code declares and what it does with the object must name one class.",
     )
@@ -340,6 +412,9 @@ def declared_status_is_written(fragment: MapFragment) -> GateResult:
         gate="declared-status-is-written",
         passed=not failures,
         checked=checked,
+        unit="declared values",
+        question="does some writer produce every value the code declares?",
+        finding="a declared status no writer produces -- a missing write form or a stale declaration",
         failures=sorted(failures),
         note="A declared status nothing writes is unreachable: a missing write form, or a stale declaration.",
     )
@@ -376,6 +451,9 @@ def map_references_resolve(fragment: MapFragment) -> GateResult:
         gate="map-references-resolve",
         passed=not failures,
         checked=checked,
+        unit="edges",
+        question="does every edge land on a node the map contains?",
+        finding="an edge points at a node the map does not have",
         failures=sorted(set(failures)),
         note="A backward walk that steps onto a missing node cannot report that it did.",
     )
@@ -464,6 +542,18 @@ def unexplainable_rejections(fragment: MapFragment) -> list[tuple[str, list[str]
 # ---------------------------------------------------------------------------
 
 
+def _sample_word(whole: int, asked: int) -> Optional[str]:
+    """``complete``, ``partial``, or None when nothing was asked."""
+    if not asked:
+        return None
+    return COMPLETE if whole == asked else PARTIAL
+
+
+def _present(ev: "evidence.Evidence") -> list[str]:
+    """The log files production actually has, sorted."""
+    return sorted(f for f in ev.log_filenames() if ev.file_status(f) == "present")
+
+
 def log_format_recognised(ev: "evidence.Evidence") -> GateResult:
     """(ii) The sampled log lines parse as log lines.
 
@@ -496,10 +586,21 @@ def log_format_recognised(ev: "evidence.Evidence") -> GateResult:
                 f"{filename}: sampled {sampled} line(s), none of which carry a "
                 f"level -- the log format is not {evidence.ANY_LINE_PATTERN!r}"
             )
+    whole, asked = evidence.sample_state(
+        ev, evidence.ANY_LINE_PATTERN, _present(ev), needs_lines=False
+    )
     return GateResult(
         gate="log-format-recognised",
         passed=not failures,
         checked=checked,
+        unit="query answers",
+        # A failure here says nothing about PanDA: the query did not run, or ran
+        # against something that is not a PandaLogger file.  Naming it as such
+        # keeps it from reading as production disagreeing with the map.
+        kind=CHECK_BROKEN,
+        question="is the log in the format the map assumed?",
+        finding="the sampled log does not parse, so no other production gate can conclude",
+        sample=_sample_word(whole, asked),
         failures=failures,
         note="Later production gates read this format; unrecognised means they cannot conclude.",
     )
@@ -527,9 +628,12 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
             continue
         checked += 1
         where = stage.anchor.as_ref() if stage.anchor else stage.owner
+        # Reason first, anchor second.  These rows are summarised by their first
+        # line elsewhere, and with the anchor in front the summary cut away the
+        # half that says what happened.
         label = f"{stage.criteria_tag or stage.funnel_label} at {where}"
         if not stage.log_files:
-            unknown.append(f"{label}: the source does not name a log file")
+            unknown.append(f"no log file is named in the source for {label}")
             continue
         # Any candidate that carries the line is enough: the proxy mixins run
         # under two processes and emitting in either one makes the observable
@@ -538,12 +642,14 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
         emitted = False
         suppressed: list[str] = []
         unproven: list[str] = []
+        absent: list[str] = []
         for filename in stage.log_files:
             # Only an *absent* file is a reason to skip.  "unknown" merely means
             # this particular question was never put to it, and treating that as
             # a reason to say nothing would silence the gate whenever the level
             # query was not among the ones issued.
             if ev.file_status(filename) == "absent":
+                absent.append(filename)
                 continue
             threshold = evidence.effective_level(ev, log_filename=filename)
             if threshold is None:
@@ -569,13 +675,31 @@ def observables_are_emitted(fragment: MapFragment, ev: "evidence.Evidence") -> G
                 + ", ".join(suppressed)
             )
         elif unproven:
-            unknown.append(f"{label}: {', '.join(unproven)}")
+            unknown.append(f"the sample is incomplete for {label} ({', '.join(unproven)})")
+        elif absent:
+            # Say why rather than "no sample": an absent file is a finding of
+            # its own, reported by ``code_paths_are_live``, and describing it
+            # here as missing evidence makes one fact look like two problems.
+            unknown.append(
+                f"{', '.join(absent)} is on no machine, so {label} never ran here"
+            )
         else:
-            unknown.append(f"{label}: no sample from {', '.join(stage.log_files)}")
+            unknown.append(f"no sample from {', '.join(stage.log_files)} for {label}")
+    whole, asked = evidence.sample_state(
+        ev, evidence.ANY_LINE_PATTERN, _present(ev), needs_lines=False
+    )
     return GateResult(
         gate="observables-are-emitted",
         passed=not failures,
         checked=checked,
+        unit="filter stages",
+        # The map and the source agree; the deployment runs at a level that
+        # drops the line.  Nothing to fix in the extraction -- the stage comes
+        # out of strategies instead.
+        kind=DEPLOYMENT_FACT,
+        question="do the promised lines survive the log level?",
+        finding="the deployment's log level drops an observable the map offers",
+        sample=_sample_word(whole, asked),
         failures=failures,
         inconclusive=unknown,
         note="An observable below the threshold must be dropped from strategies, not fetched.",
@@ -597,21 +721,41 @@ def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateR
     the deployment does not exercise it, which an investigation needs to know
     before it starts looking for lines that will never be there.
     """
-    owners: dict[str, set[str]] = {}
-    for node in list(fragment.filter_stages) + list(fragment.junctions):
-        for filename in node.log_files:
-            owners.setdefault(filename, set()).add(node.owner.split("::")[0])
+    counts: dict[str, Counter] = {}
+    for kind, nodes in (("stage", fragment.filter_stages), ("junction", fragment.junctions)):
+        for node in nodes:
+            for filename in node.log_files:
+                counts.setdefault(filename, Counter())[kind] += 1
+    # Reported as how much of the map goes with the file, because that is the
+    # consequence: these are the nodes a strategy must not send an investigation
+    # to.  The module is not named -- the filename comes from the logger, which
+    # comes from the module, so it would be the same word twice.
     failures = [
-        f"{filename} is on no machine: " + ", ".join(sorted(modules)[:3]) + " never ran"
-        for filename, modules in sorted(owners.items())
+        f"{filename} is on no machine: {counts[filename]['stage']} stage(s), "
+        f"{counts[filename]['junction']} junction(s) of the map never run here"
+        for filename in sorted(counts)
         if ev.file_status(filename) == "absent"
     ]
     return GateResult(
         gate="code-paths-are-live",
         passed=not failures,
-        checked=len(owners),
+        checked=len(counts),
+        unit="log files",
+        # The map is right and the deployment differs.  Nothing to fix.
+        kind=DEPLOYMENT_FACT,
+        question="are the map's code paths running here?",
+        finding="the map describes code this deployment never runs",
+        # Not a sample: the file either exists on a machine or it does not, and
+        # every machine in the service answered.  This is also the only negative
+        # claim production supports at all -- see the note.
         failures=failures,
-        note="A log file is created on first emit, so its absence means the path never ran here.",
+        note=(
+            "A log file is created on first emit, so its absence means the path never "
+            "ran here -- unless the map named the logger wrongly, which is unlikely "
+            f"when {sum(1 for f in counts if ev.file_status(f) == 'present')} of "
+            f"{len(counts)} files it named do exist.  It is also the only absence "
+            "production can prove: writing any other line needs a branch to fire."
+        ),
     )
 
 
@@ -660,18 +804,40 @@ def tags_are_known(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult
         here = evidence.observed_tags(ev, filename)
         mine = {s.criteria_tag for s in stages if s.criteria_tag}
         misfiled += len(set(here) & extracted - mine)
+        # The completeness guard is necessary and *not* sufficient, so what it
+        # licenses stays in ``inconclusive``.  A mapped tag missing from the log
+        # has two causes -- the map's tag is wrong, or that cut simply did not
+        # happen in the window -- and no sample size separates them, because
+        # writing the line requires the branch to fire.  Narrowing the window
+        # until every match fits would not upgrade this direction; it would
+        # manufacture findings, and it would cost the positive one, which is
+        # where the value is (``-link_unusable`` appeared six times in a wide
+        # window and would be missed in a small one).
         if ev.complete(evidence.TAG_PATTERN, log_filename=filename):
             for tag in sorted(mine - set(here)):
-                unknown.append(f"{filename}: the map has {tag} and production never emitted it")
+                unknown.append(
+                    f"{filename}: the map has {tag} and this window shows no cut using it"
+                )
     if misfiled:
         unknown.append(
             f"{misfiled} tag/file pair(s) appear in a log no stage of theirs claims "
             "-- those stages' log file is unresolved, not their tag"
         )
+    # Absent files are excluded from the sample figure: they answered, and the
+    # answer was "this never ran", which is not a partial reading of anything.
+    whole, asked = evidence.sample_state(
+        ev,
+        evidence.TAG_PATTERN,
+        [f for f in sorted(_stage_files(fragment)) if ev.file_status(f) != "absent"],
+    )
     return GateResult(
         gate="tags-are-known",
         passed=not failures,
         checked=len(observed),
+        unit="observed tags",
+        question="is every cut production makes in the map?",
+        finding="the map is missing a cut production makes",
+        sample=_sample_word(whole, asked),
         failures=failures,
         inconclusive=unknown,
         note="A tag with no stage is a cut the map cannot explain -- the system naming its own blind spot.",
@@ -736,38 +902,60 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
                     f"{expected[higher]!r} in {reversed_} of {in_order + reversed_} "
                     "observations, the map has it before"
                 )
+    whole, asked = evidence.sample_state(
+        ev,
+        evidence.FUNNEL_PATTERN,
+        [f for f in sorted(grouped) if ev.file_status(f) != "absent"],
+    )
     return GateResult(
         gate="funnel-order-matches",
         passed=not failures,
         checked=checked,
+        unit="step pairs",
+        question="does production run the chain in map order?",
+        finding="production runs a chain step out of the order the map has",
+        sample=_sample_word(whole, asked),
         failures=failures,
         note="Which step cut the candidates is a question about position.",
     )
 
 
-def templates_confirmed(
-    fragment: MapFragment, ev: "evidence.Evidence"
-) -> tuple[int, int, list[str]]:
-    """Which promised diagnostics production was actually seen to write.
+def _stage_label(stage, filename: str) -> str:
+    """A stage's identity as the map holds it: the step's name and its tag.
 
-    Returns ``(confirmed, checked, unconfirmed)``.
+    The tag alone will not do.  ``AtlasAnalJobBroker`` emits ``-disk`` from both
+    its "scratch disk check" and its "storage space check", so a report keyed on
+    the tag prints one row twice and identifies neither.
+    """
+    parts = [part for part in (stage.funnel_label, stage.criteria_tag) if part]
+    return f"{' '.join(parts)} ({filename})"
 
-    **A report, not a gate, and the reason is a real limit of this method.**
-    The map points an investigation at a template, and between releases the
-    wording is exactly what moves -- ``AtlasProdTaskBroker``'s space check went
-    from "free ... reserved" to "usable ... projected demand" -- so it would be
-    valuable to fail when a template has gone.  But asserting a template is
-    *absent* needs every matching line, and a busy broker log yields tens of
-    thousands under a cap: the complete sample that claim requires is not
-    obtainable through this transport at all.
 
-    So only the direction that works is reported.  A confirmed template is one
-    an investigation can rely on; an unconfirmed one is unknown, not missing,
-    and saying otherwise would be exactly the "cut sample read as absence"
-    mistake the rest of this module is built to avoid.
+def templates_confirmed(fragment: MapFragment, ev: "evidence.Evidence") -> list[str]:
+    """The map's diagnostic lines production was seen to write, verbatim.
+
+    One-sided, and that is not a limitation of the sample -- it is the only
+    direction that exists.  A template missing from the log has two causes that
+    nothing in the log distinguishes: the wording has moved on
+    (``AtlasProdTaskBroker``'s space check went from "free ... reserved" to
+    "usable ... projected demand"), or that branch simply did not fire in the
+    window.  Writing the line *requires* the branch to fire, so no amount of
+    reading separates them; a complete sample would license a claim just as
+    false as a cut one.
+
+    Which is why the unconfirmed half is not returned at all.  It was reported
+    once, as "40 of 92 confirmed" with the other 52 listed, and that is the
+    useless half: a reader cannot act on it, and the ratio invites reading a
+    rare rejection as a stale template.
+
+    What the confirmed half buys is narrower and real: each line found verbatim
+    is one piece of evidence that the deployed code and the map agree at that
+    point, which is the only production check on version skew there is.  It
+    also marks the templates an investigation can rely on.  Where drift can be
+    detected properly is between two source trees, offline, which is
+    ``diff-map``'s job -- and it has already caught some.
     """
     confirmed: list[str] = []
-    unconfirmed: list[str] = []
     for filename, stages in sorted(_stage_files(fragment).items()):
         haystack = "\n".join(ev.lines(evidence.TAG_PATTERN, log_filename=filename))
         if not haystack:
@@ -775,11 +963,9 @@ def templates_confirmed(
         for stage in stages:
             for template in stage.emits:
                 stem = _template_stem(template)
-                if not stem:
-                    continue
-                label = f"{stage.criteria_tag or stage.funnel_label} ({filename})"
-                (confirmed if stem in haystack else unconfirmed).append(label)
-    return len(confirmed), len(confirmed) + len(unconfirmed), unconfirmed
+                if stem and stem in haystack:
+                    confirmed.append(_stage_label(stage, filename))
+    return confirmed
 
 
 # A template's longest run of fixed words.  Taking the prefix instead was the

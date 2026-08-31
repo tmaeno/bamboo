@@ -118,7 +118,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 "extra or pass an explicit source root."
             )
         self._version = self._resolve_version(source_root)
-        self._modules = self._parse_modules(self._roots)
+        self._modules, self._skipped_tests = self._parse_modules(self._roots)
         logger.info(
             "PandaCodeMapPlugin: parsed %d module(s) from %s",
             len(self._modules),
@@ -229,6 +229,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def module_count(self) -> int:
+        """How many modules were analysed."""
+        return len(self._modules or [])
+
+    @property
+    def excluded_module_count(self) -> int:
+        """How many test modules were left out of the analysis."""
+        return getattr(self, "_skipped_tests", 0)
 
     @property
     def unexplained_steps(self) -> list[str]:
@@ -342,8 +352,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return "unknown"
 
     @staticmethod
-    def _parse_modules(roots: dict[str, Path]) -> list[SourceModule]:
+    def _parse_modules(roots: dict[str, Path]) -> tuple[list[SourceModule], int]:
         """Parse and hash every ``.py`` once; files that will not parse are skipped.
+
+        Returns the modules and how many test modules were left out, because the
+        exclusion is a decision the report should state rather than a detail in
+        a log line.
 
         Recognizers are run over the whole tree rather than a file list, so a
         module added upstream is picked up on the next build with no
@@ -378,5 +392,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     )
                 )
         if skipped_tests:
-            logger.info("skipped %d test module(s)", skipped_tests)
-        return modules
+            # Spelled out because the bare count read as a warning.  Test code
+            # is not the system's behaviour: a status a test assigns is not a
+            # transition PanDA makes, and including them put most of the
+            # ambiguous write sites in the corpus.
+            logger.info(
+                "excluded %d test module(s) from analysis "
+                "(test code is not the system's behaviour)",
+                skipped_tests,
+            )
+        return modules, skipped_tests

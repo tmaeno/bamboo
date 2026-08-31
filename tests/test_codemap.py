@@ -45,6 +45,7 @@ from bamboo.codemap.panda.recognizers import (
     trigger,
 )
 from bamboo.models.graph_element import NodeType
+from bamboo.scripts import check_map
 
 MAP_ID = "panda"
 VERSION = "panda-server-source 1.0.2"
@@ -2544,7 +2545,12 @@ def test_a_stage_whose_file_never_existed_is_not_a_logging_failure():
     live = gates.code_paths_are_live(fragment, ev)
 
     assert emitted.failures == []
-    assert emitted.inconclusive == [f"-x at {BROKER}: no sample from {BROKER_LOG}"]
+    # Says the file is on no machine rather than "no sample": the absence is a
+    # finding of its own, and calling it missing evidence made one fact read as
+    # two separate problems.
+    assert emitted.inconclusive == [
+        f"{BROKER_LOG} is on no machine, so -x at {BROKER} never ran here"
+    ]
     assert not live.passed
     assert BROKER_LOG in live.failures[0]
 
@@ -2559,7 +2565,22 @@ def test_a_stage_the_source_gives_no_file_for_is_inconclusive():
     result = gates.observables_are_emitted(fragment, _evidence(_sample([_log_line("INFO", "a")])))
 
     assert result.passed
-    assert result.inconclusive == [f"-x at {BROKER}: the source does not name a log file"]
+    assert result.inconclusive == [f"no log file is named in the source for -x at {BROKER}"]
+
+
+def test_an_inconclusive_row_leads_with_its_reason():
+    """The report summarises these rows by their first line, so the reason has
+    to come before the anchor -- otherwise the summary keeps the part that says
+    where and drops the part that says what."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "debug", BROKER, [BROKER_LOG]), _stage("-y", "debug", BROKER, [])],
+    )
+
+    rows = gates.observables_are_emitted(fragment, _evidence(_missing())).inconclusive
+
+    assert all(not row.startswith("-") for row in rows)
 
 
 def test_code_paths_are_live_passes_when_every_file_is_there():
@@ -2906,9 +2927,15 @@ def test_a_tag_the_map_has_and_production_did_not_show_needs_a_complete_sample()
     complete = gates.tags_are_known(fragment, _evidence(_tag_sample(lines)))
 
     assert partial.inconclusive == []
+    # Stays in ``inconclusive`` even when the sample is whole, and says "this
+    # window" rather than "production never": writing the line needs the branch
+    # to fire, so a quiet cut and a wrong tag look the same at any sample size.
     assert complete.inconclusive == [
-        f"{BROKER_LOG}: the map has -rse and production never emitted it"
+        f"{BROKER_LOG}: the map has -rse and this window shows no cut using it"
     ]
+    assert complete.passed
+    assert complete.sample == gates.COMPLETE
+    assert partial.sample == gates.PARTIAL
 
 
 def test_a_transposed_funnel_step_is_a_finding():
@@ -2994,11 +3021,12 @@ def test_an_early_exit_is_not_a_transposition():
 
 
 def test_a_template_seen_in_production_is_confirmed():
-    """The only direction this transport can answer.
+    """The only direction there is.
 
-    Asserting a template is *gone* needs every matching line, and a busy broker
-    log yields tens of thousands under a cap -- so an unconfirmed template is
-    unknown, not missing.
+    A template missing from the log has two causes nothing distinguishes -- the
+    wording moved on, or that branch did not fire in the window -- and writing
+    the line requires the branch to fire, so no sample size separates them.  So
+    only what was seen is returned.
     """
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -3010,6 +3038,7 @@ def test_a_template_seen_in_production_is_confirmed():
                 BROKER,
                 [BROKER_LOG],
                 emits=["  skip site={} due to disk shortage criteria=-disk"],
+                funnel_label="disk check",
             ),
             _stage(
                 "-space",
@@ -3017,6 +3046,7 @@ def test_a_template_seen_in_production_is_confirmed():
                 BROKER,
                 [BROKER_LOG],
                 emits=["skip nucleus since disk shortage ({0} TB) criteria=-space"],
+                funnel_label="space check",
             ),
         ],
     )
@@ -3024,10 +3054,48 @@ def test_a_template_seen_in_production_is_confirmed():
         _tag_sample([_log_line("INFO", "  skip site=X due to disk shortage criteria=-disk")])
     )
 
-    confirmed, checked, unconfirmed = gates.templates_confirmed(fragment, ev)
+    assert gates.templates_confirmed(fragment, ev) == [f"disk check -disk ({BROKER_LOG})"]
 
-    assert (confirmed, checked) == (1, 2)
-    assert unconfirmed == [f"-space ({BROKER_LOG})"]
+
+def test_two_stages_sharing_a_tag_are_told_apart():
+    """``AtlasAnalJobBroker`` emits ``-disk`` from both its scratch-disk and its
+    storage-space check, so a row keyed on the tag alone printed one label twice
+    and identified neither."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage(
+                "-disk",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                emits=["skip site={} due to small scratch disk"],
+                funnel_label="scratch disk check",
+            ),
+            _stage(
+                "-disk",
+                "info",
+                BROKER,
+                [BROKER_LOG],
+                emits=["skip site={} since output endpoint undefined"],
+                funnel_label="storage space check",
+            ),
+        ],
+    )
+    ev = _evidence(
+        _tag_sample(
+            [
+                _log_line("INFO", "skip site=X due to small scratch disk criteria=-disk"),
+                _log_line("INFO", "skip site=Y since output endpoint undefined criteria=-disk"),
+            ]
+        )
+    )
+
+    assert gates.templates_confirmed(fragment, ev) == [
+        f"scratch disk check -disk ({BROKER_LOG})",
+        f"storage space check -disk ({BROKER_LOG})",
+    ]
 
 
 def test_the_stem_is_the_longest_fixed_run_not_the_prefix():
@@ -3060,9 +3128,10 @@ def test_returning_everything_and_writing_it_all_down_are_different():
     assert trimmed.conclusive and not trimmed.complete
 
 
-def test_an_unconfirmed_template_is_never_called_missing():
-    """A cut sample read as absence is the mistake this module exists to avoid,
-    so the report has no failing direction to get wrong."""
+def test_an_unconfirmed_template_is_not_reported_at_all():
+    """It was reported once, as a ratio with the unconfirmed listed, and that is
+    the half a reader cannot act on: a rare rejection reads as a stale template.
+    Where drift *can* be detected is between two source trees -- ``diff-map``."""
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -3080,7 +3149,213 @@ def test_an_unconfirmed_template_is_never_called_missing():
         update={"matched": 900, "truncated": True}
     )
 
-    confirmed, checked, unconfirmed = gates.templates_confirmed(fragment, _evidence(trimmed))
+    assert gates.templates_confirmed(fragment, _evidence(trimmed)) == []
 
-    assert (confirmed, checked) == (0, 1)
-    assert unconfirmed == [f"-space ({BROKER_LOG})"]
+
+# ---------------------------------------------------------------------------
+# What the report says
+#
+# The gates were right and the report was not: it printed a deployment fact and
+# an extraction miss with the same word, never said whether the sample it read
+# was whole, and gave five incomparable counts the same label.  These pin the
+# distinctions rather than the layout.
+# ---------------------------------------------------------------------------
+
+
+def _result(gate: str, **kwargs) -> gates.GateResult:
+    return gates.GateResult(gate=gate, passed=not kwargs.get("failures"), **kwargs)
+
+
+def test_a_deployment_difference_is_not_a_defect_and_does_not_fail_a_build():
+    """The distinction the report exists to make.  ``code-paths-are-live``
+    failing means the map is right and this deployment does not run that code;
+    there is nothing to change, so it must not read as -- or exit like -- a
+    genuine miss."""
+    difference = _result(
+        "code-paths-are-live", kind=gates.DEPLOYMENT_FACT, failures=["x is on no machine"]
+    )
+    defect = _result("tags-are-known", kind=gates.MAP_DEFECT, failures=["-newcut has no stage"])
+    unusable = _result("log-format-recognised", kind=gates.CHECK_BROKEN, failures=["not authorized"])
+
+    assert difference.verdict == "DIFFERS" and not difference.actionable
+    assert defect.verdict == "FAIL" and defect.actionable
+    assert unusable.verdict == "BROKEN" and unusable.actionable
+    assert _result("funnel-order-matches").verdict == "PASS"
+
+
+def test_the_real_gates_declare_which_kind_they_are():
+    """Set on the gate rather than in the report, because which of the three a
+    failure is depends on what the gate compared, not on how it is printed."""
+    ev = _evidence(_sample([_log_line("DEBUG", "x")]), _missing("panda-Gone.log"))
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "debug", BROKER, [BROKER_LOG])],
+    )
+
+    kinds = {r.gate: r.kind for r in gates.run_production(fragment, ev)}
+
+    assert kinds["log-format-recognised"] == gates.CHECK_BROKEN
+    assert kinds["code-paths-are-live"] == gates.DEPLOYMENT_FACT
+    assert kinds["observables-are-emitted"] == gates.DEPLOYMENT_FACT
+    assert kinds["tags-are-known"] == gates.MAP_DEFECT
+    assert kinds["funnel-order-matches"] == gates.MAP_DEFECT
+
+
+def test_every_count_carries_what_it_counts():
+    """Query answers, log files, filter stages, tags and step pairs are not
+    comparable quantities; printed as "checked" they invited the comparison."""
+    ev = _evidence(_sample([_log_line("DEBUG", "x")]))
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[_stage("-x", "debug", BROKER, [BROKER_LOG])],
+    )
+
+    units = {r.gate: r.unit for r in gates.run_production(fragment, ev)}
+
+    assert units["code-paths-are-live"] == "log files"
+    assert units["observables-are-emitted"] == "filter stages"
+    assert "checked" not in units.values()
+    assert "filter stages" in _result("observables-are-emitted", unit="filter stages").summary()
+
+
+def test_the_sample_section_says_which_conclusions_are_load_bearing(capsys):
+    """The worst of the report's problems was silence here: a gate that could
+    not conclude anything looked exactly like one that checked and found
+    nothing."""
+    ev = _evidence(
+        _sample([_log_line("DEBUG", "x")]),
+        _tag_sample([_log_line("INFO", "skip criteria=-disk")], truncated=True),
+    )
+
+    check_map._report_sample(ev)
+    out = capsys.readouterr().out
+
+    assert "levels  complete" in out
+    assert "tags    PARTIAL" in out
+    assert "1 of 2 answer(s) hit a bound" in out
+    # The reason a complete sample would not help either, said once.
+    assert "branch has to fire to write" in out
+
+
+def test_the_verdict_leads_with_the_worst_kind(capsys):
+    """A check that did not run makes every other verdict unsafe to read, so it
+    outranks a defect; a deployment difference asks for no change at all."""
+    results = [
+        _result(
+            "code-paths-are-live",
+            kind=gates.DEPLOYMENT_FACT,
+            finding="the map describes code this deployment never runs",
+            failures=["a"],
+        ),
+        _result(
+            "tags-are-known",
+            kind=gates.MAP_DEFECT,
+            finding="the map is missing a cut production makes",
+            failures=["b"],
+        ),
+    ]
+
+    check_map._report_verdict(results)
+    out = capsys.readouterr().out
+
+    assert "1 map defect · 1 deployment difference" in out
+    assert "the map is missing a cut production makes." in out
+
+
+def test_a_clean_verdict_says_so(capsys):
+    check_map._report_verdict([_result("funnel-order-matches")])
+
+    assert "nothing to change" in capsys.readouterr().out
+
+
+def test_the_level_table_collapses_to_the_file_that_differs(capsys):
+    """Thirty rows whose whole payload was one sentence -- and the ``… 12 more``
+    that truncated them was hiding one of the run's two findings."""
+    ev = _evidence(
+        _sample([_log_line("DEBUG", "x")], filename="panda-A.log"),
+        _sample([_log_line("INFO", "y")], filename="panda-B.log"),
+    )
+
+    check_map._report_production(ev, [], [], top=10, full=False)
+    out = capsys.readouterr().out
+
+    assert "log level    1 at DEBUG, 1 at INFO" in out
+    # Only the file that differs from the majority; the rest carry no
+    # information one at a time.
+    assert "not at DEBUG: panda-B.log" in out
+    assert "panda-A.log" not in out
+
+
+def test_full_puts_every_folded_row_back(capsys):
+    ev = _evidence(_sample([_log_line("DEBUG", "x")], filename="panda-A.log"))
+
+    check_map._report_production(ev, [], [f"disk check -disk ({BROKER_LOG})"], top=10, full=True)
+    out = capsys.readouterr().out
+
+    assert "panda-A.log" in out and "DEBUG=1" in out
+    assert f"disk check -disk ({BROKER_LOG})" in out
+
+
+def test_agreement_is_reported_one_sided(capsys):
+    """No ratio: a line nobody saw may simply not have fired, and the ratio
+    invited reading a rare rejection as a stale template."""
+    check_map._report_production(_evidence(), [], ["a (f.log)", "b (f.log)"], top=10, full=False)
+    out = capsys.readouterr().out
+
+    assert "2 diagnostic line(s) of the map found verbatim" in out
+    assert "one-sided" in out
+    assert "/" not in out.split("agreement")[1].splitlines()[0]
+
+
+def test_the_gate_table_names_the_question_and_marks_a_partial_sample(capsys):
+    check_map._report_gates(
+        [
+            _result(
+                "tags-are-known",
+                checked=31,
+                unit="observed tags",
+                question="is every cut production makes in the map?",
+                sample=gates.PARTIAL,
+            ),
+            _result("code-paths-are-live", checked=22, unit="log files", kind=gates.DEPLOYMENT_FACT),
+        ]
+    )
+    out = capsys.readouterr().out
+
+    assert "31 observed tags" in out
+    assert "is every cut production makes in the map?" in out
+    assert "[partial]" in out
+    # A gate whose answer is not a sample gets no marker rather than a hedge.
+    assert out.splitlines()[-1].count("[") == 0
+
+
+def test_not_concluded_collapses_to_one_line_per_gate(capsys):
+    check_map._report_unconcluded(
+        [_result("observables-are-emitted", inconclusive=[f"row {i}" for i in range(7)])],
+        full=False,
+    )
+    out = capsys.readouterr().out
+
+    assert "not concluded (7)" in out
+    assert "… 6 more (--full)" in out
+
+
+def test_evidence_age_and_bound_sizes_are_readable():
+    assert check_map._age("2026-08-30T00:00:00+00:00").endswith("ago")
+    assert check_map._age("not a date") == "age unknown"
+    assert check_map._size(64 * 1024 * 1024) == "64MB"
+    assert check_map._size(1 << 30) == "1GB"
+    assert (check_map._count(1, "map defect"), check_map._count(0, "map defect")) == (
+        "1 map defect",
+        "0 map defects",
+    )
+
+
+def test_a_clipped_row_keeps_the_half_that_says_what_happened():
+    """Which is why the gate's rows lead with their reason."""
+    row = f"{BROKER_LOG} is on no machine, so -x at {BROKER} never ran here"
+
+    assert check_map._clip(row).startswith(f"{BROKER_LOG} is on no machine")
+    assert check_map._clip("short") == "short"

@@ -16,6 +16,22 @@ the gates read the file.  Separating the two means the gates re-run offline,
 tests use a fixture instead of the network, and the checking half stays
 developable without the API allowlist.
 
+The report is ordered by what the reader has to decide, not by how the checks
+run.  Three distinctions do the work, and each of them was learned by getting
+the output wrong first:
+
+* **not every failure asks for a change.**  A mapped log file that no machine
+  has means the map is right and this deployment does not run that code; a tag
+  production emits that no stage explains is an extraction miss.  Printing both
+  as ``FAIL`` made them look like one thing.
+* **a bounded sample is not the log.**  Every gate here already knows whether
+  what it read was whole, and reporting the verdict without that turned "we did
+  not look" into "it is not there" -- the one mistake this whole layer exists to
+  avoid.
+* **a count needs its unit.**  Query answers, log files, filter stages, tags and
+  step pairs are not comparable quantities, and printing all five as "checked"
+  invited exactly the comparison that means nothing.
+
 Usage::
 
     # Fetch fresh evidence and check against it
@@ -23,6 +39,9 @@ Usage::
 
     # Re-check against evidence already on disk
     bamboo check-map
+
+    # Every folded row
+    bamboo check-map --full
 
     # Check a specific release, and say where its logs are
     bamboo check-map --fetch --source-root /path/to/panda \\
@@ -33,6 +52,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import textwrap
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +67,31 @@ from bamboo.codemap.models import MapFragment
 logger = logging.getLogger(__name__)
 
 DEFAULT_EVIDENCE = Path(".bamboo") / "codemap-evidence.json"
+
+# Width the prose wraps to.  Notes are whole sentences -- they carry the reason a
+# finding matters -- so they wrap rather than run off the edge.
+_WIDTH = 96
+
+_KIND_LABEL = {
+    gates.CHECK_BROKEN: "broken check",
+    gates.MAP_DEFECT: "map defect",
+    gates.DEPLOYMENT_FACT: "deployment difference",
+}
+
+
+def _count(number: int, noun: str) -> str:
+    """``1 map defect`` / ``2 map defects`` -- the verdict line is a sentence."""
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
+def _clip(text: str, width: int = 62) -> str:
+    """One representative row, shortened to keep a summary line scannable.
+
+    The rows it shortens lead with their reason for that purpose: cutting the
+    tail of "X is on no machine, so Y never ran" still says what happened,
+    where cutting the tail of "Y at <long anchor>: X is on no machine" does not.
+    """
+    return text if len(text) <= width else text[: width - 1] + "…"
 
 
 def _targets(fragment: MapFragment, declared: dict[str, str]) -> dict[str, str]:
@@ -78,68 +125,268 @@ def _parse_overrides(specs: tuple[str, ...]) -> dict[str, str]:
     return extra
 
 
-def _report_levels(ev: evidence.Evidence, top: int) -> None:
-    """Print what each log file actually contains.
+def _age(fetched_at: str) -> str:
+    """How old the evidence is, in words.
 
-    Per file, not per service: PanDA configures a level per logger, so one
-    threshold for a whole machine group would be a number established for
-    something else.
+    Printed because the map does not change between runs and its
+    trustworthiness does: a verdict read off week-old evidence is a statement
+    about last week's deployment.
     """
-    click.echo("\nlog files:")
-    rows = sorted(ev.log_filenames())
-    for filename in rows[:top]:
-        status = ev.file_status(filename)
-        results = ev.matching(evidence.ANY_LINE_PATTERN, log_filename=filename)
-        if status != "present":
-            click.echo(f"  {filename:<34} {status}")
-            continue
-        counts = evidence.level_histogram(ev, log_filename=filename)
-        threshold = evidence.effective_level(ev, log_filename=filename) or "unknown"
-        detail = ", ".join(f"{lv}={counts[lv]}" for lv in evidence.LEVELS if counts[lv])
-        # A truncated sample cannot say what production does *not* emit, so the
-        # mark is on the line that reports the threshold rather than buried.
-        truncated = "" if ev.conclusive(evidence.ANY_LINE_PATTERN, log_filename=filename) else " [partial]"
-        click.echo(
-            f"  {filename:<34} {threshold:<8}{truncated:<10} {sum(counts.values())} line(s) "
-            f"from {len(results)} machine(s)"
+    try:
+        when = datetime.fromisoformat(fetched_at)
+    except ValueError:
+        return "age unknown"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - when).total_seconds()
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "m")):
+        if seconds >= size:
+            return f"{seconds / size:.0f}{unit} ago"
+    return "just now"
+
+
+def _size(count: int) -> str:
+    """Bytes as the size a reader recognises."""
+    for unit, size in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if count >= size:
+            return f"{count // size}{unit}"
+    return f"{count}B"
+
+
+def _note(text: str, indent: str) -> None:
+    """Print a gate's note, wrapped."""
+    click.echo(
+        textwrap.fill(
+            text,
+            width=_WIDTH,
+            initial_indent=f"{indent}note: ",
+            subsequent_indent=f"{indent}      ",
         )
-        if detail:
-            click.echo(f"    {detail}")
-    if len(rows) > top:
-        click.echo(f"  … {len(rows) - top} more")
+    )
 
 
-def _report_dropped(fragment: MapFragment, ev: evidence.Evidence, top: int) -> None:
-    """List the observables production does not emit.
+def _report_header(
+    fragment: MapFragment, ev: evidence.Evidence, path: Path, plugin: object, top: int
+) -> None:
+    """What was checked, against what, and how old it is."""
+    click.echo(f"map        {fragment.map_id} @ {fragment.derived_from}")
+    parsed = getattr(plugin, "module_count", 0)
+    if parsed:
+        excluded = getattr(plugin, "excluded_module_count", 0)
+        click.echo(
+            f"source     {parsed} module(s) analysed · {excluded} test module(s) excluded "
+            "(test code is not the system's behaviour)"
+        )
+    click.echo(f"evidence   {path} · {ev.fetched_at} ({_age(ev.fetched_at)})")
+    machines = {
+        service: len({r.machine for r in ev.results if r.query.service == service})
+        for service in sorted(ev.services())
+    }
+    click.echo(
+        f"           {len({r.query.key() for r in ev.results})} query(ies) · "
+        f"{len(ev.results)} answer(s) · "
+        + ", ".join(f"{service} {count}" for service, count in machines.items())
+        + " machine(s)"
+    )
+    status = Counter(ev.file_status(f) for f in ev.log_filenames())
+    click.echo(
+        f"files      {len(ev.log_filenames())} asked · {status['present']} present · "
+        f"{status['absent']} absent"
+        + (f" · {status['unknown']} unknown" if status["unknown"] else "")
+    )
+    broken = ev.failures()
+    if broken:
+        # Named up here, before any verdict: "not authorized" or a wrong
+        # filename is not production disagreeing with the map, and a query that
+        # did not run is not a finding about PanDA.
+        click.echo(f"errors     {len(broken)} query(ies) did not run")
+        for result in broken[:top]:
+            click.echo(f"           {result.query.service}/{result.machine}: {result.error}")
+        if len(broken) > top:
+            click.echo(f"           … {len(broken) - top} more")
 
-    The point of the command: an observable below the threshold has to come
-    out of the strategy, because a step that fetches a line which does not
-    exist is worse than having no step at all.  Stages whose file is absent
-    are left out here -- ``code-paths-are-live`` reports those, and a path
-    that never ran is a different finding from one that runs quietly.
+
+def _report_sample(ev: evidence.Evidence) -> None:
+    """How much of what was asked came back whole.
+
+    The section that was missing, and its absence was the worst of the report's
+    problems: the gates establish this to decide what they may conclude, and
+    without it on screen a gate that could not conclude anything looks exactly
+    like one that checked and found nothing.
     """
-    dropped = []
-    for stage in fragment.filter_stages:
-        if not stage.log_level or not stage.log_files:
+    present = sorted(f for f in ev.log_filenames() if ev.file_status(f) == "present")
+    rows: list[str] = []
+    for name, pattern, needs_lines in (
+        ("levels", evidence.ANY_LINE_PATTERN, False),
+        ("tags", evidence.TAG_PATTERN, True),
+        ("funnel", evidence.FUNNEL_PATTERN, True),
+    ):
+        whole, asked = evidence.sample_state(ev, pattern, present, needs_lines=needs_lines)
+        if not asked:
             continue
-        live = [f for f in stage.log_files if ev.file_status(f) == "present"]
-        if not live:
-            continue
-        if all(
-            evidence.below_threshold(
-                stage.log_level, evidence.effective_level(ev, log_filename=f)
-            )
-            for f in live
-        ):
-            where = stage.anchor.as_ref() if stage.anchor else stage.owner
-            dropped.append((stage.criteria_tag or stage.funnel_label, stage.log_level, where))
-    if not dropped:
+        word = gates.COMPLETE if whole == asked else gates.PARTIAL.upper()
+        rows.append(f"{name:<7} {word:<9} {whole}/{asked} file(s) answered whole")
+    if not rows:
         return
-    click.echo(f"\nobservables production does not emit ({len(dropped)}):")
-    for tag, level, where in dropped[:top]:
-        click.echo(f"  {tag:<24} {level:<6} {where}")
-    if len(dropped) > top:
-        click.echo(f"  … {len(dropped) - top} more")
+    for index, row in enumerate(rows):
+        click.echo(("sample     " if index == 0 else "           ") + row)
+    capped, total, bounds = evidence.bounds_hit(ev)
+    if capped:
+        shape = ", ".join(
+            f"{_size(window)} window / {matches} matches per machine"
+            for window, matches in sorted(bounds)
+        )
+        click.echo(f"           {capped} of {total} answer(s) hit a bound ({shape})")
+    click.echo("           absence in a bounded sample proves nothing -- and for a line a")
+    click.echo("           branch has to fire to write, neither does a complete one.")
+
+
+def _report_verdict(results: list[gates.GateResult]) -> None:
+    """The one line that says whether anything needs doing."""
+    failing = [r for r in results if not r.passed]
+    counts = Counter(r.kind for r in failing)
+    click.echo(
+        "\nverdict    "
+        + " · ".join(
+            _count(counts.get(kind, 0), _KIND_LABEL[kind]) for kind in gates.KIND_ORDER
+        )
+    )
+    worst = next(
+        (r for kind in gates.KIND_ORDER for r in failing if r.kind == kind), None
+    )
+    if worst is None:
+        click.echo(
+            "           nothing to change: the map and the deployment agree "
+            "wherever they can be compared."
+        )
+    else:
+        click.echo(f"           {worst.finding or worst.gate}.")
+
+
+def _report_findings(results: list[gates.GateResult], top: int, full: bool) -> None:
+    """Every failure, worst kind first, headed by what it means.
+
+    The gate's slug is kept as the pointer but demoted: it is an identifier, and
+    ``code-paths-are-live`` does not tell a reader what went wrong.
+    """
+    failing = [
+        r for kind in gates.KIND_ORDER for r in results if not r.passed and r.kind == kind
+    ]
+    if not failing:
+        return
+    click.echo("\nfindings")
+    for result in failing:
+        click.echo(f"\n  {result.finding or result.gate}  [{result.gate}]")
+        shown = result.failures if full else result.failures[:top]
+        for failure in shown:
+            click.echo(f"    {failure}")
+        if len(result.failures) > len(shown):
+            click.echo(f"    … {len(result.failures) - len(shown)} more (--full)")
+        if result.note:
+            _note(result.note, "    ")
+
+
+def _report_production(
+    ev: evidence.Evidence,
+    results: list[gates.GateResult],
+    confirmed: list[str],
+    top: int,
+    full: bool,
+) -> None:
+    """What production said, as facts rather than as row dumps.
+
+    The level table used to be the largest block in the report and its whole
+    payload was one sentence.  It is that sentence now, plus the files that
+    differ from it -- which is also what keeps a finding out of a ``… 12 more``.
+    """
+    by_gate = {r.gate: r for r in results}
+    click.echo("\nproduction")
+
+    present = sorted(f for f in ev.log_filenames() if ev.file_status(f) == "present")
+    levels = Counter(
+        evidence.effective_level(ev, log_filename=f) or "unknown" for f in present
+    )
+    if levels:
+        click.echo(
+            "  log level    "
+            + ", ".join(f"{count} at {level}" for level, count in levels.most_common())
+        )
+        common = levels.most_common(1)[0][0]
+        odd = [
+            f
+            for f in present
+            if (evidence.effective_level(ev, log_filename=f) or "unknown") != common
+        ]
+        if odd and not full:
+            click.echo(f"               not at {common}: " + ", ".join(odd[:top]))
+        if full:
+            for filename in present:
+                counts = evidence.level_histogram(ev, log_filename=filename)
+                detail = ", ".join(
+                    f"{level}={counts[level]}" for level in evidence.LEVELS if counts[level]
+                )
+                level = evidence.effective_level(ev, log_filename=filename) or "?"
+                click.echo(f"               {filename:<34} {level:<8} {detail}")
+
+    observables = by_gate.get("observables-are-emitted")
+    if observables:
+        click.echo(
+            f"  observables  {observables.checked} stage(s) · "
+            f"{len(observables.failures)} dropped by level · "
+            f"{len(observables.inconclusive)} not concluded"
+        )
+    funnel = by_gate.get("funnel-order-matches")
+    if funnel:
+        state = (
+            "all in the map's order"
+            if not funnel.failures
+            else f"{len(funnel.failures)} out of the map's order"
+        )
+        click.echo(f"  funnel       {funnel.checked} step pair(s) · {state}")
+    if confirmed:
+        # The only production check on version skew there is, and one-sided.
+        # The unconfirmed half is not counted here on purpose: a line nobody saw
+        # may simply not have fired, so the ratio invited a false reading.
+        click.echo(
+            f"  agreement    {len(confirmed)} diagnostic line(s) of the map found "
+            "verbatim in production"
+        )
+        click.echo("               one-sided: a line not seen may simply not have fired")
+        if full:
+            for label in sorted(confirmed):
+                click.echo(f"               {label}")
+
+
+def _report_unconcluded(results: list[gates.GateResult], full: bool) -> None:
+    """What was looked at and not decided, one line per gate.
+
+    Kept visible rather than folded away entirely: "we could not tell" is a
+    result, and the seven near-identical rows it used to print were not.
+    """
+    rows = [(r.gate, r.inconclusive) for r in results if r.inconclusive]
+    if not rows:
+        return
+    click.echo(f"\nnot concluded ({sum(len(items) for _, items in rows)})")
+    for gate, items in rows:
+        if full:
+            click.echo(f"  {gate}")
+            for item in items:
+                click.echo(f"    {item}")
+            continue
+        click.echo(f"  {gate:<26} {len(items):>3}  {_clip(items[0])}")
+        if len(items) > 1:
+            click.echo(f"  {'':<26} {'':>3}  … {len(items) - 1} more (--full)")
+
+
+def _report_gates(results: list[gates.GateResult]) -> None:
+    """The audit trail: what ran, over how much, in whose units."""
+    click.echo("\ngates")
+    for result in results:
+        mark = "  [partial]" if result.sample == gates.PARTIAL else ""
+        click.echo(
+            f"  {result.verdict:<8} {result.gate:<24} {result.checked:>4} "
+            f"{result.unit:<14} {result.question or ''}{mark}"
+        )
 
 
 @click.command("check-map")
@@ -188,9 +435,19 @@ def _report_dropped(fragment: MapFragment, ev: evidence.Evidence, top: int) -> N
     "--strict",
     is_flag=True,
     help=(
-        "Exit non-zero if any gate fails.  Off by default: a production gate "
-        "failing means the map and the deployment have drifted, which is a "
-        "signal to look rather than a reason to fail a pipeline."
+        "Exit non-zero if a gate fails in a way that asks for a change -- a map "
+        "defect or a check that could not run.  A deployment difference does "
+        "not count: the map and the source agree there, and the deployment "
+        "simply does not exercise that code, which is no reason to fail a "
+        "pipeline."
+    ),
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help=(
+        "Print every folded row: each log file's level histogram, every "
+        "confirmed diagnostic, and all failure and not-concluded rows."
     ),
 )
 @click.option("--top", default=10, show_default=True, help="Rows per listing.")
@@ -203,6 +460,7 @@ def main(
     log_file_specs: tuple[str, ...],
     timeout: float,
     strict: bool,
+    full: bool,
     top: int,
     verbose: bool,
 ) -> None:
@@ -257,53 +515,21 @@ def main(
             )
         ev = evidence.Evidence.load(evidence_path)
 
-    click.echo(f"\nmap_id       : {fragment.map_id}")
-    click.echo(f"derived_from : {fragment.derived_from}")
-    click.echo(f"evidence     : {evidence_path} ({ev.fetched_at})")
+    results = gates.run_production(fragment, ev)
+    confirmed = gates.templates_confirmed(fragment, ev)
 
-    broken = ev.failures()
-    if broken:
-        # Named before the gates so that "not authorized" or a wrong filename
-        # reads as what it is, rather than as production disagreeing with the
-        # map.  A query that did not run is not a finding about PanDA.
-        click.echo(f"\nqueries that did not run ({len(broken)}):")
-        for result in broken[:top]:
-            click.echo(f"  {result.query.service}/{result.machine}: {result.error}")
-        if len(broken) > top:
-            click.echo(f"  … {len(broken) - top} more")
+    click.echo()
+    _report_header(fragment, ev, evidence_path, plugin, top)
+    _report_sample(ev)
+    _report_verdict(results)
+    _report_findings(results, top, full)
+    _report_production(ev, results, confirmed, top, full)
+    _report_unconcluded(results, full)
+    _report_gates(results)
 
-    _report_levels(ev, top)
-    _report_dropped(fragment, ev, top)
-
-    confirmed, promised, unconfirmed = gates.templates_confirmed(fragment, ev)
-    if promised:
-        # A report and not a gate: asserting a template has *gone* needs every
-        # matching line, which a busy broker log does not yield under a cap.
-        # An unconfirmed template is unknown, not missing.
-        click.echo(f"\ndiagnostics confirmed in production: {confirmed}/{promised}")
-        for label in unconfirmed[:top]:
-            click.echo(f"  unconfirmed  {label}")
-        if len(unconfirmed) > top:
-            click.echo(f"  … {len(unconfirmed) - top} more")
-
-    click.echo("\ngates:")
-    all_passed = True
-    for result in gates.run_production(fragment, ev):
-        click.echo(f"  {result.summary()}")
-        if not result.passed:
-            all_passed = False
-        for failure in result.failures[:top]:
-            click.echo(f"      - {failure}")
-        if len(result.failures) > top:
-            click.echo(f"      … {len(result.failures) - top} more")
-        for item in result.inconclusive[:top]:
-            click.echo(f"      ? {item}")
-        if len(result.inconclusive) > top:
-            click.echo(f"      … {len(result.inconclusive) - top} more inconclusive")
-        if result.note:
-            click.echo(f"      note: {result.note}")
-
-    if not all_passed and strict:
+    # Only the failures that ask for a change.  A deployment difference is
+    # information the map should carry, not a broken build.
+    if strict and any(result.actionable for result in results):
         raise SystemExit(1)
 
 
