@@ -499,7 +499,7 @@ def _progress(source: str, rel: str):
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
         _module(source, rel),
     ]
-    subjects, junctions, coverage = progress.extract(modules, MAP_ID, VERSION)
+    subjects, junctions, coverage, _diag = progress.extract(modules, MAP_ID, VERSION)
     return subjects, [j for j in junctions if j.owner.startswith(rel)], coverage
 
 
@@ -871,7 +871,7 @@ def _progress_multi(*sources: tuple[str, str]):
     """Extract with the spec fixtures plus several caller modules."""
     modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py")]
     modules += [_module(text, rel) for text, rel in sources]
-    subjects, junctions, coverage = progress.extract(modules, MAP_ID, VERSION)
+    subjects, junctions, coverage, _diag = progress.extract(modules, MAP_ID, VERSION)
     return subjects, junctions, coverage
 
 
@@ -1169,7 +1169,7 @@ def _sql_extract(source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/t
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     conflicts = attributor.learn_table_classes(modules)
-    subjects, junctions, coverage, uncovered = sqlwrite.extract(
+    subjects, junctions, coverage, uncovered, _diag = sqlwrite.extract(
         modules, MAP_ID, VERSION, attributor
     )
     return subjects, junctions, coverage, uncovered, conflicts, attributor
@@ -1456,7 +1456,7 @@ def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, junctions, _c, _u = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _s, junctions, _c, _u, _d = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
     status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
 
     assert {(b.outcome, b.tier) for b in status[0].branches} == {
@@ -1893,6 +1893,110 @@ def test_a_stated_key_the_mapping_lacks_resolves_to_nothing():
     written = next(n for n in ast.walk(func) if isinstance(n, ast.Assign))
 
     assert settle(written.value, func) == []
+
+
+def test_assembled_text_is_indexed_and_a_bare_literal_is_not():
+    """The index answers "this message was seen, who wrote it" -- which needs a
+    frame with holes.  An exact message can be found by searching the source for
+    itself, so a bare literal is not a template and does not earn a row.
+    """
+    source = (
+        "class JobSpec(object):\n"
+        "    _attributes = ('PandaID', 'jobStatus', 'ddmErrorDiag')\n"
+        "    def fail(self, n):\n"
+        "        self.ddmErrorDiag = f'failed to get {n} files'\n"
+        "        self.jobStatus = 'failed'\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    _s, _j, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+
+    assert [(d.template, d.field, d.form) for d in diagnostics] == [
+        ("failed to get {} files", "JobSpec.ddmErrorDiag", "attribute")
+    ]
+
+
+def test_a_frame_of_nothing_but_holes_is_not_a_search_key():
+    """``setErrDiag`` appends with ``f"{self.errorDialog} {diag}"``, whose frame
+    is two holes and a space: true, and matching nothing.  A row that cannot be
+    searched for is noise in an index that exists to be searched."""
+    source = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'status', 'errorDialog')\n"
+        "    def setErrDiag(self, diag):\n"
+        "        self.errorDialog = f'{self.errorDialog} {diag}'\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/JediTaskSpec.py"),
+    ]
+    _s, _j, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+
+    assert diagnostics == []
+
+
+def test_a_bound_template_is_filed_against_the_column_not_the_bind():
+    """On its own the bind is called ``:errDiag`` and could belong to any
+    statement in the method; which column it lands in is the join the SQL slice
+    has already made, which is why the index is collected there.
+
+    Qualified by the table here because a one-column statement cannot say which
+    spec the row holds -- the same fallback a write gets, so the two agree.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self, site):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET errorDialog=:errDiag '\n"
+        "        varMap = {}\n"
+        "        varMap[':errDiag'] = f'site {site} is unknown'\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    _s, _j, _c, _u, diagnostics = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+
+    assert [(d.template, d.field, d.form) for d in diagnostics] == [
+        ("site {} is unknown", "JEDI_Tasks.errorDialog", "bind")
+    ]
+
+
+def test_the_index_survives_promotion_dropping_the_field():
+    """The whole point.  ``ddmErrorDiag`` satisfies no promotion criterion --
+    correctly, since it has no value set to enumerate -- so its subject and its
+    junctions are dropped.  The writes that assemble its text are still the
+    answer to "who wrote this line", and an index makes no claim about the field
+    that promotion could contradict.
+    """
+    source = (
+        "class JobSpec(object):\n"
+        "    _attributes = ('PandaID', 'jobStatus', 'ddmErrorDiag')\n"
+        "    def fail(self, n, why):\n"
+        "        self.ddmErrorDiag = f'failed to get {n} files'\n"
+        "        self.ddmErrorDiag = why\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    subjects, junctions, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.subjects.extend(subjects)
+    fragment.junctions.extend(junctions)
+    fragment.diagnostics.extend(diagnostics)
+
+    promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+
+    assert "JobSpec.ddmErrorDiag" not in {s.name for s in fragment.subjects}
+    assert "JobSpec.ddmErrorDiag" not in {j.subject for j in fragment.junctions}
+    assert [d.template for d in fragment.diagnostics] == ["failed to get {} files"]
 
 
 def test_the_attribute_slice_reads_a_subscript_of_a_declared_mapping():

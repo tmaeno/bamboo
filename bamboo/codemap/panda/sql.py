@@ -50,6 +50,7 @@ from typing import NamedTuple, Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap.panda.pathcond import exclusive, path_condition
+from bamboo.codemap.panda.values import rendered_text
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,6 @@ _INSERT = re.compile(
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)\s*=\s*(:?[A-Za-z_]\w*|[^,]+?)(?=\s*,|\s*$)")
 _IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 _WHERE = re.compile(r"\bWHERE\b", re.IGNORECASE)
-# ``{0}`` / ``{}`` / ``{schema}`` in a ``str.format`` template.
-_FIELD = re.compile(r"\{[^{}]*\}")
 
 _QUOTED = re.compile(r"^'([^']*)'$")
 _BARE = re.compile(r"^[A-Za-z_]\w*$")
@@ -157,41 +156,6 @@ class SqlWrite(BaseModel):
     )
 
 
-def _literal(node: ast.expr) -> Optional[str]:
-    """Render a string expression, marking unreadable parts as ``{}``.
-
-    An f-string's interpolations are almost always the schema name, which does
-    not change what the statement does; blanking them keeps the rest readable
-    rather than discarding the whole statement.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.JoinedStr):
-        return "".join(
-            value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else "{}"
-            for value in node.values
-        )
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left, right = _literal(node.left), _literal(node.right)
-        if left is None and right is None:
-            return None
-        return (left or "") + (right or "")
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "format"
-    ):
-        # ``"FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
-        # ".format(panda_config.schemaJEDI)`` -- the older spelling of the same
-        # f-string, and 62 statements still use it.  Missing it did not merely
-        # lose coverage: those statements are where JEDI selects tasks by
-        # status, so the map read a dozen task states as ones nothing ever
-        # selects on.
-        text = _literal(node.func.value)
-        return None if text is None else _FIELD.sub("{}", text)
-    return None
-
-
 def _parts(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
@@ -207,7 +171,7 @@ def _parts(
             for target in node.targets:
                 if not (isinstance(target, ast.Name) and target.id == name):
                     continue
-                text = _literal(node.value)
+                text = rendered_text(node.value)
                 if text is None and isinstance(node.value, ast.Name):
                     # ``sql = sqlTU`` -- the statement was built under another
                     # name and *chosen* here.  The choosing assignment is the
@@ -224,7 +188,7 @@ def _parts(
             and node.target.id == name
             and isinstance(node.op, ast.Add)
         ):
-            text = _literal(node.value)
+            text = rendered_text(node.value)
             if text is not None:
                 parts.append((node.lineno, "+=", text, node))
     parts.sort(key=lambda part: part[0])

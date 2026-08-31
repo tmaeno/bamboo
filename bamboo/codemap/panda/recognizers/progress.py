@@ -43,6 +43,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     CoverageStat,
+    DiagnosticTemplate,
     JunctionNode,
     SourceModule,
     SubjectNode,
@@ -326,7 +327,7 @@ def extract(
     modules: list[SourceModule],
     map_id: str,
     derived_from: str,
-) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat]]:
+) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat], list[DiagnosticTemplate]]:
     """Extract subjects, junctions for attribute writes, and coverage.
 
     Coverage measures *attribution*, not resolution: candidates are the writes
@@ -337,6 +338,11 @@ def extract(
     whose class is unresolved is still emitted, under the placeholder subject:
     that is a gap in attribution, and dropping it would lose the fact that the
     attribute is written here at all.
+
+    The diagnostic index comes back alongside rather than as part of the
+    junctions, because it survives promotion and they do not: a message field is
+    not a subject, and the writes that assemble its text are still the answer to
+    "who wrote this line".
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
@@ -354,6 +360,7 @@ def extract(
     junctions: dict[str, JunctionNode] = {}
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str]] = set()
+    diagnostics: list[DiagnosticTemplate] = []
 
     for module in modules:
         attach_parents(module.tree)
@@ -385,6 +392,25 @@ def extract(
             owner = f"{module.rel_path}::{qualname}"
             subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)
+
+            template = values.diagnostic_template(value)
+            if template:
+                diagnostics.append(
+                    DiagnosticTemplate(
+                        map_id=map_id,
+                        derived_from=derived_from,
+                        template=template,
+                        field=subject,
+                        form="attribute",
+                        anchor=Anchor(
+                            package=module.package,
+                            file=module.rel_path,
+                            line_start=node.lineno,
+                            line_end=node.end_lineno,
+                            blob_sha=module.blob_sha,
+                        ),
+                    )
+                )
 
             structural = attributor.structural_class(target, func)
             junction = junctions.get(name)
@@ -454,7 +480,7 @@ def extract(
         )
         for spec_class, attribute in sorted(attributed)
     ]
-    return subjects, list(junctions.values()), coverage
+    return subjects, list(junctions.values()), coverage, diagnostics
 
 
 def _attribution_evidence(

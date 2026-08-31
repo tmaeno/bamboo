@@ -154,12 +154,13 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.filter_stages.extend(filter_stages)
         fragment.coverage.extend(selection_coverage)
 
-        subjects, junctions, progress_coverage = progress.extract(
+        subjects, junctions, progress_coverage, written_text = progress.extract(
             self._modules, self.map_id, self._version
         )
         fragment.subjects.extend(subjects)
         fragment.junctions.extend(junctions)
         fragment.coverage.extend(progress_coverage)
+        fragment.diagnostics.extend(written_text)
 
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
@@ -184,12 +185,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(returned_junctions)
         fragment.coverage.extend(returned_coverage)
 
-        sql_subjects, sql_junctions, sql_coverage, self._uncovered_tables = sqlwrite.extract(
-            self._modules, self.map_id, self._version, attributor
-        )
+        (
+            sql_subjects,
+            sql_junctions,
+            sql_coverage,
+            self._uncovered_tables,
+            bound_text,
+        ) = sqlwrite.extract(self._modules, self.map_id, self._version, attributor)
         fragment.subjects.extend(sql_subjects)
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)
+        fragment.diagnostics.extend(bound_text)
 
         # The predicate side of the same statements: which values something
         # selects rows on.  Attached to the subject rather than kept apart, so

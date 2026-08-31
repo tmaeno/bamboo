@@ -140,6 +140,25 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             if len(blind) > top:
                 click.echo(f"    … {len(blind) - top} more")
 
+    if fragment.diagnostics:
+        fields = Counter(d.field for d in fragment.diagnostics)
+        distinct = {d.template for d in fragment.diagnostics}
+        click.echo(
+            f"\ndiagnostic templates: {len(fragment.diagnostics)} "
+            f"({len(distinct)} distinct) in {len(fields)} field(s)"
+        )
+        for field, count in fields.most_common(top):
+            click.echo(f"  {count:>3}  {field}")
+        if len(fields) > top:
+            click.echo(f"    … {len(fields) - top} more field(s)")
+        # Said out loud because it is the one part of the map promotion does
+        # not filter: these are here precisely because their fields are not
+        # subjects, and a reader who assumed otherwise would expect a junction.
+        click.echo(
+            "  outside promotion: a free-text field is not a subject, and this "
+            "answers\n  \"who wrote this line\" rather than \"why is it this value\""
+        )
+
     if fragment.boundaries:
         systems = Counter(b.system for b in fragment.boundaries)
         click.echo(

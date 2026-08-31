@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from typing import Optional, Union
 
 from bamboo.codemap.models import SourceModule
@@ -47,6 +48,77 @@ from bamboo.codemap.panda.pathcond import functions_with_owner, single_definitio
 
 # A literal mapping, nested as deeply as the source nests it.
 Mapping = dict[str, Union[str, "Mapping"]]
+
+# ``{0}`` / ``{}`` / ``{schema}`` in a ``str.format`` template.
+_FIELD = re.compile(r"\{[^{}]*\}")
+
+
+def rendered_text(node: ast.expr) -> Optional[str]:
+    """Render a string expression, marking the parts only run time knows as ``{}``.
+
+    The shape of the text rather than the text: what the code will produce with
+    the holes left open.  Two callers want the same answer for opposite reasons
+    -- reading a SQL statement, where the interpolation is almost always the
+    schema name and blanking it keeps the statement readable; and indexing a
+    diagnostic, where the literal frame is precisely the part a message observed
+    in production can be matched against.
+
+    ``None`` when nothing literal can be recovered, which is different from an
+    empty string: it means the expression says nothing about its own text.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else "{}"
+            for value in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = rendered_text(node.left), rendered_text(node.right)
+        if left is None and right is None:
+            return None
+        return (left or "") + (right or "")
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        # ``"FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        # ".format(panda_config.schemaJEDI)`` -- the older spelling of the same
+        # f-string, and 62 statements still use it.  Missing it did not merely
+        # lose coverage: those statements are where JEDI selects tasks by
+        # status, so the map read a dozen task states as ones nothing ever
+        # selects on.
+        text = rendered_text(node.func.value)
+        return None if text is None else _FIELD.sub("{}", text)
+    return None
+
+
+def diagnostic_template(node: ast.expr) -> Optional[str]:
+    """The template *node* assembles, if it is one worth indexing.
+
+    Two conditions, both properties of the expression rather than claims about
+    the field it is written to -- which is what lets the index avoid deciding
+    what counts as a message.
+
+    **Assembled, not written out.**  A template is a frame with holes; a bare
+    literal is not one, and an exact message can be found by searching the
+    source for itself.  That case the index does not have to earn.
+
+    **Some literal text.**  ``setErrDiag`` appends with ``f"{self.errorDialog}
+    {diag}"``, whose frame is two holes and a space: true, and matching nothing.
+    A row that cannot serve as a search key is noise in an index that exists to
+    be searched.
+    """
+    assembled = isinstance(node, (ast.JoinedStr, ast.BinOp)) or (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    )
+    if not assembled:
+        return None
+    text = rendered_text(node)
+    return text if text and _FIELD.sub("", text).strip() else None
 
 
 def _literal_mapping(node: ast.expr) -> Optional[Mapping]:

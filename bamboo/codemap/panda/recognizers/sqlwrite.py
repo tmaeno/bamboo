@@ -51,6 +51,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     CoverageStat,
+    DiagnosticTemplate,
     JunctionNode,
     SourceModule,
     SubjectNode,
@@ -124,12 +125,20 @@ def extract(
     map_id: str,
     derived_from: str,
     attributor: SpecAttributor,
-) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat], set[str]]:
+) -> tuple[
+    list[SubjectNode],
+    list[JunctionNode],
+    list[CoverageStat],
+    set[str],
+    list[DiagnosticTemplate],
+]:
     """Extract junctions for SQL bind writes.
 
     Returns the tables holding no spec alongside the usual three, so the
     build can say what the map does not cover instead of burying it in a
-    coverage ratio.
+    coverage ratio, and the diagnostic templates bound into statements -- which
+    belong here rather than in a scan of their own because the column a bind
+    lands in is the join this slice has already made.
 
     *attributor* is passed in already taught: the table map is learned from the
     whole corpus, so it cannot be built from the module in hand.
@@ -138,6 +147,7 @@ def extract(
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
     uncovered: set[str] = set()
+    diagnostics: list[DiagnosticTemplate] = []
     settle = values.resolver(values.declared_mappings(modules))
 
     for module in modules:
@@ -167,6 +177,7 @@ def extract(
                         qualifier, attribute, kind = _subject_of(
                             attributor, spec_class, statement.table, column
                         )
+                        templates: list[tuple[str, ast.stmt]] = []
                         outcomes = _outcomes(
                             attributor,
                             func=func,
@@ -176,6 +187,24 @@ def extract(
                             supplied=supplied,
                             spec_class=spec_class,
                             settle=settle,
+                            templates=templates,
+                        )
+                        diagnostics.extend(
+                            DiagnosticTemplate(
+                                map_id=map_id,
+                                derived_from=derived_from,
+                                template=template,
+                                field=SubjectNode.make_name(qualifier, attribute),
+                                form="bind",
+                                anchor=Anchor(
+                                    package=module.package,
+                                    file=module.rel_path,
+                                    line_start=node.lineno,
+                                    line_end=node.end_lineno,
+                                    blob_sha=module.blob_sha,
+                                ),
+                            )
+                            for template, node in templates
                         )
                         if not outcomes:
                             continue
@@ -213,7 +242,7 @@ def extract(
         )
         for qualifier, attribute, kind in sorted(attributed)
     ]
-    return subjects, list(junctions.values()), coverage, uncovered
+    return subjects, list(junctions.values()), coverage, uncovered, diagnostics
 
 
 def _deciding_fragment(
@@ -247,6 +276,7 @@ def _outcomes(
     supplied: sql.ColumnValue,
     spec_class: Optional[str],
     settle,
+    templates: list[tuple[str, ast.stmt]],
 ) -> list[tuple[str, int, ast.stmt, list[str]]]:
     """Return ``(outcome, tier, node, extra conditions)`` for one written column.
 
@@ -259,6 +289,12 @@ def _outcomes(
     that reached ``varMap[":status"] = newTaskStatus`` say the write happened,
     and the guards on the assignment that gave the local its value say which
     value.  Both are needed, and neither is derivable from the other's node.
+
+    Diagnostic templates are appended to *templates* rather than returned: they
+    are not outcomes, and the caller files them against the column rather than
+    the subject.  Collected here because *which column the text lands in* is the
+    join this slice has already made -- on its own the bind is called
+    ``:errDiag`` and could belong to any statement in the method.
     """
     if supplied.kind == "bind":
         if run.varmap is None:
@@ -270,6 +306,9 @@ def _outcomes(
             if settled:
                 found.extend((outcome, 1, bind, []) for outcome in settled)
                 continue
+            template = values.diagnostic_template(value)
+            if template:
+                templates.append((template, bind))
             if isinstance(value, ast.Name):
                 # Reaching definitions, the same reading the attribute slice
                 # makes of a local: 19% of the corpus's writes fill the bind

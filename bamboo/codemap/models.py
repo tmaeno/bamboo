@@ -479,6 +479,7 @@ class MapFragment(BaseModel):
     boundaries: list[BoundaryNode] = Field(default_factory=list)
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
+    diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
 
     def extend(self, other: "MapFragment") -> None:
@@ -488,7 +489,52 @@ class MapFragment(BaseModel):
         self.boundaries.extend(other.boundaries)
         self.value_enums.extend(other.value_enums)
         self.filter_stages.extend(other.filter_stages)
+        self.diagnostics.extend(other.diagnostics)
         self.coverage.extend(other.coverage)
+
+
+class DiagnosticTemplate(BaseModel):
+    """One place the code assembles text, and the frame it assembles.
+
+    **Deliberately not a node, and deliberately outside promotion.**  Promotion
+    answers "is this field worth asking why about?", which for a free-text field
+    is the wrong question -- ``ddmErrorDiag`` has no value set to enumerate, and
+    a subject node for it would invite a reader to expect a branch table.  The
+    question an investigation actually asks of it is the other way round: *this
+    message was seen, who wrote it?*  That is an index from a template to an
+    anchor, and an index makes no claim about the field, so it needs none of the
+    machinery -- no promotion criterion, no threshold, and no rule for telling a
+    message from an identifier.
+
+    That last point is what settled the design.  Both structural readings that
+    look like they could separate the two were measured and both misclassify:
+    the template reading as prose calls ``panda.pp.in.{}.{}`` a message and
+    misses ``errorDialog`` (whose other writes go through ``setErrDiag``), and
+    "nothing ever compares this field" also matches ``lfn`` and ``jobName``.
+    Indexing all of them costs nothing and misleads nobody.
+
+    Only *assembled* text is indexed.  A bare literal is not a template, and an
+    exact message can be found by searching the source for itself.
+    """
+
+    map_id: str
+    derived_from: str
+    template: str = Field(
+        ...,
+        description=(
+            "The literal frame, run-time parts as ``{}`` -- what a message "
+            "observed in production is matched against."
+        ),
+    )
+    field: str = Field(
+        ...,
+        description=(
+            "Qualified name of the field the text lands in.  Often not a "
+            "subject: that is the point."
+        ),
+    )
+    form: str = Field(..., description="attribute | bind")
+    anchor: Anchor
 
 
 class FilterStageNode(BaseNode):
