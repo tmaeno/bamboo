@@ -348,6 +348,7 @@ def extract(
     vocabularies = declared_vocabularies(modules, declarations)
     attributor = SpecAttributor(declarations, class_bases(modules))
     attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
     settle = values.resolver(values.declared_mappings(modules))
 
     # The subject universe is what the spec classes declare.  Without this
@@ -412,7 +413,7 @@ def extract(
                     )
                 )
 
-            structural = attributor.structural_class(target, func)
+            structural = attributor.structural_class(target, func, owner_class)
             junction = junctions.get(name)
             if junction is None:
                 junction = JunctionNode(

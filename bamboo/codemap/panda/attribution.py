@@ -73,6 +73,20 @@ NOT_A_SPEC = "not-a-spec"
 UNRESOLVED_CLASS = "?"
 
 
+def _rooted_at_self(expression: ast.expr) -> bool:
+    """Whether *expression* is ``self.<field>``, however many fields deep.
+
+    A bare ``self`` is excluded: that write is the enclosing class's own
+    attribute and resolves outright, with no inference involved.
+    """
+    if not isinstance(expression, ast.Attribute):
+        return False
+    node: ast.expr = expression
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return isinstance(node, ast.Name) and node.id == "self"
+
+
 def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
     """Return ``{class: [base class, ...]}`` for every class in the corpus.
 
@@ -116,6 +130,7 @@ class SpecAttributor:
         self._accessed_cache: dict[ast.AST, dict[str, set[str]]] = {}
         self._element_types: dict[tuple[str, str], set[str]] = {}
         self._table_classes: dict[str, str] = {}
+        self._self_fields: dict[tuple[str, str], set[str]] = {}
 
     # -- container element types ----------------------------------------- #
 
@@ -170,6 +185,47 @@ class SpecAttributor:
                         self._element_types.setdefault((holder_class, attribute), set()).add(
                             element
                         )
+
+    # -- what a class does with its own fields ---------------------------- #
+
+    def learn_self_attributes(self, modules: list[SourceModule]) -> None:
+        """Pool the attributes each class touches on ``self.<field>``.
+
+        Structural inference is otherwise per function, because a local name is
+        only one thing for as long as the function lasts -- two methods using
+        ``tmpFileSpec`` need not mean the same kind of object.  ``self.taskSpec``
+        is different: it is one field of one class, so every method that touches
+        it is describing the same object, and the attributes they touch belong in
+        one set.  Same argument as before, on the scope the language guarantees.
+
+        It matters where a class holds a spec and spreads its use thinly:
+        ``TaskRefinerBase`` touches ``self.taskSpec.status`` beside only
+        ``jediTaskID`` in that method -- two attributes half the specs declare --
+        while across the class it touches twelve, which only ``JediTaskSpec``
+        has.  That write is the sole producer of the ``topreprocess`` status, so
+        without this the graph invariant reported a declared status as
+        unreachable.
+
+        Measured before it was believed: five writes settled that were not
+        before, no attribution taken away, and 78 sites where a class was
+        already stated another way all agreed.
+        """
+        for module in modules:
+            for node in ast.walk(module.tree):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                for inner in ast.walk(node):
+                    if (
+                        not isinstance(inner, ast.Attribute)
+                        or inner.attr not in self._declared_names
+                        or not _rooted_at_self(inner.value)
+                    ):
+                        continue
+                    try:
+                        expression = ast.unparse(inner.value)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    self._self_fields.setdefault((node.name, expression), set()).add(inner.attr)
 
     # -- table -> spec class --------------------------------------------- #
 
@@ -309,7 +365,7 @@ class SpecAttributor:
                 stated = self._stated_local_class(expression.id, func)
                 if stated is not None:
                     return stated
-        return self._structural_of(expression, func)
+        return self._structural_of(expression, func, enclosing_class)
 
     def _stated_local_class(
         self,
@@ -511,6 +567,7 @@ class SpecAttributor:
         self,
         target: ast.Attribute,
         func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str] = None,
     ) -> Optional[str]:
         """Return the spec class implied by what the code does with the object.
 
@@ -531,21 +588,30 @@ class SpecAttributor:
         belongs to both ``FileSpec`` and ``JediFileSpec`` -- rather than
         picking, since a wrong subject is a false lead.
         """
-        return self._structural_of(target.value, func)
+        return self._structural_of(target.value, func, enclosing_class)
 
     def _structural_of(
         self,
         expression: ast.expr,
         func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str] = None,
     ) -> Optional[str]:
-        """Structural inference over an arbitrary object expression."""
+        """Structural inference over an arbitrary object expression.
+
+        The function is the scope, except for ``self.<field>``, where the class
+        is -- see :meth:`learn_self_attributes`.  Widening can only narrow the
+        candidates, never move them, so an answer this gives is one the
+        per-function reading would have given or left open.
+        """
         if func is None:
             return None
         try:
             rendered = ast.unparse(expression)
         except Exception:  # noqa: BLE001
             return None
-        touched = self._accessed_attributes(func).get(rendered)
+        touched = set(self._accessed_attributes(func).get(rendered, ()))
+        if enclosing_class is not None and _rooted_at_self(expression):
+            touched |= self._self_fields.get((enclosing_class, rendered), set())
         if not touched:
             return None
         candidates = [
@@ -607,7 +673,7 @@ class SpecAttributor:
         # (205 of 205), which is what makes the gate in ``gates`` worth having.
         # It is the last reading because it is the last one that is evidence --
         # what remains after it would be a guess from the variable's name.
-        structural = self.structural_class(target, func)
+        structural = self.structural_class(target, func, enclosing_class)
         if structural is not None and self._declares(structural, attribute):
             return structural, STRUCTURAL
 

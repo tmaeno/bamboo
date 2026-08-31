@@ -166,6 +166,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # which is learned from the whole corpus rather than from one module.
         declarations = progress.spec_attributes(self._modules)
         attributor = SpecAttributor(declarations, class_bases(self._modules))
+        attributor.learn_self_attributes(self._modules)
         self._table_conflicts = attributor.learn_table_classes(self._modules)
 
         alias_subjects, alias_junctions, alias_coverage = alias.extract(

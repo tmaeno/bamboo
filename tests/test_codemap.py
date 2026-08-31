@@ -937,6 +937,7 @@ def test_container_attribute_need_not_be_a_declared_column():
     declarations = progress.spec_attributes(modules)
     attributor = attribution.SpecAttributor(declarations, attribution.class_bases(modules))
     attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
 
     assert "Files" not in declarations["JobSpec"]
     assert attributor._element_types[("JobSpec", "Files")] == {"FileSpec"}
@@ -963,6 +964,50 @@ def test_module_qualified_constructor_is_still_a_constructor():
 
     assert junctions[0].subject == "FileSpec.status"
     assert junctions[0].attribution == "certain"
+
+
+def test_what_a_class_does_with_its_own_field_is_pooled_across_its_methods():
+    """``self.taskSpec`` is one field of one class, so every method that touches
+    it describes the same object.
+
+    ``TaskRefinerBase`` is why: the method writing ``self.taskSpec.status``
+    touches only ``jediTaskID`` beside it -- two attributes half the specs
+    declare -- while the class touches twelve, which only ``JediTaskSpec`` has.
+    That write is the sole producer of ``topreprocess``, so reading the method
+    alone left a declared status looking unreachable.
+    """
+    source = (
+        "class TaskRefinerBase(object):\n"
+        "    def remember(self, taskSpec):\n"
+        "        self.taskSpec.oldStatus = self.taskSpec.status\n"
+        "    def refine(self):\n"
+        "        self.taskSpec.status = 'topreprocess'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefinerBase.py")
+    written = [j for j in junctions if j.owner.endswith("::refine")]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("JediTaskSpec.status", "structural")
+    ]
+
+
+def test_a_local_name_is_not_pooled_across_methods():
+    """A local is one thing only for as long as its function lasts -- two
+    methods using ``spec`` need not mean the same kind of object, so the
+    evidence for widening the scope is missing.  It stays unresolved, which is
+    reported rather than guessed at.
+    """
+    source = (
+        "class Refiner(object):\n"
+        "    def remember(self, spec):\n"
+        "        spec.oldStatus = 'ready'\n"
+        "    def refine(self, spec):\n"
+        "        spec.status = 'topreprocess'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/Other.py")
+    written = [j for j in junctions if j.owner.endswith("::refine")]
+
+    assert [j.attribution for j in written] == ["unresolved"]
 
 
 def test_a_copy_holds_what_the_original_held():
