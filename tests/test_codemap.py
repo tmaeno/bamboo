@@ -3056,6 +3056,167 @@ def test_a_tag_the_map_has_and_production_did_not_show_needs_a_complete_sample()
     assert partial.sample == gates.PARTIAL
 
 
+def _transition(task: str, status: str, stamp: str, filename: str = "panda-ContentsFeeder.log"):
+    """One ``set task_status=`` line, as the knights write it."""
+    return _sample(
+        [
+            _log_line(
+                "INFO", f"<jediTaskID={task}> set task_status={status}", name="ContentsFeeder"
+            )
+        ],
+        filename=filename,
+        pattern=evidence.TRANSITION_PATTERN,
+    ).model_copy(
+        update={
+            "lines": [
+                f"2026-08-30 {stamp} ContentsFeeder: INFO     "
+                f"<jediTaskID={task}> set task_status={status}"
+            ]
+        }
+    )
+
+
+def _task_status_fragment(outcomes, vocabulary=(), selected=(), runtime=()):
+    branches = [Branch(outcome=o, tier=1) for o in outcomes]
+    branches += [Branch(outcome=f"runtime({name})", tier=2) for name in runtime]
+    return MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            SubjectNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name=evidence.TRANSITION_SUBJECT,
+                spec_class="JediTaskSpec",
+                attribute="status",
+                vocabulary=list(vocabulary),
+                selected_values=list(selected),
+            )
+        ],
+        junctions=[
+            JunctionNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name="j",
+                owner="pandajedi/jediorder/ContentsFeeder.py::feed",
+                subject=evidence.TRANSITION_SUBJECT,
+                branches=branches,
+            )
+        ],
+    )
+
+
+def test_a_task_history_is_rebuilt_across_files_and_machines():
+    """The database keeps the current status and the one before it, so a
+    sequence only exists in the log -- and one task's history is spread over the
+    refiner, the generator and the post-processor, on whichever machine picked it
+    up.  Ordering therefore comes from the timestamps, not from the order the
+    lines came back in."""
+    ev = _evidence(
+        _transition("7", "running", "12:00:09,000", "panda-JobGenerator.log"),
+        _transition("7", "defined", "12:00:00,000", "panda-TaskRefiner.log"),
+        _transition("7", "ready", "12:00:05,000"),
+        # Two knights logging the same value in a row is not a transition.
+        _transition("7", "ready", "12:00:06,000"),
+    )
+
+    histories = evidence.observed_task_status(ev)
+
+    assert [status for _stamp, status, _file in histories["7"]] == [
+        "defined",
+        "ready",
+        "running",
+    ]
+    assert evidence.observed_pairs(histories) == Counter(
+        {("defined", "ready"): 1, ("ready", "running"): 1}
+    )
+
+
+def test_a_departure_survives_a_gap_and_a_pair_does_not():
+    """Seeing a task in one status and later in another proves it left the
+    first, whether or not the step between was sampled.  The pair is what a gap
+    invents, which is why one is evidence and the other a report."""
+    histories = evidence.observed_task_status(
+        _evidence(
+            _transition("7", "defined", "12:00:00,000"),
+            _transition("7", "running", "12:00:09,000"),
+        )
+    )
+
+    assert evidence.observed_departures(histories) == Counter({"defined": 1})
+
+
+def test_a_status_production_sets_and_no_branch_produces_is_a_finding():
+    """What gate nine is for, and what it added over the offline check: a value
+    the code declares and production sets, which no branch produces, cannot be a
+    stale declaration any more."""
+    fragment = _task_status_fragment(
+        outcomes=["toabort"], vocabulary=["toabort", "aborted"], runtime=["newTaskStatus"]
+    )
+    ev = _evidence(
+        _transition("7", "toabort", "12:00:00,000"),
+        _transition("7", "aborted", "12:00:05,000"),
+    )
+
+    result = gates.transitions_are_explained(fragment, ev)
+
+    assert not result.passed
+    assert result.failures == [
+        "production sets aborted (1x), the code declares it, and no branch in the map "
+        "produces it (1 writer(s) of this subject decide the value at run time)"
+    ]
+    assert result.kind == gates.MAP_DEFECT
+
+
+def test_an_undeclared_status_may_be_a_run_time_value():
+    """Tier 2 is by design -- the writer is in the map and the outcome is not --
+    so a value nothing declares is not evidence of a missing writer."""
+    fragment = _task_status_fragment(outcomes=["defined"], runtime=["newTaskStatus"])
+    ev = _evidence(
+        _transition("7", "defined", "12:00:00,000"),
+        _transition("7", "surprising", "12:00:05,000"),
+    )
+
+    result = gates.transitions_are_explained(fragment, ev)
+
+    assert result.passed
+    assert "may be a value one of the 1 run-time writer(s) computes" in result.inconclusive[0]
+
+
+def test_a_status_nothing_selects_on_is_not_a_failure():
+    """A task can be moved on by a junction that selects it by id or on a
+    command, with no status predicate for the map to have missed."""
+    fragment = _task_status_fragment(
+        outcomes=["defined", "running"], selected=["defined"]
+    )
+    ev = _evidence(
+        _transition("7", "defined", "12:00:00,000"),
+        _transition("7", "running", "12:00:05,000"),
+        _transition("7", "defined", "12:00:09,000"),
+    )
+
+    result = gates.transitions_are_explained(fragment, ev)
+
+    assert result.passed
+    assert any("moved tasks out of running" in row for row in result.inconclusive)
+
+
+def test_conformance_passes_when_production_stays_inside_the_map():
+    fragment = _task_status_fragment(
+        outcomes=["defined", "ready", "running"], selected=["defined", "ready"]
+    )
+    ev = _evidence(
+        _transition("7", "defined", "12:00:00,000"),
+        _transition("7", "ready", "12:00:05,000"),
+        _transition("7", "running", "12:00:09,000"),
+    )
+
+    result = gates.transitions_are_explained(fragment, ev)
+
+    assert result.passed and result.failures == []
+    assert result.checked == 3
+
+
 def test_a_transposed_funnel_step_is_a_finding():
     """"Which step cut the candidates" is a question about position, so an
     order that disagrees makes every answer off by one step."""

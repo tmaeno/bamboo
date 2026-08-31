@@ -986,6 +986,100 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
     )
 
 
+def transitions_are_explained(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Every task status production sets is one the map can produce.
+
+    Conformance checking, with the map as the model and the knights' own log as
+    the trace.  The strongest of these checks in principle, because it depends
+    on nothing about how the code is written: a status the system was observed
+    to enter and the branch tables cannot produce is a blind spot stated by the
+    system itself.
+
+    The database cannot supply this -- ``JEDI_Tasks`` keeps the current status
+    and the one before it, so a *sequence* only exists in the log, and the
+    knights write one: ``set task_status=<value>`` at twelve sites in eight
+    files, all of them places the map already holds as junctions.
+
+    **What a bounded sample supports here, and what it does not.**  Seeing a
+    value proves the system produced it, so the positive direction stands
+    however little was read.  The pairs do not: a step the sample missed leaves
+    its neighbours adjacent, and ``a -> c`` then looks like a transition the
+    code makes, with nothing in the log marking the gap.  So the gate reads
+    values and the pairs are reported.
+
+    Two independent readings decide how hard a miss is.  A value the code
+    *declares* and production *sets*, with no writer the map resolved, is a
+    missing write form: both sources agree the value is real, which is what
+    ``declared-status-is-written`` could not settle on its own -- it can only
+    say "a missing write form, or a stale declaration".  An undeclared value
+    could be one a run-time writer computes, which the map records as tier 2 by
+    design, so that stays inconclusive with the count of writers that could
+    account for it.
+    """
+    histories = evidence.observed_task_status(ev)
+    seen = Counter(status for rows in histories.values() for _, status, _ in rows)
+    subject = evidence.TRANSITION_SUBJECT
+    junctions = [j for j in fragment.junctions if j.subject == subject]
+    resolved = {b.outcome for j in junctions for b in j.branches if b.tier == 1}
+    at_runtime = sum(1 for j in junctions for b in j.branches if b.tier != 1)
+    declared: set[str] = set()
+    selected: set[str] = set()
+    for node in fragment.subjects:
+        if node.name == subject:
+            declared = set(node.vocabulary)
+            selected = set(node.selected_values)
+
+    failures: list[str] = []
+    unknown: list[str] = []
+    for status, times in sorted(seen.items()):
+        if status in resolved:
+            continue
+        if status in declared:
+            failures.append(
+                f"production sets {status} ({times}x), the code declares it, and no "
+                f"branch in the map produces it ({at_runtime} writer(s) of this "
+                "subject decide the value at run time)"
+            )
+        else:
+            unknown.append(
+                f"production sets {status} ({times}x) and no branch in the map produces "
+                f"it, but nothing declares it either -- it may be a value one of the "
+                f"{at_runtime} run-time writer(s) computes"
+            )
+    # The read side, and it cannot be a failure: a task can be moved on by a
+    # junction that selects it by id or on a command, with no status predicate
+    # for the map to have missed.
+    for status in sorted(evidence.observed_departures(histories)):
+        if status not in selected:
+            unknown.append(
+                f"production moved tasks out of {status} and no query in the map "
+                "selects on it"
+            )
+    whole, asked = evidence.sample_state(
+        ev,
+        evidence.TRANSITION_PATTERN,
+        sorted(f for f in ev.log_filenames() if ev.file_status(f) == "present"),
+    )
+    return GateResult(
+        gate="transitions-are-explained",
+        passed=not failures,
+        checked=len(seen),
+        unit="statuses seen",
+        question="can the map produce every status production set?",
+        finding="production puts tasks in a status the map cannot produce",
+        sample=_sample_word(whole, asked),
+        failures=failures,
+        inconclusive=unknown,
+        note=(
+            "Independent of how the code is written, which is what makes it the last "
+            "line against a blind spot both the recognizer and the writer census miss. "
+            "A failure here narrows declared-status-is-written, which can only say "
+            "'a missing write form, or a stale declaration': production setting the "
+            "value rules the second out."
+        ),
+    )
+
+
 def _stage_label(stage, filename: str) -> str:
     """A stage's identity as the map holds it: the step's name and its tag.
 
@@ -1066,6 +1160,8 @@ def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateR
         results.append(observables_are_emitted(fragment, ev))
         results.append(tags_are_known(fragment, ev))
         results.append(funnel_order_matches(fragment, ev))
+    if ev.matching(evidence.TRANSITION_PATTERN):
+        results.append(transitions_are_explained(fragment, ev))
     return results
 
 

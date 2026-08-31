@@ -118,6 +118,12 @@ TRANSITION_PATTERN = r"set task_status="
 TRANSITION_TAIL_BYTES = 8 * 1024 * 1024
 TRANSITION_MAX_MATCHES = 2000
 
+# Which subject those lines are about.  ``task_status`` in the message and
+# ``status`` on the spec are the same field under two names -- a convention of
+# this corpus, like the patterns above, and the join between what production
+# logged and what the map extracted.
+TRANSITION_SUBJECT = "JediTaskSpec.status"
+
 _TAG_IN_LINE = re.compile(r"\bcriteria=(-[\w.]+)")
 _FUNNEL_IN_LINE = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 

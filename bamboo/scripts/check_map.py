@@ -356,6 +356,38 @@ def _report_production(
             for label in sorted(confirmed):
                 click.echo(f"               {label}")
 
+    histories = evidence.observed_task_status(ev)
+    if histories:
+        moving = {task: rows for task, rows in histories.items() if len(rows) > 1}
+        writers = Counter(
+            filename for rows in histories.values() for _stamp, _status, filename in rows
+        )
+        click.echo(
+            f"  transitions  {len(histories)} task(s) · {len(moving)} seen to change "
+            f"status · {len(evidence.observed_pairs(histories))} distinct pair(s)"
+        )
+        # Which component's log holds this is what the map is for, so it is
+        # reported as the answer rather than assumed as the question: every file
+        # was asked and these are the ones that carry it.
+        click.echo(
+            "               logged by "
+            + ", ".join(
+                f"{name.removeprefix('panda-').removesuffix('.log')} {count}"
+                for name, count in writers.most_common(None if full else top)
+            )
+        )
+        pairs = evidence.observed_pairs(histories)
+        for (before, after), count in pairs.most_common(None if full else 5):
+            click.echo(f"               {before} -> {after}  {count}x")
+        if not full and len(pairs) > 5:
+            click.echo(f"               … {len(pairs) - 5} more pair(s)")
+        click.echo(
+            "               pairs are a report: a step the sample missed leaves its"
+        )
+        click.echo(
+            "               neighbours adjacent, and nothing in the log marks the gap"
+        )
+
 
 def _report_unconcluded(results: list[gates.GateResult], full: bool) -> None:
     """What was looked at and not decided, one line per gate.
