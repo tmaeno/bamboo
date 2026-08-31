@@ -730,16 +730,22 @@ def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateR
     # consequence: these are the nodes a strategy must not send an investigation
     # to.  The module is not named -- the filename comes from the logger, which
     # comes from the module, so it would be the same word twice.
+    verdicts = {filename: ev.file_status(filename) for filename in sorted(counts)}
     failures = [
         f"{filename} is on no machine: {counts[filename]['stage']} stage(s), "
         f"{counts[filename]['junction']} junction(s) of the map never run here"
-        for filename in sorted(counts)
-        if ev.file_status(filename) == "absent"
+        for filename, status in verdicts.items()
+        if status == "absent"
     ]
+    # Only the files the evidence answered.  Counting every file the map names
+    # would put the ones nobody asked about in the denominator, which makes the
+    # corroboration below read weaker than the evidence actually is -- and the
+    # set the map names grows whenever a slice widens, without a query behind it.
+    answered = [status for status in verdicts.values() if status != "unknown"]
     return GateResult(
         gate="code-paths-are-live",
         passed=not failures,
-        checked=len(counts),
+        checked=len(answered),
         unit="log files",
         # The map is right and the deployment differs.  Nothing to fix.
         kind=DEPLOYMENT_FACT,
@@ -752,9 +758,9 @@ def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateR
         note=(
             "A log file is created on first emit, so its absence means the path never "
             "ran here -- unless the map named the logger wrongly, which is unlikely "
-            f"when {sum(1 for f in counts if ev.file_status(f) == 'present')} of "
-            f"{len(counts)} files it named do exist.  It is also the only absence "
-            "production can prove: writing any other line needs a branch to fire."
+            f"when {sum(1 for status in answered if status == 'present')} of "
+            f"{len(answered)} files it named and asked about do exist.  It is also the "
+            "only absence production can prove: writing any other line needs a branch to fire."
         ),
     )
 

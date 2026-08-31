@@ -981,6 +981,160 @@ def test_a_copy_holds_what_the_original_held():
 
 
 # --------------------------------------------------------------------------- #
+# progress: what the right-hand side settles
+# --------------------------------------------------------------------------- #
+#
+# The slice used to read literal right-hand sides only, which left the map with
+# two states for a write -- resolved or invisible -- when the model has a third
+# the SQL slice was already using.  These pin the ladder that fixes it, and in
+# particular the one rung that must not slip: ``passthrough`` names a place a
+# value lives, so a local variable can never be its target.
+
+
+def _outcomes(junctions):
+    """``(outcome, tier)`` for every branch, in order."""
+    return [(b.outcome, b.tier) for j in junctions for b in j.branches]
+
+
+def test_both_arms_of_an_if_else_are_on_the_map():
+    """The shape that showed the slice was wrong -- ``AtlasProdWatchDog.py:350``.
+
+    Reading literals only, this junction said it always produces ``ready``.  The
+    other arm is how a reassigned task returns to the status it held, so the
+    reasoning could not offer "the restore did not fire" as a candidate at all.
+    """
+    source = (
+        "def doActionForReassign(self, taskSpec):\n"
+        "    if taskSpec.oldStatus in ['assigning', 'exhausted', None]:\n"
+        "        taskSpec.status = 'ready'\n"
+        "    else:\n"
+        "        taskSpec.status = taskSpec.oldStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedidog/AtlasProdWatchDog.py")
+
+    assert _outcomes(junctions) == [
+        ("ready", 1),
+        ("passthrough(JediTaskSpec.oldStatus)", 2),
+    ]
+    assert junctions[0].branches[1].path_condition == [
+        "not (taskSpec.oldStatus in ['assigning', 'exhausted', None])"
+    ]
+
+
+def test_clearing_a_field_is_an_outcome():
+    """``oldStatus = None`` decides the field as much as any word does.
+
+    Spelled as the source spells it, which is also how a log line interpolating
+    the field reads -- the map is compared against production text.
+    """
+    source = "def release(self, taskSpec):\n    taskSpec.oldStatus = None\n"
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedidog/AtlasProdWatchDog.py")
+
+    assert _outcomes(junctions) == [("None", 1)]
+
+
+def test_a_local_is_resolved_by_reaching_definitions():
+    """A guarded chain assigning the local carries its conditions to the write.
+
+    The write's own guards come first because reaching it is necessary for any
+    outcome; the assignment's guards say which one.
+    """
+    source = (
+        "def refine(self, taskSpec, ok):\n"
+        "    if taskSpec.nucleus:\n"
+        "        newStatus = 'ready'\n"
+        "    else:\n"
+        "        newStatus = 'pending'\n"
+        "    if ok:\n"
+        "        taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert _outcomes(junctions) == [("ready", 1), ("pending", 1)]
+    assert [b.path_condition for b in junctions[0].branches] == [
+        ["ok", "taskSpec.nucleus"],
+        ["ok", "not (taskSpec.nucleus)"],
+    ]
+
+
+def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
+    """``passthrough(X)`` claims the value lives in X and the walk continues
+    there.  A local is a step in a computation, not a place a value lives, so a
+    passthrough onto one is an edge whose far end cannot exist -- and the
+    reference gate would not catch it, because it excuses a passthrough landing
+    off the promoted set as a provenance terminal.
+    """
+    source = (
+        "def refine(self, taskSpec, incoming):\n"
+        "    newStatus = compute(incoming)\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert _outcomes(junctions) == [("runtime(newStatus)", 2)]
+
+
+def test_a_qualified_field_name_is_a_passthrough():
+    """``self.oldStatus = self.status`` is how ``oldStatus`` gets recorded -- the
+    edge prune works from, and the first hop out of the flagship symptom."""
+    source = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'status', 'oldStatus')\n"
+        "    def setOnHold(self):\n"
+        "        self.oldStatus = self.status\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/taskbuffer/JediTaskSpec.py")
+
+    assert _outcomes(junctions) == [("passthrough(JediTaskSpec.status)", 2)]
+
+
+def test_an_attribute_of_something_that_is_not_a_spec_is_a_run_time_outcome():
+    """``self.status`` in a WatchDog is the WatchDog's own field: a name
+    collision, not a place on the map.  Naming it as a passthrough source would
+    point the walk at a node no map contains."""
+    source = (
+        "class AtlasProdWatchDog(object):\n"
+        "    def doAction(self, taskSpec):\n"
+        "        taskSpec.status = self.status\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedidog/AtlasProdWatchDog.py")
+
+    assert _outcomes(junctions) == [("runtime(self.status)", 2)]
+
+
+def test_assembled_text_keeps_its_template():
+    """Free text is not a state, so there is no outcome to enumerate -- but the
+    template is the search key that finds this write from a diagnostic seen in
+    production, which is the whole basis of reverse-indexing a message."""
+    source = (
+        "class JobSpec(object):\n"
+        "    _attributes = ('PandaID', 'jobStatus', 'ddmErrorDiag')\n"
+        "    def fail(self, n):\n"
+        "        self.ddmErrorDiag = f'failed to get {n} files'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/taskbuffer/JobSpec.py")
+
+    assert _outcomes(junctions) == [("runtime(f'failed to get {n} files')", 2)]
+    assert junctions[0].branches[0].emits == ["failed to get {} files"]
+
+
+def test_the_return_alias_shape_is_left_to_its_own_slice():
+    """``taskSpec.status = self.getFinalTaskStatus(...)`` is resolved one hop up
+    into a branch per returned value.  A second reading here would put "decided
+    at run time" beside branches that say what the value is -- a weaker claim
+    contradicting a stronger one at the same junction.
+    """
+    source = (
+        "class PostProcessorBase(object):\n"
+        "    def doPostProcess(self, taskSpec):\n"
+        "        taskSpec.status = self.getFinalTaskStatus(taskSpec)\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedipprocess/PostProcessorBase.py")
+
+    assert junctions == []
+
+
+# --------------------------------------------------------------------------- #
 # sql-write: statements, table classes, bind writes
 # --------------------------------------------------------------------------- #
 
@@ -1676,7 +1830,12 @@ def test_the_callers_conditions_come_first_and_are_not_marked():
 def test_a_helper_that_computes_its_answer_is_not_a_producer():
     """``makeBuildJobParameters`` and ``getLargestAttemptNr`` settle nothing from
     a closed set, so the coverage row says these helpers compute rather than
-    decide -- 2 of 7 sites in the corpus, and that is the honest number."""
+    decide -- 2 of 7 sites in the corpus, and that is the honest number.
+
+    The writer is still recorded, at tier 2.  This slice owns the whole
+    ``self.helper()`` shape, so the attribute slice stays out of it entirely;
+    dropping the sites this one cannot follow would put them on no slice at all.
+    """
     source = (
         "class JobGenerator(object):\n"
         "    def generate(self, taskSpec):\n"
@@ -1689,7 +1848,9 @@ def test_a_helper_that_computes_its_answer_is_not_a_producer():
         (source, "pandajedi/jediorder/JobGenerator.py")
     )
 
-    assert junctions == []
+    assert [(b.outcome, b.tier) for j in junctions for b in j.branches] == [
+        ("runtime(computeStatus())", 2)
+    ]
     assert [(c.candidates, c.explained) for c in coverage] == [(1, 0)]
 
 

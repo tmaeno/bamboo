@@ -1,12 +1,23 @@
 """Progress recognizer -- where the code settles a subject's value.
 
 This slice produces the junctions the reasoning actually walks backwards from.
-It starts with the simplest write form, ``spec.status = "tobroken"``, because
-the outcome is stated right there and nothing has to be resolved: that keeps
-the first contact between the node model and real source narrow enough that a
-modelling error shows up before the harder write forms depend on it.
 
-Two decisions worth stating.
+**Every write is recorded; only the outcome may be unresolved.**  The simplest
+form, ``spec.status = "tobroken"``, states its outcome outright, and for a long
+time it was the only form this slice read.  That was a modelling error rather
+than a staged rollout: it left the map with two states for an attribute write,
+literal or invisible, when the model has a third that the SQL slice was already
+using -- the writer is known and the value is only settled at run time.  So a
+right-hand side this slice cannot resolve produces a tier-2 branch reading
+``runtime(<expression>)``, never an absence.
+
+The distinction matters because pruning is *elimination*.  A candidate set with
+a writer missing does not yield "unknown", it yields a confident wrong answer,
+and the writers that were missing included the ones that carry a task out of
+``pending`` -- ``taskSpec.status = taskSpec.oldStatus`` -- which is the very
+edge the flagship symptom's backward walk needs.
+
+Two further decisions worth stating.
 
 **Which spec class a write belongs to is decided per write site, and the basis
 is recorded.**  ``taskSpec.status = ...`` names an attribute eight classes
@@ -26,7 +37,7 @@ cannot be checked against anything.
 from __future__ import annotations
 
 import ast
-from typing import Iterator, Optional
+from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import (
     Anchor,
@@ -46,6 +57,7 @@ from bamboo.codemap.panda.pathcond import (
     attach_parents,
     enclosing_class,
     enclosing_function,
+    literal_values,
     path_condition,
 )
 
@@ -136,23 +148,158 @@ def declared_vocabularies(
 # --------------------------------------------------------------------------- #
 
 
-def _literal_attribute_writes(
+def _attribute_writes(
     tree: ast.Module,
-) -> Iterator[tuple[ast.Attribute, str, ast.Assign]]:
-    """Yield ``(target, literal value, node)`` for ``x.attr = "literal"``.
+) -> Iterator[tuple[ast.Attribute, ast.expr, ast.Assign]]:
+    """Yield ``(target, right-hand side, node)`` for every ``x.attr = <value>``.
 
     The whole target is yielded, not just its name: attributing the write needs
-    the object expression, which is where the class comes from.
+    the object expression, which is where the class comes from.  The right-hand
+    side is yielded unresolved -- what can be made of it is :func:`_resolve`'s
+    question, and it needs the enclosing function this does not have.
     """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
-        value = node.value
-        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
-            continue
         for target in node.targets:
             if isinstance(target, ast.Attribute):
-                yield target, value.value, node
+                yield target, node.value, node
+
+
+# --------------------------------------------------------------------------- #
+# what the right-hand side settles
+# --------------------------------------------------------------------------- #
+
+
+class Resolved(NamedTuple):
+    """One outcome a write's right-hand side can produce.
+
+    ``conditions`` are guards *beyond* the write's own path condition -- what
+    left a local holding this value -- and are kept separate so the caller can
+    drop the ones it already has.  ``emits`` carries the template when the value
+    is assembled text rather than a state.  Both are tuples: a shared mutable
+    default on a NamedTuple is one edit away from a bug.
+    """
+
+    outcome: str
+    tier: int
+    conditions: tuple[str, ...] = ()
+    emits: tuple[str, ...] = ()
+
+
+def _runtime(value: ast.expr) -> str:
+    """Render an outcome that is only settled when the code runs.
+
+    Spelled as a call so nothing mistakes it for a value the code writes, and
+    spelled the same way the SQL slice spells it -- the two slices see the same
+    shapes and one map should not describe them two ways.
+    """
+    try:
+        return f"runtime({ast.unparse(value)})"
+    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+        return "runtime(?)"
+
+
+def _template(value: ast.expr) -> Optional[str]:
+    """Render assembled text as a template, interpolations as ``{}``.
+
+    ``job.ddmErrorDiag = f"failed to get {n} files"`` has no outcome worth
+    enumerating -- free text is not a state -- but the template is the search
+    key that finds this write site from a diagnostic observed in production,
+    which is the whole basis of reverse-indexing an error message.  It goes in
+    ``emits`` because that is already where a branch's templates live.
+    """
+    if isinstance(value, ast.Constant):
+        return value.value if isinstance(value.value, str) else None
+    if isinstance(value, ast.JoinedStr):
+        rendered = "".join(_template(piece) or "{}" for piece in value.values)
+        # Nothing but placeholders is not a search key.
+        return rendered if rendered.strip("{}") else None
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        left, right = _template(value.left), _template(value.right)
+        if left is None and right is None:
+            return None
+        return f"{left or '{}'}{right or '{}'}"
+    return None
+
+
+def _defers_to_return_alias(value: ast.expr) -> bool:
+    """Whether the return-alias slice owns this right-hand side.
+
+    ``taskSpec.status = self.getFinalTaskStatus(...)`` is resolved one hop up,
+    into a branch per value the helper can return.  A second reading of the
+    same write here would put "the value is decided at run time" beside the
+    thirteen branches that say what it is: a weaker claim contradicting a
+    stronger one at the same junction, on the very junction that gate found
+    ``aborted`` missing from.
+
+    Safe only because that slice records the calls it *cannot* follow as
+    run-time outcomes too, so staying out of this shape drops no writer.
+    """
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "self"
+    )
+
+
+def _resolve(
+    value: ast.expr,
+    *,
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    dominating: list[str],
+    attributor: SpecAttributor,
+    owner_class: Optional[str],
+    spec_names: set[str],
+) -> list[Resolved]:
+    """Return every outcome *value* can settle to, with the tier of each.
+
+    A ladder, strongest rung first, and it never falls off the bottom: the last
+    rung says "settled at run time" rather than declining to record the write.
+
+    The rung that needs stating is the one for a bare name.  A local is resolved
+    by reaching definitions and, failing that, becomes ``runtime(<name>)`` --
+    **not** ``passthrough(<name>)``.  ``passthrough(X)`` claims the value lives
+    in X and the backward walk continues there, which is only true when X is a
+    qualified field name: a spec attribute, or a table column.  A local variable
+    is a step in a computation, not a place a value lives, so a passthrough onto
+    one is a type error in the map's own vocabulary -- an edge whose far end
+    cannot exist.  Nothing catches it either: the reference gate deliberately
+    excuses a passthrough that lands off the promoted set, because a genuine
+    provenance terminal looks exactly like that.
+    """
+    if isinstance(value, ast.Constant):
+        if isinstance(value.value, str):
+            return [Resolved(value.value, 1)]
+        # ``taskSpec.oldStatus = None`` clears the field, which decides it as
+        # much as any word does; the same goes for a count or a flag.  Spelled
+        # as the source spells it, which is also how a log line interpolating
+        # the field would read.
+        return [Resolved(ast.unparse(value), 1)]
+
+    if isinstance(value, ast.Name) and func is not None:
+        resolved = literal_values(func, value.id)
+        if resolved:
+            return [
+                Resolved(
+                    literal,
+                    1,
+                    tuple(test for test in conditions if test not in dominating),
+                )
+                for literal, conditions, _line in resolved
+            ]
+
+    if isinstance(value, ast.Attribute) and value.attr in spec_names:
+        source, _basis = attributor.attribute_write(
+            value, func=func, enclosing_class=owner_class
+        )
+        if source is not None:
+            outcome = f"passthrough({SubjectNode.make_name(source, value.attr)})"
+            return [Resolved(outcome, 2)]
+
+    template = _template(value)
+    return [Resolved(_runtime(value), 2, (), (template,) if template else ())]
 
 
 def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
@@ -187,13 +334,16 @@ def extract(
     map_id: str,
     derived_from: str,
 ) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat]]:
-    """Extract subjects, junctions for literal attribute writes, and coverage.
+    """Extract subjects, junctions for attribute writes, and coverage.
 
-    Coverage counts literal attribute writes as candidates and those whose spec
-    class could be settled as explained.  Unresolved writes are still emitted as
-    junctions under the placeholder subject -- they are a gap in *attribution*,
-    not in extraction, and dropping them would lose the fact that the attribute
-    is written here at all.
+    Coverage measures *attribution*, not resolution: candidates are the writes
+    that could belong to a spec, explained are those whose spec class could be
+    settled.  It kept that meaning when the slice widened past literals, so the
+    denominator grew from 278 to the real number of writes -- which is the point
+    of widening, and makes the figure incomparable with the earlier one.  A write
+    whose class is unresolved is still emitted, under the placeholder subject:
+    that is a gap in attribution, and dropping it would lose the fact that the
+    attribute is written here at all.
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
@@ -215,14 +365,17 @@ def extract(
         attach_parents(module.tree)
         candidates = 0
         explained = 0
-        for target, literal, node in _literal_attribute_writes(module.tree):
+        for target, value, node in _attribute_writes(module.tree):
             if target.attr not in spec_attribute_names:
                 continue
+            if _defers_to_return_alias(value):
+                continue
             func = enclosing_function(node)
+            owner_class = enclosing_class(node)
             spec_class, basis = attributor.attribute_write(
                 target,
                 func=func,
-                enclosing_class=enclosing_class(node),
+                enclosing_class=owner_class,
             )
             if basis == NOT_A_SPEC:
                 # Not a candidate at all, so it is not counted as one: a
@@ -261,17 +414,27 @@ def extract(
                     ),
                 )
                 junctions[name] = junction
-            junction.branches.append(
-                Branch(
-                    outcome=literal,
-                    path_condition=path_condition(node),
-                    order=len(junction.branches),
-                    # The outcome is a literal at the write site, so nothing
-                    # has to be resolved at run time.  Independent of whether
-                    # the subject's class was settled.
-                    tier=1,
+
+            # The write's own guards, shared by every outcome its right-hand
+            # side can produce: reaching a write is necessary for any of them.
+            dominating = path_condition(node)
+            for resolved in _resolve(
+                value,
+                func=func,
+                dominating=dominating,
+                attributor=attributor,
+                owner_class=owner_class,
+                spec_names=spec_attribute_names,
+            ):
+                junction.branches.append(
+                    Branch(
+                        outcome=resolved.outcome,
+                        path_condition=dominating + list(resolved.conditions),
+                        emits=list(resolved.emits),
+                        order=len(junction.branches),
+                        tier=resolved.tier,
+                    )
                 )
-            )
         if candidates:
             coverage.append(
                 CoverageStat(
@@ -325,13 +488,20 @@ def unattributed_outcomes(
     Either the vocabulary is incomplete or the extraction is wrong; both are
     worth looking at, and neither is served by quietly assigning the write to
     the nearest-looking class.
+
+    Deliberately literal-only, unlike the extraction: this compares outcomes
+    against a declared word list, and a value settled at run time cannot be
+    compared against anything.  Widening it would report every
+    ``runtime(...)`` as a word no list mentions, which is true and useless.
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
     declared = set().union(*vocabularies.values()) if vocabularies else set()
     unattributed: dict[str, set[str]] = {}
     for module in modules:
-        for target, literal, _node in _literal_attribute_writes(module.tree):
-            if literal not in declared:
-                unattributed.setdefault(target.attr, set()).add(literal)
+        for target, value, _node in _attribute_writes(module.tree):
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                continue
+            if value.value not in declared:
+                unattributed.setdefault(target.attr, set()).add(value.value)
     return unattributed

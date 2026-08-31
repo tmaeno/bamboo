@@ -214,6 +214,13 @@ def extract_producers(
     matches forty-two sites of which two touch a subject, and the rest are
     plugin lookups and config reads -- the same ratio that got the naming
     heuristic deleted.  Restricted, it reads the two that decide a status.
+
+    **This slice owns the shape outright**, including the writes whose helper it
+    cannot follow: those get a run-time outcome rather than nothing, so the
+    attribute slice can stay out of the shape entirely instead of adding a
+    second, weaker reading of the two writes resolved here.  ``explained``
+    still counts only the resolved ones, so the coverage figure keeps saying how
+    much of the shape was actually followed.
     """
     producers = find_producers(modules)
     junctions: dict[str, JunctionNode] = {}
@@ -244,12 +251,29 @@ def extract_producers(
                 if spec_class is None or target.attr not in declarations.get(spec_class, set()):
                     continue
                 candidates += 1
-                producer = _producer_at(producers, call.func.attr, owner_class, attributor)
-                if producer is None:
-                    continue
-                explained += 1
                 attributed.add((spec_class, target.attr))
                 caller = path_condition(node)
+                producer = _producer_at(producers, call.func.attr, owner_class, attributor)
+                if producer is None:
+                    # The helper returns something this slice cannot follow --
+                    # a computed value, or another call.  The writer is still
+                    # the answer to "who set this", which is what localize and
+                    # prune work from, so it is recorded as a run-time outcome.
+                    _record(
+                        junctions,
+                        map_id=map_id,
+                        derived_from=derived_from,
+                        module=module,
+                        node=call,
+                        owner=f"{module.rel_path}::{func.name if func else '<module>'}",
+                        spec_class=spec_class,
+                        attribute=target.attr,
+                        literal=f"runtime({call.func.attr}())",
+                        condition=caller,
+                        tier=2,
+                    )
+                    continue
+                explained += 1
                 for literal, inner in producer.values:
                     _record(
                         junctions,
