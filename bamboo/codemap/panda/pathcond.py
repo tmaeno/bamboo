@@ -121,6 +121,94 @@ def path_condition(node: ast.AST) -> list[str]:
     return conditions
 
 
+def own_test(node: ast.AST) -> Optional[str]:
+    """The test of the innermost ``if``/``elif`` whose body contains *node*.
+
+    Read from the tree rather than taken as the last entry of
+    :func:`path_condition`, whose entries may carry the ``[name := expr]``
+    annotation -- wrapping that in ``not (...)`` produces text nothing can read
+    back.
+    """
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(ancestor, ast.If) and previous in ancestor.body:
+            try:
+                return ast.unparse(ancestor.test)
+            except Exception:  # noqa: BLE001
+                return None
+        previous = ancestor
+    return None
+
+
+def _exclusive(one: list[str], other: list[str]) -> bool:
+    """Whether two path conditions cannot both hold.
+
+    Detected from the negations :func:`path_condition` already writes down: an
+    ``elif`` branch carries ``not (<the test before it>)``, so two branches of
+    one chain each hold a negation of something the other asserts.
+
+    Deliberately conservative -- an annotated test will not match textually, so
+    some exclusive pairs read as compatible.  That is the safe direction: the
+    caller uses this to decide whether a later write could overwrite an earlier
+    one, and a missed exclusion adds a condition that is true but redundant,
+    where a missed *overlap* would drop a condition that is required.
+    """
+    return any(f"not ({test})" in other for test in one) or any(
+        f"not ({test})" in one for test in other
+    )
+
+
+def literal_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[str, list[str], int]]:
+    """``(literal, conditions, line)`` for every ``name = "<literal>"`` in *func*.
+
+    The line is the assignment's, because that is where the value is decided --
+    an anchor pointing at the use would send a reader to the place that merely
+    passes it on.
+
+    Reaching definitions for one local, which is what a value assigned to a
+    variable before it is used needs -- the tag a broker interpolates into its
+    rejection message, or the status a post-processor's helper returns.
+
+    **Reassignment is the part dominating-guard analysis cannot see.**  The
+    conditions on an assignment are necessary and, on their own, not sufficient:
+    a later write reaching the same name replaces it.  So each assignment also
+    carries the negation of every later one that is not mutually exclusive with
+    it -- ``criteria = "-link_unusable"`` sits above the ``elif`` chain that
+    replaces it, and ``status = "aborted"`` sits above two rechecks at the end
+    of the function that can replace it whatever the chain decided.
+
+    Exclusive siblings are skipped, or every branch of a chain would carry the
+    negation of every other: ``-dest_blacklisted`` would come out requiring
+    ``not (totalQueued >= limit)``, a condition with nothing to do with it.
+    """
+    found: list[tuple[ast.Assign, str]] = [
+        (node, node.value.value)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+        and enclosing_function(node) is func
+    ]
+    found.sort(key=lambda pair: pair[0].lineno)
+    conditions = {node: path_condition(node) for node, _ in found}
+    values: list[tuple[str, list[str], int]] = []
+    for assignment, literal in found:
+        guards = list(conditions[assignment])
+        for other, _ in found:
+            if other.lineno <= assignment.lineno:
+                continue
+            if _exclusive(conditions[assignment], conditions[other]):
+                continue
+            test = own_test(other)
+            if test and f"not ({test})" not in guards:
+                guards.append(f"not ({test})")
+        values.append((literal, guards, assignment.lineno))
+    return values
+
+
 def _substitute_bare_name(
     rendered: str, test: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> str:

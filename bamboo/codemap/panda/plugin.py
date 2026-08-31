@@ -174,6 +174,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(alias_junctions)
         fragment.coverage.extend(alias_coverage)
 
+        # The same relationship read the other way -- a helper that returns the
+        # value the caller writes.  Kept separate in the coverage matrix because
+        # the two have different denominators.
+        returned_subjects, returned_junctions, returned_coverage = alias.extract_producers(
+            self._modules, self.map_id, self._version, declarations, attributor
+        )
+        fragment.subjects.extend(returned_subjects)
+        fragment.junctions.extend(returned_junctions)
+        fragment.coverage.extend(returned_coverage)
+
         sql_subjects, sql_junctions, sql_coverage, self._uncovered_tables = sqlwrite.extract(
             self._modules, self.map_id, self._version, attributor
         )

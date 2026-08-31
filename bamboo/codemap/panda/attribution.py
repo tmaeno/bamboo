@@ -430,6 +430,25 @@ class SpecAttributor:
             pending.extend(self._bases.get(name, ()))
         return None
 
+    def family(self, cls: str) -> set[str]:
+        """*cls* and every class it inherits from, transitively.
+
+        What ``self`` covers.  Already walked privately to find which class in a
+        hierarchy declares an attribute; exposed because resolving
+        ``self.<method>()`` asks the same question of methods --
+        ``PickleFileSpec(FileSpec)`` and ``AtlasProdPostProcessor``'s two levels
+        of base are both real here.
+        """
+        seen: set[str] = set()
+        pending = [cls]
+        while pending:
+            name = pending.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            pending.extend(self._bases.get(name, ()))
+        return seen
+
     def _certain(
         self,
         variable: str,

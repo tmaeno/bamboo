@@ -39,10 +39,10 @@ from typing import Iterator, Optional
 
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
 from bamboo.codemap.panda.pathcond import (
-    ancestors,
     attach_parents,
     enclosing_function,
     functions_with_owner,
+    literal_values,
     path_condition,
 )
 
@@ -145,82 +145,21 @@ def _interpolated_tag_name(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _tag_assignments(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> list[tuple[ast.Assign, str]]:
-    """Every ``name = "<tag>"`` in *func*, in source order."""
-    found = [
-        (node, node.value.value)
-        for node in ast.walk(func)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)
-        and _TAG_LITERAL.match(node.value.value)
-        and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
-        and enclosing_function(node) is func
+def _tag_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: Optional[str]
+) -> list[tuple[str, list[str], int]]:
+    """The tags *name* can hold, with the conditions that leave it holding each.
+
+    Filtered to signed words so that an unrelated string assigned to the same
+    variable is not read as a rejection reason.
+    """
+    if not name:
+        return []
+    return [
+        (literal, conditions, line)
+        for literal, conditions, line in literal_values(func, name)
+        if _TAG_LITERAL.match(literal)
     ]
-    found.sort(key=lambda pair: pair[0].lineno)
-    return found
-
-
-def _own_test(node: ast.AST) -> Optional[str]:
-    """The test of the innermost ``if``/``elif`` whose body contains *node*.
-
-    Read from the tree rather than taken as the last entry of
-    :func:`path_condition`, whose entries may carry the ``[name := expr]``
-    annotation -- wrapping that in ``not (...)`` produces text nothing can read
-    back.
-    """
-    previous = node
-    for ancestor in ancestors(node):
-        if isinstance(ancestor, ast.If) and previous in ancestor.body:
-            try:
-                return ast.unparse(ancestor.test)
-            except Exception:  # noqa: BLE001
-                return None
-        previous = ancestor
-    return None
-
-
-def _conditions_for_assignment(
-    assignment: ast.Assign, siblings: list[ast.Assign]
-) -> list[str]:
-    """The guards on *assignment*, plus the negation of what would overwrite it.
-
-    Reassignment is the one thing dominating-guard analysis cannot see on its
-    own.  ``criteria = "-link_unusable"`` sits above the ``if``/``elif`` chain
-    that replaces it, so its own guards are necessary and not sufficient: the
-    tag reaches the message only where none of the later branches fired.  Left
-    at its own guards the map would claim that cut happens far more often than
-    it does.
-
-    A later write overwrites this one only where it is reached under the same
-    conditions, which is exactly the test that its path condition *starts with*
-    this one's.  Comparing depths instead looks right and is not: Python nests
-    an ``elif`` inside the previous ``if``'s ``orelse``, so a sibling branch is
-    always deeper, and negating its test put ``not (totalQueued >= limit)`` on a
-    cut that happens when the destination is blacklisted -- a condition with
-    nothing to do with it.  With the prefix test the branch's own test is
-    enough, because the negations of everything before it are already there.
-
-    What remains outside this is the flag deciding whether the assembled message
-    is recorded at all (``skipFlag``/``tempFlag`` here): a further hop, and one
-    the whole slice already leaves to ``inputs``.
-    """
-    # The prefix is compared against the guards alone, not against the list the
-    # negations are being added to: growing the thing being matched would make
-    # every sibling after the first fail to match.
-    dominating = path_condition(assignment)
-    conditions = list(dominating)
-    for other in siblings:
-        if other.lineno <= assignment.lineno:
-            continue
-        if path_condition(other)[: len(dominating)] != dominating:
-            continue
-        test = _own_test(other)
-        if test and f"not ({test})" not in conditions:
-            conditions.append(f"not ({test})")
-    return conditions
 
 
 def _emitting_call(node: ast.AST) -> Optional[ast.Call]:
@@ -388,8 +327,6 @@ def extract(
                     tagged = [(match.group(1), path_condition(node), text, node.lineno)]
                 else:
                     name = _interpolated_tag_name(node)
-                    assignments = _tag_assignments(func, name) if name else []
-                    siblings = [assignment for assignment, _ in assignments]
                     # One message, one stage per value the variable can hold --
                     # the branch that set it is what distinguishes the cuts, so
                     # each assignment is its own stage, anchored where the reason
@@ -399,13 +336,8 @@ def extract(
                     # every rejection in the file, so offering it as the line to
                     # look for would confirm nothing.
                     tagged = [
-                        (
-                            tag,
-                            _conditions_for_assignment(assignment, siblings),
-                            "",
-                            assignment.lineno,
-                        )
-                        for assignment, tag in assignments
+                        (tag, conditions, "", line)
+                        for tag, conditions, line in _tag_values(func, name)
                     ]
                 step = _step_at(steps, node.lineno)
                 label = step.label if step else ""

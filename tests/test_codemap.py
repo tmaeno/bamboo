@@ -33,7 +33,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     ValueEnumNode,
 )
-from bamboo.codemap.panda import attribution, promotion, sql
+from bamboo.codemap.panda import attribution, pathcond, promotion, sql
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -1396,6 +1396,107 @@ def test_promotion_follows_a_passthrough_into_its_source():
 
 
 # --------------------------------------------------------------------------- #
+# reaching definitions for one local
+# --------------------------------------------------------------------------- #
+
+
+def _func(source: str, name: str = "f"):
+    tree = ast.parse(source)
+    from bamboo.codemap.panda.pathcond import attach_parents
+
+    attach_parents(tree)
+    return next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+    )
+
+
+def test_a_guarded_chain_gives_each_value_its_own_condition():
+    func = _func(
+        "def f(self, spec):\n"
+        "    if spec.status == 'tobroken':\n"
+        "        status = 'broken'\n"
+        "    elif spec.status == 'toabort':\n"
+        "        status = 'aborted'\n"
+        "    return status\n"
+    )
+
+    values = pathcond.literal_values(func, "status")
+
+    assert [(literal, conditions) for literal, conditions, _line in values] == [
+        ("broken", ["spec.status == 'tobroken'"]),
+        (
+            "aborted",
+            ["not (spec.status == 'tobroken')", "spec.status == 'toabort'"],
+        ),
+    ]
+
+
+def test_a_later_write_that_is_not_exclusive_becomes_a_condition():
+    """The part dominating-guard analysis cannot see.  ``getFinalTaskStatus``
+    decides a status in an if/elif chain and then rechecks twice at the end of
+    the function, and either recheck can replace whatever the chain decided --
+    so the chain's own guards are necessary and not sufficient.
+
+    Comparing nesting depth or prefixes misses this: the rechecks sit at the
+    top level, *shallower* than the branch they overwrite.
+    """
+    func = _func(
+        "def f(self, spec):\n"
+        "    if spec.status == 'toabort':\n"
+        "        status = 'aborted'\n"
+        "    else:\n"
+        "        status = 'done'\n"
+        "    if spec.is_hpo():\n"
+        "        status = 'finished'\n"
+        "    return status\n"
+    )
+
+    values = {
+        literal: conditions
+        for literal, conditions, _line in pathcond.literal_values(func, "status")
+    }
+
+    assert values["aborted"] == ["spec.status == 'toabort'", "not (spec.is_hpo())"]
+    assert values["done"] == ["not (spec.status == 'toabort')", "not (spec.is_hpo())"]
+    # The overwriting write itself has nothing after it.
+    assert values["finished"] == ["spec.is_hpo()"]
+
+
+
+def test_exclusive_siblings_do_not_negate_each_other():
+    """Otherwise every branch of a chain carries the negation of every other:
+    ``-dest_blacklisted`` came out requiring ``not (totalQueued >= limit)``, a
+    condition with nothing to do with it."""
+    func = _func(
+        "def f(self, spec):\n"
+        "    criteria = '-link_unusable'\n"
+        "    if spec.blacklisted:\n"
+        "        criteria = '-dest_blacklisted'\n"
+        "    elif spec.queued >= spec.limit:\n"
+        "        criteria = '-links_full'\n"
+        "    return criteria\n"
+    )
+
+    values = {
+        literal: conditions
+        for literal, conditions, _line in pathcond.literal_values(func, "criteria")
+    }
+
+    assert values["-dest_blacklisted"] == ["spec.blacklisted"]
+    assert values["-links_full"] == [
+        "not (spec.blacklisted)",
+        "spec.queued >= spec.limit",
+    ]
+    # The unconditional default carries both, because either replaces it.
+    assert values["-link_unusable"] == [
+        "not (spec.blacklisted)",
+        "not (spec.queued >= spec.limit)",
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # write alias
 # --------------------------------------------------------------------------- #
 
@@ -1473,6 +1574,141 @@ def test_only_literal_writes_make_a_method_an_alias():
     modules = [_module(spec, "pandaserver/taskbuffer/JediTaskSpec.py")]
 
     assert alias.find_aliases(modules, progress.spec_attributes(modules)) == {}
+
+
+# --------------------------------------------------------------------------- #
+# return alias -- a helper that returns the value the caller writes
+# --------------------------------------------------------------------------- #
+
+_FINAL_STATUS = """
+class JediTaskSpec(object):
+    _attributes = ("jediTaskID", "status", "oldStatus")
+"""
+
+_POST_PROCESSOR = """
+class PostProcessorBase(object):
+    def doBasicPostProcess(self, taskSpec):
+        taskSpec.status = self.getFinalTaskStatus(taskSpec)
+
+    def getFinalTaskStatus(self, taskSpec, checkGoal=False):
+        if taskSpec.status == 'tobroken':
+            status = 'broken'
+        elif taskSpec.status == 'toabort':
+            status = 'aborted'
+        else:
+            status = 'done'
+        if taskSpec.is_hpo_workflow():
+            status = 'finished'
+        if checkGoal:
+            return True
+        return status
+"""
+
+
+def _producer_extract(*sources: tuple[str, str]):
+    modules = [_module(_FINAL_STATUS, "pandaserver/taskbuffer/JediTaskSpec.py")]
+    modules += [_module(text, rel) for text, rel in sources]
+    declarations = progress.spec_attributes(modules)
+    attributor = attribution.SpecAttributor(declarations, attribution.class_bases(modules))
+    return alias.extract_producers(modules, MAP_ID, VERSION, declarations, attributor)
+
+
+def test_a_status_decided_inside_a_helper_reaches_the_map():
+    """The gap gate nine found.  The attribute slice takes only literal
+    right-hand sides, so ``taskSpec.status = self.getFinalTaskStatus(...)`` was
+    not on the map at all -- and production put 104 tasks into ``aborted``,
+    which is decided only inside that helper.
+    """
+    _subjects, junctions, _cov = _producer_extract(
+        (_POST_PROCESSOR, "pandajedi/jedipprocess/PostProcessorBase.py")
+    )
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+    outcomes = {b.outcome for b in junction.branches if b.tier == 1}
+
+    assert outcomes == {"broken", "aborted", "done", "finished"}
+    aborted = next(b for b in junction.branches if b.outcome == "aborted")
+    # The helper's own guards, marked with where they came from, and the recheck
+    # that can replace whatever the chain decided.
+    assert aborted.path_condition == [
+        "not (taskSpec.status == 'tobroken')  [in getFinalTaskStatus()]",
+        "taskSpec.status == 'toabort'  [in getFinalTaskStatus()]",
+        "not (taskSpec.is_hpo_workflow())  [in getFinalTaskStatus()]",
+    ]
+
+
+def test_an_unreadable_return_keeps_the_list_open():
+    """``return True`` on the goal-checking path is a value this slice cannot
+    follow, so the junction says so rather than letting the outcomes read as a
+    closed set."""
+    _subjects, junctions, _cov = _producer_extract(
+        (_POST_PROCESSOR, "pandajedi/jedipprocess/PostProcessorBase.py")
+    )
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+
+    assert [b.outcome for b in junction.branches if b.tier == 2] == [
+        "runtime(getFinalTaskStatus())"
+    ]
+
+
+def test_the_callers_conditions_come_first_and_are_not_marked():
+    """A reader who cannot tell the caller's guard from the helper's cannot tell
+    a caller that never ran from a helper that decided otherwise."""
+    caller = (
+        "class AtlasProdPostProcessor(PostProcessorBase):\n"
+        "    def doPostProcess(self, taskSpec):\n"
+        "        if taskSpec.gshare != 'Test':\n"
+        "            taskSpec.status = self.getFinalTaskStatus(taskSpec)\n"
+    )
+    _subjects, junctions, _cov = _producer_extract(
+        (_POST_PROCESSOR, "pandajedi/jedipprocess/PostProcessorBase.py"),
+        (caller, "pandajedi/jedipprocess/AtlasProdPostProcessor.py"),
+    )
+
+    junction = next(j for j in junctions if "AtlasProdPostProcessor" in j.owner)
+    aborted = next(b for b in junction.branches if b.outcome == "aborted")
+
+    assert aborted.path_condition[0] == "taskSpec.gshare != 'Test'"
+    assert all("[in getFinalTaskStatus()]" in c for c in aborted.path_condition[1:])
+
+
+def test_a_helper_that_computes_its_answer_is_not_a_producer():
+    """``makeBuildJobParameters`` and ``getLargestAttemptNr`` settle nothing from
+    a closed set, so the coverage row says these helpers compute rather than
+    decide -- 2 of 7 sites in the corpus, and that is the honest number."""
+    source = (
+        "class JobGenerator(object):\n"
+        "    def generate(self, taskSpec):\n"
+        "        taskSpec.status = self.computeStatus()\n"
+        "    def computeStatus(self):\n"
+        "        return compute(self.state)\n"
+    )
+
+    _subjects, junctions, coverage = _producer_extract(
+        (source, "pandajedi/jediorder/JobGenerator.py")
+    )
+
+    assert junctions == []
+    assert [(c.candidates, c.explained) for c in coverage] == [(1, 0)]
+
+
+def test_only_a_bare_self_receiver_is_followed():
+    """Widened to any call the shape matches forty-two sites of which two touch
+    a subject; the rest are plugin lookups and config reads."""
+    source = (
+        "class Refiner(object):\n"
+        "    def refine(self, taskSpec):\n"
+        "        taskSpec.status = self.helper.getFinalTaskStatus(taskSpec)\n"
+    )
+
+    _subjects, junctions, coverage = _producer_extract(
+        (_POST_PROCESSOR, "pandajedi/jedipprocess/PostProcessorBase.py"),
+        (source, "pandajedi/jedirefine/TaskRefinerBase.py"),
+    )
+
+    assert not any("TaskRefinerBase" in j.owner for j in junctions)
+    assert not any(c.file.endswith("TaskRefinerBase.py") for c in coverage)
 
 
 # --------------------------------------------------------------------------- #
