@@ -4,9 +4,14 @@ name: tests
 # lazily, so backends construct without a database, and the tests that would talk
 # to Neo4j / Qdrant / an LLM / PanDA use fixtures.
 #
-# `bamboo[local]` (torch, sentence-transformers) is deliberately not installed —
-# the core dependencies are enough to import the whole CLI, which is what
-# `test_completion` needs, and they install in about a minute.
+# Only the `dev` extra is installed. `local` (torch, sentence-transformers) is far
+# too heavy, `panda` is not needed — the Code Map tests parse source held in the
+# tests as strings — and `mattermost` is currently unusable anyway: 2.x's
+# `endpoints/access_control.py` imports a `FileType` its own `_base` no longer
+# exports. The two tests that need that driver skip when it is absent.
+#
+# This costs about a minute, and finding out what it costs was the point: the
+# suite had never been run outside a developer's own machine.
 
 on:
   push:
@@ -38,6 +43,13 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Unit tests
+        env:
+          # Not a secret and never sent anywhere. The LangChain OpenAI client
+          # refuses to *construct* without a key, so 36 tests that mock every
+          # call still need one present to reach the code they are testing.
+          # Locally a developer's ~/.config/bamboo/.env supplies it, which is
+          # why this only showed up once there was a CI run.
+          LLM_API_KEY: not-a-real-key-nothing-is-called
         run: pytest -q -m "not timing"
 
       - name: Timing-sensitive tests (not a gate)
