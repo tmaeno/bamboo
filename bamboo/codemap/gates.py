@@ -460,6 +460,51 @@ def map_references_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
+def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
+    """(i) No two nodes of one kind share a semantic signature.
+
+    A signature is the merge key, so two nodes sharing one are not two nodes:
+    storing the map keeps whichever was written last and the other is gone.
+    That loss is invisible from either side -- the build reports what it built
+    and the database reports what it holds, and nobody had put the two numbers
+    next to each other.  It cost a real arm of the map: ``AtlasProdJobBroker``
+    runs "temporary problem check" at two points that test different things,
+    both were built, and only the second survived being stored, so the map
+    said that cut was unconditional when it is not.
+
+    Cheap and general, in the way ``map-references-resolve`` is: it makes no
+    claim about any slice, only that the identity scheme is total.  A slice
+    that starts producing indistinguishable nodes says so here rather than in
+    a diagnosis six months later.
+    """
+    failures: list[str] = []
+    checked = 0
+    for kind in ("subjects", "junctions", "boundaries", "value_enums", "filter_stages"):
+        nodes = getattr(fragment, kind)
+        checked += len(nodes)
+        for name, count in Counter(node.name for node in nodes).items():
+            if count > 1:
+                where = sorted(
+                    f"{n.anchor.file}:{n.anchor.line_start}"
+                    for n in nodes
+                    if n.name == name and getattr(n, "anchor", None)
+                )
+                failures.append(
+                    f"{count} {kind[:-1]}(s) share the signature {name}"
+                    + (f" -- {', '.join(where)}" if where else "")
+                )
+    return GateResult(
+        gate="map-identities-are-distinct",
+        passed=not failures,
+        checked=checked,
+        unit="nodes",
+        question="does every node have a signature no other node shares?",
+        finding="two nodes share one merge key, so storing the map keeps only one",
+        failures=sorted(failures),
+        note="The build counts what it made; the store keeps one per signature. Nothing else compares them.",
+    )
+
+
 def carried_from_outside(fragment: MapFragment) -> list[tuple[str, str]]:
     """Subjects whose value is copied from a field the map does not explain.
 
@@ -1373,6 +1418,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))
         results.append(map_references_resolve(fragment))
+    results.append(map_identities_are_distinct(fragment))
     return results
 
 

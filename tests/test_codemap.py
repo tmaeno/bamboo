@@ -3220,6 +3220,34 @@ def test_every_junction_lands_on_a_subject_the_map_contains():
     assert result.failures == ["x.py::f writes JediTaskSpec.ghost, which is not a subject"]
 
 
+def test_two_nodes_sharing_a_signature_are_reported_rather_than_one_being_lost():
+    """The signature is the merge key, so a shared one is a node about to vanish.
+
+    Found by storing the map for the first time: the build said 109 filter
+    stages and Neo4j held 108.  ``AtlasProdJobBroker`` runs "temporary problem
+    check" at two points guarded by ``hintForTB``, and keyed on the label alone
+    they were one node -- so the map ended up claiming that cut is
+    unconditional.  Neither side could see it; only the two counts together.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+    twin = fragment.junctions[0].model_copy(deep=True)
+    twin.branches = [Branch(outcome="broken")]
+    fragment.junctions.append(twin)
+
+    result = gates.map_identities_are_distinct(fragment)
+
+    assert not result.passed
+    assert result.failures == [
+        f"2 junction(s) share the signature {fragment.junctions[0].name}"
+    ]
+
+
+def test_a_map_whose_signatures_are_all_distinct_says_nothing():
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+
+    assert gates.map_identities_are_distinct(fragment).passed
+
+
 def test_a_subject_nothing_writes_does_not_belong_in_the_map():
     fragment = _graph(
         subjects=[

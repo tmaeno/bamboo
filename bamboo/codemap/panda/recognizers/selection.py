@@ -34,6 +34,7 @@ Nothing here needs the chain matcher the plan budgeted for.
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
 from typing import Iterator, Optional
 
@@ -506,6 +507,34 @@ def _untagged_steps(
     return found
 
 
+def _signature(stage: _Stage) -> str:
+    """What identifies this stage, independently of where it sits in the file.
+
+    A tag is a signature on its own -- the code emits ``criteria=-diskIO`` per
+    rejected site, so it is both the meaning and the log line -- and paired with
+    the funnel label it separates the two stages that share ``-disk``.
+
+    An untagged stage has neither, and the label alone is not enough: a chain
+    can run the same step at two points on paths that exclude each other.
+    ``AtlasProdJobBroker`` runs "temporary problem check" early when it was
+    called for a task-brokerage hint and last when it was not, and the two test
+    different things.  Keyed on the label alone they are one node, so storing
+    the map silently kept the later one and the ``hintForTB`` arm disappeared --
+    the same "only one arm of the if/else is on the map" fault the attribute
+    slice had, arriving through node identity instead.
+
+    So what the stage *tests* completes the signature, since for a step with no
+    name of its own that is the only thing left that means anything.  Digested
+    rather than spelled out because the conditions run to 300 characters, and
+    only for untagged stages, which are 12 of 109.  It moves when the logic
+    moves, which is correct: a step testing something else is another step.
+    """
+    if stage.tag:
+        return f"{stage.label}|{stage.tag}" if stage.label else stage.tag
+    digest = hashlib.sha1(" & ".join(stage.conditions).encode()).hexdigest()[:6]
+    return f"{stage.label}#{digest}"
+
+
 def _node(
     map_id: str,
     derived_from: str,
@@ -514,9 +543,7 @@ def _node(
     order: int,
     stage: _Stage,
 ) -> FilterStageNode:
-    signature = f"{stage.label}|{stage.tag}" if stage.label and stage.tag else (
-        stage.tag or stage.label
-    )
+    signature = _signature(stage)
     inputs: list[str] = []
     for condition in stage.conditions:
         for name in _identifiers(condition):
