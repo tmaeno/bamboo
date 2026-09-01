@@ -154,13 +154,27 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.filter_stages.extend(filter_stages)
         fragment.coverage.extend(selection_coverage)
 
-        subjects, junctions, progress_coverage, written_text = progress.extract(
-            self._modules, self.map_id, self._version
+        # Which enumeration a constant belongs to, by its bare name.  A name
+        # two enumerations share cannot decode anything, so it is dropped
+        # rather than guessed at -- the one such name in the corpus belongs to
+        # neither of the modules that declare error codes.
+        by_constant: dict[str, set[str]] = {}
+        for enum in enums:
+            by_constant.setdefault(enum.constant, set()).add(enum.namespace)
+        enumerations = {
+            constant: next(iter(spaces))
+            for constant, spaces in by_constant.items()
+            if len(spaces) == 1
+        }
+
+        subjects, junctions, progress_coverage, written_text, bindings = progress.extract(
+            self._modules, self.map_id, self._version, enumerations
         )
         fragment.subjects.extend(subjects)
         fragment.junctions.extend(junctions)
         fragment.coverage.extend(progress_coverage)
         fragment.diagnostics.extend(written_text)
+        fragment.enumeration_writes.extend(bindings)
 
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.

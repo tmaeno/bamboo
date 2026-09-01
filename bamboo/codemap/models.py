@@ -480,6 +480,7 @@ class MapFragment(BaseModel):
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
+    enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
 
     def extend(self, other: "MapFragment") -> None:
@@ -490,6 +491,7 @@ class MapFragment(BaseModel):
         self.value_enums.extend(other.value_enums)
         self.filter_stages.extend(other.filter_stages)
         self.diagnostics.extend(other.diagnostics)
+        self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
 
 
@@ -534,6 +536,53 @@ class DiagnosticTemplate(BaseModel):
         ),
     )
     form: str = Field(..., description="attribute | bind")
+    anchor: Anchor
+
+
+class EnumerationWrite(BaseModel):
+    """One place the code puts a named enumeration constant into a field.
+
+    The binding between a field and the enumeration that decodes it, which is
+    what a reverse index needs and cannot get from the constants alone.  Numbers
+    are reused across enumerations by design -- ``taskbuffer.ErrorCode.EC_Kill``
+    and ``jobdispatcher.ErrorCode.EC_Watcher`` are both ``100`` -- so the index
+    is keyed on ``(namespace, value)``, and decoding a code seen in a record is
+    impossible without knowing which field it came from.
+
+    ``errorcode`` calls that binding "separate and explicit, not recoverable
+    from the constant's location", and it is right about the location.  It is
+    recoverable from the *write*: ``jobSpec.taskBufferErrorCode =
+    ErrorCode.EC_Kill`` states the field and the constant in one statement, and
+    the corpus does that 79 times over five fields -- three of which are the
+    three ``ErrorCode`` modules, one field each.
+
+    Not restricted to error codes, and deliberately: the rule is "a declared
+    field assigned a constant the value-enum slice extracted", which also
+    catches ``JediTaskSpec.eventService`` and ``JobSpec.job_label``.  Telling
+    an error code from any other enumeration would need a classifier, and an
+    index makes no claim that would justify one -- the same reason
+    :class:`DiagnosticTemplate` indexes every assembled string.
+
+    **Outside promotion**, also for that class's reason: no criterion fires on
+    these fields -- every write is tier 2, the right-hand side being a module
+    constant rather than a literal -- so promotion drops them, and rightly.
+    "Why is this field 100?" is not the question anyone asks of it; "what does
+    100 mean here?" is, and that is an index.
+    """
+
+    map_id: str
+    derived_from: str
+    field: str = Field(
+        ..., description="Qualified name of the field written, e.g. JobSpec.taskBufferErrorCode."
+    )
+    constant: str = Field(..., description="The constant's bare name, e.g. EC_Kill.")
+    namespace: str = Field(
+        ...,
+        description=(
+            "The enumeration the constant belongs to, as the value-enum index "
+            "keys it.  This is the half that makes an observed value decodable."
+        ),
+    )
     anchor: Anchor
 
 

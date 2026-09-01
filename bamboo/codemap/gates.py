@@ -851,6 +851,80 @@ def tags_are_known(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult
     )
 
 
+def _decodes(fragment: MapFragment) -> dict[str, set[str]]:
+    """``{job field: the enumerations that decode it}``, read from the writes.
+
+    A field can have more than one: ``job_label`` takes constants from both
+    ``JobUtils.PROD`` and ``JobUtils.ANALY``, and either is a legitimate answer,
+    so the index for that field is the union.
+    """
+    bound: dict[str, set[str]] = {}
+    for write in fragment.enumeration_writes:
+        bound.setdefault(write.field.split(".")[-1], set()).add(write.namespace)
+    return bound
+
+
+def error_codes_are_known(fragment: MapFragment, ev: "evidence.Evidence") -> GateResult:
+    """(ii) Every coded value production puts in a record is one the index decodes.
+
+    The (c) slice's only production check, and the last of the map's indexes to
+    meet a real record.  A code sitting in a job field that the index cannot
+    name is either a constant the extraction missed or one whose enumeration the
+    map bound to the wrong field, and both make the index answer a question
+    wrongly rather than not at all -- which is worse, because P2 means to use it
+    as a lookup.
+
+    Positive only, like every production check here: seeing ``100`` in
+    ``taskBufferErrorCode`` proves the entry is live whatever fraction of
+    production was sampled, while a constant the sample lacks may simply not
+    have fired.  ``value-enum-referenced`` already asks the other direction of
+    the source, where it can be answered.
+
+    **Only the fields the map binds to an enumeration are checked**, and that
+    binding is read from the writes rather than declared here.  Three fields
+    have one -- the three ``ErrorCode`` modules, one field each.  Of the rest,
+    ``pilotErrorCode`` belongs to the pilot, which is a boundary the map
+    deliberately does not index; ``exeErrorCode`` carries a transform's exit
+    code; ``supErrorCode`` is decoded by a table rather than by constants; and
+    ``brokerageErrorCode`` has no declared constants at all.  Checking those
+    against this index would report every value they hold as unknown, which
+    says nothing about the index.
+    """
+    decodes = _decodes(fragment)
+    index: dict[str, set] = {}
+    for enum in fragment.value_enums:
+        index.setdefault(enum.namespace, set()).add(enum.value)
+
+    observed = evidence.observed_codes(ev)
+    failures: list[str] = []
+    checked = 0
+    for field, counts in sorted(observed.items()):
+        spaces = decodes.get(field)
+        if not spaces:
+            continue
+        known = set().union(*(index.get(space, set()) for space in spaces))
+        for value, times in sorted(counts.items(), key=lambda kv: str(kv[0])):
+            checked += 1
+            if value in known:
+                continue
+            failures.append(
+                f"production sets {field}={value} ({times}x) and "
+                f"{', '.join(sorted(spaces))} has no constant with that value"
+            )
+    sampled = len(ev.records)
+    return GateResult(
+        gate="error-codes-are-known",
+        passed=not failures,
+        checked=checked,
+        unit="coded values",
+        question="is every code production records in the index?",
+        finding="the index cannot decode a code production records",
+        sample=_sample_word(sampled, max(sampled, ev.tasks_available)),
+        failures=failures,
+        note="A code the index cannot name makes a lookup answer wrongly, not not at all.",
+    )
+
+
 def _precedence(runs: list[list[int]]) -> dict[tuple[int, int], list[int]]:
     """For each pair of steps, how often each order was observed.
 
@@ -1037,6 +1111,14 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
     ``AtlasProdTaskBroker``'s log that costs exactly ``status check``; in the
     single-chain files it costs nothing, because a label shared with a sibling
     broker that does not write there is not ambiguous here.
+
+    **A lone reversed observation is one traversal's worth of noise.**  Wrapping
+    is not a rare artefact here -- pairs the map orders correctly still come
+    back 4440 reversed against 6119 in order -- and every traversal that wraps
+    contributes exactly one reversed observation.  So a pair whose whole
+    evidence is a single reversal is indistinguishable from one wrap, and there
+    is no majority in it to speak of.  The corpus makes the line easy: of 624
+    pairs, 604 are seen ten times or more and the rest are seen once or twice.
     """
     chains = _chains(fragment)
     label_owners = _label_owners(chains)
@@ -1073,7 +1155,7 @@ def funnel_order_matches(fragment: MapFragment, ev: "evidence.Evidence") -> Gate
             ranked = [[rank[label] for label in run if label in rank] for run in runs]
             for (lower, higher), (in_order, reversed_) in sorted(_precedence(ranked).items()):
                 checked += 1
-                if reversed_ > in_order:
+                if reversed_ > in_order and reversed_ > 1:
                     failures.append(
                         f"{filename} ({owner.split('::')[-1]}): production logs "
                         f"{expected[lower]!r} after {expected[higher]!r} in {reversed_} "
@@ -1274,6 +1356,8 @@ def run_production(fragment: MapFragment, ev: "evidence.Evidence") -> list[GateR
         results.append(funnel_order_matches(fragment, ev))
     if ev.matching(evidence.TRANSITION_PATTERN):
         results.append(transitions_are_explained(fragment, ev))
+    if ev.records and fragment.enumeration_writes:
+        results.append(error_codes_are_known(fragment, ev))
     return results
 
 

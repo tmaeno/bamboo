@@ -26,6 +26,7 @@ from bamboo.codemap.models import (
     BoundaryNode,
     Branch,
     EntryPoint,
+    EnumerationWrite,
     FilterStageNode,
     JunctionNode,
     MapFragment,
@@ -499,7 +500,7 @@ def _progress(source: str, rel: str):
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
         _module(source, rel),
     ]
-    subjects, junctions, coverage, _diag = progress.extract(modules, MAP_ID, VERSION)
+    subjects, junctions, coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
     return subjects, [j for j in junctions if j.owner.startswith(rel)], coverage
 
 
@@ -871,7 +872,7 @@ def _progress_multi(*sources: tuple[str, str]):
     """Extract with the spec fixtures plus several caller modules."""
     modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py")]
     modules += [_module(text, rel) for text, rel in sources]
-    subjects, junctions, coverage, _diag = progress.extract(modules, MAP_ID, VERSION)
+    subjects, junctions, coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
     return subjects, junctions, coverage
 
 
@@ -2041,7 +2042,7 @@ def test_assembled_text_is_indexed_and_a_bare_literal_is_not():
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
         _module(source, "pandaserver/taskbuffer/JobSpec.py"),
     ]
-    _s, _j, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+    _s, _j, _c, diagnostics, _enum = progress.extract(modules, MAP_ID, VERSION)
 
     assert [(d.template, d.field, d.form) for d in diagnostics] == [
         ("failed to get {} files", "JobSpec.ddmErrorDiag", "attribute")
@@ -2062,7 +2063,7 @@ def test_a_frame_of_nothing_but_holes_is_not_a_search_key():
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
         _module(source, "pandaserver/taskbuffer/JediTaskSpec.py"),
     ]
-    _s, _j, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+    _s, _j, _c, diagnostics, _enum = progress.extract(modules, MAP_ID, VERSION)
 
     assert diagnostics == []
 
@@ -2116,7 +2117,7 @@ def test_the_index_survives_promotion_dropping_the_field():
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
         _module(source, "pandaserver/taskbuffer/JobSpec.py"),
     ]
-    subjects, junctions, _c, diagnostics = progress.extract(modules, MAP_ID, VERSION)
+    subjects, junctions, _c, diagnostics, _enum = progress.extract(modules, MAP_ID, VERSION)
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
     fragment.subjects.extend(subjects)
     fragment.junctions.extend(junctions)
@@ -2127,6 +2128,72 @@ def test_the_index_survives_promotion_dropping_the_field():
     assert "JobSpec.ddmErrorDiag" not in {s.name for s in fragment.subjects}
     assert "JobSpec.ddmErrorDiag" not in {j.subject for j in fragment.junctions}
     assert [d.template for d in fragment.diagnostics] == ["failed to get {} files"]
+
+
+_ENUM_WRITER = (
+    "class JobSpec(object):\n"
+    "    _attributes = ('PandaID', 'jobStatus', 'taskBufferErrorCode', 'pilotErrorCode')\n"
+    "    def kill(self):\n"
+    "        self.taskBufferErrorCode = ErrorCode.EC_Kill\n"
+    "        self.pilotErrorCode = 0\n"
+)
+
+
+def test_a_field_is_bound_to_the_enumeration_that_decodes_it():
+    """``jobSpec.taskBufferErrorCode = ErrorCode.EC_Kill`` states both halves.
+
+    ``errorcode`` says this binding is "not recoverable from the constant's
+    location", and it is right about the location -- the write is where it is
+    recoverable from, and the corpus has 79 of them.
+    """
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ENUM_WRITER, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    _s, _j, _c, _d, bindings = progress.extract(
+        modules, MAP_ID, VERSION, {"EC_Kill": "taskbuffer.ErrorCode.EC"}
+    )
+
+    assert [(b.field, b.constant, b.namespace) for b in bindings] == [
+        ("JobSpec.taskBufferErrorCode", "EC_Kill", "taskbuffer.ErrorCode.EC")
+    ]
+
+
+def test_the_binding_survives_promotion_dropping_the_field():
+    """No criterion fires on an error-code field -- every write is tier 2, the
+    right-hand side being a constant -- so promotion drops it, and rightly.
+
+    "Why is this field 100?" is not the question; "what does 100 mean here?"
+    is, and an index makes no claim promotion could contradict.
+    """
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ENUM_WRITER, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    subjects, junctions, _c, _d, bindings = progress.extract(
+        modules, MAP_ID, VERSION, {"EC_Kill": "taskbuffer.ErrorCode.EC"}
+    )
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.subjects.extend(subjects)
+    fragment.junctions.extend(junctions)
+    fragment.enumeration_writes.extend(bindings)
+
+    promotion.apply(fragment, promotion.criteria_for(fragment, Counter(), {}))
+
+    assert "JobSpec.taskBufferErrorCode" not in {s.name for s in fragment.subjects}
+    assert [b.constant for b in fragment.enumeration_writes] == ["EC_Kill"]
+
+
+def test_a_constant_two_enumerations_share_is_not_a_binding():
+    """A name that decodes to two namespaces decodes nothing, so it is dropped
+    rather than guessed at -- the plugin only hands over the unambiguous ones."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ENUM_WRITER, "pandaserver/taskbuffer/JobSpec.py"),
+    ]
+    _s, _j, _c, _d, bindings = progress.extract(modules, MAP_ID, VERSION, {})
+
+    assert bindings == []
 
 
 def test_the_attribute_slice_reads_a_subscript_of_a_declared_mapping():
@@ -4191,7 +4258,12 @@ def test_conformance_passes_when_production_stays_inside_the_map():
 
 def test_a_transposed_funnel_step_is_a_finding():
     """"Which step cut the candidates" is a question about position, so an
-    order that disagrees makes every answer off by one step."""
+    order that disagrees makes every answer off by one step.
+
+    Two traversals rather than one, because a chain that really runs its steps
+    out of order does so every time, while a single reversal is what one wrap
+    of a correctly-ordered chain produces.
+    """
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -4203,8 +4275,9 @@ def test_a_transposed_funnel_step_is_a_finding():
     ev = _evidence(
         _sample(
             [
-                _log_line("INFO", "100 candidates passed memory check"),
-                _log_line("INFO", "80 candidates passed disk check"),
+                _log_line("INFO", f"<jediTaskID={task}> {n} candidates passed {label}")
+                for task in (1, 2)
+                for n, label in ((100, "memory check"), (80, "disk check"))
             ],
             pattern=evidence.FUNNEL_PATTERN,
         )
@@ -4386,6 +4459,123 @@ def test_an_early_exit_is_not_a_transposition():
     assert gates.funnel_order_matches(fragment, ev).passed
 
 
+def _code_fragment() -> MapFragment:
+    """A map that decodes ``taskBufferErrorCode`` and nothing else."""
+    return MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        value_enums=[
+            ValueEnumNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name="taskbuffer.ErrorCode.EC_Kill",
+                namespace="taskbuffer.ErrorCode.EC",
+                constant="EC_Kill",
+                value=100,
+            )
+        ],
+        enumeration_writes=[
+            EnumerationWrite(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                field="JobSpec.taskBufferErrorCode",
+                constant="EC_Kill",
+                namespace="taskbuffer.ErrorCode.EC",
+                anchor=Anchor(package="pandaserver", file="x.py", line_start=1),
+            )
+        ],
+    )
+
+
+def _job_evidence(*jobs: dict) -> evidence.Evidence:
+    return evidence.Evidence(
+        fetched_at="2026-08-30T00:00:00+00:00",
+        records=[evidence.JobRecords(task_id="7", jobs=list(jobs))],
+        tasks_available=1,
+    )
+
+
+def test_a_code_the_index_cannot_decode_is_a_finding():
+    """P2 means to use the index as a lookup, so a value it cannot name makes
+    it answer wrongly rather than not at all."""
+    ev = _job_evidence(
+        {"PandaID": 1, "taskBufferErrorCode": 100},
+        {"PandaID": 2, "taskBufferErrorCode": 999},
+    )
+
+    result = gates.error_codes_are_known(_code_fragment(), ev)
+
+    assert not result.passed
+    assert result.failures == [
+        "production sets taskBufferErrorCode=999 (1x) and "
+        "taskbuffer.ErrorCode.EC has no constant with that value"
+    ]
+    assert result.checked == 2
+
+
+def test_the_field_decides_which_constant_a_value_means():
+    """Why the binding exists at all.  ``100`` was recorded 338 times in one
+    sample and meant three different things: ``EC_Kill`` in
+    ``taskBufferErrorCode``, ``EC_Setupper`` in ``ddmErrorCode``, ``EC_Watcher``
+    in ``jobDispatcherErrorCode``.  Without the field the index is a coin flip.
+    """
+    fragment = _code_fragment()
+    fragment.value_enums.append(
+        ValueEnumNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="jobdispatcher.ErrorCode.EC_Watcher",
+            namespace="jobdispatcher.ErrorCode.EC",
+            constant="EC_Watcher",
+            value=100,
+        )
+    )
+    fragment.enumeration_writes.append(
+        EnumerationWrite(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            field="JobSpec.jobDispatcherErrorCode",
+            constant="EC_Watcher",
+            namespace="jobdispatcher.ErrorCode.EC",
+            anchor=Anchor(package="pandaserver", file="Watcher.py", line_start=1),
+        )
+    )
+
+    assert gates._decodes(fragment) == {
+        "taskBufferErrorCode": {"taskbuffer.ErrorCode.EC"},
+        "jobDispatcherErrorCode": {"jobdispatcher.ErrorCode.EC"},
+    }
+    # Both hold 100 and both decode, each through its own enumeration.
+    ev = _job_evidence(
+        {"PandaID": 1, "taskBufferErrorCode": 100, "jobDispatcherErrorCode": 100}
+    )
+    assert gates.error_codes_are_known(fragment, ev).passed
+
+
+def test_a_field_the_map_binds_to_no_enumeration_is_not_checked():
+    """``pilotErrorCode`` is the pilot's, and the map holds the pilot as a
+    boundary on purpose.  Checking it against this index would report every
+    value it carries as unknown, which says nothing about the index."""
+    ev = _job_evidence({"PandaID": 1, "pilotErrorCode": 1099})
+
+    result = gates.error_codes_are_known(_code_fragment(), ev)
+
+    assert result.passed and result.checked == 0
+
+
+def test_a_field_at_rest_is_not_a_coded_value():
+    """An error-code field holds zero when there was no error, so counting it
+    would make every index look as though it were missing the ordinary case."""
+    ev = _job_evidence(
+        {"PandaID": 1, "taskBufferErrorCode": 0},
+        {"PandaID": 2, "taskBufferErrorCode": None},
+    )
+
+    result = gates.error_codes_are_known(_code_fragment(), ev)
+
+    assert result.passed and result.checked == 0
+
+
 def test_a_step_production_counts_and_the_map_lacks_is_a_finding():
     """The funnel counter's positive direction: candidates demonstrably went
     somewhere and the map has no step to name it.
@@ -4451,6 +4641,46 @@ def test_a_step_named_after_a_run_time_value_is_matched_by_its_frame():
     )
 
     assert gates.funnel_steps_are_known(fragment, ev).passed
+
+
+def test_one_reversed_observation_is_one_traversals_worth_of_noise():
+    """Wrapping is not rare here -- pairs the map orders correctly still come
+    back 4440 reversed against 6119 in order -- and every traversal that wraps
+    contributes exactly one reversal.  A pair whose whole evidence is a single
+    reversal is indistinguishable from one wrap, and has no majority in it.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        filter_stages=[
+            _stage("-a", "info", BROKER, [BROKER_LOG], funnel_label="disk check", order=0),
+            _stage("-b", "info", BROKER, [BROKER_LOG], funnel_label="memory check", order=1),
+        ],
+    )
+    once = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "100 candidates passed memory check"),
+                _log_line("INFO", "80 candidates passed disk check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+    assert gates.funnel_order_matches(fragment, once).passed
+
+    # Seen again, it is no longer an anecdote.
+    twice = _evidence(
+        _sample(
+            [
+                _log_line("INFO", "<jediTaskID=1> 100 candidates passed memory check"),
+                _log_line("INFO", "<jediTaskID=1> 80 candidates passed disk check"),
+                _log_line("INFO", "<jediTaskID=2> 100 candidates passed memory check"),
+                _log_line("INFO", "<jediTaskID=2> 80 candidates passed disk check"),
+            ],
+            pattern=evidence.FUNNEL_PATTERN,
+        )
+    )
+    assert not gates.funnel_order_matches(fragment, twice).passed
 
 
 def test_a_step_the_map_places_twice_cannot_testify_about_order():

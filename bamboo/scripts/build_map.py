@@ -159,6 +159,27 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             "answers\n  \"who wrote this line\" rather than \"why is it this value\""
         )
 
+    if fragment.enumeration_writes:
+        bound: dict[str, set[str]] = {}
+        for write in fragment.enumeration_writes:
+            bound.setdefault(write.field, set()).add(write.namespace)
+        constants = {w.constant for w in fragment.enumeration_writes}
+        click.echo(
+            f"\nenumeration bindings: {len(fragment.enumeration_writes)} write(s) "
+            f"of {len(constants)} constant(s) into {len(bound)} field(s)"
+        )
+        for field, spaces in sorted(bound.items()):
+            click.echo(f"  {field}  <-  {', '.join(sorted(spaces))}")
+        # The same note the templates carry, for the same reason, plus what
+        # this one buys: values are reused across enumerations, so a code seen
+        # in a record cannot be decoded without knowing which field held it.
+        click.echo(
+            "  outside promotion: an index, not a claim that the field is a "
+            "subject.\n  It is what makes a value observed in a record decodable, "
+            "since the\n  index is keyed on (namespace, value) and values repeat "
+            "across namespaces"
+        )
+
     if fragment.boundaries:
         systems = Counter(b.system for b in fragment.boundaries)
         click.echo(

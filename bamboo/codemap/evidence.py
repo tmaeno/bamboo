@@ -47,7 +47,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -232,6 +232,31 @@ class GrepResult(BaseModel):
         return self.conclusive and len(self.lines) == self.matched
 
 
+class JobRecords(BaseModel):
+    """The jobs of one task, reduced to the fields a gate reads.
+
+    A second kind of evidence, because a record is not a log line and reading
+    it needs none of the grep machinery: there is no pattern, no per-machine
+    union, and no ``truncated`` -- the API answers with the rows or it errors.
+
+    Compacted on the way in rather than on the way out.  The full descriptions
+    of one busy task run to megabytes, and an evidence file has already once
+    reached 112 MB by writing down everything it was handed; what any gate here
+    needs is a handful of coded fields per job.
+
+    What bounds this sample is how many tasks were asked about, which is a
+    number rather than a flag, so :class:`Evidence` records it alongside how
+    many were available to ask.
+    """
+
+    task_id: str
+    jobs: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="One dict per job, holding only KEPT_JOB_FIELDS.",
+    )
+    error: Optional[str] = None
+
+
 class Evidence(BaseModel):
     """Everything read from production for one ``check-map`` run.
 
@@ -243,6 +268,21 @@ class Evidence(BaseModel):
 
     fetched_at: str
     results: list[GrepResult] = Field(default_factory=list)
+    records: list[JobRecords] = Field(
+        default_factory=list,
+        description=(
+            "Job rows, one entry per task asked about.  Defaulted so that an "
+            "evidence file written before records existed still loads."
+        ),
+    )
+    tasks_available: int = Field(
+        default=0,
+        description=(
+            "How many task ids the log evidence offered when the records were "
+            "fetched.  With ``len(records)`` this is the whole sample story -- "
+            "a record query has no ``truncated`` to carry it."
+        ),
+    )
 
     def matching(
         self,
@@ -449,6 +489,83 @@ async def collect(queries: list[GrepQuery], timeout: float = POLL_TIMEOUT_SECOND
         fetched_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         results=[result for batch in gathered for result in batch],
     )
+
+
+# What a job row is reduced to before it is written down.  The coded fields the
+# index has anything to say about, plus enough to tell one job from another when
+# a finding has to be followed up by hand.
+KEPT_JOB_FIELDS = (
+    "PandaID",
+    "jobStatus",
+    "computingSite",
+    "pilotErrorCode",
+    "exeErrorCode",
+    "supErrorCode",
+    "ddmErrorCode",
+    "brokerageErrorCode",
+    "jobDispatcherErrorCode",
+    "taskBufferErrorCode",
+)
+
+# How many tasks the record query asks about by default.  One round trip per
+# task against the production API, and the direction these records support is
+# positive -- a code seen is a code used -- so a sample costs coverage and
+# nothing else.
+DEFAULT_TASK_SAMPLE = 50
+
+
+async def collect_job_records(
+    task_ids: list[str], sample: int = DEFAULT_TASK_SAMPLE
+) -> tuple[list[JobRecords], int]:
+    """Fetch the jobs of up to *sample* tasks, compacted.
+
+    The task ids are not asked of the API: they come from the log evidence,
+    which parses ``jediTaskID`` out of the transition lines.  That matters for
+    more than convenience.  Every endpoint that returns a *population* of tasks
+    scopes it to one ``userName`` -- ``get_tasks_detailed_info_since`` seeds its
+    criteria with the caller's DN and only a plain filter value can displace it,
+    and ``get_tasks_modified_since`` pins it in SQL -- so there is no query for
+    "the tasks production ran".  The per-id endpoints have no such check, and
+    the logs hand over thousands of ids with no user scoping at all.
+
+    Taken from the front of the list rather than at random: the caller passes
+    them in a fixed order, and a reproducible sample is worth more here than an
+    unbiased one, given the direction these records support.
+    """
+    from bamboo.utils.panda_client import get_job_descriptions  # noqa: PLC0415
+
+    async def one(task_id: str) -> JobRecords:
+        try:
+            jobs = await get_job_descriptions(int(task_id), unsuccessful_only=True)
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            logger.warning("evidence: job records for task %s failed: %s", task_id, exc)
+            return JobRecords(task_id=task_id, error=str(exc))
+        return JobRecords(
+            task_id=task_id,
+            jobs=[{k: job.get(k) for k in KEPT_JOB_FIELDS} for job in jobs],
+        )
+
+    chosen = sorted(task_ids)[:sample]
+    return list(await asyncio.gather(*(one(t) for t in chosen))), len(task_ids)
+
+
+def observed_codes(evidence: Evidence) -> dict[str, Counter]:
+    """``{job field: Counter(code)}`` over every job row on record.
+
+    Zero and null are dropped: an error-code field is zero when there was no
+    error, so counting it would make every index look as though it were missing
+    an entry for the ordinary case.
+    """
+    seen: dict[str, Counter] = {}
+    for record in evidence.records:
+        for job in record.jobs:
+            for field, value in job.items():
+                if field in ("PandaID", "jobStatus", "computingSite"):
+                    continue
+                if value in (None, 0, "0", ""):
+                    continue
+                seen.setdefault(field, Counter())[value] += 1
+    return seen
 
 
 def sample_queries(targets: dict[str, str]) -> list[GrepQuery]:

@@ -226,6 +226,17 @@ def _report_sample(ev: evidence.Evidence) -> None:
             continue
         word = gates.COMPLETE if whole == asked else gates.PARTIAL.upper()
         rows.append(f"{name:<7} {word:<9} {whole}/{asked} file(s) answered whole")
+    if ev.records:
+        # A record query has no truncation to report -- the API answers with
+        # the rows or it errors -- so what bounds this sample is how many tasks
+        # were asked about, and that has to be said as plainly as a bound is.
+        jobs = sum(len(r.jobs) for r in ev.records)
+        failed = sum(1 for r in ev.records if r.error)
+        word = gates.COMPLETE if len(ev.records) >= ev.tasks_available else gates.PARTIAL.upper()
+        rows.append(
+            f"{'records':<7} {word:<9} {len(ev.records)}/{ev.tasks_available} task(s) "
+            f"asked, {jobs} job row(s)" + (f", {failed} error(s)" if failed else "")
+        )
     if not rows:
         return
     for index, row in enumerate(rows):
@@ -464,6 +475,15 @@ def _report_gates(results: list[gates.GateResult]) -> None:
     help="Seconds to wait for each grep to come back.",
 )
 @click.option(
+    "--tasks",
+    default=evidence.DEFAULT_TASK_SAMPLE,
+    show_default=True,
+    help=(
+        "With --fetch, how many of the tasks seen in the logs to pull job "
+        "records for.  One request each, so this is the API cost."
+    ),
+)
+@click.option(
     "--strict",
     is_flag=True,
     help=(
@@ -491,6 +511,7 @@ def main(
     fetch: bool,
     log_file_specs: tuple[str, ...],
     timeout: float,
+    tasks: int,
     strict: bool,
     full: bool,
     top: int,
@@ -544,6 +565,21 @@ def main(
             f"across {len(set(targets.values()))} service(s)"
         )
         ev = asyncio.run(evidence.collect(queries, timeout=timeout))
+
+        # A second round, and it has to be second: the tasks to ask about come
+        # out of the transition lines the first round returned.  That is not a
+        # convenience -- every endpoint returning a *population* of tasks scopes
+        # it to one userName, so the logs are the only unscoped source of ids
+        # there is, and the per-id endpoints impose no such check.
+        task_ids = sorted(evidence.observed_task_status(ev))
+        if task_ids:
+            click.echo(
+                f"fetching job records for {min(len(task_ids), tasks)} "
+                f"of {len(task_ids)} task(s) seen in the logs"
+            )
+            ev.records, ev.tasks_available = asyncio.run(
+                evidence.collect_job_records(task_ids, sample=tasks)
+            )
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
     else:

@@ -44,6 +44,7 @@ from bamboo.codemap.models import (
     Branch,
     CoverageStat,
     DiagnosticTemplate,
+    EnumerationWrite,
     JunctionNode,
     SourceModule,
     SubjectNode,
@@ -323,12 +324,44 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
     return declarations
 
 
+def _named_constant(value: ast.expr) -> Optional[str]:
+    """The bare name of the module constant a right-hand side reads, if it is one.
+
+    ``ErrorCode.EC_Kill`` and ``pandaserver.taskbuffer.ErrorCode.EC_Transfer``
+    both give ``EC_Kill``-shaped answers, and the qualifier is deliberately
+    dropped: the constant's own name is what the value-enum index knows it by,
+    and matching on the name alone means no import has to be resolved.  Safe
+    because the names are effectively unique -- 44 ``EC_`` constants over 43
+    distinct names, and the one collision is between two modules that declare
+    no error codes at all.
+    """
+    if isinstance(value, ast.Attribute):
+        return value.attr
+    if isinstance(value, ast.Name):
+        return value.id
+    return None
+
+
 def extract(
     modules: list[SourceModule],
     map_id: str,
     derived_from: str,
-) -> tuple[list[SubjectNode], list[JunctionNode], list[CoverageStat], list[DiagnosticTemplate]]:
+    enumerations: Optional[dict[str, str]] = None,
+) -> tuple[
+    list[SubjectNode],
+    list[JunctionNode],
+    list[CoverageStat],
+    list[DiagnosticTemplate],
+    list[EnumerationWrite],
+]:
     """Extract subjects, junctions for attribute writes, and coverage.
+
+    *enumerations* maps a constant's bare name to the namespace the value-enum
+    index keys it under, and is what turns ``jobSpec.taskBufferErrorCode =
+    ErrorCode.EC_Kill`` into a binding between a field and an enumeration.  The
+    slice cannot derive it -- the constants belong to the (c) slice -- so it is
+    handed in, the way the attributor is.  Omitted, no bindings are recorded and
+    everything else is unchanged.
 
     Coverage measures *attribution*, not resolution: candidates are the writes
     that could belong to a spec, explained are those whose spec class could be
@@ -362,6 +395,8 @@ def extract(
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str]] = set()
     diagnostics: list[DiagnosticTemplate] = []
+    bindings: list[EnumerationWrite] = []
+    enumerations = enumerations or {}
 
     for module in modules:
         attach_parents(module.tree)
@@ -394,6 +429,14 @@ def extract(
             subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)
 
+            anchor = Anchor(
+                package=module.package,
+                file=module.rel_path,
+                line_start=node.lineno,
+                line_end=node.end_lineno,
+                blob_sha=module.blob_sha,
+            )
+
             template = values.diagnostic_template(value)
             if template:
                 diagnostics.append(
@@ -403,13 +446,20 @@ def extract(
                         template=template,
                         field=subject,
                         form="attribute",
-                        anchor=Anchor(
-                            package=module.package,
-                            file=module.rel_path,
-                            line_start=node.lineno,
-                            line_end=node.end_lineno,
-                            blob_sha=module.blob_sha,
-                        ),
+                        anchor=anchor,
+                    )
+                )
+
+            constant = _named_constant(value)
+            if constant in enumerations:
+                bindings.append(
+                    EnumerationWrite(
+                        map_id=map_id,
+                        derived_from=derived_from,
+                        field=subject,
+                        constant=constant,
+                        namespace=enumerations[constant],
+                        anchor=anchor,
                     )
                 )
 
@@ -426,13 +476,7 @@ def extract(
                     structural_subject=(
                         SubjectNode.make_name(structural, target.attr) if structural else None
                     ),
-                    anchor=Anchor(
-                        package=module.package,
-                        file=module.rel_path,
-                        line_start=node.lineno,
-                        line_end=node.end_lineno,
-                        blob_sha=module.blob_sha,
-                    ),
+                    anchor=anchor,
                 )
                 junctions[name] = junction
 
@@ -481,7 +525,7 @@ def extract(
         )
         for spec_class, attribute in sorted(attributed)
     ]
-    return subjects, list(junctions.values()), coverage, diagnostics
+    return subjects, list(junctions.values()), coverage, diagnostics, bindings
 
 
 def _attribution_evidence(
