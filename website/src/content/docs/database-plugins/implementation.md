@@ -33,7 +33,7 @@ flowchart TD
    - Abstract base classes for backends
    - `GraphDatabaseBackend` interface
    - `VectorDatabaseBackend` interface
-   - 8 abstract methods each
+   - 19 and 9 abstract methods respectively
 
 2. **`bamboo/database/factory.py`**
    - Backend registry system
@@ -226,23 +226,53 @@ GRAPH_DATABASE_BACKEND=in_memory pytest tests/
 
 ## 📚 Interfaces
 
-### GraphDatabaseBackend (8 methods)
-- `connect()` - Establish connection
-- `close()` - Close connection
-- `create_node(node)` - Create a graph node
-- `get_or_create_canonical_node(node, name)` - Create or get by name
-- `create_relationship(relationship)` - Create relationship
-- `find_causes(errors, task_features, environment_factors, components, limit)` - Query by all clue types, ranked by evidence breadth
-- `increment_cause_frequency(cause_id)` - Update metrics
-- `update_resolution_success_rate(res_id, success)` - Update metrics
+Every method below is abstract, so a backend that omits one cannot be
+instantiated at all. The lists are checked against the code by
+`tests/test_docs.py` — they were short for months, which is worse than useless:
+a contributor implementing exactly what was listed got a `TypeError`.
 
-### VectorDatabaseBackend (6 methods)
-- `connect()` - Establish connection
-- `close()` - Close connection
-- `upsert_section_vector()` - Insert/update document
-- `search_similar()` - Vector similarity search
-- `delete_document(doc_id)` - Delete by ID
-- `get_document(doc_id)` - Retrieve by ID
+### GraphDatabaseBackend (19 methods)
+
+Lifecycle:
+- `connect()` - Open the database connection and create any required indexes
+- `close()` - Close the database connection and release resources
+
+Writing:
+- `create_node(node)` - Unconditionally create a new node and return its assigned ID
+- `get_or_create_canonical_node(node, canonical_name)` - Return the ID of an existing node with that name, or create it
+- `create_relationship(relationship)` - Create a directed relationship between two nodes
+- `update_node_description(node_type, name, description)` - Set the description field on an existing node
+- `increment_cause_frequency(cause_id)` - Increment the `frequency` counter on a cause node
+- `update_resolution_success_rate(resolution_id, success)` - Update the running success-rate statistic
+- `set_procedure_auto_run(procedure_name, value)` - Set/clear the durable per-procedure auto-run grant
+
+Reading:
+- `find_causes(symptoms, task_features, environment_factors, components, limit)` - Candidate causes ranked by evidence breadth
+- `find_procedures_for_causes(cause_names, include_tentative)` - Procedures linked to those causes via `investigated_by`
+- `find_all_procedures(limit, include_tentative)` - Procedures cause-agnostically, by total reuse frequency
+- `find_common_pattern(graph_ids, min_occurrences)` - Edges shared across at least that many of the given graphs
+- `get_node_description(node_type, name)` - The description of an existing node, or `None`
+- `summary()` - Per-type counts of nodes and relationships
+
+Deleting:
+- `clear_all()` - Delete every node and relationship in the database
+- `remove_graph_id(graph_id)` - Remove one graph's contribution and clean up what it leaves isolated
+
+[Code Map](/bamboo/architecture/code-map/) (machine-derived, rebuildable — kept in
+its own label namespace so a rebuild cannot touch human-validated knowledge):
+- `merge_map_node(node)` - Merge a Code Map node on `(label, map_id, name)` and return its ID
+- `clear_map(map_id, version=None)` - Delete one map's nodes, leaving the incident graph untouched
+
+### VectorDatabaseBackend (9 methods)
+- `connect()` - Open the database connection and ensure the collection exists
+- `close()` - Close the database connection
+- `collection_exists()` - Whether the backing collection/index exists and is ready
+- `upsert_section_vector(vector_id, embedding, content, section, metadata)` - Insert or update a vector point
+- `search_similar(query_embedding, limit, score_threshold, filter_conditions)` - The most similar points above the threshold
+- `get_document(doc_id)` - Retrieve a single point by ID
+- `get_summaries_by_graph_ids(graph_ids)` - Fetch `Summary` section entries for those graphs
+- `delete_document(doc_id)` - Delete the point with the given ID
+- `clear_all()` - Drop and recreate the entire collection
 
 ## ✨ Benefits
 

@@ -24,7 +24,12 @@ except ImportError as e:
 
 from bamboo.config import get_settings
 from bamboo.database.base import GraphDatabaseBackend
-from bamboo.models.graph_element import BaseNode, GraphRelationship, NodeType
+from bamboo.models.graph_element import (
+    CODE_MAP_NODE_TYPES,
+    BaseNode,
+    GraphRelationship,
+    NodeType,
+)
 from bamboo.utils.errors import describe_endpoint_failure, log_endpoint_failure
 
 logger = logging.getLogger(__name__)
@@ -464,12 +469,7 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def clear_map(self, map_id: str, version: str | None = None) -> int:
         """Delete one Code Map's nodes without touching the incident graph."""
-        labels = [
-            NodeType.JUNCTION_POINT.value,
-            NodeType.BOUNDARY.value,
-            NodeType.SUBJECT.value,
-            NodeType.VALUE_ENUM.value,
-        ]
+        labels = sorted(t.value for t in CODE_MAP_NODE_TYPES)
         label_filter = " OR ".join(f"n:{label}" for label in labels)
         query = f"MATCH (n) WHERE ({label_filter}) AND n.map_id = $map_id "
         params: dict[str, Any] = {"map_id": map_id}

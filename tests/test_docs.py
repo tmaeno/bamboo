@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from bamboo.database.base import GraphDatabaseBackend, VectorDatabaseBackend
 from bamboo.models.graph_element import NodeType, RelationType
 
 SCHEMA_PAGE = (
@@ -74,3 +75,56 @@ def test_the_stated_counts_match_the_enums(schema_text: str) -> None:
     assert f"**{len(list(RelationType))} relationship types**" in schema_text
     assert f"### Node types ({len(list(NodeType))})" in schema_text
     assert f"### Relationship types ({len(list(RelationType))})" in schema_text
+
+
+# ---------------------------------------------------------------------------
+# The database-plugin pages, which tell a contributor what to implement.
+# ---------------------------------------------------------------------------
+
+PLUGIN_DOCS = SCHEMA_PAGE.parent.parent / "database-plugins"
+
+_BACKENDS = (
+    ("GraphDatabaseBackend", GraphDatabaseBackend),
+    ("VectorDatabaseBackend", VectorDatabaseBackend),
+)
+
+
+@pytest.fixture(scope="module")
+def plugin_pages() -> dict[str, str]:
+    if not PLUGIN_DOCS.is_dir():  # pragma: no cover - only if the site moves
+        pytest.skip(f"{PLUGIN_DOCS} is not in this checkout")
+    return {p.name: p.read_text() for p in PLUGIN_DOCS.glob("*.md")}
+
+
+@pytest.mark.parametrize("label,backend", _BACKENDS, ids=lambda x: getattr(x, "__name__", x))
+def test_the_interface_page_lists_every_method_a_backend_must_have(
+    plugin_pages: dict[str, str], label: str, backend: type
+) -> None:
+    """A short list here is not a cosmetic problem.
+
+    Every method is abstract, so a contributor who implements exactly what the
+    page lists gets a ``TypeError`` on instantiation.  The page listed 8 of 19
+    for the graph backend and 6 of 9 for the vector one.
+    """
+    page = plugin_pages["implementation.md"]
+    missing = sorted(m for m in backend.__abstractmethods__ if f"`{m}(" not in page)
+
+    assert not missing, f"{label} methods missing from implementation.md: {missing}"
+
+
+def test_the_stated_interface_sizes_match_the_abstract_classes(
+    plugin_pages: dict[str, str],
+) -> None:
+    """Counts, which a reader believes without counting, in both pages."""
+    graph = len(GraphDatabaseBackend.__abstractmethods__)
+    vector = len(VectorDatabaseBackend.__abstractmethods__)
+
+    implementation = plugin_pages["implementation.md"]
+    assert f"### GraphDatabaseBackend ({graph} methods)" in implementation
+    assert f"### VectorDatabaseBackend ({vector} methods)" in implementation
+    assert f"{graph} and {vector} abstract methods respectively" in implementation
+
+    checklist = plugin_pages["checklist.md"]
+    assert f"`GraphDatabaseBackend` interface with {graph} methods" in checklist
+    assert f"`VectorDatabaseBackend` interface with {vector} methods" in checklist
+    assert f"Full implementation of all {graph} methods" in checklist

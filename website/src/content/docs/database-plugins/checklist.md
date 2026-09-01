@@ -6,8 +6,8 @@ title: "Database Plugin System - Final Checklist"
 
 ### Core Infrastructure
 - [x] Abstract base classes created (`base.py`)
-  - [x] `GraphDatabaseBackend` interface with 8 methods
-  - [x] `VectorDatabaseBackend` interface with 6 methods
+  - [x] `GraphDatabaseBackend` interface with 19 methods
+  - [x] `VectorDatabaseBackend` interface with 9 methods
   - [x] Full type hints
   - [x] Docstrings for all methods
 
@@ -37,7 +37,7 @@ title: "Database Plugin System - Final Checklist"
   - [x] Logging added
 
 - [x] In-Memory example backend (`in_memory_backend.py`)
-  - [x] Full implementation of all 8 methods
+  - [x] Full implementation of all 19 methods
   - [x] Reference implementation for developers
   - [x] Documentation in docstrings
   - [x] No external dependencies

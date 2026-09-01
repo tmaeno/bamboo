@@ -70,6 +70,27 @@ class NodeType(str, Enum):
     FILTER_STAGE = "FilterStage"
 
 
+#: The labels that make up the Code Map namespace.
+#:
+#: Named here rather than spelled out at each use so that "which labels may a
+#: rebuild delete" is stated once.  Spelled out at the use site instead, the
+#: set silently went stale: ``clear_map`` was written before ``FilterStage``
+#: existed and kept deleting only four of the five, leaving stages from a
+#: previous source version behind forever.
+#:
+#: ``tests/test_docs.py`` checks this against the node models in
+#: ``bamboo.codemap.models``, which declare the same fact independently.
+CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
+    {
+        NodeType.JUNCTION_POINT,
+        NodeType.BOUNDARY,
+        NodeType.SUBJECT,
+        NodeType.VALUE_ENUM,
+        NodeType.FILTER_STAGE,
+    }
+)
+
+
 class RelationType(str, Enum):
     """Edge type enum.  Values are used verbatim as Neo4j relationship types.
 
