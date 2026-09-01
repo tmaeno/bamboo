@@ -16,6 +16,13 @@ bamboo/
 │   │   ├── knowledge_reviewer.py       # LLM quality gate
 │   │   ├── context_enricher.py         # MCP tool orchestration / context enrichment
 │   │   └── reasoning_navigator.py      # Diagnoses tasks against the knowledge base
+│   ├── codemap/           # Code Map: a graph extracted from a target system's source
+│   │   ├── panda/recognizers/          # One module per slice (progress, selection, …)
+│   │   ├── panda/attribution.py        # Which spec class a write belongs to
+│   │   ├── panda/promotion.py          # Which attributes become subjects
+│   │   ├── gates.py                    # Self-verification, offline and against production
+│   │   ├── evidence.py                 # Production logs and records, fetched and stored
+│   │   └── diff.py                     # What changed between two source versions
 │   ├── database/          # Graph + vector database clients
 │   │   └── backends/                   # neo4j_backend.py, qdrant_backend.py
 │   ├── llm/               # LLM client (llm_client.py) and prompts (prompts.py)
