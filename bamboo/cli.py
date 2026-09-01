@@ -929,6 +929,15 @@ cli.add_command(_review_drafts_main, "review-drafts")
 from bamboo.scripts.batch_populate import main as _batch_populate_main
 cli.add_command(_batch_populate_main, "batch-populate")
 
+from bamboo.scripts.build_map import main as _build_map_main
+cli.add_command(_build_map_main, "build-map")
+
+from bamboo.scripts.check_map import main as _check_map_main
+cli.add_command(_check_map_main, "check-map")
+
+from bamboo.scripts.diff_map import main as _diff_map_main
+cli.add_command(_diff_map_main, "diff-map")
+
 from bamboo.scripts.verify import cmd as _verify_cmd
 cli.add_command(_verify_cmd, "verify")
 

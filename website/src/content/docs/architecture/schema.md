@@ -5,6 +5,10 @@ title: "Graph Schema"
 The knowledge graph schema used by the incident-analysis pipeline. Node and relationship
 types are defined in `bamboo/models/graph_element.py` (`NodeType` and `RelationType`).
 
+The same Neo4j database holds a second, separate set of labels — the
+[Code Map](/bamboo/architecture/code-map/), machine-derived from source. They share a
+database and nothing else; see [Two namespaces](#two-namespaces) below.
+
 ## Core schema
 
 This is the subset the incident-analysis pipeline actually extracts and queries.
@@ -50,13 +54,33 @@ Task-level logs from orchestration services (JEDI, Harvester, …) are accepted 
 keyed by source name. Each source is filtered and analysed by the LLM independently; every
 extracted node is tagged with `log_source` in its metadata.
 
+## Two namespaces
+
+The database holds two bodies of knowledge with opposite lifecycles, and the labels are
+what keep them apart.
+
+| | Incident graph | Code Map |
+|---|---|---|
+| Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
+| If you lose it | Irreplaceable | Rebuild it in a minute |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `JunctionPoint`, `FilterStage`, `Boundary`, `ValueEnum` |
+
+That separation is not tidiness: `clear_all()` drops everything in the database, so
+rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
+because the Code Map labels are distinct, and it is the only safe way to rebuild one.
+
+The two join at `Component`: an incident's `Component` node and the Code Map's junctions
+describe the same subsystem from opposite directions, which is what `implemented_by` is
+for. See the [Code Map overview](/bamboo/architecture/code-map/) for what the Code Map
+node kinds mean.
+
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **18 node types** and
-**19 relationship types** in total — available for future extraction strategies beyond the core
+The model defines a larger set of node and relationship types — **23 node types** and
+**23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (18)
+### Node types (23)
 
 ```
 - Symptom: Symptom messages and failures
@@ -77,9 +101,16 @@ incident-analysis pipeline.
 - Action: Actions (automated/manual)
 - Dependency: System dependencies
 - User: Users (operators, engineers, admins)
+
+Code Map types (machine-derived from source, separate namespace):
+- Subject: An attribute worth asking "why is it this value?" about
+- JunctionPoint: A place the code settles a subject's value, with one branch per outcome
+- FilterStage: One reason a candidate was dropped on the way to a selection
+- Boundary: Where causation crosses into a system this map does not cover
+- ValueEnum: One `NAME = value` constant, so a code seen in a record can be decoded
 ```
 
-### Relationship types (19)
+### Relationship types (23)
 
 ```
 Core Relationships:
@@ -105,6 +136,13 @@ User Relationships:
 - reported_by: Issue reported by User
 - assigned_to: Task assigned to User
 - approved_by: Action approved by User
+
+Code Map Relationships:
+- writes: JunctionPoint writes Subject
+- reads: JunctionPoint reads Subject (an input to its path condition)
+- bounded_by: JunctionPoint bounded_by Boundary
+- upstream_of: JunctionPoint upstream_of JunctionPoint (the backward walk's edge)
+- implemented_by: Component implemented_by JunctionPoint (the join to the incident graph)
 ```
 
 ### Extended graph example

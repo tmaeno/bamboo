@@ -16,7 +16,11 @@ import logging
 from typing import Any, Dict, Set
 
 from bamboo.database.base import GraphDatabaseBackend
-from bamboo.models.graph_element import BaseNode, GraphRelationship
+from bamboo.models.graph_element import (
+    CODE_MAP_NODE_TYPES,
+    BaseNode,
+    GraphRelationship,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +314,74 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         self.relationships.clear()
         self.node_index.clear()
         logger.info("In-memory backend: all data cleared")
+
+    async def merge_map_node(self, node: BaseNode) -> str:
+        """Merge a Code Map node on ``(label, map_id, name)``.
+
+        A Code Map node is identified by what it means, not by where it was
+        found, so a rebuild after the target system moved the code updates the
+        existing node.  ``valid_for`` accumulates the versions the node was
+        seen unchanged in rather than being overwritten.
+
+        The node models declare no ``valid_for`` field — Neo4j sets it as a
+        stored property, which has no counterpart here — so this backend keeps
+        it under ``metadata``, the model's own place for what the store adds.
+        """
+        map_id = getattr(node, "map_id", None)
+        if not map_id:
+            raise ValueError("Code Map nodes must carry a map_id")
+        version = getattr(node, "derived_from", None)
+
+        existing = next(
+            (
+                n
+                for n in self.nodes.values()
+                if n.node_type == node.node_type
+                and getattr(n, "map_id", None) == map_id
+                and n.name == node.name
+            ),
+            None,
+        )
+        valid_for = list((existing.metadata.get("valid_for") if existing else None) or [])
+        if version is not None and version not in valid_for:
+            valid_for.append(version)
+
+        if existing is None:
+            node_id = await self.create_node(node)
+        else:
+            node.id = existing.id
+            self.nodes[existing.id] = node
+            node_id = existing.id
+        self.nodes[node_id].metadata["valid_for"] = valid_for
+
+        logger.debug(f"Merged map node: {node_id} ({map_id}/{node.name})")
+        return node_id
+
+    async def clear_map(self, map_id: str, version: str | None = None) -> int:
+        """Delete one Code Map's nodes, leaving the incident graph untouched."""
+        doomed = [
+            node_id
+            for node_id, node in self.nodes.items()
+            if node.node_type in CODE_MAP_NODE_TYPES
+            and getattr(node, "map_id", None) == map_id
+            and (version is None or getattr(node, "derived_from", None) == version)
+        ]
+        for node_id in doomed:
+            node_type = str(self.nodes[node_id].node_type)
+            self.node_index.get(node_type, set()).discard(node_id)
+            del self.nodes[node_id]
+        self.relationships = {
+            rel_id: rel
+            for rel_id, rel in self.relationships.items()
+            if rel.source_id not in doomed and rel.target_id not in doomed
+        }
+        logger.info(
+            "In-memory backend: cleared Code Map map_id=%s version=%s (%d node(s))",
+            map_id,
+            version or "*",
+            len(doomed),
+        )
+        return len(doomed)
 
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the frequency counter for a cause."""

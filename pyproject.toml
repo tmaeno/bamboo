@@ -124,4 +124,13 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs a live service (database, LLM, PanDA) to run.",
+    # Real behaviour, real value, but it races a child process against a wall-clock
+    # grace period, so a loaded machine loses it: 3 of 4 whole-suite runs fail while
+    # 3 of 3 runs of the file alone pass.  CI runs these as a separate, non-blocking
+    # step -- kept visible rather than deleted, kept out of the gate rather than
+    # making the gate meaningless.
+    "timing: passes or fails on how fast the machine is; not a merge gate.",
+]
 

@@ -61,6 +61,9 @@ export default defineConfig({
 						{ label: 'Graph Schema', slug: 'architecture/schema' },
 						{ label: 'Execution Trust', slug: 'architecture/execution-trust' },
 						{ label: 'Extraction Plugins', slug: 'architecture/extraction-plugin-system' },
+						{ label: 'Code Map', slug: 'architecture/code-map' },
+						{ label: 'Code Map: Building', slug: 'architecture/code-map-building' },
+						{ label: 'Code Map: Verification', slug: 'architecture/code-map-verification' },
 					],
 				},
 				{
