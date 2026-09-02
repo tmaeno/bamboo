@@ -3472,9 +3472,67 @@ def test_an_annotation_that_changes_no_write_is_a_finding():
 
     assert not result.passed
     assert result.failures == [
-        "workflow_core.py:859 states data_spec_map holds WFDataSpec "
-        "and no write resolves differently without it"
+        "workflow_core.py:859 states WFDataSpec for data_spec_map "
+        "and no write in scope resolves differently without it"
     ]
+
+
+def test_a_yield_annotation_that_changes_no_write_is_a_finding():
+    """A context manager's yield type is audited the same way, and has to be.
+
+    It is the *only* mechanical check available for it.  Two of the three
+    workflow locks have no second reading -- the attributes touched on the
+    locked spec are declared by every workflow spec -- so the agreement gate
+    corroborates one annotation and is silent about the other two.  What is
+    left is the ablation: does removing it change a write.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="DataCarousel.py:691",
+            kind="yield",
+            container="request_lock()",
+            stated="DataCarouselRequestSpec",
+            put_in=[],
+            read=False,
+        )
+    )
+
+    result = gates.annotations_are_read(fragment)
+
+    assert not result.passed
+    assert result.failures == [
+        "DataCarousel.py:691 states DataCarouselRequestSpec for request_lock() "
+        "and no write in scope resolves differently without it"
+    ]
+
+
+def test_the_agreement_gate_counts_only_what_it_can_compare():
+    """A yield type has nothing stored in it, so it is not this gate's business.
+
+    Counting it as ``checked`` would report a comparison that never happened --
+    the same thing the production report was rebuilt to stop doing when a
+    truncated sample was shown as a completed check.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="closer.py:49",
+            container="dataset_map",
+            stated="DatasetSpec",
+            put_in=["DatasetSpec"],
+            read=True,
+        ),
+        AnnotationAudit(
+            where="workflow_core.py:266",
+            kind="yield",
+            container="workflow_lock()",
+            stated="WorkflowSpec",
+            put_in=[],
+            read=True,
+        ),
+    )
+
+    assert gates.container_annotations_agree(fragment).checked == 1
+    assert gates.annotations_are_read(fragment).checked == 2
 
 
 def test_a_base_class_annotation_is_read_in_the_subclass():
@@ -3536,6 +3594,102 @@ def test_a_container_held_by_a_loop_variable_is_read():
     assert [(j.subject, j.attribution) for j in written] == [
         ("FileSpec.status", "container")
     ]
+
+
+def test_a_context_manager_states_the_class_its_with_target_holds():
+    """``with self.workflow_lock(id) as spec`` -- the last unresolved shape.
+
+    The write is four expressions from anything that names a class: the lock
+    method yields the spec, the ``with`` binds it, and the attributes touched
+    (``status``, ``end_time``) are declared by every workflow spec, so
+    structural inference cannot separate them either.  The declared yield type
+    is the only reading, and PanDA's docstring already stated it.
+    """
+    source = (
+        "class WorkflowCore:\n"
+        "    @contextmanager\n"
+        "    def workflow_lock(self, workflow_id: int) -> Iterator[JediTaskSpec | None]:\n"
+        "        yield self.tbif.get_workflow(workflow_id)\n"
+        "\n"
+        "    def cancel_workflow(self, workflow_id: int) -> bool:\n"
+        "        with self.workflow_lock(workflow_id) as workflow_spec:\n"
+        "            workflow_spec.status = 'cancelled'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediTaskSpec.status", "certain")
+    ]
+
+
+def test_the_yield_type_is_the_first_argument_of_a_generator():
+    """``Generator[Y, S, R]`` puts the yield type first, unlike a mapping.
+
+    The container reading takes the *last* argument so that ``Dict[K, V]``
+    gives its values.  Reusing it here would read ``Generator[WorkflowSpec,
+    None, None]`` as ``None`` -- a silent no-op on the fuller spelling of the
+    same annotation.
+    """
+    source = (
+        "class WorkflowCore:\n"
+        "    @contextmanager\n"
+        "    def data_lock(self, data_id) -> Generator[JediFileSpec, None, None]:\n"
+        "        yield self.tbif.get_data(data_id)\n"
+        "\n"
+        "    def cancel_data(self, data_id):\n"
+        "        with self.data_lock(data_id) as data_spec:\n"
+        "            data_spec.status = 'cancelled'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediFileSpec.status", "certain")
+    ]
+
+
+def test_an_unannotated_context_manager_states_nothing():
+    """The shape alone is not the fact -- the annotation is.
+
+    Every one of PanDA's eight context managers looked like this before the
+    yield type was asked for, and reading the shape as evidence would have
+    invented an answer for all of them.
+    """
+    source = (
+        "class WorkflowCore:\n"
+        "    @contextmanager\n"
+        "    def workflow_lock(self, workflow_id):\n"
+        "        yield self.tbif.get_workflow(workflow_id)\n"
+        "\n"
+        "    def cancel_workflow(self, workflow_id):\n"
+        "        with self.workflow_lock(workflow_id) as workflow_spec:\n"
+        "            workflow_spec.status = 'cancelled'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [("?.status", "unresolved")]
+
+
+def test_an_iterator_that_is_not_a_context_manager_types_nothing():
+    """``as`` binds ``__enter__()``'s result, which a bare iterator has not got.
+
+    So ``-> Iterator[X]`` without ``@contextmanager`` on something used in a
+    ``with`` describes code that cannot run, and answering ``X`` there would be
+    a confident wrong answer about broken code -- worse than the unresolved
+    write it replaces.  The decorator is the declaration that makes the yield
+    type what ``as`` receives.
+    """
+    source = (
+        "class WorkflowCore:\n"
+        "    def workflow_lock(self, workflow_id) -> Iterator[JediTaskSpec]:\n"
+        "        yield self.tbif.get_workflow(workflow_id)\n"
+        "\n"
+        "    def cancel_workflow(self, workflow_id):\n"
+        "        with self.workflow_lock(workflow_id) as workflow_spec:\n"
+        "            workflow_spec.status = 'cancelled'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [("?.status", "unresolved")]
 
 
 def test_the_typed_declaration_form_yields_the_same_column_names():

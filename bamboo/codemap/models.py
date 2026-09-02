@@ -519,15 +519,32 @@ class MapFragment(BaseModel):
 
 
 class AnnotationAudit(BaseModel):
-    """Two readings of one container element annotation, side by side.
+    """Two readings of one annotation the map has to take on trust, side by side.
 
     Not a node.  This records how much the map trusts a statement PanDA makes
-    about what a container holds, which is a fact about the extraction rather
-    than about the system, so it belongs in the report and the gates and not in
-    the graph.
+    about a class it cannot otherwise read, which is a fact about the extraction
+    rather than about the system, so it belongs in the report and the gates and
+    not in the graph.
+
+    Two shapes qualify, and both are trusted for the same reason -- the class
+    they name is stated nowhere else in the expression that reaches the write.
+    A container's element type (``Dict[str, DatasetSpec]``) has a second
+    reading in what the code stores; a context manager's yield type
+    (``Iterator[WorkflowSpec | None]``) has one only when the object's usage
+    happens to be distinctive, which for two of PanDA's three workflow locks it
+    is not.
     """
 
     where: str = Field(description="``file:line`` of the annotation")
+    kind: str = Field(
+        default="container",
+        description=(
+            "``container`` for an element type, ``yield`` for a context "
+            "manager's.  Only the first has a stored second reading, so the "
+            "agreement gate is about that one and the ablation gate is about "
+            "both."
+        ),
+    )
     container: str = Field(description="the annotated name, for the report")
     stated: str = Field(description="the spec class the annotation names")
     put_in: list[str] = Field(

@@ -202,16 +202,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         attributor.learn_self_attributes(self._modules)
         self._table_conflicts = attributor.learn_table_classes(self._modules)
 
-        # Audit the element types the map takes on trust.  Needs an attributor
-        # equipped the same way the progress slice's was, since both readings
-        # are the ordinary resolution -- one of the annotated container, one of
-        # what the code stores in it.
+        # Audit the classes the map takes on trust from an annotation.  Needs an
+        # attributor equipped the same way the progress slice's was, since both
+        # readings are the ordinary resolution -- one of the annotated container,
+        # one of what the code stores in it.
         audited = SpecAttributor(declarations, class_bases(self._modules))
         audited.learn_element_types(self._modules)
         audited.learn_self_attributes(self._modules)
         fragment.annotation_readings = [
             AnnotationAudit(
                 where=row.where,
+                kind=row.kind,
                 container=row.container,
                 stated=row.stated,
                 put_in=sorted(row.put_in),

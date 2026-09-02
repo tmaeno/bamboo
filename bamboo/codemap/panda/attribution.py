@@ -475,9 +475,7 @@ class SpecAttributor:
             named, scopes = expression.id, [func]
         elif isinstance(expression, ast.Attribute) and _rooted_at_self(expression):
             named = expression.attr
-            owner: Optional[ast.AST] = func
-            while owner is not None and not isinstance(owner, ast.ClassDef):
-                owner = getattr(owner, "parent", None)
+            owner = self._enclosing_class(func)
             scopes = self._class_and_ancestors(owner) if owner is not None else []
         else:
             return None
@@ -536,9 +534,7 @@ class SpecAttributor:
             scope: Scope = [(func, enclosing_class)]
         elif _rooted_at_self(container):
             name = container.attr
-            owner: Optional[ast.AST] = func
-            while owner is not None and not isinstance(owner, ast.ClassDef):
-                owner = getattr(owner, "parent", None)
+            owner = self._enclosing_class(func)
             if owner is None:
                 return None
             # The same scope the annotation lookup uses, for the same reason:
@@ -552,6 +548,24 @@ class SpecAttributor:
             return None
         found = _classes_put_in(name, scope, self)
         return next(iter(found)) if len(found) == 1 else None
+
+    @staticmethod
+    def _enclosing_class(
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[ast.ClassDef]:
+        """The class *func* is a method of, walked back through parent links.
+
+        Depends on :func:`attach_parents` having run, which the recognizer does
+        and the element-type pass does not -- so a reading built on this
+        degrades to "cannot tell" in the earlier pass rather than answering
+        wrongly.  Three readings ask this same question (a field's annotation,
+        a field's stored element type, a method's yield type), and three copies
+        of the walk would drift the moment one of them grew a case.
+        """
+        owner: Optional[ast.AST] = func
+        while owner is not None and not isinstance(owner, ast.ClassDef):
+            owner = getattr(owner, "parent", None)
+        return owner
 
     def _class_and_ancestors(self, cls: ast.ClassDef) -> list[ast.ClassDef]:
         """*cls* then its base classes, nearest first, as far as the corpus goes."""
@@ -627,6 +641,99 @@ class SpecAttributor:
         parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
         return self._annotated_class(parts[-1]) if parts else None
 
+    def _yielded_class(
+        self, method: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> Optional[str]:
+        """The spec class a context manager declares it yields.
+
+        ``@contextmanager`` is required, and it is the declaration that makes
+        this reading sound rather than a shape being taken for a fact.  ``as``
+        binds what ``__enter__()`` returns, which a plain generator has not
+        got: an undecorated ``-> Iterator[X]`` entered by a ``with`` describes
+        code that cannot run, and answering ``X`` for it would be a confident
+        wrong answer about a bug.
+
+        The yield type is the **first** argument, unlike the container reading
+        in :meth:`_annotated_element`, which takes the last so that
+        ``Dict[K, V]`` gives its values.  Sharing that would read
+        ``Generator[WorkflowSpec, None, None]`` as ``None`` -- a silent no-op
+        on the fuller spelling of the same annotation.
+        """
+        decorators = {
+            node.id if isinstance(node, ast.Name) else getattr(node, "attr", "")
+            for node in method.decorator_list
+        }
+        if not decorators & {"contextmanager", "asynccontextmanager"}:
+            return None
+        annotation = method.returns
+        if not isinstance(annotation, ast.Subscript):
+            return None
+        base = annotation.value
+        wrapper = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if wrapper not in {"Iterator", "Generator", "AsyncIterator", "AsyncGenerator"}:
+            return None
+        inner = annotation.slice
+        parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+        return self._annotated_class(parts[0]) if parts else None
+
+    def _yielded_local_class(
+        self,
+        variable: str,
+        func: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> Optional[str]:
+        """The class a ``with ... as`` binding takes from the lock it enters.
+
+        ``workflow_core`` cancels a workflow, a step and a data entry the same
+        way::
+
+            with self.workflow_lock(workflow_id) as workflow_spec:
+                ...
+                workflow_spec.status = WorkflowStatus.cancelled
+
+        and nothing between the annotation and the write names a class: the
+        attributes touched (``status``, ``end_time``, ``workflow_id``) are
+        declared by all three workflow specs, so structural inference separates
+        the step -- which also touches ``flavor`` and ``member_id`` -- and
+        leaves the other two open.  These were the last unresolved writes in
+        the corpus.
+
+        Restricted to ``self.<method>()``, which is the same one-hop-into-a
+        -same-class-helper rule that path conditions and return aliases already
+        use, and here it is not a restriction that costs anything: of the
+        corpus's ``with ... as <name>`` bindings, fourteen call a method on
+        ``self`` and every one of those fourteen enters a context manager
+        declared in that same class.  The rest are ``open()``, executors and
+        cursors, which hold no spec.
+        """
+        owner = self._enclosing_class(func)
+        if owner is None:
+            return None
+        methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+        for cls in self._class_and_ancestors(owner):
+            for item in cls.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    methods.setdefault(item.name, item)
+        for node in ast.walk(func):
+            if not isinstance(node, (ast.With, ast.AsyncWith)):
+                continue
+            for entry in node.items:
+                target = entry.optional_vars
+                call = entry.context_expr
+                if not (isinstance(target, ast.Name) and target.id == variable):
+                    continue
+                if not (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "self"
+                ):
+                    continue
+                method = methods.get(call.func.attr)
+                yielded = self._yielded_class(method) if method is not None else None
+                if yielded is not None:
+                    return yielded
+        return None
+
     def _stated_local_class(
         self,
         variable: str,
@@ -664,6 +771,11 @@ class SpecAttributor:
             stated = self._annotated_class(node.annotation)
             if stated is not None:
                 return stated
+        # Still an annotation, one indirection away: the class is stated on the
+        # context manager the ``with`` enters rather than on the name it binds.
+        yielded = self._yielded_local_class(variable, func)
+        if yielded is not None:
+            return yielded
         constructors: set[str] = set()
         for node in ast.walk(func):
             if not isinstance(node, ast.Assign):
@@ -907,6 +1019,12 @@ class SpecAttributor:
     def stated_annotation(self, annotation: ast.expr) -> Optional[str]:
         """Public reading of an annotation that names a class outright."""
         return self._annotated_class(annotation)
+
+    def yield_annotation(
+        self, method: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> Optional[str]:
+        """Public reading of a context manager's declared yield type."""
+        return self._yielded_class(method)
 
     def _declares(self, spec_class: str, attribute: str) -> bool:
         return attribute in self._declarations.get(spec_class, ())
@@ -1188,9 +1306,10 @@ class SpecAttributor:
 
 
 class AnnotationReading(NamedTuple):
-    """What one container element annotation states, and what the code does."""
+    """What one trusted annotation states, and what the code does."""
 
     where: str  # "file:line"
+    kind: str  # "container" (an element type) or "yield" (a context manager's)
     container: str  # the annotated name, for the report
     stated: str  # the spec class the annotation names
     put_in: frozenset[str]  # classes the code stores in it, where they resolve
@@ -1200,20 +1319,21 @@ class AnnotationReading(NamedTuple):
 Scope = list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[str]]]
 
 
-def _annotated_containers(
+def _trusted_annotations(
     module: SourceModule,
     attributor: SpecAttributor,
     specs: frozenset[str],
     corpus: Scope,
-) -> list[tuple[ast.AST, str, str, Scope]]:
-    """Every container annotation in *module* that names a spec element type.
+) -> list[tuple[ast.AST, str, str, str, Scope]]:
+    """Every annotation in *module* naming a spec class nothing else states.
 
-    Yields ``(node, container_name, stated_class, scope)``.  The scope is where
+    Yields ``(node, kind, name, stated_class, scope)``.  The scope is where
     both readings have to be taken, and it differs by annotation shape: a bare
     name is a local or a parameter, so its scope is the one function, while
     ``self.<field>`` is the object's own -- annotated in ``__init__`` and used
     in whatever method needs it, the shape ``closer`` and ``adder_atlas_plugin``
-    both use.
+    both use.  A context manager's yield type has the same scope as a field:
+    the method is entered from wherever the class or a subclass needs the lock.
 
     For a field the scope reaches into subclasses, and it has to.  PanDA
     annotates in the base and consumes in the derived class:
@@ -1223,7 +1343,7 @@ def _annotated_containers(
     the annotating class would call those unread without having looked where
     they are used, which is a verdict the audit has not earned.
     """
-    found: list[tuple[ast.AST, str, str, Scope]] = []
+    found: list[tuple[ast.AST, str, str, str, Scope]] = []
     local: Scope = list(functions_with_owner(module.tree))
     contains = {id(func): set(map(id, ast.walk(func))) for func, _ in local}
 
@@ -1240,6 +1360,13 @@ def _annotated_containers(
         return [(f, o) for f, o in corpus if o in family]
 
     for node in ast.walk(module.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yielded = attributor.yield_annotation(node)
+            if yielded is not None and yielded in specs:
+                found.append(
+                    (node, "yield", f"{node.name}()", yielded, scope_of(node, True))
+                )
+            continue
         annotation = getattr(node, "annotation", None)
         if annotation is None:
             continue
@@ -1263,7 +1390,7 @@ def _annotated_containers(
             name, on_self = node.target.attr, True
         else:
             continue
-        found.append((node, name, stated, scope_of(node, on_self)))
+        found.append((node, "container", name, stated, scope_of(node, on_self)))
     return found
 
 
@@ -1272,7 +1399,7 @@ def annotation_readings(
     attributor: SpecAttributor,
     spec_attribute_names: set[str],
 ) -> list[AnnotationReading]:
-    """Read every container element annotation twice and report both readings."""
+    """Read every trusted annotation twice and report both readings."""
     specs = attributor.declared_classes()
     readings: list[AnnotationReading] = []
 
@@ -1287,23 +1414,66 @@ def annotation_readings(
     ]
 
     for module in modules:
-        for node, name, stated, scope in _annotated_containers(
+        for node, kind, name, stated, scope in _trusted_annotations(
             module, attributor, specs, corpus
         ):
-            if not scope or not _container_is_opened(name, scope):
+            used = (
+                _manager_is_entered(name.removesuffix("()"), scope)
+                if kind == "yield"
+                else _container_is_opened(name, scope)
+            )
+            if not scope or not used:
                 continue
             readings.append(
                 AnnotationReading(
                     where=f"{module.rel_path}:{node.lineno}",
+                    kind=kind,
                     container=name,
                     stated=stated,
-                    put_in=_classes_put_in(name, scope, attributor),
+                    # Only a container has a second reading here.  A yield type
+                    # is corroborated, when it is at all, by the object's usage
+                    # -- which ``structural_attribution_agrees`` compares, and
+                    # which for two of PanDA's three workflow locks says
+                    # nothing, since the attributes touched are declared by
+                    # every workflow spec.
+                    put_in=(
+                        _classes_put_in(name, scope, attributor)
+                        if kind == "container"
+                        else frozenset()
+                    ),
                     read=_annotation_changes_a_write(
                         node, scope, attributor, spec_attribute_names
                     ),
                 )
             )
     return readings
+
+
+def _manager_is_entered(method: str, scope: Scope) -> bool:
+    """Whether anything in *scope* enters ``self.<method>()`` and binds it.
+
+    The counterpart of :func:`_container_is_opened`, and there for the same
+    reason: a context manager annotated but never entered with an ``as`` target
+    in scope states its yield type for whoever enters it elsewhere, so the map
+    cannot depend on that annotation here and "unread" would be a true
+    statement about nothing.
+    """
+    for func, _owner in scope:
+        for node in ast.walk(func):
+            if not isinstance(node, (ast.With, ast.AsyncWith)):
+                continue
+            for entry in node.items:
+                call = entry.context_expr
+                if (
+                    isinstance(entry.optional_vars, ast.Name)
+                    and isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == method
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == "self"
+                ):
+                    return True
+    return False
 
 
 def _container_is_opened(name: str, scope: Scope) -> bool:
@@ -1398,14 +1568,22 @@ def _annotation_changes_a_write(
         # Nothing in scope for the annotation to affect, so there is nothing to
         # claim either way; treated as read so the gate stays quiet.
         return True
-    saved = node.annotation
-    # A bare container name is exactly the annotation this policy calls
-    # uninformative, which makes it the right thing to substitute.
-    node.annotation = ast.Name(id="dict", ctx=ast.Load())
+    # A function states the class in ``returns``; everything else in
+    # ``annotation``.  The substitute differs with it: a bare container name is
+    # exactly the annotation this policy calls uninformative, while for a yield
+    # type the uninformative state is having none, which is how all eight of
+    # PanDA's context managers were written before it was asked for.
+    field = "returns" if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else "annotation"
+    saved = getattr(node, field)
+    setattr(
+        node,
+        field,
+        None if field == "returns" else ast.Name(id="dict", ctx=ast.Load()),
+    )
     try:
         after = _scope_resolutions(scope, attributor, spec_attribute_names)
     finally:
-        node.annotation = saved
+        setattr(node, field, saved)
     return before != after
 
 

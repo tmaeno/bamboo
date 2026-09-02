@@ -518,15 +518,12 @@ def container_annotations_agree(fragment: MapFragment) -> GateResult:
     the harvest bar that deleted naming inference.  As a check it costs one
     pass over seventeen sites and catches a wrong subject.
     """
-    conflicts = [
-        row
-        for row in fragment.annotation_readings
-        if row.put_in and row.stated not in row.put_in
-    ]
+    containers = [row for row in fragment.annotation_readings if row.kind == "container"]
+    conflicts = [row for row in containers if row.put_in and row.stated not in row.put_in]
     return GateResult(
         gate="container-annotations-agree",
         passed=not conflicts,
-        checked=len(fragment.annotation_readings),
+        checked=len(containers),
         unit="container annotations",
         question="does a container hold what its annotation says?",
         finding="an annotation names a class the code contradicts",
@@ -543,7 +540,7 @@ def container_annotations_agree(fragment: MapFragment) -> GateResult:
 
 
 def annotations_are_read(fragment: MapFragment) -> GateResult:
-    """(i) Every container element annotation the map depends on changes a write.
+    """(i) Every annotation the map takes on trust changes a write.
 
     The mirror of ``spec-declarations-are-read``, and it exists for the same
     reason: an annotation nobody reads looks exactly like a container with
@@ -565,18 +562,25 @@ def annotations_are_read(fragment: MapFragment) -> GateResult:
     consumes in the derived class.  A verdict of unread means the audit looked
     where the field is actually used and the map still does not depend on it:
     either the annotation is redundant, or a read form is missing here.
+
+    Context manager yield types are audited beside container element types, and
+    for them this is the *only* mechanical check.  ``Iterator[WorkflowSpec |
+    None]`` on ``workflow_lock`` has no second reading: the attributes touched
+    on the locked spec (``status``, ``end_time``, ``workflow_id``) are declared
+    by every workflow spec, so ``structural_attribution_agrees`` corroborates
+    the step lock's annotation and says nothing about the other two.
     """
     unread = [row for row in fragment.annotation_readings if not row.read]
     return GateResult(
         gate="annotations-are-read",
         passed=not unread,
         checked=len(fragment.annotation_readings),
-        unit="container annotations",
-        question="does the extraction read every element annotation?",
+        unit="spec annotations",
+        question="does the extraction read every annotation it asked for?",
         finding="an annotation the map asked for changes nothing",
         failures=[
-            f"{row.where} states {row.container} holds {row.stated} "
-            "and no write resolves differently without it"
+            f"{row.where} states {row.stated} for {row.container} "
+            "and no write in scope resolves differently without it"
             for row in unread
         ],
         note=(
