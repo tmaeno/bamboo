@@ -297,8 +297,72 @@ def _resolve(
     return [Resolved(_runtime(value), 2)]
 
 
+#: Class-level names a spec uses to say which database columns it holds.
+#: Read together because PanDA uses all three, and which one a class picks is a
+#: matter of when it was written rather than of what it means.
+SPEC_DECLARATION_NAMES = frozenset({"attributes", "_attributes", "attributes_with_types"})
+
+
+def _declared_names(value: ast.expr) -> set[str]:
+    """The column names one declaration states, whichever form it takes.
+
+    Two forms carry names, and they are read the same way because they say the
+    same thing:
+
+    * ``attributes = ("jediTaskID", "status", ...)`` -- a tuple of strings.
+    * ``attributes_with_types = (AttributeWithType("status", str), ...)`` --
+      the newer form, which adds the column's type.
+
+    A class using the second one also assigns ``attributes``, but derives it
+    (``tuple([a.attribute for a in attributes_with_types])``), so reading only
+    literals takes nothing from it.  Nothing about that is visible at the
+    assignment: the name matches, the statement is there, and the result is
+    empty.  ``spec-declarations-are-read`` exists because of it.
+    """
+    if isinstance(value, (ast.Tuple, ast.List)):
+        names = {
+            element.value
+            for element in value.elts
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+        }
+        if names:
+            return names
+        # A tuple of AttributeWithType(...) calls: the column name is the first
+        # argument, and the type beside it is more than the older form states.
+        return {
+            call.args[0].value
+            for call in value.elts
+            if isinstance(call, ast.Call)
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        }
+    return set()
+
+
+def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[str]]]:
+    """Every class-level column declaration in the corpus: ``(class, file, names)``.
+
+    Kept separate from :func:`spec_attributes` so that a declaration yielding
+    *nothing* is still on the list.  That is the whole point -- a form the
+    reader does not understand is indistinguishable from an absent declaration
+    once the names have been merged into a dict.
+    """
+    found: list[tuple[str, str, set[str]]] = []
+    for module in modules:
+        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
+            for stmt in cls.body:
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                names = {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+                if not names & SPEC_DECLARATION_NAMES:
+                    continue
+                found.append((cls.name, module.rel_path, _declared_names(stmt.value)))
+    return found
+
+
 def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
-    """Return ``{spec_class: {declared attribute, ...}}`` from ``_attributes``.
+    """Return ``{spec_class: {declared attribute, ...}}``.
 
     The declaration bounds attribution: a write can only belong to a class that
     says it has the attribute.  Without that bound, overlap alone hands every
@@ -307,20 +371,9 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
     statuses share words like "running" and "failed".
     """
     declarations: dict[str, set[str]] = {}
-    for module in modules:
-        for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
-            for stmt in cls.body:
-                if not isinstance(stmt, ast.Assign):
-                    continue
-                names = {t.id for t in stmt.targets if isinstance(t, ast.Name)}
-                if not names & {"attributes", "_attributes"}:
-                    continue
-                if isinstance(stmt.value, (ast.Tuple, ast.List)):
-                    declarations.setdefault(cls.name, set()).update(
-                        e.value
-                        for e in stmt.value.elts
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str)
-                    )
+    for cls_name, _file, names in spec_declarations(modules):
+        if names:
+            declarations.setdefault(cls_name, set()).update(names)
     return declarations
 
 

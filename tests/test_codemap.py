@@ -3220,6 +3220,46 @@ def test_every_junction_lands_on_a_subject_the_map_contains():
     assert result.failures == ["x.py::f writes JediTaskSpec.ghost, which is not a subject"]
 
 
+def test_a_class_declaring_columns_the_reader_cannot_parse_is_a_finding():
+    """A declaration form nobody reads is silent in exactly the wrong way.
+
+    ``WFDataSpec`` states its columns as ``AttributeWithType("status", str)``
+    and derives the older name from that, so a reader taking only literal
+    tuples matched the assignment and took nothing.  Twenty-four writes in one
+    module went unattributed and ``unresolved`` swallowed them, because no gate
+    was looking at a class that declares nothing.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        declaration_yields={"JobSpec (JobSpec.py)": 126, "WFDataSpec (workflow_base.py)": 0},
+    )
+
+    result = gates.spec_declarations_are_read(fragment)
+
+    assert not result.passed
+    assert result.checked == 2
+    assert result.failures == [
+        "WFDataSpec (workflow_base.py) declares columns and the extraction read none"
+    ]
+
+
+def test_the_typed_declaration_form_yields_the_same_column_names():
+    """Both forms say the same thing, so both are read the same way."""
+    source = (
+        "class WFDataSpec:\n"
+        "    attributes_with_types = (\n"
+        "        AttributeWithType('data_id', int),\n"
+        "        AttributeWithType('status', str),\n"
+        "    )\n"
+        "    attributes = tuple([a.attribute for a in attributes_with_types])\n"
+    )
+
+    declared = progress.spec_attributes([_module(source)])
+
+    assert declared == {"WFDataSpec": {"data_id", "status"}}
+
+
 def test_two_nodes_sharing_a_signature_are_reported_rather_than_one_being_lost():
     """The signature is the merge key, so a shared one is a node about to vanish.
 

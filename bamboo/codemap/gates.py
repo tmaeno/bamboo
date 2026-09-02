@@ -460,6 +460,39 @@ def map_references_resolve(fragment: MapFragment) -> GateResult:
     )
 
 
+def spec_declarations_are_read(fragment: MapFragment) -> GateResult:
+    """(i) Every column declaration the target system makes yields something.
+
+    The target system states which columns each of its classes holds, and the
+    extraction reads those statements.  Two expressions of one fact, so they can
+    be compared -- and the comparison needs no threshold, because the failure is
+    total: a declaration the reader does not understand yields *zero* names.
+
+    This has now been the shape of two blind spots.  The first pass looked for
+    ``attributes`` and found three classes, because most of them say
+    ``_attributes``.  Later, four classes moved to a form that carries types --
+    ``attributes_with_types = (AttributeWithType("status", str), ...)`` -- and
+    derive the old name from it, so the reader matched the assignment and took
+    nothing.  Twenty-seven writes went unattributed, twenty-four of them in one
+    module, and ``unresolved`` absorbed them all without a gate looking.
+
+    The wider lesson is that a naming convention drifting is invisible to any
+    tool that was told the convention: it is exactly as silent as having nothing
+    to read.  Only counting what came back says otherwise.
+    """
+    unread = sorted(where for where, names in fragment.declaration_yields.items() if not names)
+    return GateResult(
+        gate="spec-declarations-are-read",
+        passed=not unread,
+        checked=len(fragment.declaration_yields),
+        unit="declarations",
+        question="does every declaration the extraction reads yield anything?",
+        finding="a class declares its columns in a form the extraction does not read",
+        failures=[f"{where} declares columns and the extraction read none" for where in unread],
+        note="A form nobody reads looks exactly like a class with nothing to declare.",
+    )
+
+
 def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
     """(i) No two nodes of one kind share a semantic signature.
 
@@ -1418,6 +1451,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))
         results.append(map_references_resolve(fragment))
+    if fragment.declaration_yields:
+        results.append(spec_declarations_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

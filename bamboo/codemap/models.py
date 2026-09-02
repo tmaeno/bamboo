@@ -482,6 +482,17 @@ class MapFragment(BaseModel):
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
+    declaration_yields: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "``Class (file)`` -> how many names the extraction read from the "
+            "column declaration there.  Every declaration is listed, including "
+            "the ones that yielded nothing, which is the point: a form nobody "
+            "reads looks exactly like a class with nothing to declare once the "
+            "names have been merged away.  Carried on the fragment rather than "
+            "logged so that ``spec-declarations-are-read`` can fail on it."
+        ),
+    )
 
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place."""
@@ -493,6 +504,7 @@ class MapFragment(BaseModel):
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
+        self.declaration_yields.update(other.declaration_yields)
 
 
 class DiagnosticTemplate(BaseModel):

@@ -179,6 +179,15 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
         declarations = progress.spec_attributes(self._modules)
+        # Every declaring class and how many columns came back, so that a form
+        # this reader does not understand fails a gate instead of vanishing into
+        # `unresolved`.  Counted per class rather than per assignment: the four
+        # classes using the typed form also assign the older name, deriving it,
+        # and that derived line legitimately yields nothing on its own.
+        yields: dict[str, set[str]] = {}
+        for cls, rel_path, names in progress.spec_declarations(self._modules):
+            yields.setdefault(f"{cls} ({rel_path})", set()).update(names)
+        fragment.declaration_yields = {where: len(names) for where, names in yields.items()}
         attributor = SpecAttributor(declarations, class_bases(self._modules))
         attributor.learn_self_attributes(self._modules)
         self._table_conflicts = attributor.learn_table_classes(self._modules)
