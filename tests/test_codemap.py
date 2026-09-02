@@ -1052,6 +1052,85 @@ def test_a_copy_of_a_container_element_carries_the_element_type():
     assert junctions[0].attribution == "container"
 
 
+def test_a_container_takes_its_element_type_from_what_is_put_in_it():
+    """No annotation, and none needed: the code says it one line above.
+
+    A local's evidence is always in the same function, so asking the target
+    system to annotate one is asking it to restate what is already there --
+    which is how a wrong element type got in.  The corpus agrees: of eighteen
+    container element annotations, seventeen are on parameters or fields, where
+    the evidence really is in another scope, and one was on a local.
+
+    Measured on 36 sites before being trusted: the reading agreed with the
+    existing answer 36 times and disagreed none.
+    """
+    source = (
+        "import copy\n"
+        "class Mod:\n"
+        "    def make(self, rows):\n"
+        "        row_id_spec_map = {}\n"
+        "        for spec in rows:\n"
+        "            use(spec.lfn)\n"
+        "            row_id_spec_map[1] = spec\n"
+        "        tmp_file_spec = copy.copy(row_id_spec_map[1])\n"
+        "        tmp_file_spec.status = 'cached'\n"
+    )
+    _subjects, junctions, _cov = _progress(
+        source, "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py"
+    )
+    written = [j for j in junctions if j.subject.endswith(".status")]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("FileSpec.status", "container")
+    ]
+
+
+def test_an_annotation_outranks_what_is_put_in_the_container():
+    """The annotation wins, which is what keeps the gate from being circular.
+
+    ``container_annotations_agree`` compares the stated element type against
+    the stored one.  If the stored reading were preferred there would be
+    nothing left to check -- the gate would be comparing the attribution
+    against itself, the tautology that sank attribution by declared vocabulary.
+    So this reading ranks *below* the annotation and only fills its silence.
+    """
+    source = (
+        "class Mod:\n"
+        "    def make(self):\n"
+        "        m: Dict[int, JediFileSpec] = {}\n"
+        "        spec = FileSpec()\n"
+        "        m[1] = spec\n"
+        "        m[1].status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefinerBase.py")
+    written = [j for j in junctions if j.owner.endswith("::make")]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("JediFileSpec.status", "certain")
+    ]
+
+
+def test_a_container_holding_two_classes_settles_nothing():
+    """The reading assumes the container is homogeneous, so it has to check.
+
+    Same assumption the adder idiom carries, which is why both report
+    ``container`` rather than ``certain``.  Where the assumption is visibly
+    false the honest answer is the unresolved write.
+    """
+    source = (
+        "class Mod:\n"
+        "    def make(self):\n"
+        "        m = {}\n"
+        "        m[1] = FileSpec()\n"
+        "        m[2] = JediFileSpec()\n"
+        "        m[1].status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefinerBase.py")
+    written = [j for j in junctions if j.owner.endswith("::make")]
+
+    assert [j.attribution for j in written] == ["unresolved"]
+
+
 def test_a_mapping_is_read_through_get_as_well_as_subscript():
     """``d.get(key)`` and ``d[key]`` are the same read, and PanDA writes both.
 

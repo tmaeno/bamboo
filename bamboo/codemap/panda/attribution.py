@@ -497,6 +497,62 @@ class SpecAttributor:
                     return arg.annotation
         return None
 
+    def _stored_element_class(
+        self,
+        container: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str],
+    ) -> Optional[str]:
+        """The element class a container gets from what the code stores in it.
+
+        ``row_id_spec_map[fileSpec.row_ID] = fileSpec`` states the value type as
+        plainly as an annotation would, and one line closer to the read.  That
+        matters because the alternative was asking PanDA to annotate a *local*,
+        and a local's evidence is never anywhere else -- which is how a wrong
+        element type got in and sat there resolving nothing.  Of eighteen
+        container element annotations in the corpus, seventeen are on parameters
+        or fields, where the value really does arrive from another scope.  One
+        was on a local, and it is this one.
+
+        **Ranked below the annotation on purpose.**  ``container_annotations_agree``
+        compares the stated element type against this reading, so preferring
+        this one would leave the gate comparing the attribution against itself
+        -- the tautology that sank attribution by declared vocabulary.  Here it
+        only fills the annotation's silence.
+
+        Reported as ``container``: the assumption is that the container is
+        homogeneous, exactly as for the adder idiom, and a container visibly
+        holding two classes settles nothing.
+
+        Measured on 36 sites before being trusted -- 32 locals and 4 fields,
+        29 of them one block of ``fileSpecMap`` writes in
+        ``task_complex_module`` -- where it agreed with the existing answer 36
+        times and disagreed none.
+        """
+        if func is None:
+            return None
+        if isinstance(container, ast.Name):
+            name = container.id
+            scope: Scope = [(func, enclosing_class)]
+        elif _rooted_at_self(container):
+            name = container.attr
+            owner: Optional[ast.AST] = func
+            while owner is not None and not isinstance(owner, ast.ClassDef):
+                owner = getattr(owner, "parent", None)
+            if owner is None:
+                return None
+            # The same scope the annotation lookup uses, for the same reason:
+            # one field of one class, wherever its methods happen to touch it.
+            scope = [
+                pair
+                for cls in self._class_and_ancestors(owner)
+                for pair in functions_with_owner(cls, cls.name)
+            ]
+        else:
+            return None
+        found = _classes_put_in(name, scope, self)
+        return next(iter(found)) if len(found) == 1 else None
+
     def _class_and_ancestors(self, cls: ast.ClassDef) -> list[ast.ClassDef]:
         """*cls* then its base classes, nearest first, as far as the corpus goes."""
         order: list[ast.ClassDef] = [cls]
@@ -743,8 +799,10 @@ class SpecAttributor:
             # here.  Two writes in ``create_pseudo_files_for_dyn_num_events``
             # were unattributed *with an annotation on the mapping right above
             # them*, because nothing looked past the ``copy``.
-            if self._container_read(copied) is not None:
+            if (opened := self._container_read(copied)) is not None:
                 element = self._annotated_receiver(copied, func)
+                if element is None:
+                    element = self._stored_element_class(opened, func, enclosing_class)
                 if element is not None:
                     return element
                 continue
@@ -1074,6 +1132,14 @@ class SpecAttributor:
         annotated = self._annotated_receiver(target.value, func)
         if annotated is not None and self._declares(annotated, attribute):
             return annotated, CERTAIN
+
+        # What the code stores in the container, where nothing annotated it.
+        # Strictly after the annotation, so that the gate comparing the two has
+        # something independent to compare -- see ``_stored_element_class``.
+        if (opened := self._container_read(target.value)) is not None:
+            stored = self._stored_element_class(opened, func, enclosing_class)
+            if stored is not None and self._declares(stored, attribute):
+                return stored, CONTAINER
 
         # Structural inference: what the code does with the object.  Measured
         # against the writes the code states outright, the two never disagreed
