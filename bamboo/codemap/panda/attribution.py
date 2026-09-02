@@ -367,6 +367,150 @@ class SpecAttributor:
                     return stated
         return self._structural_of(expression, func, enclosing_class)
 
+    def _annotated_receiver(
+        self,
+        expression: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[str]:
+        """The class an annotation gives the object being written to.
+
+        Three shapes, all of which the annotation policy produces:
+
+        ``self.dataset``
+            An attribute rather than a name, so ``self.dataset: DatasetSpec``
+            was written and never read.
+        ``self.dataset_map[key]``
+            A subscript, whose class is the mapping's value type -- and a
+            mapping annotated bare (``Dict``) says nothing, which is what makes
+            ``Dict[str, DatasetSpec]`` worth asking for.
+        ``dataset`` bound from ``self.dataset_map[key]``
+            The same, one assignment removed.
+        """
+        if isinstance(expression, ast.Subscript):
+            annotation = self._annotation_of(expression.value, func)
+            return self._annotated_element(annotation) if annotation else None
+        annotation = self._annotation_of(expression, func)
+        stated = self._annotated_class(annotation) if annotation else None
+        if stated is not None:
+            return stated
+        # A local assigned from an annotated container's element.
+        if isinstance(expression, ast.Name) and func is not None:
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Assign) or not any(
+                    isinstance(t, ast.Name) and t.id == expression.id
+                    for t in node.targets
+                ):
+                    continue
+                if isinstance(node.value, ast.Subscript):
+                    return self._annotated_receiver(node.value, func)
+        return None
+
+    def _annotation_of(
+        self,
+        expression: ast.expr,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[ast.expr]:
+        """The annotation written for *expression*, wherever it was written.
+
+        The scope searched depends on what the expression is, and the
+        distinction is the whole point:
+
+        ``self.dataset_map``
+            One object's field, so the class is the scope -- annotated in
+            ``__init__`` while the write happens in another method.
+        ``dataset_map`` (a bare name)
+            A local or a parameter, so **only the enclosing function**.
+
+        Searching the module for either would be name matching across
+        unrelated functions, which is the naming heuristic that was measured
+        and deleted.  It showed up immediately when this did search the module:
+        ``apply_sub_workflow_outputs`` took its type from a same-named
+        parameter of ``_check_all_inputs_of_step`` five hundred lines away.
+        The answer happened to be right, which is worse than being wrong --
+        it is a guess that looks like a reading.
+        """
+        if isinstance(expression, ast.Name):
+            named, scope = expression.id, func
+        elif isinstance(expression, ast.Attribute) and _rooted_at_self(expression):
+            named = expression.attr
+            scope = func
+            while scope is not None and not isinstance(scope, ast.ClassDef):
+                scope = getattr(scope, "parent", None)
+        else:
+            return None
+        if scope is None:
+            return None
+        for node in ast.walk(scope):
+            if isinstance(node, ast.AnnAssign):
+                target = node.target
+                if (
+                    isinstance(target, ast.Name) and target.id == named
+                ) or (isinstance(target, ast.Attribute) and target.attr == named):
+                    return node.annotation
+        args = getattr(scope, "args", None)
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
+            if arg.arg == named and arg.annotation is not None:
+                return arg.annotation
+        return None
+
+    def _annotated_class(self, annotation: ast.expr) -> Optional[str]:
+        """The spec class an annotation names, through the wrappers it may wear.
+
+        Reading only ``Name`` and ``Attribute`` left annotations PanDA had
+        already written unread: ``upsert_workflow_entities`` declares
+        ``workflow_spec: WorkflowSpec | None = None`` and three writes under it
+        came out unattributed, because a PEP 604 union is a ``BinOp`` and
+        neither branch matched.
+
+        ``Optional[X]`` and ``X | None`` are the same statement, and both mean
+        "X, or absent" -- absence writes nothing, so for the purpose of naming
+        what a write went to they say X.  A union of two spec classes says
+        neither, and is left open rather than guessed at.
+        """
+        if isinstance(annotation, ast.Name):
+            return annotation.id if annotation.id in self._declarations else None
+        if isinstance(annotation, ast.Attribute):
+            return annotation.attr if annotation.attr in self._declarations else None
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            found = {
+                cls
+                for side in (annotation.left, annotation.right)
+                if (cls := self._annotated_class(side)) is not None
+            }
+            return next(iter(found)) if len(found) == 1 else None
+        if isinstance(annotation, ast.Subscript):
+            base = annotation.value
+            name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+            if name == "Optional":
+                return self._annotated_class(annotation.slice)
+        return None
+
+    def _annotated_element(self, annotation: ast.expr) -> Optional[str]:
+        """The spec class a container annotation says it holds.
+
+        ``jobs: List[JobSpec]`` and ``dataset_map: Dict[str, DatasetSpec]`` state
+        the element type outright, which is what the annotation policy asks for
+        when a container's contents cannot be learned from an adder call.  The
+        value type is taken as the last argument, so a mapping gives its values
+        rather than its keys.
+        """
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            found = {
+                cls
+                for side in (annotation.left, annotation.right)
+                if (cls := self._annotated_element(side)) is not None
+            }
+            return next(iter(found)) if len(found) == 1 else None
+        if not isinstance(annotation, ast.Subscript):
+            return None
+        base = annotation.value
+        name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if name == "Optional":
+            return self._annotated_element(annotation.slice)
+        inner = annotation.slice
+        parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+        return self._annotated_class(parts[-1]) if parts else None
+
     def _stated_local_class(
         self,
         variable: str,
@@ -383,14 +527,27 @@ class SpecAttributor:
         ):
             if arg.arg != variable or arg.annotation is None:
                 continue
-            annotation = arg.annotation
-            name = (
-                annotation.id
-                if isinstance(annotation, ast.Name)
-                else getattr(annotation, "attr", None)
+            stated = self._annotated_class(arg.annotation)
+            if stated is not None:
+                return stated
+        # ``x: JediDatasetSpec`` on a local or on ``self``, which is the form the
+        # annotation policy asks PanDA for when nothing else states the type.
+        for node in ast.walk(func):
+            if not isinstance(node, ast.AnnAssign):
+                continue
+            target = node.target
+            named = (
+                target.id
+                if isinstance(target, ast.Name)
+                else target.attr
+                if isinstance(target, ast.Attribute)
+                else None
             )
-            if name in self._declarations:
-                return name
+            if named != variable:
+                continue
+            stated = self._annotated_class(node.annotation)
+            if stated is not None:
+                return stated
         constructors: set[str] = set()
         for node in ast.walk(func):
             if not isinstance(node, ast.Assign):
@@ -546,11 +703,31 @@ class SpecAttributor:
                 not isinstance(node, (ast.For, ast.AsyncFor))
                 or not isinstance(node.target, ast.Name)
                 or node.target.id != variable
-                or not isinstance(node.iter, ast.Attribute)
+                or not isinstance(node.iter, (ast.Attribute, ast.Name))
             ):
+                continue
+            if isinstance(node.iter, ast.Name):
+                # ``for job in jobs`` -- a parameter rather than a spec's own
+                # list, so there is no adder to have taught us anything and the
+                # annotation is the only statement of the element type.
+                annotation = self._annotation_of(node.iter, func)
+                stated = (
+                    self._annotated_element(annotation) if annotation is not None else None
+                )
+                if stated is not None:
+                    found.add(stated)
                 continue
             holder = self.class_of(node.iter.value, func, enclosing_class)
             if holder is None:
+                # No adder taught us this container, but it may say so itself:
+                # ``self.jobs: List[JobSpec]`` states the element type where
+                # the adder idiom is absent.
+                annotation = self._annotation_of(node.iter, func)
+                stated = (
+                    self._annotated_element(annotation) if annotation is not None else None
+                )
+                if stated is not None:
+                    found.add(stated)
                 continue
             found |= self._element_types.get((holder, node.iter.attr), set())
         return next(iter(found)) if len(found) == 1 else None
@@ -774,6 +951,17 @@ class SpecAttributor:
                 )
             if element is not None and self._declares(element, attribute):
                 return element, CONTAINER
+
+        # An annotation on the receiver, wherever the receiver's shape.  The
+        # branches above only look at a bare name, so the two forms the
+        # annotation policy actually produces were both unread:
+        # ``self.dataset: DatasetSpec`` is an attribute, not a name, and
+        # ``self.dataset_map[key].status`` is a subscript of an annotated
+        # mapping.  Both state the type outright, which is why they rank here
+        # rather than after structural inference.
+        annotated = self._annotated_receiver(target.value, func)
+        if annotated is not None and self._declares(annotated, attribute):
+            return annotated, CERTAIN
 
         # Structural inference: what the code does with the object.  Measured
         # against the writes the code states outright, the two never disagreed
