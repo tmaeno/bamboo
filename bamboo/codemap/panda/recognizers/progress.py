@@ -464,7 +464,12 @@ def extract(
             owner_class = enclosing_class(node)
             spec_class, basis = attributor.attribute_write(
                 target,
-                func=func,
+                # Module scope is a scope.  ``SiteMapper`` builds its default
+                # site at import time -- ``DEFAULT_SITE = SiteSpec()`` and then
+                # eight writes to it -- and passing ``None`` here meant the
+                # constructor one line above was never looked for, so writes
+                # the code types outright came out unresolved.
+                func=func if func is not None else module.tree,
                 enclosing_class=owner_class,
             )
             if basis == NOT_A_SPEC:

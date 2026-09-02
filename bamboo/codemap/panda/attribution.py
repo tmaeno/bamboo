@@ -377,7 +377,10 @@ class SpecAttributor:
         seen = seen or frozenset()
         if variable in seen:
             return None
-        for arg in (*func.args.posonlyargs, *func.args.args, *func.args.kwonlyargs):
+        args = getattr(func, "args", None)  # a module has no parameters
+        for arg in (
+            (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ()
+        ):
             if arg.arg != variable or arg.annotation is None:
                 continue
             annotation = arg.annotation
@@ -437,6 +440,95 @@ class SpecAttributor:
                     # which is not in PanDA but costs one frozenset to rule out.
                     return self._stated_local_class(source.id, func, seen)
                 return self._constructed_class(source, func, seen)
+        return None
+
+    def _built_class(
+        self,
+        variable: str,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[str]:
+        """The class name *variable* is constructed from, spec or not.
+
+        Deliberately unfiltered, unlike :meth:`_constructed_class`, which only
+        answers for classes that declare columns.  Telling "constructed from
+        something that is not a spec" apart from "not constructed here" is what
+        lets the caller drop a write instead of recording it as unresolved, and
+        a filter that returns ``None`` for both cannot make that distinction.
+        """
+        if func is None:
+            return None
+        built: set[str] = set()
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or not any(
+                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            ):
+                continue
+            callee = node.value.func if isinstance(node.value, ast.Call) else None
+            name = (
+                callee.id
+                if isinstance(callee, ast.Name)
+                else getattr(callee, "attr", None)
+                if isinstance(callee, ast.Attribute)
+                else None
+            )
+            if name and name[:1].isupper():
+                built.add(name)
+        return next(iter(built)) if len(built) == 1 else None
+
+    def _copied_element_class(
+        self,
+        variable: str,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+        enclosing_class: Optional[str],
+        seen: Optional[frozenset[str]] = None,
+    ) -> Optional[str]:
+        """Return the element class a chain of copies carries over.
+
+        ``copy.copy`` already counts as stating a type when the original was
+        constructed, but the original is often a loop variable instead, and the
+        two paths did not meet::
+
+            job = JobSpec()                                    # certain
+            for tmpFileSpec in job.Files:                      # container
+                tmpInputFileSpec = copy.copy(tmpFileSpec)
+                tmpZipInputFileSpec = copy.copy(tmpInputFileSpec)
+                tmpZipInputFileSpec.lfn = ...                  # was unresolved
+
+        Every hop of that is readable, and three writes in ``getJobs`` fell out
+        of the map because the constructor scan does not look at loops and the
+        loop scan does not look through copies.
+
+        Reported as ``container`` rather than ``certain`` on purpose: a copy is
+        exactly as trustworthy as what it copied, and the weakest link here is
+        the assumption that nothing else was appended to that list.
+        """
+        if func is None:
+            return None
+        seen = seen or frozenset()
+        if variable in seen:
+            return None
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or not any(
+                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            ):
+                continue
+            value = node.value
+            if (
+                not isinstance(value, ast.Call)
+                or not isinstance(value.func, ast.Attribute)
+                or value.func.attr not in {"copy", "deepcopy"}
+                or not value.args
+                or not isinstance(value.args[0], ast.Name)
+            ):
+                continue
+            source = value.args[0].id
+            element = self._iterated_element_class(source, func, enclosing_class)
+            if element is None:
+                element = self._copied_element_class(
+                    source, func, enclosing_class, seen | {variable}
+                )
+            if element is not None:
+                return element
         return None
 
     def _iterated_element_class(
@@ -661,10 +753,25 @@ class SpecAttributor:
             if certain is not None:
                 return certain, CERTAIN
 
+            # The same reasoning as the ``self`` branch above, for a receiver
+            # the code constructs: if its class declares no columns it is not a
+            # spec, so this is not a spec write and there is nothing to resolve.
+            # ``check_result = WFDataTargetCheckResult()`` then
+            # ``check_result.metadata = ...`` was being recorded as a junction
+            # with an unknown subject -- a decision point the map invented, and
+            # the worst kind for elimination, since it can never be the answer.
+            built = self._built_class(target.value.id, func)
+            if built is not None and built not in self._declarations:
+                return None, NOT_A_SPEC
+
             # A loop over a container whose element type the code states:
             # ``for file in job.Files`` is settled by the ``FileSpec()`` that
             # was put into that list, not by inference about ``file``.
             element = self._iterated_element_class(target.value.id, func, enclosing_class)
+            if element is None:
+                element = self._copied_element_class(
+                    target.value.id, func, enclosing_class
+                )
             if element is not None and self._declares(element, attribute):
                 return element, CONTAINER
 
