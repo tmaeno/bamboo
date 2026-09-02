@@ -467,6 +467,36 @@ class Neo4jBackend(GraphDatabaseBackend):
             record = await result.single()
             return record["id"]
 
+    async def find_map_nodes(
+        self,
+        label: str,
+        map_id: str,
+        match: dict[str, Any] | None = None,
+        version: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Match Code Map nodes on equality, and hand back their properties."""
+        if label not in {t.value for t in CODE_MAP_NODE_TYPES}:
+            raise ValueError(f"{label!r} is not a Code Map label")
+
+        params: dict[str, Any] = {"map_id": map_id}
+        clauses = ["n.map_id = $map_id"]
+        if version is not None:
+            clauses.append("n.derived_from = $version")
+            params["version"] = version
+        for index, (key, value) in enumerate(sorted((match or {}).items())):
+            # Parameterised on the value; the key is interpolated because Cypher
+            # has no placeholder for a property name. Keys come from the models,
+            # never from a caller's input, and a bad one matches nothing.
+            if not key.isidentifier():
+                raise ValueError(f"{key!r} is not a property name")
+            clauses.append(f"n.{key} = $v{index}")
+            params[f"v{index}"] = value
+
+        query = f"MATCH (n:{label}) WHERE {' AND '.join(clauses)} RETURN properties(n) AS props"
+        async with self._session(database=self.settings.neo4j_database) as session:
+            result = await session.run(query, **params)
+            return [record["props"] async for record in result]
+
     async def clear_map(self, map_id: str, version: str | None = None) -> int:
         """Delete one Code Map's nodes without touching the incident graph."""
         labels = sorted(t.value for t in CODE_MAP_NODE_TYPES)

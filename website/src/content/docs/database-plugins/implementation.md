@@ -33,7 +33,7 @@ flowchart TD
    - Abstract base classes for backends
    - `GraphDatabaseBackend` interface
    - `VectorDatabaseBackend` interface
-   - 19 and 9 abstract methods respectively
+   - 20 and 9 abstract methods respectively
 
 2. **`bamboo/database/factory.py`**
    - Backend registry system
@@ -231,7 +231,7 @@ instantiated at all. The lists are checked against the code by
 `tests/test_docs.py` — they were short for months, which is worse than useless:
 a contributor implementing exactly what was listed got a `TypeError`.
 
-### GraphDatabaseBackend (19 methods)
+### GraphDatabaseBackend (20 methods)
 
 Lifecycle:
 - `connect()` - Open the database connection and create any required indexes
@@ -261,6 +261,7 @@ Deleting:
 [Code Map](/bamboo/architecture/code-map/) (machine-derived, rebuildable — kept in
 its own label namespace so a rebuild cannot touch human-validated knowledge):
 - `merge_map_node(node)` - Merge a Code Map node on `(label, map_id, name)` and return its ID
+- `find_map_nodes(label, map_id, match=None, version=None)` - Code Map nodes whose properties equal `match`, as raw dicts
 - `clear_map(map_id, version=None)` - Delete one map's nodes, leaving the incident graph untouched
 
 ### VectorDatabaseBackend (9 methods)

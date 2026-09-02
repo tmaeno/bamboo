@@ -357,6 +357,31 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         logger.debug(f"Merged map node: {node_id} ({map_id}/{node.name})")
         return node_id
 
+    async def find_map_nodes(
+        self,
+        label: str,
+        map_id: str,
+        match: dict[str, Any] | None = None,
+        version: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Match Code Map nodes on equality, and hand back their properties."""
+        if label not in {t.value for t in CODE_MAP_NODE_TYPES}:
+            raise ValueError(f"{label!r} is not a Code Map label")
+
+        found = []
+        for node in self.nodes.values():
+            if node.node_type.value != label:
+                continue
+            props = node.model_dump(exclude={"node_type"})
+            if props.get("map_id") != map_id:
+                continue
+            if version is not None and props.get("derived_from") != version:
+                continue
+            if any(props.get(k) != v for k, v in (match or {}).items()):
+                continue
+            found.append(props)
+        return found
+
     async def clear_map(self, map_id: str, version: str | None = None) -> int:
         """Delete one Code Map's nodes, leaving the incident graph untouched."""
         doomed = [

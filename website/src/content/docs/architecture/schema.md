@@ -74,6 +74,27 @@ describe the same subsystem from opposite directions, which is what `implemented
 for. See the [Code Map overview](/bamboo/architecture/code-map/) for what the Code Map
 node kinds mean.
 
+:::caution[The Code Map is stored as nodes only — no relationships yet]
+`build-map` writes the five node kinds and no edges at all, so the Code Map relationship
+types below are declared and not yet produced by anything. Do not write a query that
+expects them.
+
+Traversal still works, because the references are ordinary string properties rather than
+edges: `JunctionPoint.subject` holds a `Subject.name`, so joining on it answers *which
+code decides this value* today.
+
+```cypher
+MATCH (s:Subject {map_id: 'panda', name: 'JediTaskSpec.status'})
+MATCH (j:JunctionPoint {map_id: 'panda'}) WHERE j.subject = s.name
+RETURN j.owner, j.log_files          // 37 writers, and which log each lands in
+```
+
+The one reference this does not reach is a `passthrough(...)` outcome, which names where
+a value was carried from. Those live inside `branches`, stored as a JSON string, so
+following the chain means decoding it rather than matching a pattern. Real edges get
+materialised when the backward walk needs variable-length paths, and not before.
+:::
+
 ## Extended catalogue
 
 The model defines a larger set of node and relationship types — **23 node types** and

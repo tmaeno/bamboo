@@ -248,6 +248,41 @@ class GraphDatabaseBackend(ABC):
         pass
 
     @abstractmethod
+    async def find_map_nodes(
+        self,
+        label: str,
+        map_id: str,
+        match: Optional[dict[str, Any]] = None,
+        version: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Return Code Map nodes whose properties equal *match*, as raw dicts.
+
+        One equality-match primitive rather than a method per question.  The
+        Code Map's references are plain string properties -- a junction holds
+        the ``name`` of the subject it writes -- so "which code decides this
+        value?" is this call, and the domain vocabulary belongs a layer up in
+        :mod:`bamboo.codemap.lookup` where it can be read alongside the models.
+
+        Raw dicts because a backend stores what it can: nested structures
+        arrive back as JSON strings from Neo4j and as objects from a store that
+        keeps Python. Decoding belongs with the models that define the shape.
+
+        Args:
+            label:   A Code Map label, e.g. ``"JunctionPoint"``.
+            map_id:  Which map to read; never optional, since two maps can hold
+                     the same name for different systems.
+            match:   Property equality filters, ANDed.  ``None`` returns the
+                     whole label.
+            version: Restrict to one ``derived_from``; ``None`` reads every
+                     version stored, which is how an old incident is explained
+                     against the code that was running at the time.
+
+        Returns:
+            One dict of properties per node, in no guaranteed order.
+        """
+        pass
+
+    @abstractmethod
     async def increment_cause_frequency(self, cause_id: str):
         """Increment the ``frequency`` counter on a cause node by 1.
 

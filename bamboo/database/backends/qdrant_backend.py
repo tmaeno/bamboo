@@ -8,8 +8,7 @@ from typing import Any, Optional
 import httpx
 
 try:
-    from qdrant_client import AsyncQdrantClient
-    from qdrant_client import models
+    from qdrant_client import AsyncQdrantClient, models
     from qdrant_client.models import Distance, PointStruct, VectorParams
 except ImportError as e:
     raise ImportError(
