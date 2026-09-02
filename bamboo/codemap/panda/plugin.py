@@ -25,9 +25,19 @@ from typing import Optional
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
-from bamboo.codemap.models import JunctionNode, MapFragment, SourceModule, SubjectNode
+from bamboo.codemap.models import (
+    AnnotationAudit,
+    JunctionNode,
+    MapFragment,
+    SourceModule,
+    SubjectNode,
+)
 from bamboo.codemap.panda import promotion
-from bamboo.codemap.panda.attribution import SpecAttributor, class_bases
+from bamboo.codemap.panda.attribution import (
+    SpecAttributor,
+    annotation_readings,
+    class_bases,
+)
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -191,6 +201,28 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         attributor = SpecAttributor(declarations, class_bases(self._modules))
         attributor.learn_self_attributes(self._modules)
         self._table_conflicts = attributor.learn_table_classes(self._modules)
+
+        # Audit the element types the map takes on trust.  Needs an attributor
+        # equipped the same way the progress slice's was, since both readings
+        # are the ordinary resolution -- one of the annotated container, one of
+        # what the code stores in it.
+        audited = SpecAttributor(declarations, class_bases(self._modules))
+        audited.learn_element_types(self._modules)
+        audited.learn_self_attributes(self._modules)
+        fragment.annotation_readings = [
+            AnnotationAudit(
+                where=row.where,
+                container=row.container,
+                stated=row.stated,
+                put_in=sorted(row.put_in),
+                read=row.read,
+            )
+            for row in annotation_readings(
+                self._modules,
+                audited,
+                set().union(*declarations.values()) if declarations else set(),
+            )
+        ]
 
         alias_subjects, alias_junctions, alias_coverage = alias.extract(
             self._modules, self.map_id, self._version, declarations, attributor

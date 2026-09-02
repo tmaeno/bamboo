@@ -493,6 +493,99 @@ def spec_declarations_are_read(fragment: MapFragment) -> GateResult:
     )
 
 
+def container_annotations_agree(fragment: MapFragment) -> GateResult:
+    """(i) A container's stated element type matches what the code puts in it.
+
+    ``Dict[str, DatasetSpec]`` is asked of PanDA precisely because a bare
+    ``Dict`` says nothing, which makes the element type a fact the map takes on
+    trust.  One went in wrong::
+
+        row_id_spec_map: Dict[int, JediFileSpec] = {}
+        for fileSpec in job_spec.Files:              # JobSpec.Files: FileSpec
+            row_id_spec_map[fileSpec.row_ID] = fileSpec
+
+    ``FileSpec`` declares ``row_ID``, ``JediFileSpec`` does not, so the line
+    below the annotation contradicts it.  Nothing caught it:
+    ``structural_attribution_agrees`` compares two readings of *one expression*
+    and here they are an expression apart -- the annotation is on the mapping,
+    the attribute that separates the classes is touched on the loop variable.
+    The writes the annotation resolves, ``.fileID`` and ``.attemptNr``, are
+    declared by both classes, so checking the write settles nothing either.
+
+    The second reading is what the code stores, and it is used **only** here.
+    Inferring element types from assignment resolves nothing the annotation
+    does not already resolve while putting 301 containers in scope, which is
+    the harvest bar that deleted naming inference.  As a check it costs one
+    pass over seventeen sites and catches a wrong subject.
+    """
+    conflicts = [
+        row
+        for row in fragment.annotation_readings
+        if row.put_in and row.stated not in row.put_in
+    ]
+    return GateResult(
+        gate="container-annotations-agree",
+        passed=not conflicts,
+        checked=len(fragment.annotation_readings),
+        unit="container annotations",
+        question="does a container hold what its annotation says?",
+        finding="an annotation names a class the code contradicts",
+        failures=[
+            f"{row.where} says {row.container} holds {row.stated}, "
+            f"but the code puts in {', '.join(sorted(row.put_in))}"
+            for row in conflicts
+        ],
+        note=(
+            "The annotation is trusted above structural inference, so a wrong "
+            "one is a confident wrong subject rather than an open question."
+        ),
+    )
+
+
+def annotations_are_read(fragment: MapFragment) -> GateResult:
+    """(i) Every container element annotation the map depends on changes a write.
+
+    The mirror of ``spec-declarations-are-read``, and it exists for the same
+    reason: an annotation nobody reads looks exactly like a container with
+    nothing to state.  Two went into PanDA that resolved nothing at all -- one
+    naming the wrong class, one naming the right class through a read form the
+    extraction did not have (``d.get(key)`` where only ``d[key]`` was read).
+    Both were reported as closing writes they never closed.
+
+    Ablation rather than a proxy: the annotation is removed, the writes in its
+    scope are resolved again, and the two answers are compared including the
+    basis.  Asking instead "is some write attributed to the class this names"
+    would be wrong twice over -- an annotation is often read *transitively*
+    (``jobs: List[JobSpec]`` types ``job``, which types ``file`` through
+    ``JobSpec.Files``, and the write that lands is ``FileSpec.status``), and an
+    annotation that only lifts a write from ``structural`` to ``certain``
+    changes no class while still being read.
+
+    Scope reaches into subclasses, because PanDA annotates in the base and
+    consumes in the derived class.  A verdict of unread means the audit looked
+    where the field is actually used and the map still does not depend on it:
+    either the annotation is redundant, or a read form is missing here.
+    """
+    unread = [row for row in fragment.annotation_readings if not row.read]
+    return GateResult(
+        gate="annotations-are-read",
+        passed=not unread,
+        checked=len(fragment.annotation_readings),
+        unit="container annotations",
+        question="does the extraction read every element annotation?",
+        finding="an annotation the map asked for changes nothing",
+        failures=[
+            f"{row.where} states {row.container} holds {row.stated} "
+            "and no write resolves differently without it"
+            for row in unread
+        ],
+        note=(
+            "Either the annotation is redundant or the read form is missing; "
+            "the two look identical from here, so both are worth a look."
+        ),
+    )
+
+
 def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
     """(i) No two nodes of one kind share a semantic signature.
 
@@ -1453,6 +1546,9 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(map_references_resolve(fragment))
     if fragment.declaration_yields:
         results.append(spec_declarations_are_read(fragment))
+    if fragment.annotation_readings:
+        results.append(container_annotations_agree(fragment))
+        results.append(annotations_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

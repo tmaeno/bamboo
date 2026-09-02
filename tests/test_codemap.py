@@ -23,6 +23,7 @@ from bamboo.codemap import diff, evidence, gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
+    AnnotationAudit,
     BoundaryNode,
     Branch,
     EntryPoint,
@@ -1024,6 +1025,71 @@ def test_a_copy_holds_what_the_original_held():
 
     assert junctions[0].subject == "FileSpec.status"
     assert junctions[0].attribution == "certain"
+
+
+def test_a_copy_of_a_container_element_carries_the_element_type():
+    """``copy.copy(d[key])`` -- the original is an element, not a name.
+
+    ``create_pseudo_files_for_dyn_num_events`` builds its pseudo files this way,
+    and the copy chain stopped at the subscript, so two writes stayed
+    unattributed *with an annotation on the mapping sitting right above them*.
+    The annotation could not help because nothing looked past the ``copy``.
+    """
+    source = (
+        "import copy\n"
+        "class Mod:\n"
+        "    def make(self, rows):\n"
+        "        row_id_spec_map: Dict[int, FileSpec] = {}\n"
+        "        for row in rows:\n"
+        "            tmp_file_spec = copy.copy(row_id_spec_map[row])\n"
+        "            tmp_file_spec.status = 'cached'\n"
+    )
+    _subjects, junctions, _cov = _progress(
+        source, "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py"
+    )
+
+    assert junctions[0].subject == "FileSpec.status"
+    assert junctions[0].attribution == "container"
+
+
+def test_a_mapping_is_read_through_get_as_well_as_subscript():
+    """``d.get(key)`` and ``d[key]`` are the same read, and PanDA writes both.
+
+    Reading only the subscript left an annotation that was already correct doing
+    nothing: ``workflow_core`` states ``data_spec_map: Dict[str, WFDataSpec]``
+    and then binds the receiver with ``data_spec_map.get(name)``, so three
+    writes stayed unattributed with the answer written above them.
+    """
+    source = (
+        "class Core:\n"
+        "    def apply(self, name):\n"
+        "        data_spec_map: Dict[str, JediFileSpec] = self.load()\n"
+        "        data_spec = data_spec_map.get(name)\n"
+        "        data_spec.status = 'done'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert junctions[0].subject == "JediFileSpec.status"
+    assert junctions[0].attribution == "certain"
+
+
+def test_a_bare_get_on_a_queue_is_not_a_container_read():
+    """``.get()`` with no argument is not an element read, so nothing is claimed.
+
+    The method name is common on objects that are not mappings.  The annotation
+    is what carries the risk, not the name, so the guard is cheap -- but a queue
+    handed the wrong element type would be a confident wrong answer.
+    """
+    source = (
+        "class Core:\n"
+        "    def apply(self):\n"
+        "        queue: Dict[str, JediFileSpec] = self.load()\n"
+        "        item = queue.get()\n"
+        "        item.status = 'done'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/workflow/workflow_core.py")
+
+    assert junctions[0].attribution == "unresolved"
 
 
 # --------------------------------------------------------------------------- #
@@ -3241,6 +3307,155 @@ def test_a_class_declaring_columns_the_reader_cannot_parse_is_a_finding():
     assert result.checked == 2
     assert result.failures == [
         "WFDataSpec (workflow_base.py) declares columns and the extraction read none"
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# auditing the element types the map takes on trust
+# --------------------------------------------------------------------------- #
+#
+# ``Dict[str, DatasetSpec]`` is asked of PanDA because a bare ``Dict`` says
+# nothing, which makes the element type a fact with no second reading -- and one
+# went in naming the wrong class while resolving nothing.  These two gates are
+# the second reading.
+
+
+def _audited(*rows):
+    return MapFragment(map_id=MAP_ID, derived_from=VERSION, annotation_readings=list(rows))
+
+
+def test_an_annotation_the_code_contradicts_is_a_finding():
+    """The failure that prompted the gate, reduced to its shape.
+
+    ``row_id_spec_map: Dict[int, JediFileSpec]`` sat one line above
+    ``row_id_spec_map[fileSpec.row_ID] = fileSpec``, where ``fileSpec`` comes
+    from ``JobSpec.Files`` and only ``FileSpec`` declares ``row_ID``.  No other
+    gate could see it: ``structural_attribution_agrees`` compares two readings
+    of one expression, and these are an expression apart.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="task_event_module.py:2949",
+            container="row_id_spec_map",
+            stated="JediFileSpec",
+            put_in=["FileSpec"],
+            read=True,
+        )
+    )
+
+    result = gates.container_annotations_agree(fragment)
+
+    assert not result.passed
+    assert result.failures == [
+        "task_event_module.py:2949 says row_id_spec_map holds JediFileSpec, "
+        "but the code puts in FileSpec"
+    ]
+
+
+def test_no_independent_reading_is_not_evidence_against_an_annotation():
+    """An unresolvable value is the case the annotation was asked for.
+
+    Silence has to stay silence here.  Treating "nothing else could be read" as
+    disagreement would fire on every container the annotation exists to
+    explain, which is all of the useful ones.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="closer.py:49",
+            container="dataset_map",
+            stated="DatasetSpec",
+            put_in=[],
+            read=True,
+        )
+    )
+
+    assert gates.container_annotations_agree(fragment).passed
+
+
+def test_an_annotation_that_changes_no_write_is_a_finding():
+    """The other half of the same failure: correct class, read form missing.
+
+    ``data_spec_map: Dict[str, WFDataSpec]`` named the right class and closed
+    nothing, because the receiver is bound by ``data_spec_map.get(name)`` and
+    only ``d[key]`` was read.  It was reported as resolving three writes.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="workflow_core.py:859",
+            container="data_spec_map",
+            stated="WFDataSpec",
+            put_in=[],
+            read=False,
+        )
+    )
+
+    result = gates.annotations_are_read(fragment)
+
+    assert not result.passed
+    assert result.failures == [
+        "workflow_core.py:859 states data_spec_map holds WFDataSpec "
+        "and no write resolves differently without it"
+    ]
+
+
+def test_a_base_class_annotation_is_read_in_the_subclass():
+    """PanDA annotates where a field is initialised, not where it is used.
+
+    ``self.jobs: List[JobSpec]`` is stated in ``SetupperPluginBase`` and
+    iterated in the dummy plugin that derives from it.  Scoping the lookup to
+    the enclosing class left the annotation doing nothing -- and inheritance is
+    already how ``self`` writes resolve, so following it reads a relationship
+    the language guarantees rather than matching a name.
+    """
+    base = (
+        "class Base:\n"
+        "    def __init__(self):\n"
+        "        self.jobs: List[JobSpec] = []\n"
+    )
+    derived = (
+        "class Dummy(Base):\n"
+        "    def run(self):\n"
+        "        for job_spec in self.jobs:\n"
+        "            for file_spec in job_spec.Files:\n"
+        "                file_spec.status = 'failed'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        (base, "pandaserver/dataservice/setupper_plugin_base.py"),
+        (derived, "pandaserver/dataservice/setupper_dummy_plugin.py"),
+    )
+    written = [j for j in junctions if "setupper_dummy" in j.owner]
+
+    # ``status`` is declared by three classes here, so nothing but the base
+    # class's annotation can start the chain -- which is what makes this the
+    # real shape rather than a write the declaring-class rule settles anyway.
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("FileSpec.status", "container")
+    ]
+
+
+def test_a_container_held_by_a_loop_variable_is_read():
+    """Nested loops -- the outer one already answered what the inner one asks.
+
+    ``class_of`` did not consult the loop rule, so ``for job in jobs`` followed
+    by ``for file in job.Files`` was unreadable even with ``jobs`` annotated:
+    the two entry points into attribution disagreed about which readings exist.
+    """
+    source = (
+        "class Setupper:\n"
+        "    def update_failed_jobs(self, jobs: List[JobSpec]):\n"
+        "        for job in jobs:\n"
+        "            for file in job.Files:\n"
+        "                file.status = 'failed'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_ADDERS, "pandaserver/taskbuffer/JobSpec.py"),
+        (source, "pandaserver/dataservice/setupper_plugin_base.py"),
+    )
+    written = [j for j in junctions if "setupper_plugin_base" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("FileSpec.status", "container")
     ]
 
 

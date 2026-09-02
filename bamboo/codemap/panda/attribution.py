@@ -49,11 +49,11 @@ The gate that does work compares the stated class against the structural one
 from __future__ import annotations
 
 import ast
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner
 
 CERTAIN = "certain"
 # One hop through the adder idiom: what the code put into the container.
@@ -131,6 +131,7 @@ class SpecAttributor:
         self._element_types: dict[tuple[str, str], set[str]] = {}
         self._table_classes: dict[str, str] = {}
         self._self_fields: dict[tuple[str, str], set[str]] = {}
+        self._class_nodes: dict[str, ast.ClassDef] = {}
 
     # -- container element types ----------------------------------------- #
 
@@ -214,6 +215,9 @@ class SpecAttributor:
             for node in ast.walk(module.tree):
                 if not isinstance(node, ast.ClassDef):
                     continue
+                # Kept for the same reason the attribute pool is: a field
+                # annotated in a base class is read in the derived one.
+                self._class_nodes.setdefault(node.name, node)
                 for inner in ast.walk(node):
                     if (
                         not isinstance(inner, ast.Attribute)
@@ -367,6 +371,33 @@ class SpecAttributor:
                     return stated
         return self._structural_of(expression, func, enclosing_class)
 
+    @staticmethod
+    def _container_read(expression: ast.expr) -> Optional[ast.expr]:
+        """The container an expression takes one element out of, if it does.
+
+        ``d[key]`` and ``d.get(key)`` are the same read and PanDA writes both,
+        but only the subscript was read.  That left an annotation which was
+        already correct doing nothing: ``workflow_core`` states
+        ``data_spec_map: Dict[str, WFDataSpec]`` and binds the receiver with
+        ``data_spec = data_spec_map.get(output_data_name)``, so three writes
+        stayed unattributed with the answer written above them.
+
+        The argument is required.  ``.get`` is a common method on objects that
+        are not mappings, and a ``Queue``'s ``get()`` takes none -- claiming an
+        element type there would be a confident wrong answer, which is worse
+        than the unresolved write it replaces.
+        """
+        if isinstance(expression, ast.Subscript):
+            return expression.value
+        if (
+            isinstance(expression, ast.Call)
+            and isinstance(expression.func, ast.Attribute)
+            and expression.func.attr == "get"
+            and expression.args
+        ):
+            return expression.func.value
+        return None
+
     def _annotated_receiver(
         self,
         expression: ast.expr,
@@ -379,15 +410,16 @@ class SpecAttributor:
         ``self.dataset``
             An attribute rather than a name, so ``self.dataset: DatasetSpec``
             was written and never read.
-        ``self.dataset_map[key]``
-            A subscript, whose class is the mapping's value type -- and a
-            mapping annotated bare (``Dict``) says nothing, which is what makes
-            ``Dict[str, DatasetSpec]`` worth asking for.
-        ``dataset`` bound from ``self.dataset_map[key]``
+        ``self.dataset_map[key]`` / ``self.dataset_map.get(key)``
+            A read of one element, whose class is the mapping's value type --
+            and a mapping annotated bare (``Dict``) says nothing, which is what
+            makes ``Dict[str, DatasetSpec]`` worth asking for.
+        ``dataset`` bound from either of those
             The same, one assignment removed.
         """
-        if isinstance(expression, ast.Subscript):
-            annotation = self._annotation_of(expression.value, func)
+        container = self._container_read(expression)
+        if container is not None:
+            annotation = self._annotation_of(container, func)
             return self._annotated_element(annotation) if annotation else None
         annotation = self._annotation_of(expression, func)
         stated = self._annotated_class(annotation) if annotation else None
@@ -401,7 +433,7 @@ class SpecAttributor:
                     for t in node.targets
                 ):
                     continue
-                if isinstance(node.value, ast.Subscript):
+                if self._container_read(node.value) is not None:
                     return self._annotated_receiver(node.value, func)
         return None
 
@@ -417,41 +449,69 @@ class SpecAttributor:
 
         ``self.dataset_map``
             One object's field, so the class is the scope -- annotated in
-            ``__init__`` while the write happens in another method.
+            ``__init__`` while the write happens in another method -- **and its
+            base classes with it**.  PanDA annotates a field where it is
+            initialised and consumes it where it is specialised:
+            ``self.jobs: List[JobSpec]`` is stated in ``SetupperPluginBase`` and
+            iterated in ``setupper_dummy_plugin``, and
+            ``self.outDatasetSpecList: List[JediDatasetSpec]`` is stated in
+            ``TaskRefinerBase`` and iterated in three refiners.  Stopping at the
+            enclosing class left three correct annotations doing nothing, which
+            ``annotations_are_read`` reported.
         ``dataset_map`` (a bare name)
             A local or a parameter, so **only the enclosing function**.
 
-        Searching the module for either would be name matching across
-        unrelated functions, which is the naming heuristic that was measured
-        and deleted.  It showed up immediately when this did search the module:
-        ``apply_sub_workflow_outputs`` took its type from a same-named
-        parameter of ``_check_all_inputs_of_step`` five hundred lines away.
-        The answer happened to be right, which is worse than being wrong --
-        it is a guess that looks like a reading.
+        Following the bases is not the deleted naming heuristic: inheritance is
+        already how ``self`` writes resolve at all (see
+        :meth:`_declaring_ancestor`), so this reads the same relationship the
+        language guarantees rather than matching a name across unrelated code.
+        Searching the *module* is what was measured and deleted -- it showed up
+        immediately: ``apply_sub_workflow_outputs`` took its type from a
+        same-named parameter of ``_check_all_inputs_of_step`` five hundred lines
+        away.  The answer happened to be right, which is worse than being wrong
+        -- it is a guess that looks like a reading.
         """
         if isinstance(expression, ast.Name):
-            named, scope = expression.id, func
+            named, scopes = expression.id, [func]
         elif isinstance(expression, ast.Attribute) and _rooted_at_self(expression):
             named = expression.attr
-            scope = func
-            while scope is not None and not isinstance(scope, ast.ClassDef):
-                scope = getattr(scope, "parent", None)
+            owner: Optional[ast.AST] = func
+            while owner is not None and not isinstance(owner, ast.ClassDef):
+                owner = getattr(owner, "parent", None)
+            scopes = self._class_and_ancestors(owner) if owner is not None else []
         else:
             return None
-        if scope is None:
-            return None
-        for node in ast.walk(scope):
-            if isinstance(node, ast.AnnAssign):
-                target = node.target
-                if (
-                    isinstance(target, ast.Name) and target.id == named
-                ) or (isinstance(target, ast.Attribute) and target.attr == named):
-                    return node.annotation
-        args = getattr(scope, "args", None)
-        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
-            if arg.arg == named and arg.annotation is not None:
-                return arg.annotation
+        for scope in scopes:
+            if scope is None:
+                continue
+            for node in ast.walk(scope):
+                if isinstance(node, ast.AnnAssign):
+                    target = node.target
+                    if (
+                        isinstance(target, ast.Name) and target.id == named
+                    ) or (isinstance(target, ast.Attribute) and target.attr == named):
+                        return node.annotation
+            args = getattr(scope, "args", None)
+            for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
+                if arg.arg == named and arg.annotation is not None:
+                    return arg.annotation
         return None
+
+    def _class_and_ancestors(self, cls: ast.ClassDef) -> list[ast.ClassDef]:
+        """*cls* then its base classes, nearest first, as far as the corpus goes."""
+        order: list[ast.ClassDef] = [cls]
+        seen = {cls.name}
+        queue = list(self._bases.get(cls.name, ()))
+        while queue:
+            name = queue.pop(0)
+            if name in seen:
+                continue
+            seen.add(name)
+            node = self._class_nodes.get(name)
+            if node is not None:
+                order.append(node)
+                queue.extend(self._bases.get(name, ()))
+        return order
 
     def _annotated_class(self, annotation: ast.expr) -> Optional[str]:
         """The spec class an annotation names, through the wrappers it may wear.
@@ -675,10 +735,22 @@ class SpecAttributor:
                 or not isinstance(value.func, ast.Attribute)
                 or value.func.attr not in {"copy", "deepcopy"}
                 or not value.args
-                or not isinstance(value.args[0], ast.Name)
             ):
                 continue
-            source = value.args[0].id
+            copied = value.args[0]
+            # ``copy.copy(row_id_spec_map[row])`` -- the original is an element
+            # of a typed container rather than a name, and the chain stopped
+            # here.  Two writes in ``create_pseudo_files_for_dyn_num_events``
+            # were unattributed *with an annotation on the mapping right above
+            # them*, because nothing looked past the ``copy``.
+            if self._container_read(copied) is not None:
+                element = self._annotated_receiver(copied, func)
+                if element is not None:
+                    return element
+                continue
+            if not isinstance(copied, ast.Name):
+                continue
+            source = copied.id
             element = self._iterated_element_class(source, func, enclosing_class)
             if element is None:
                 element = self._copied_element_class(
@@ -693,9 +765,13 @@ class SpecAttributor:
         variable: str,
         func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
         enclosing_class: Optional[str],
+        seen: Optional[frozenset[str]] = None,
     ) -> Optional[str]:
         """Return the class of a variable that iterates a typed container."""
         if func is None:
+            return None
+        seen = seen or frozenset()
+        if variable in seen:
             return None
         found: set[str] = set()
         for node in ast.walk(func):
@@ -718,6 +794,17 @@ class SpecAttributor:
                     found.add(stated)
                 continue
             holder = self.class_of(node.iter.value, func, enclosing_class)
+            if holder is None and isinstance(node.iter.value, ast.Name):
+                # Nested loops, and the outer one already answered this.
+                # ``class_of`` does not consult the loop rule, so a container
+                # held by a loop variable was unreadable even with the outer
+                # container annotated -- ``for job in jobs`` then
+                # ``for file in job.Files`` in ``update_failed_jobs``.  The two
+                # entry points disagreed about which readings exist, which is
+                # the same divergence this design keeps finding elsewhere.
+                holder = self._iterated_element_class(
+                    node.iter.value.id, func, enclosing_class, seen | {variable}
+                )
             if holder is None:
                 # No adder taught us this container, but it may say so itself:
                 # ``self.jobs: List[JobSpec]`` states the element type where
@@ -737,6 +824,31 @@ class SpecAttributor:
     def declared_attributes(self, spec_class: str) -> set[str]:
         """Return the attributes *spec_class* declares, in their own spelling."""
         return self._declarations.get(spec_class, set())
+
+    def declared_classes(self) -> frozenset[str]:
+        """Return every class the corpus declares columns for."""
+        return frozenset(self._declarations)
+
+    def class_and_subclasses(self, cls: str) -> frozenset[str]:
+        """Return *cls* together with every class in the corpus deriving from it."""
+        family = {cls}
+        while True:
+            grown = family | {
+                name
+                for name, bases in self._bases.items()
+                if family.intersection(bases)
+            }
+            if grown == family:
+                return frozenset(family)
+            family = grown
+
+    def element_annotation(self, annotation: ast.expr) -> Optional[str]:
+        """Public reading of a container annotation's element type."""
+        return self._annotated_element(annotation)
+
+    def stated_annotation(self, annotation: ast.expr) -> Optional[str]:
+        """Public reading of an annotation that names a class outright."""
+        return self._annotated_class(annotation)
 
     def _declares(self, spec_class: str, attribute: str) -> bool:
         return attribute in self._declarations.get(spec_class, ())
@@ -973,3 +1085,288 @@ class SpecAttributor:
             return structural, STRUCTURAL
 
         return None, UNRESOLVED
+
+
+# --------------------------------------------------------------------------- #
+# auditing the annotations the map asked for
+# --------------------------------------------------------------------------- #
+#
+# A bare ``Dict`` says nothing about what it holds, which is the whole reason
+# the annotation policy asks the target system for ``Dict[str, DatasetSpec]``.
+# That makes the element type a fact the map depends on and cannot check the way
+# it checks the rest -- and one went in wrong.
+#
+#     row_id_spec_map: Dict[int, JediFileSpec] = {}
+#     for fileSpec in job_spec.Files:              # JobSpec.Files holds FileSpec
+#         row_id_spec_map[fileSpec.row_ID] = fileSpec
+#
+# ``FileSpec`` declares ``row_ID`` and ``JediFileSpec`` does not, so the line
+# below the annotation contradicts it.  ``structural_attribution_agrees`` could
+# not see it: that gate compares two readings of *one expression*, and here the
+# annotation is on the mapping while the attribute that tells the classes apart
+# is touched on the loop variable.  The writes the annotation resolves --
+# ``.fileID`` and ``.attemptNr`` -- are declared by both classes, so no check of
+# the write itself distinguishes them either.
+#
+# Two readings do exist, one expression apart, and comparing them is the same
+# move as everywhere else in this design:
+#
+#   stated  the element type the annotation declares
+#   put in  the class of what the code actually stores in that container
+#
+# The second reading is deliberately *not* used to resolve writes.  Measured, it
+# settles nothing the annotation does not already settle, and inferring element
+# types from assignment would put 301 containers in scope for a mechanism whose
+# harvest is zero -- the bar that deleted naming inference. It earns its place
+# as a check and only as a check.
+
+
+class AnnotationReading(NamedTuple):
+    """What one container element annotation states, and what the code does."""
+
+    where: str  # "file:line"
+    container: str  # the annotated name, for the report
+    stated: str  # the spec class the annotation names
+    put_in: frozenset[str]  # classes the code stores in it, where they resolve
+    read: bool  # whether removing it would change any write in scope
+
+
+Scope = list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[str]]]
+
+
+def _annotated_containers(
+    module: SourceModule,
+    attributor: SpecAttributor,
+    specs: frozenset[str],
+    corpus: Scope,
+) -> list[tuple[ast.AST, str, str, Scope]]:
+    """Every container annotation in *module* that names a spec element type.
+
+    Yields ``(node, container_name, stated_class, scope)``.  The scope is where
+    both readings have to be taken, and it differs by annotation shape: a bare
+    name is a local or a parameter, so its scope is the one function, while
+    ``self.<field>`` is the object's own -- annotated in ``__init__`` and used
+    in whatever method needs it, the shape ``closer`` and ``adder_atlas_plugin``
+    both use.
+
+    For a field the scope reaches into subclasses, and it has to.  PanDA
+    annotates in the base and consumes in the derived class:
+    ``self.jobs: List[JobSpec]`` is stated in ``SetupperPluginBase`` and
+    iterated in ``setupper_dummy_plugin``, and ``self.outDatasetSpecList`` is
+    stated in ``TaskRefinerBase`` and iterated in three refiners.  Scoping to
+    the annotating class would call those unread without having looked where
+    they are used, which is a verdict the audit has not earned.
+    """
+    found: list[tuple[ast.AST, str, str, Scope]] = []
+    local: Scope = list(functions_with_owner(module.tree))
+    contains = {id(func): set(map(id, ast.walk(func))) for func, _ in local}
+
+    def scope_of(node: ast.AST, on_self: bool) -> Scope:
+        holder = next(((f, o) for f, o in local if id(node) in contains[id(f)]), None)
+        if holder is None:
+            return []
+        if not on_self:
+            return [holder]
+        owner = holder[1]
+        if owner is None:
+            return [holder]
+        family = attributor.class_and_subclasses(owner)
+        return [(f, o) for f, o in corpus if o in family]
+
+    for node in ast.walk(module.tree):
+        annotation = getattr(node, "annotation", None)
+        if annotation is None:
+            continue
+        stated = attributor.element_annotation(annotation)
+        # A plain ``x: JobSpec`` is not what this audits: the class is stated
+        # outright and the single-declaring-class rule usually settles those
+        # writes without it, so "unread" would be true and mean nothing.
+        if stated is None or stated not in specs:
+            continue
+        if attributor.stated_annotation(annotation) is not None:
+            continue
+        if isinstance(node, ast.arg):
+            name, on_self = node.arg, False
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name, on_self = node.target.id, False
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and _rooted_at_self(node.target)
+        ):
+            name, on_self = node.target.attr, True
+        else:
+            continue
+        found.append((node, name, stated, scope_of(node, on_self)))
+    return found
+
+
+def annotation_readings(
+    modules: list[SourceModule],
+    attributor: SpecAttributor,
+    spec_attribute_names: set[str],
+) -> list[AnnotationReading]:
+    """Read every container element annotation twice and report both readings."""
+    specs = attributor.declared_classes()
+    readings: list[AnnotationReading] = []
+
+    for module in modules:
+        # Structural inference reads an expression's ancestors, and this pass
+        # can run before or after the recognizer that attaches them.  Attaching
+        # is idempotent, so doing it here makes the audit independent of order
+        # rather than quietly weaker when it runs first.
+        attach_parents(module.tree)
+    corpus: Scope = [
+        pair for module in modules for pair in functions_with_owner(module.tree)
+    ]
+
+    for module in modules:
+        for node, name, stated, scope in _annotated_containers(
+            module, attributor, specs, corpus
+        ):
+            if not scope or not _container_is_opened(name, scope):
+                continue
+            readings.append(
+                AnnotationReading(
+                    where=f"{module.rel_path}:{node.lineno}",
+                    container=name,
+                    stated=stated,
+                    put_in=_classes_put_in(name, scope, attributor),
+                    read=_annotation_changes_a_write(
+                        node, scope, attributor, spec_attribute_names
+                    ),
+                )
+            )
+    return readings
+
+
+def _container_is_opened(name: str, scope: Scope) -> bool:
+    """Whether anything in *scope* takes an element out of the container.
+
+    A container that is only passed along states its element type for the
+    callee, not for anything here, so the map cannot depend on that annotation
+    in this scope and "unread" would be a true statement about nothing.
+    ``process_step_pending(self, step_spec, data_spec_map: Dict[str, WFDataSpec])``
+    is that shape: PanDA wrote it for the type checker and the parameter is
+    handed on without being opened.
+
+    An annotation on a container the code *does* open is a different matter --
+    the map either reads it or is missing the read form, and both are worth
+    knowing.  Narrowing to those is what keeps the gate about the extraction.
+    """
+    for func, _owner in scope:
+        for node in ast.walk(func):
+            if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(
+                node.iter, (ast.Name, ast.Attribute)
+            ):
+                iterated = (
+                    node.iter.id
+                    if isinstance(node.iter, ast.Name)
+                    else node.iter.attr
+                )
+                if iterated == name:
+                    return True
+            opened = SpecAttributor._container_read(node) if isinstance(node, ast.expr) else None
+            if opened is None:
+                continue
+            held = (
+                opened.id
+                if isinstance(opened, ast.Name)
+                else getattr(opened, "attr", None)
+            )
+            if held == name:
+                return True
+    return False
+
+
+def _classes_put_in(
+    name: str,
+    scope: Scope,
+    attributor: SpecAttributor,
+) -> frozenset[str]:
+    """The spec classes the code stores in the container called *name*.
+
+    Only values whose class resolves on their own count.  An unresolvable value
+    is not evidence against the annotation -- it is the case the annotation was
+    asked for.
+    """
+    found: set[str] = set()
+    for func, owner in scope:
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if not isinstance(target, ast.Subscript):
+                continue
+            base = target.value
+            if isinstance(base, ast.Name):
+                holder = base.id
+            elif _rooted_at_self(base):
+                holder = base.attr
+            else:
+                continue
+            if holder != name:
+                continue
+            stored = attributor.class_of(node.value, func, owner)
+            if stored is not None:
+                found.add(stored)
+    return frozenset(found)
+
+
+def _annotation_changes_a_write(
+    node: ast.AST,
+    scope: Scope,
+    attributor: SpecAttributor,
+    spec_attribute_names: set[str],
+) -> bool:
+    """Whether any write in *scope* resolves differently without the annotation.
+
+    Ablation rather than a proxy, because the annotation is often read
+    *transitively*: ``jobs: List[JobSpec]`` types ``job``, which types ``file``
+    through ``JobSpec.Files``, and the write that lands is ``FileSpec.status``.
+    Asking "is some write attributed to the class the annotation names" would
+    call that annotation unread while it is doing all the work.
+    """
+    before = _scope_resolutions(scope, attributor, spec_attribute_names)
+    if not before:
+        # Nothing in scope for the annotation to affect, so there is nothing to
+        # claim either way; treated as read so the gate stays quiet.
+        return True
+    saved = node.annotation
+    # A bare container name is exactly the annotation this policy calls
+    # uninformative, which makes it the right thing to substitute.
+    node.annotation = ast.Name(id="dict", ctx=ast.Load())
+    try:
+        after = _scope_resolutions(scope, attributor, spec_attribute_names)
+    finally:
+        node.annotation = saved
+    return before != after
+
+
+def _scope_resolutions(
+    scope: Scope,
+    attributor: SpecAttributor,
+    spec_attribute_names: set[str],
+) -> dict[tuple[int, str], tuple[Optional[str], str]]:
+    """``(line, attribute) -> (class, basis)`` for every spec write in *scope*.
+
+    The basis is part of the answer, not decoration.  Several of these
+    annotations turn out to name a class structural inference reaches anyway,
+    so comparing classes alone calls them unread while they are in fact moving
+    the write from ``structural`` to ``certain`` -- and every such pair is one
+    more thing ``structural_attribution_agrees`` gets to check.
+    """
+    out: dict[tuple[int, str], tuple[Optional[str], str]] = {}
+    for func, owner in scope:
+        for target in ast.walk(func):
+            if not isinstance(target, ast.Attribute) or not isinstance(
+                target.ctx, ast.Store
+            ):
+                continue
+            if target.attr not in spec_attribute_names:
+                continue
+            cls, basis = attributor.attribute_write(
+                target, func=func, enclosing_class=owner
+            )
+            out[(target.lineno, target.attr)] = (cls, basis)
+    return out

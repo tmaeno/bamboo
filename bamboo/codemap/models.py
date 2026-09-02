@@ -493,6 +493,16 @@ class MapFragment(BaseModel):
             "logged so that ``spec-declarations-are-read`` can fail on it."
         ),
     )
+    annotation_readings: list["AnnotationAudit"] = Field(
+        default_factory=list,
+        description=(
+            "One row per container element annotation the map depends on -- what "
+            "it states, what the code actually stores there, and whether "
+            "removing it would change any write.  A bare ``Dict`` says nothing, "
+            "so these element types are facts the map takes on trust; these rows "
+            "are what let two gates check them instead."
+        ),
+    )
 
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place."""
@@ -505,6 +515,37 @@ class MapFragment(BaseModel):
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
         self.declaration_yields.update(other.declaration_yields)
+        self.annotation_readings.extend(other.annotation_readings)
+
+
+class AnnotationAudit(BaseModel):
+    """Two readings of one container element annotation, side by side.
+
+    Not a node.  This records how much the map trusts a statement PanDA makes
+    about what a container holds, which is a fact about the extraction rather
+    than about the system, so it belongs in the report and the gates and not in
+    the graph.
+    """
+
+    where: str = Field(description="``file:line`` of the annotation")
+    container: str = Field(description="the annotated name, for the report")
+    stated: str = Field(description="the spec class the annotation names")
+    put_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Spec classes the code stores in that container, where they resolve "
+            "on their own.  Empty means no independent reading was available, "
+            "which is not evidence against the annotation -- it is the case the "
+            "annotation was asked for."
+        ),
+    )
+    read: bool = Field(
+        description=(
+            "Whether removing the annotation would change any write in its "
+            "scope, in class or in basis.  False means the map does not depend "
+            "on it: either it is redundant or a read form is missing."
+        )
+    )
 
 
 class DiagnosticTemplate(BaseModel):
