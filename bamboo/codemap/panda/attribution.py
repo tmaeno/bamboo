@@ -455,16 +455,33 @@ class SpecAttributor:
         stated = self._annotated_class(annotation) if annotation else None
         if stated is not None:
             return stated
-        # A local assigned from an annotated container's element.
+        # A local assigned from something already annotated -- an element of an
+        # annotated container, or an annotated field of the object.  ``finisher``
+        # guards ``self.dataset`` for None once at the top and works through a
+        # local from there, which is the right way to write it and put the sole
+        # producer of ``DatasetSpec.status = 'cleanup'`` out of reach: the
+        # annotation is on the field, the write is on the local, one hop apart.
+        #
+        # Every candidate is collected rather than the first one returned,
+        # because returning on the first match would make the answer depend on
+        # walk order, and a local assigned from two differently annotated
+        # places states nothing about either.
         if isinstance(expression, ast.Name) and func is not None:
+            sources: set[str] = set()
             for node in ast.walk(func):
                 if not isinstance(node, ast.Assign) or not any(
                     isinstance(t, ast.Name) and t.id == expression.id
                     for t in node.targets
                 ):
                     continue
-                if self._container_read(node.value) is not None:
-                    return self._annotated_receiver(node.value, func)
+                if self._container_read(node.value) is None and not (
+                    isinstance(node.value, ast.Attribute) and _rooted_at_self(node.value)
+                ):
+                    continue
+                held = self._annotated_receiver(node.value, func)
+                if held is not None:
+                    sources.add(held)
+            return next(iter(sources)) if len(sources) == 1 else None
         return None
 
     def _annotation_of(

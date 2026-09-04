@@ -3769,6 +3769,56 @@ def test_the_typed_declaration_form_yields_the_same_column_names():
     assert declared == {"WFDataSpec": {"data_id", "status"}}
 
 
+def test_a_local_bound_from_an_annotated_field_keeps_its_class():
+    """One hop from the field to the local, and the annotation stops being seen.
+
+    ``finisher`` guards ``self.dataset`` for None once at the top and works
+    through a local from there, which is the right way to write it -- and it
+    put the sole producer of ``DatasetSpec.status = 'cleanup'`` beyond the
+    reader, filed under a placeholder subject while eleven other writers of
+    that subject were on the map.  The reading is the same shape as the one
+    already followed for a local bound from an annotated *container*: a
+    reaching definition in the same function, and a declaration one hop away.
+    """
+    source = (
+        "class Finisher:\n"
+        "    def __init__(self, dataset):\n"
+        "        self.dataset: JediFileSpec | None = dataset\n"
+        "\n"
+        "    def run(self):\n"
+        "        dataset = self.dataset\n"
+        "        dataset.status = 'cleanup'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/finisher.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediFileSpec.status", "certain")
+    ]
+
+
+def test_a_local_bound_from_two_different_fields_settles_nothing():
+    """The hop is only worth taking when it lands in one place.
+
+    Returning the first assignment found would make the answer depend on walk
+    order, which is not a reading of anything.
+    """
+    source = (
+        "class Finisher:\n"
+        "    def __init__(self, a, b):\n"
+        "        self.a: JediFileSpec | None = a\n"
+        "        self.b: FileSpec | None = b\n"
+        "\n"
+        "    def run(self, flag):\n"
+        "        spec = self.a\n"
+        "        if flag:\n"
+        "            spec = self.b\n"
+        "        spec.status = 'cleanup'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/finisher.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [("?.status", "unresolved")]
+
+
 def test_a_quoted_annotation_states_what_an_unquoted_one_states():
     """Quoting is a runtime concern, not a change of statement.
 
