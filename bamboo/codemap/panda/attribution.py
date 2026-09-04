@@ -49,7 +49,8 @@ The gate that does work compares the stated class against the structural one
 from __future__ import annotations
 
 import ast
-from typing import NamedTuple, Optional
+import re
+from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql
@@ -71,6 +72,35 @@ NOT_A_SPEC = "not-a-spec"
 # with a character no Python identifier can contain, so an unresolved subject
 # can never collide with a real one.
 UNRESOLVED_CLASS = "?"
+
+
+def _unquoted(annotation: ast.expr, depth: int = 0) -> ast.expr:
+    """*annotation* with a quoted type expression opened up.
+
+    A quote is a runtime concern, not a change of statement.  panda-server
+    evaluates annotations at import time -- no module in the corpus uses
+    ``from __future__ import annotations`` -- so ``if TYPE_CHECKING`` plus a
+    quoted name is the only way to name a type that cannot be imported at
+    runtime, and ``base_module`` says why in a comment of its own: importing
+    ``WrappedCursor`` there would close an import cycle.  Discarding the quoted
+    form makes runtime safety and map visibility exclusive, which is a choice
+    the target system should not have to make on our behalf.
+
+    Read by compiling the string as an expression, which is what
+    ``typing.ForwardRef`` does with the same text.  Prose in an annotation slot
+    is not a type and need not parse, so a failure is "nothing" rather than an
+    exception -- one malformed annotation must not take down a build.  The
+    depth cap covers a quote inside a quote, which no real code writes.
+    """
+    if not isinstance(annotation, ast.Constant) or not isinstance(annotation.value, str):
+        return annotation
+    if depth >= 2:
+        return annotation
+    try:
+        parsed = ast.parse(annotation.value.strip(), mode="eval").body
+    except (SyntaxError, ValueError):
+        return annotation
+    return _unquoted(parsed, depth + 1)
 
 
 def _rooted_at_self(expression: ast.expr) -> bool:
@@ -597,6 +627,7 @@ class SpecAttributor:
         what a write went to they say X.  A union of two spec classes says
         neither, and is left open rather than guessed at.
         """
+        annotation = _unquoted(annotation)
         if isinstance(annotation, ast.Name):
             return annotation.id if annotation.id in self._declarations else None
         if isinstance(annotation, ast.Attribute):
@@ -624,6 +655,7 @@ class SpecAttributor:
         value type is taken as the last argument, so a mapping gives its values
         rather than its keys.
         """
+        annotation = _unquoted(annotation)
         if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
             found = {
                 cls
@@ -1305,6 +1337,103 @@ class SpecAttributor:
 # as a check and only as a check.
 
 
+def _consumed_annotations(
+    module: SourceModule,
+) -> Iterator[tuple[ast.AST, ast.expr, str, str, bool]]:
+    """Every annotation position the reader actually consults.
+
+    Yields ``(node, annotation, kind, name, on_self)``.  ``on_self`` says which
+    scope both the audit and the legibility census have to look in: an object's
+    own field is annotated where it is initialised and used wherever a method
+    needs it, while a bare name is a local or a parameter and belongs to one
+    function.
+
+    Defined once because two passes need the same list and a second copy would
+    drift.  The exclusion matters as much as the inclusion: a plain ``->``
+    return annotation is **not** here, because the reader deliberately does not
+    read one (measured: 29 of the corpus's 493 return annotations name a
+    declared spec, too few for the mechanism).  Listing them anyway would make
+    the census report a reading that was never attempted -- five heterogeneous
+    returns like ``tuple[DataCarouselRequestSpec | None, str | None]`` are
+    exactly the shape it would misreport.
+    """
+    for node in ast.walk(module.tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            decorators = {
+                d.id if isinstance(d, ast.Name) else getattr(d, "attr", "")
+                for d in node.decorator_list
+            }
+            if node.returns is not None and decorators & {
+                "contextmanager",
+                "asynccontextmanager",
+            }:
+                yield node, node.returns, "yield", f"{node.name}()", True
+            continue
+        annotation = getattr(node, "annotation", None)
+        if annotation is None:
+            continue
+        if isinstance(node, ast.arg):
+            yield node, annotation, "parameter", node.arg, False
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            yield node, annotation, "name", node.target.id, False
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Attribute)
+            and _rooted_at_self(node.target)
+        ):
+            yield node, annotation, "field", node.target.attr, True
+
+
+def spec_annotation_forms(
+    modules: list[SourceModule], attributor: SpecAttributor
+) -> dict[str, str]:
+    """``file:line`` -> the class the reader got, or ``""`` when it got none.
+
+    The same fact expressed twice, for annotations rather than declarations:
+    the annotation's *text* names a class the corpus declares, and the reader
+    either read it or did not.  Only the disagreement is interesting, and it
+    means one thing -- **the reader does not understand this form**.
+
+    The text side is deliberately crude, matching identifier tokens in the
+    unparsed source rather than walking the tree, because a reading that shares
+    the reader's notion of shape cannot check it.  A quoted name, an unknown
+    wrapper and a form nobody has written yet all tokenise the same.
+
+    This is the fourth time one form of one fact has drifted out of reach --
+    ``attributes`` to ``_attributes``, then ``attributes_with_types``, then the
+    annotated declaration, and quoted annotations alongside.  Each was found by
+    reading source, which is not a mechanism.  ``spec_declarations_are_read``
+    counts what came back for declarations; this counts what came back for
+    annotations, so the fifth form reports itself.
+
+    ``Callable`` is excluded wherever it appears.  The spec names inside a
+    callable's signature describe what it takes and returns, not the class of
+    the annotated object, so the reader is right to say nothing and a finding
+    there would be a false one.  No instance exists in the corpus today; it is
+    excluded because its meaning is known, not because it was observed.
+    """
+    declared = attributor.declared_classes()
+    forms: dict[str, str] = {}
+    for module in modules:
+        for node, annotation, kind, _name, _on_self in _consumed_annotations(module):
+            try:
+                text = ast.unparse(annotation)
+            except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+                continue
+            if "Callable" in text:
+                continue
+            if not declared & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)):
+                continue
+            read = (
+                attributor.yield_annotation(node)
+                if kind == "yield" and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else attributor.stated_annotation(annotation)
+                or attributor.element_annotation(annotation)
+            )
+            forms[f"{module.rel_path}:{node.lineno}"] = read or ""
+    return forms
+
+
 class AnnotationReading(NamedTuple):
     """What one trusted annotation states, and what the code does."""
 
@@ -1359,16 +1488,11 @@ def _trusted_annotations(
         family = attributor.class_and_subclasses(owner)
         return [(f, o) for f, o in corpus if o in family]
 
-    for node in ast.walk(module.tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for node, annotation, kind, name, on_self in _consumed_annotations(module):
+        if kind == "yield":
             yielded = attributor.yield_annotation(node)
             if yielded is not None and yielded in specs:
-                found.append(
-                    (node, "yield", f"{node.name}()", yielded, scope_of(node, True))
-                )
-            continue
-        annotation = getattr(node, "annotation", None)
-        if annotation is None:
+                found.append((node, kind, name, yielded, scope_of(node, on_self)))
             continue
         stated = attributor.element_annotation(annotation)
         # A plain ``x: JobSpec`` is not what this audits: the class is stated
@@ -1377,18 +1501,6 @@ def _trusted_annotations(
         if stated is None or stated not in specs:
             continue
         if attributor.stated_annotation(annotation) is not None:
-            continue
-        if isinstance(node, ast.arg):
-            name, on_self = node.arg, False
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            name, on_self = node.target.id, False
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Attribute)
-            and _rooted_at_self(node.target)
-        ):
-            name, on_self = node.target.attr, True
-        else:
             continue
         found.append((node, "container", name, stated, scope_of(node, on_self)))
     return found

@@ -37,6 +37,7 @@ from bamboo.codemap.panda.attribution import (
     SpecAttributor,
     annotation_readings,
     class_bases,
+    spec_annotation_forms,
 )
 from bamboo.codemap.panda.recognizers import (
     alias,
@@ -224,6 +225,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 set().union(*declarations.values()) if declarations else set(),
             )
         ]
+        # And whether every annotation that names a spec class was legible at
+        # all.  The audit above can only report on annotations it managed to
+        # read; a form the reader does not understand yields no row, which is
+        # the same blindness ``spec-declarations-are-read`` was written for.
+        fragment.spec_annotation_forms = spec_annotation_forms(self._modules, audited)
 
         alias_subjects, alias_junctions, alias_coverage = alias.extract(
             self._modules, self.map_id, self._version, declarations, attributor

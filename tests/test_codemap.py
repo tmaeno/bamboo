@@ -3477,6 +3477,67 @@ def test_an_annotation_that_changes_no_write_is_a_finding():
     ]
 
 
+def test_an_annotation_the_extraction_cannot_read_is_a_finding():
+    """The half of the declaration lesson that had no gate.
+
+    A declaration drifting out of reach is caught by counting what came back.
+    An annotation drifting out of reach was caught by nothing: the reader
+    returns nothing, and that is indistinguishable from an annotation about
+    ``int``. Four forms of one fact have now drifted, each found by a person
+    reading source.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        spec_annotation_forms={
+            "setupper_plugin_base.py:13": "JobSpec",
+            "adder_gen.py:42": "",
+        },
+    )
+
+    result = gates.annotation_forms_are_understood(fragment)
+
+    assert not result.passed
+    assert result.checked == 2
+    assert result.failures == [
+        "adder_gen.py:42 names a declared spec class and the extraction read none"
+    ]
+
+
+def test_the_legibility_census_leaves_out_what_the_reader_never_reads():
+    """Two exclusions, both measured, both about not inventing a finding.
+
+    A plain ``->`` return annotation is not read on purpose -- 29 of the
+    corpus's 493 name a declared spec, too few for the mechanism -- so listing
+    one would report a reading that was never attempted, and the heterogeneous
+    ``tuple[Spec | None, str | None]`` returns are exactly the shape that would
+    misreport.  Inside a ``Callable`` the spec names describe what the callable
+    takes, not the class of the annotated object.
+    """
+    source = (
+        "class Adder:\n"
+        "    def find(self, key) -> tuple['JediFileSpec', str]:\n"
+        "        ...\n"
+        "\n"
+        "    def register(self, done: Callable[[JediFileSpec], None]):\n"
+        "        ...\n"
+        "\n"
+        "    def update(self, spec: JediFileSpec):\n"
+        "        ...\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/dataservice/adder_gen.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+
+    forms = attribution.spec_annotation_forms(modules, attributor)
+
+    assert forms == {"pandaserver/dataservice/adder_gen.py:8": "JediFileSpec"}
+
+
 def test_a_yield_annotation_that_changes_no_write_is_a_finding():
     """A context manager's yield type is audited the same way, and has to be.
 
@@ -3706,6 +3767,124 @@ def test_the_typed_declaration_form_yields_the_same_column_names():
     declared = progress.spec_attributes([_module(source)])
 
     assert declared == {"WFDataSpec": {"data_id", "status"}}
+
+
+def test_a_quoted_annotation_states_what_an_unquoted_one_states():
+    """Quoting is a runtime concern, not a change of statement.
+
+    panda-server evaluates annotations at import time -- no module uses
+    ``from __future__ import annotations`` -- so ``if TYPE_CHECKING`` plus a
+    quoted name is the only way to name a type that cannot be imported at
+    runtime, and ``base_module`` says why in a comment: importing
+    ``WrappedCursor`` there would close an import cycle.  Discarding the quoted
+    form makes runtime safety and map visibility exclusive.
+    """
+    source = (
+        "class Setupper:\n"
+        "    def update(self, file_spec: 'JediFileSpec'):\n"
+        "        file_spec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandaserver/dataservice/setupper.py")
+
+    # ``status`` is declared by three classes here, so nothing but the
+    # annotation can settle the write -- which is what makes this the real
+    # shape rather than one the declaring-class rule answers anyway.
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediFileSpec.status", "certain")
+    ]
+
+
+def test_a_quoted_element_type_states_what_an_unquoted_one_states():
+    """The inner quote is reached through the reading that is already there.
+
+    ``JediTaskSpec`` writes ``datasetSpecList: list["JediDatasetSpec"]``, so the
+    element reading has to see through a quote one level down rather than only
+    at the top of an annotation.
+    """
+    source = (
+        "class Refiner:\n"
+        "    def refine(self, specs: list['JediFileSpec']):\n"
+        "        for spec in specs:\n"
+        "            spec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefinerBase.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediFileSpec.status", "container")
+    ]
+
+
+def test_an_annotation_that_is_not_a_type_expression_reads_as_nothing():
+    """A string in an annotation need not parse, so reading one cannot raise.
+
+    Prose in an annotation slot is not a type, and the reader has to say
+    "nothing" for it the same way it does for ``int`` -- a traceback here would
+    take down the whole build over one malformed annotation.
+    """
+    attributor = attribution.SpecAttributor({"JobSpec": {"jobStatus"}}, {})
+
+    for text in ("'not a type'", "'JobSpec('", "''"):
+        node = ast.parse(text, mode="eval").body
+        assert attributor.stated_annotation(node) is None
+        assert attributor.element_annotation(node) is None
+
+
+def test_an_annotated_declaration_is_read_like_a_plain_one():
+    """A type on the declaration does not change what it declares.
+
+    ``pandacommon`` already writes ``attributes: tuple[str, ...] = ()`` and a
+    mypy campaign is annotating panda-server, so this form is arriving.  The
+    statement filter accepted only ``ast.Assign``, which meant an annotated
+    declaration was not merely misread -- it was never looked at, so the class
+    contributed no entry at all and the gate that exists to catch exactly this
+    had nothing to count.
+    """
+    source = "class JediDatasetSpec:\n    _attributes: tuple[str, ...] = ('datasetID', 'status')\n"
+
+    declared = progress.spec_attributes([_module(source)])
+
+    assert declared == {"JediDatasetSpec": {"datasetID", "status"}}
+
+
+def test_a_column_named_attributes_is_not_a_declaration():
+    """The discriminator is whether the statement assigns the list.
+
+    ``JediDatasetSpec`` really does have a column called ``attributes`` -- it
+    is in the declared tuple -- and the type block near the top of the class
+    states its type.  That statement declares nothing about the class's
+    columns, and reading it as a declaration would put a correctly-read class
+    on the unread list.
+    """
+    source = (
+        "class JediDatasetSpec:\n"
+        "    _attributes = ('datasetID', 'status', 'attributes')\n"
+        "    attributes: str | None\n"
+    )
+
+    declarations = progress.spec_declarations([_module(source)])
+
+    assert [(cls, sorted(names)) for cls, _file, names in declarations] == [
+        ("JediDatasetSpec", ["attributes", "datasetID", "status"])
+    ]
+
+
+def test_an_annotated_declaration_that_yields_nothing_is_counted():
+    """The blind spot proper: found and empty has to beat never looked at.
+
+    A derived declaration legitimately reads as empty, and the per-class
+    aggregation absorbs that when the class also states its columns outright.
+    What must not happen is the class dropping out of the count entirely --
+    that is the state in which the reader can lose every column of a class and
+    the gate still passes.
+    """
+    source = (
+        "class WFDataSpec:\n"
+        "    attributes: tuple[str, ...] = tuple(a.attribute for a in _pairs)\n"
+    )
+
+    declarations = progress.spec_declarations([_module(source)])
+
+    assert [(cls, names) for cls, _file, names in declarations] == [("WFDataSpec", set())]
 
 
 def test_two_nodes_sharing_a_signature_are_reported_rather_than_one_being_lost():

@@ -347,14 +347,33 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
     *nothing* is still on the list.  That is the whole point -- a form the
     reader does not understand is indistinguishable from an absent declaration
     once the names have been merged into a dict.
+
+    An annotated declaration counts, and the promise above is why it has to.
+    Accepting only ``ast.Assign`` meant ``_attributes: tuple[str, ...] = (...)``
+    was not misread but never looked at, so the class contributed no entry and
+    the gate had nothing to count -- a reader able to lose every column of a
+    class while the gate passes.  ``pandacommon`` already writes
+    ``attributes: tuple[str, ...] = ()``, so the form is arriving rather than
+    hypothetical.
+
+    **A declaration assigns the list.**  That is the discriminator, and it is a
+    reading rather than a heuristic: ``JediDatasetSpec`` has a column *called*
+    ``attributes``, and the type block near the top of the class states its
+    type (``attributes: str | None``) without assigning anything.  Requiring a
+    value keeps that statement out, whatever the aggregation upstream happens
+    to do with an empty result.
     """
     found: list[tuple[str, str, set[str]]] = []
     for module in modules:
         for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
-                if not isinstance(stmt, ast.Assign):
+                if isinstance(stmt, ast.Assign):
+                    targets: list[ast.expr] = list(stmt.targets)
+                elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                    targets = [stmt.target]
+                else:
                     continue
-                names = {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+                names = {t.id for t in targets if isinstance(t, ast.Name)}
                 if not names & SPEC_DECLARATION_NAMES:
                     continue
                 found.append((cls.name, module.rel_path, _declared_names(stmt.value)))

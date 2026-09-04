@@ -493,6 +493,46 @@ def spec_declarations_are_read(fragment: MapFragment) -> GateResult:
     )
 
 
+def annotation_forms_are_understood(fragment: MapFragment) -> GateResult:
+    """(i) Every annotation that names a declared spec class is legible.
+
+    The sibling of ``spec_declarations_are_read``, and it exists because that
+    gate's lesson turned out to have a second half.  A declaration drifting out
+    of reach is caught by counting what came back; an *annotation* drifting out
+    of reach was not caught by anything, because the reader simply returned
+    nothing and nothing distinguishes that from an annotation about ``int``.
+
+    Two readings, independent by construction.  The annotation's text names a
+    class the corpus declares -- matched as identifier tokens in the unparsed
+    source, not by walking the tree, so that a reading which shares the
+    reader's notion of shape cannot vouch for it.  The reader either got a
+    class or did not.  A disagreement means one thing: the extraction does not
+    understand this form.
+
+    What made this worth a gate is that the same drift has now happened four
+    times to one fact -- ``attributes``, then ``_attributes``, then
+    ``attributes_with_types``, then the annotated declaration -- and each time
+    it was found by a person reading source.  In panda-server the pressure is
+    real rather than hypothetical: annotations are evaluated at import time
+    there, so a type that cannot be imported at runtime has to be quoted, and
+    114 annotations naming a spec class sit one refactor away from that form.
+    """
+    unread = sorted(where for where, cls in fragment.spec_annotation_forms.items() if not cls)
+    return GateResult(
+        gate="annotation-forms-are-understood",
+        passed=not unread,
+        checked=len(fragment.spec_annotation_forms),
+        unit="spec annotations",
+        question="can the extraction read every annotation that names a spec?",
+        finding="an annotation names a spec class in a form the extraction cannot read",
+        failures=[f"{where} names a declared spec class and the extraction read none" for where in unread],
+        note=(
+            "The annotation is there and correct; the reader cannot see it, "
+            "which looks exactly like an annotation about something else."
+        ),
+    )
+
+
 def container_annotations_agree(fragment: MapFragment) -> GateResult:
     """(i) A container's stated element type matches what the code puts in it.
 
@@ -1550,6 +1590,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(map_references_resolve(fragment))
     if fragment.declaration_yields:
         results.append(spec_declarations_are_read(fragment))
+    if fragment.spec_annotation_forms:
+        results.append(annotation_forms_are_understood(fragment))
     if fragment.annotation_readings:
         results.append(container_annotations_agree(fragment))
         results.append(annotations_are_read(fragment))

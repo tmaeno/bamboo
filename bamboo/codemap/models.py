@@ -503,6 +503,18 @@ class MapFragment(BaseModel):
             "are what let two gates check them instead."
         ),
     )
+    spec_annotation_forms: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "``file:line`` -> the spec class the extraction read from the "
+            "annotation there, empty when it read none.  Listed only where the "
+            "annotation's text names a class the corpus declares, so an empty "
+            "value means the two readings disagree and the form is one the "
+            "extraction does not understand.  Same shape as "
+            "``declaration_yields`` and for the same reason: counting what came "
+            "back is the only way an unreadable form differs from an absent one."
+        ),
+    )
 
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place."""
@@ -516,6 +528,7 @@ class MapFragment(BaseModel):
         self.coverage.extend(other.coverage)
         self.declaration_yields.update(other.declaration_yields)
         self.annotation_readings.extend(other.annotation_readings)
+        self.spec_annotation_forms.update(other.spec_annotation_forms)
 
 
 class AnnotationAudit(BaseModel):
