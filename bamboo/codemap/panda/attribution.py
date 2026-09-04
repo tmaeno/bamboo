@@ -671,6 +671,19 @@ class SpecAttributor:
         when a container's contents cannot be learned from an adder call.  The
         value type is taken as the last argument, so a mapping gives its values
         rather than its keys.
+
+        **Not every subscripted annotation in a field position is a container.**
+        PanDA declares its columns through a descriptor generic --
+        ``PandaID: SpecColumn[int]`` -- and 160 of the 418 class-scope
+        annotations on the declaring classes have that shape.  ``self.PandaID``
+        *is* an int rather than a collection of them, so if a column ever held a
+        spec class the last argument would name the right class for the wrong
+        reason.  It stays harmless for a structural reason rather than a lucky
+        one: this reading is consulted only where something takes an element
+        *out of* the annotated thing, and a descriptor field holding one spec is
+        never subscripted or iterated.  Measured at zero such columns today, so
+        there is nothing to special-case -- recorded because the next reader
+        would otherwise have to rediscover why it is safe.
         """
         annotation = _unquoted(annotation)
         if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
