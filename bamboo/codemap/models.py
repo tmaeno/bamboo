@@ -199,6 +199,21 @@ class Branch(BaseModel):
     )
 
 
+# How work arrives at a junction.  Declared with the field that carries it
+# rather than in the recognizer that assigns it, because both halves of the map
+# read them: the extraction to label an entry, and an investigation to decide
+# whether a stalled value will come back on its own.
+POLLED = "polled"
+COMMAND = "command"
+MESSAGE = "message"
+REQUEST = "request"
+
+#: Triggers that re-evaluate.  A subject only these can reach recovers by
+#: itself, so waiting is a plan; a subject only the others can reach is
+#: consumed once, and a missed one stays missed.
+SELF_REPAIRING_TRIGGERS = frozenset({POLLED})
+
+
 class EntryPoint(BaseModel):
     """One way control reaches a junction, and what it hands over on the way.
 
@@ -266,6 +281,21 @@ class JunctionNode(BaseNode):
             "split: of 33 files asked, that line is in exactly five -- "
             "ContentsFeeder, JobGenerator, PostProcessor, TaskCommando and "
             "TaskRefiner -- and in neither proxy file."
+        ),
+    )
+    owns_logger: bool = Field(
+        default=True,
+        description=(
+            "Whether the module holding this junction declares its own logger. "
+            "False means ``log_files`` are the files of the classes that mix it "
+            "in -- true for where its own output lands, since the SQL comment "
+            "trace does appear there, but *not* a place a line about this "
+            "junction firing can appear, because the code that writes such a "
+            "line is the caller.  The difference decides whether an empty grep "
+            "may be read as 'it did not fire': asking ``panda-DBProxy.log`` for "
+            "``set task_status=`` returns nothing however often the junction "
+            "runs, so an eliminator that did not know this would rule out every "
+            "proxy candidate at once and confidently keep the wrong one."
         ),
     )
     attribution: str = Field(
@@ -763,3 +793,208 @@ class FilterStageNode(BaseNode):
     @staticmethod
     def make_name(map_id: str, owner: str, signature: str) -> str:
         return f"{map_id}:{owner}:{signature}"
+
+
+# ---------------------------------------------------------------------------
+# What one investigation makes of the map
+# ---------------------------------------------------------------------------
+#
+# None of these are nodes.  A strategy is the product of asking the map one
+# question about one incident; storing it would put an answer into the
+# vocabulary the answers are drawn from, and the next build would either
+# overwrite it or leave it behind pointing at junctions that have moved.  They
+# carry ``derived_from`` for the same reason every node does -- a strategy is a
+# statement about one version of the source, and reading one against another
+# deployment is exactly the skew the version stamp exists to make visible.
+
+
+#: What an observation settled about a candidate.
+SEEN = "seen"
+ELIMINATED = "eliminated"
+UNSETTLED = "unsettled"
+UNASKABLE = "unaskable"
+
+#: What production answered for one log file.
+ANSWER_SEEN = "seen"
+ANSWER_ABSENT = "absent"
+ANSWER_NO_FILE = "no_file"
+ANSWER_INCONCLUSIVE = "inconclusive"
+ANSWER_NOT_ASKED = "not_asked"
+
+
+class Symptom(BaseModel):
+    """What was observed, in the map's own vocabulary.
+
+    Deliberately not free text.  Turning "the task is stuck in pending" into
+    grep terms and ranking thirty files is the retrieval problem the map exists
+    to remove; naming a subject and a value instead makes the lookup exact, and
+    the quality of the answer stops depending on how well the question was
+    phrased.
+    """
+
+    subject: str = Field(..., description="Qualified subject, e.g. JediTaskSpec.status.")
+    observed: str = Field(..., description="The value the record actually holds.")
+    task_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "The entity this is about, when there is one.  Without it the "
+            "evidence can still say which writers are live, but not which one "
+            "wrote *this* row -- a different and much weaker claim, so it is "
+            "recorded rather than defaulted."
+        ),
+    )
+
+
+class Candidate(BaseModel):
+    """One junction that could have produced the observed value.
+
+    The set is the system's real fan-out, not an artefact of how the map was
+    built: an expert asked why a task is ``pending`` faces the same eighteen.
+    What the map adds is that the enumeration is complete, precomputed, and
+    carries the log file to read for each one.
+    """
+
+    owner: str
+    tier: int = Field(
+        default=1,
+        description=(
+            "1 when a branch states this value outright, 2 when the writer is "
+            "known and the value is only settled at run time.  A tier-2 "
+            "candidate is never eliminated by the value, because 'this one "
+            "could have' is the honest answer for it."
+        ),
+    )
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where a line about this junction firing can appear -- the caller's "
+            "files where it has callers, its own only where it declares a "
+            "logger.  Empty means no file can be asked about it at all, which "
+            "is a finding rather than a reason to guess one."
+        ),
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="Path conditions of the branches that reach this outcome.",
+    )
+    triggers: list[str] = Field(default_factory=list)
+    entries: list[str] = Field(default_factory=list)
+    verdict: str = Field(
+        default=UNSETTLED,
+        description=f"{SEEN} | {ELIMINATED} | {UNSETTLED} | {UNASKABLE}",
+    )
+    because: str = Field(default="", description="Why the verdict, in one clause.")
+
+
+class Observation(BaseModel):
+    """One question put to production, and what its answer would settle.
+
+    Asked of both machine groups, not of the one the package suggests.  JEDI
+    opens its own TaskBuffer, so ``pandaserver`` code called by a knight runs in
+    the JEDI process and logs there; the package is wrong precisely where most
+    junctions are.  A service that does not have the file answers "No such file
+    or directory", which is cheap and is itself distinguishable from an empty
+    match -- so the union costs one extra query and removes a guess.
+    """
+
+    log_file: str
+    pattern: str
+    role: str = Field(
+        default="probe",
+        description=(
+            "``probe`` asks whether this row was moved here; ``control`` asks "
+            "whether the file carries that kind of line at all.  Without the "
+            "second, a file that never speaks the sentence is indistinguishable "
+            "from one whose writer did not fire, and the map's largest group of "
+            "junctions is reached through files of exactly that kind."
+        ),
+    )
+    services: list[str] = Field(default_factory=list)
+    settles: list[str] = Field(
+        default_factory=list, description="Owners of the candidates this can settle."
+    )
+    verdict: str = Field(
+        default=ANSWER_NOT_ASKED,
+        description=(
+            f"{ANSWER_SEEN} | {ANSWER_ABSENT} | {ANSWER_NO_FILE} | "
+            f"{ANSWER_INCONCLUSIVE} | {ANSWER_NOT_ASKED}.  Four ways of not "
+            "matching and only two of them are answers, which is the whole "
+            "reason this is not a count."
+        ),
+    )
+    matched: int = 0
+    sample: list[str] = Field(
+        default_factory=list, description="A few matched lines, for the report."
+    )
+
+
+class FollowUp(BaseModel):
+    """Whether anything will move the value on, and what to ask if not.
+
+    The other half of the question.  Which junction wrote ``pending`` says how
+    the row got where it is; this says whether it is going to leave, and a task
+    can be stuck for a reason that has nothing to do with the writer.
+    """
+
+    selected: bool = Field(
+        ...,
+        description="Whether any query in the map selects rows on this value.",
+    )
+    selection_gates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tables bounding what those queries can see, none of which anything "
+            "in the map writes.  The reason a row can fail to be picked up while "
+            "passing every condition on its own status."
+        ),
+    )
+    triggers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Triggers pooled over every writer of the subject.  Pooled over "
+            "*writers* rather than over the query that selects the value, "
+            "because the map records ``selected_values`` on the subject without "
+            "saying which junction asked -- an approximation, and named as one."
+        ),
+    )
+    self_repairing: bool = False
+    carried_from: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Fields this subject's value is copied from.  Where to take the "
+            "question when nothing selects the observed value: the row is not "
+            "going anywhere, so the useful question is who wrote the step before."
+        ),
+    )
+    question: str = Field(default="", description="What to ask next, in one sentence.")
+
+
+class Strategy(BaseModel):
+    """What the map has to say about one symptom.
+
+    Two phases in one object: everything above ``observations`` comes from the
+    map alone and needs no network, and the verdicts are filled in afterwards
+    from an evidence file.  Separating them is what lets the derivation be
+    tested against a fixture, re-evaluated offline, and inspected before a
+    single query is put to production -- the same split ``check-map`` makes, and
+    for the same reason: first contact turns up the errors in the model.
+    """
+
+    symptom: Symptom
+    map_id: str
+    derived_from: str
+    candidates: list[Candidate] = Field(default_factory=list)
+    observations: list[Observation] = Field(default_factory=list)
+    follow_up: Optional[FollowUp] = None
+    findings: list[str] = Field(
+        default_factory=list,
+        description="Facts about the map itself that this question turned up.",
+    )
+    gaps: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the map would have to record for this to go further.  A "
+            "capability gap is an answer of its own -- it names the next thing "
+            "to build instead of being absorbed as a weaker conclusion."
+        ),
+    )

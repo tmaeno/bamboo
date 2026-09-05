@@ -189,6 +189,12 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     this code live" and "whose log mentions it" with the same value, and
     conflating those is what made eleven candidates for a pending task look
     indistinguishable when nine of them are separable.
+
+    ``owns_logger`` records which of the two ``log_files`` is.  A reader that
+    cannot tell an inherited file from a declared one has no way to know that
+    asking the proxy files for a caller's line always returns nothing, and would
+    read that nothing as "the junction did not fire" -- for every proxy
+    candidate at once.
     """
     declared = declared_files(modules)
     inherited = inherited_files(modules, declared)
@@ -202,6 +208,7 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
 
     for junction in fragment.junctions:
         where, _, method = junction.owner.partition("::")
+        junction.owns_logger = where in declared
         mine = set(junction.log_files)
         # The enclosing class is part of ``owner`` but not of the call graph's
         # keys, which are bare method names -- the same last-segment rule the

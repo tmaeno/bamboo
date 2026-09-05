@@ -49,19 +49,24 @@ from __future__ import annotations
 import ast
 from typing import Optional
 
-from bamboo.codemap.models import EntryPoint, JunctionNode, SourceModule
+from bamboo.codemap.models import (
+    COMMAND,
+    MESSAGE,
+    POLLED,
+    REQUEST,
+    SELF_REPAIRING_TRIGGERS,
+    EntryPoint,
+    JunctionNode,
+    SourceModule,
+)
 from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.pathcond import functions_with_owner
 from bamboo.codemap.panda.recognizers.boundary import endpoint_decorator
 
-POLLED = "polled"
-COMMAND = "command"
-MESSAGE = "message"
-REQUEST = "request"
-
-# Self-repairing triggers.  A subject only these can reach comes back on its
-# own; a subject only the others can reach does not.
-_SELF_REPAIRING = frozenset({POLLED})
+# The trigger vocabulary is imported rather than declared here.  It lives with
+# the field that carries it because both halves of the map read it: this one to
+# label an entry, and an investigation to ask whether a stalled value will come
+# back on its own -- the same distinction seen from the other end.
 
 # A message-processing plugin says so in its base class.
 _MESSAGE_BASE = "MsgProc"
@@ -512,5 +517,5 @@ def fragile_subjects(junctions: list[JunctionNode]) -> list[tuple[str, list[str]
     return sorted(
         (subject, sorted(kinds))
         for subject, kinds in self_repairing(junctions).items()
-        if kinds and not kinds & _SELF_REPAIRING
+        if kinds and not kinds & SELF_REPAIRING_TRIGGERS
     )

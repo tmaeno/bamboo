@@ -4418,6 +4418,28 @@ def test_a_writer_with_no_logger_of_its_own_takes_its_callers():
     assert fragment.junctions[0].caller_log_files == ["panda-Knight.log"]
 
 
+def test_whether_a_junctions_own_files_are_its_own_is_recorded():
+    """An inherited file is not a place a line about this junction can appear.
+
+    Both of these are true of a proxy method: the SQL comment trace really does
+    land in ``panda-DBProxy.log``, and ``set task_status=`` never does, because
+    the caller writes it.  Without the distinction a reader asking the inherited
+    file gets an empty answer it cannot interpret -- and reading it as "the
+    junction did not fire" rules out every proxy candidate at once.
+    """
+    proxy = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+    knight = _junction("pandajedi/jediorder/Knight.py::start")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (KNIGHT, "pandajedi/jediorder/Knight.py"),
+        junctions=[proxy, knight],
+    )
+    owns = {j.owner.split("::")[-1]: j.owns_logger for j in fragment.junctions}
+
+    assert owns == {"makeTaskPending_JEDI": False, "start": True}
+
+
 def test_a_caller_that_starts_nothing_still_names_a_log():
     """The two questions come apart here, which is the whole point.
 
