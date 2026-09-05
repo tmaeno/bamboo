@@ -2133,6 +2133,44 @@ def test_a_local_holding_the_mapping_resolves_too():
     assert settle(written.value, func) == ["aborting", "finishing", "paused"]
 
 
+def test_a_loop_over_the_mapping_reaches_the_same_values():
+    """The read side spells it the other way, and only the read side matters
+    for "will anything pick this task up".
+
+    ``for commandStr, taskStatusMap in commandStatusMap.items()`` binds one
+    entry per turn, so ``taskStatusMap["doing"]`` is the same set of statuses
+    ``commandStatusMap[commandStr]["doing"]`` gives.  Reading only the
+    subscript is why every command-in-progress status looked like a value no
+    query asks for -- a state a task enters and never leaves.
+    """
+    mappings = _mappings(_COMMAND_MAP)
+    func = _func(
+        "def f(self):\n"
+        "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "        varMap[':status'] = taskStatusMap['doing']\n"
+    )
+    settle = values.resolver(mappings)
+    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    assert settle(bound.value, func) == ["aborting", "finishing", "paused"]
+
+
+def test_the_key_half_of_the_loop_is_not_a_value():
+    """Binding it would enumerate command names as if they were statuses."""
+    mappings = _mappings(_COMMAND_MAP)
+    func = _func(
+        "def f(self):\n"
+        "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "        varMap[':status'] = commandStr['doing']\n"
+    )
+    settle = values.resolver(mappings)
+    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    assert settle(bound.value, func) == []
+
+
 def test_a_mapping_with_one_computed_entry_resolves_to_nothing():
     """Elimination treats a short candidate list as complete, so a value set
     missing a member is worse than no value set: the caller then records an
@@ -2697,6 +2735,111 @@ def test_a_shared_table_is_not_reported_as_unlogged():
     )
 
     assert gates.unobservable_boundaries(fragment) == []
+
+
+# --------------------------------------------------------------------------- #
+# what bounds a query's reach
+# --------------------------------------------------------------------------- #
+#
+# A row can be missed for a reason no predicate mentions.  One was: a task sat
+# in ``finishing`` while the query that rescues orphaned commands ran every
+# cycle, because the auxiliary table it joins had stopped being updated and its
+# watermark had risen above the task's id.
+
+_ORPHAN_RESCUE = """
+class TaskModule:
+    def getTasksToExecCommand_JEDI(self, vo):
+        sqlOrpS = "SELECT jediTaskID,errorDialog "
+        sqlOrpS += "FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA "
+        sqlOrpS += "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID "
+        sqlOrpS += "AND tabT.status=:status "
+        self.cur.execute(sqlOrpS + comment, varMap)
+        sqlOrpU = "UPDATE {0}.JEDI_Tasks SET oldStatus=:oldStatus "
+        sqlOrpU += "WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlOrpU + comment, varMap)
+"""
+
+
+def test_the_second_table_in_a_from_list_is_read():
+    """Stopping at the first hid a table joined by thirty-one functions.
+
+    ``reads`` answers where the row came from and rightly names the leading
+    table; what bounds which rows can be seen is a different question, and the
+    join partner is where the answer is written.
+    """
+    statement = (
+        "SELECT jediTaskID FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA "
+        "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID"
+    )
+
+    assert [table for table, _c in sql.reads(statement)] == ["JEDI_Tasks"]
+    assert sql.joins(statement) == ["JEDI_AUX_Status_MinTaskID"]
+    assert sql.joined_columns(statement, "JEDI_AUX_Status_MinTaskID") == [
+        "min_jediTaskID",
+        "status",
+    ]
+
+
+def test_a_name_the_statement_defines_for_itself_is_not_a_join_partner():
+    """``checkDuplication_JEDI`` joins its own ``WITH`` block to itself, which
+    is a step in the query rather than a dependency on anything outside it."""
+    statement = (
+        "WITH tmpTab AS (SELECT PandaID FROM {}.filesTable4) "
+        "SELECT a.PandaID FROM tmpTab a,tmpTab b WHERE a.PandaID=b.PandaID"
+    )
+
+    assert sql.joins(statement) == []
+
+
+def test_only_a_table_nothing_here_writes_is_a_gate():
+    """A join to a table the corpus maintains is a step in a query; a join to
+    one it only ever reads is a dependency that can go stale unaccounted for."""
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    never_written = boundary.tables_never_written(modules)
+
+    assert "JEDI_AUX_Status_MinTaskID" in never_written
+    assert "JEDI_Tasks" not in never_written
+
+    found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
+
+    assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
+
+
+def test_a_table_that_bounds_a_query_and_nothing_writes_is_a_boundary():
+    """A complete answer -- the value comes from outside -- and a work item.
+
+    Found from the read side rather than the schema qualifier, which is why it
+    reaches a table sitting in JEDI's own schema.
+    """
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    found = boundary.extract_selection_gates(
+        modules, MAP_ID, VERSION, boundary.tables_never_written(modules), set()
+    )
+
+    assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
+    assert found[0].system == boundary.UNRESOLVED_SYSTEM
+    assert found[0].transport == "shared_table"
+    # Read-only is the finding, not a gap in the reading.
+    assert found[0].operations == ["SELECT"]
+    assert found[0].handed_over == []
+    assert found[0].carried_values == ["min_jediTaskID", "status"]
+
+
+def test_a_table_the_schema_recognizer_already_named_is_not_repeated():
+    """One crossing, found two ways, must not become two boundaries."""
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    found = boundary.extract_selection_gates(
+        modules,
+        MAP_ID,
+        VERSION,
+        boundary.tables_never_written(modules),
+        {"JEDI_AUX_Status_MinTaskID"},
+    )
+
+    assert found == []
 
 
 # --------------------------------------------------------------------------- #
@@ -4063,6 +4206,64 @@ def test_a_where_clause_says_which_values_something_acts_on():
     selected = sqlwrite.selected_values(modules, attributor)
     assert selected["JediTaskSpec.status"] == {"pending"}
     assert selected["JEDI_Tasks.vo"] == {"atlas", "test"}
+
+
+def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
+    """The read side settles a bind the way the write side already did.
+
+    ``varMap[":status"] = taskStatusMap["doing"]`` is the orphan-rescue query.
+    Taking only literals here left every status a command passes through
+    looking like a value no query asks for -- a state a task enters and never
+    leaves -- while the write side resolved the same mapping through the other
+    spelling.  One map, two slices, one fact, two answers.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def rescue(self):\n"
+        "        sqlT = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+        "        self.cur.execute(sqlT + comment, varMap)\n"
+        "        commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "        for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "            varMap = {}\n"
+        "            varMap[':status'] = taskStatusMap['doing']\n"
+        "            sqlO = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "            sqlO += 'WHERE status=:status '\n"
+        "            self.cur.execute(sqlO + comment, varMap)\n"
+    )
+    modules = [
+        _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    selected = sqlwrite.selected_values(modules, attributor)
+
+    assert selected["JediTaskSpec.status"] == {"aborting", "finishing", "paused"}
+
+
+def test_a_subject_carries_what_bounds_the_queries_that_select_it():
+    """A status the map says is selected is half an answer without this.
+
+    The task really was in a status the query asks for; it was outside what the
+    query could see, because the table it joins had stopped being updated.
+    """
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    gated = sqlwrite.selection_gates(
+        modules, attributor, boundary.tables_never_written(modules)
+    )
+
+    assert gated["JediTaskSpec.status"] == {"JEDI_AUX_Status_MinTaskID"}
 
 
 def test_a_statement_built_with_str_format_is_read():

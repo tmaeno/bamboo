@@ -131,6 +131,19 @@ class SubjectNode(BaseNode):
             "nothing ever moves away from."
         ),
     )
+    selection_gates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tables that bound which rows the queries selecting this subject "
+            "can see at all, and that nothing in this map writes.  A different "
+            "reason for a row not to be picked up than any value in "
+            "``selected_values``: ``JEDI_AUX_Status_MinTaskID`` is joined by "
+            "thirty-one functions on ``jediTaskID >= min_jediTaskID``, so when "
+            "it goes stale a task is invisible to all of them whatever its "
+            "status is.  Named here because a status the map says is selected "
+            "is only half an answer without what bounds the selecting."
+        ),
+    )
 
     @staticmethod
     def make_name(spec_class: str, attribute: str) -> str:

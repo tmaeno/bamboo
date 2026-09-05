@@ -159,6 +159,21 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.boundaries.extend(channels)
         fragment.coverage.extend(channel_coverage)
 
+        # The same crossing found from the read side rather than the schema
+        # qualifier: a table that bounds a query's reach and that nothing here
+        # keeps current.  Kept out of the coverage matrix because there is no
+        # denominator to be a fraction of -- every join either names such a
+        # table or does not.
+        self._never_written = boundary.tables_never_written(self._modules)
+        gates = boundary.extract_selection_gates(
+            self._modules,
+            self.map_id,
+            self._version,
+            self._never_written,
+            {channel.interface.split(".")[-1] for channel in channels},
+        )
+        fragment.boundaries.extend(gates)
+
         filter_stages, selection_coverage, self._unexplained_steps = selection.extract(
             self._modules, self.map_id, self._version
         )
@@ -264,8 +279,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # selects rows on.  Attached to the subject rather than kept apart, so
         # the invariants can compare it with what the junctions write.
         selected = sqlwrite.selected_values(self._modules, attributor)
+        gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             subject.selected_values = sorted(selected.get(subject.name, ()))
+            subject.selection_gates = sorted(gated.get(subject.name, ()))
 
         # A function that writes a status both ways produces one junction from
         # each recognizer under the same name.  Storage merges on the name, so

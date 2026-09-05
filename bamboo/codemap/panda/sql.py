@@ -532,6 +532,71 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
     return found
 
 
+# The whole FROM list, aliases and all: ``FROM {0}.JEDI_Tasks tabT,
+# {0}.JEDI_AUX_Status_MinTaskID tabA``.
+_FROM_LIST = re.compile(
+    r"\bFROM\s+((?:[\w{}.]+(?:\s+\w+)?\s*,\s*)*[\w{}.]+(?:\s+\w+)?)", re.IGNORECASE
+)
+
+# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself.
+_CTE = re.compile(r"\b(?:WITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+
+
+def joins(sql: str) -> list[str]:
+    """Return the tables *sql* names in a ``FROM`` beyond the first.
+
+    Separate from :func:`reads`, which answers *where the row came from* and so
+    keeps naming the leading table.  This answers a different question -- *what
+    bounds which rows can be seen at all* -- and a join partner is the usual
+    way that bound is written::
+
+        FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID
+
+    A task below ``min_jediTaskID`` is invisible to that query no matter what
+    its status is, so a stale ``JEDI_AUX_Status_MinTaskID`` silently narrows
+    thirty-one functions at once -- which is a real stall this map could not
+    explain, because ``reads`` stopped at the first table and the auxiliary one
+    had never been seen.
+
+    A name the statement defines for itself is not one of these.
+    ``checkDuplication_JEDI`` builds ``WITH tmpTab AS (...)`` and then joins
+    ``tmpTab`` to itself, which is a step in the query rather than a dependency
+    on anything outside it.
+    """
+    defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
+    found: list[str] = []
+    for match in _FROM_LIST.finditer(sql):
+        parts = [part.strip() for part in match.group(1).split(",")]
+        for part in parts[1:]:
+            table = _table_of(part.split()[0]) if part.split() else ""
+            # ``{}`` means the name was interpolated, so the statement does not
+            # say which table this is.
+            if not table or table == "{}" or table.lower() in defined:
+                continue
+            if table not in found:
+                found.append(table)
+    return found
+
+
+def joined_columns(sql: str, table: str) -> list[str]:
+    """Columns of *table* the statement names, found through its alias.
+
+    The alias is how a join predicate refers to a table --
+    ``tabA.min_jediTaskID`` -- so without resolving it the most useful thing
+    about a join, *which column bounds the rows*, cannot be read.
+    """
+    found: dict[str, str] = {}
+    for match in _FROM_LIST.finditer(sql):
+        for part in match.group(1).split(","):
+            words = part.strip().split()
+            if len(words) != 2 or _table_of(words[0]) != table:
+                continue
+            for column in re.finditer(rf"\b{re.escape(words[1])}\.(\w+)", sql):
+                found.setdefault(column.group(1).lower(), column.group(1))
+    return sorted(found.values())
+
+
 def deletes(sql: str) -> list[str]:
     """Return the tables *sql* deletes rows from.
 

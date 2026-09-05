@@ -233,6 +233,49 @@ def _mapping_behind(
     return None
 
 
+def _mapping_iterated(
+    name: str,
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    mappings: dict[str, Mapping],
+) -> Optional[Mapping]:
+    """The declared mapping *name* takes an entry of, when a loop binds it.
+
+    ``for commandStr, taskStatusMap in commandStatusMap.items()`` binds
+    ``taskStatusMap`` to one value of the mapping per turn, so
+    ``taskStatusMap["doing"]`` reaches the same six statuses that
+    ``commandStatusMap[commandStr]["doing"]`` does.  The corpus writes it the
+    first way in one place and the second way in another, a hundred lines apart
+    in the same file, and reading only the subscript is why the map could say
+    which statuses a command *leaves behind* but not which ones it *looks for*
+    -- so every "command in progress" status looked like a value nothing
+    selects on, which is the shape of a stall the map is supposed to explain.
+    """
+    if func is None:
+        return None
+    for node in ast.walk(func):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Tuple):
+            continue
+        bound = [
+            index
+            for index, element in enumerate(node.target.elts)
+            if isinstance(element, ast.Name) and element.id == name
+        ]
+        # The value half only.  Binding the key half would enumerate command
+        # names as if they were statuses.
+        if bound != [1] or len(node.target.elts) != 2:
+            continue
+        if not (
+            isinstance(node.iter, ast.Call)
+            and isinstance(node.iter.func, ast.Attribute)
+            and node.iter.func.attr == "items"
+        ):
+            continue
+        mapping = _mapping_behind(node.iter.func.value, func, mappings)
+        if mapping is not None:
+            return mapping
+    return None
+
+
 def mapping_values(
     expression: ast.expr,
     *,
@@ -246,6 +289,9 @@ def mapping_values(
     completed command leaves behind, and ``["incexec"]["done"]`` gives exactly
     ``rerefine``.
 
+    A name a loop bound to one entry of the mapping enters one level down, and
+    is otherwise the same walk -- see :func:`_mapping_iterated`.
+
     Returns ``[]`` when the expression is not this shape, when the mapping is
     not declared, or when a stated key is not in it -- that last one being a
     disagreement between two parts of the source, which is not this function's
@@ -258,11 +304,20 @@ def mapping_values(
         node = node.value
     if not keys:
         return []
+    level: list[Union[str, Mapping]]
     mapping = _mapping_behind(node, func, mappings)
-    if mapping is None:
-        return []
+    if mapping is not None:
+        level = [mapping]
+    else:
+        iterated = (
+            _mapping_iterated(node.id, func, mappings)
+            if isinstance(node, ast.Name)
+            else None
+        )
+        if iterated is None:
+            return []
+        level = list(iterated.values())
 
-    level: list[Union[str, Mapping]] = [mapping]
     for key in reversed(keys):
         stepped: list[Union[str, Mapping]] = []
         for entry in level:

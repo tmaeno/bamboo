@@ -415,7 +415,28 @@ def selected_values(
 
     Attributed exactly like a write, so ``JediTaskSpec.status`` means the same
     thing on both sides and the two can be compared at all.
+
+    **Bound values are settled the same way the write side settles them.**  Both
+    sides read the same declared mappings, and taking only a literal here left
+    the read side blind to every status a command passes through:
+    ``varMap[":status"] = taskStatusMap["doing"]`` is the orphan-rescue query in
+    ``getTasksToExecCommand_JEDI``, and without it ``aborting``, ``finishing``,
+    ``toretry``, ``toincexec`` and ``toreassign`` all looked like values no
+    query ever asks for -- that is, like states a task can enter and never
+    leave.  The write side already resolved the same mapping through the other
+    spelling, so the two slices were disagreeing about one fact.
+
+    That mapping's ``dummy`` sentinel comes along with them, and the loop
+    skips it (``if varMap[":status"] in ["dummy", "paused"]: continue``) before
+    the statement runs.  Left in rather than modelled: the guard is a
+    ``continue`` above the execution, which is not the dominating-``if`` shape
+    the path conditions read, and building that for one site would be a
+    mechanism for one site.  Over-crediting is the direction this function
+    already takes -- see :func:`_tables_of` -- and it costs nothing measurable
+    here: ``dummy`` was not among the values reported as written-but-unselected
+    for this subject, so nothing is hidden by it.
     """
+    settle = values.resolver(values.declared_mappings(modules))
     found: dict[str, set[str]] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -432,9 +453,9 @@ def selected_values(
                         )
                         subject = SubjectNode.make_name(qualifier, attribute)
                         for bind in sql.bound_values(func, run.varmap or "", key):
-                            value = bind.value
-                            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                                found.setdefault(subject, set()).add(value.value)
+                            found.setdefault(subject, set()).update(
+                                settle(bind.value, func)
+                            )
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
@@ -442,6 +463,47 @@ def selected_values(
                         found.setdefault(
                             SubjectNode.make_name(qualifier, attribute), set()
                         ).add(value)
+    return found
+
+
+def selection_gates(
+    modules: list[SourceModule], attributor: SpecAttributor, never_written: set[str]
+) -> dict[str, set[str]]:
+    """Return ``{subject: tables bounding the queries that select on it}``.
+
+    Read from the same statements as :func:`selected_values` and kept beside it
+    because the two are halves of one answer.  That one says a query asks for
+    this value; this one says what limits which rows the query can see, and a
+    task can be invisible for the second reason while the first is satisfied.
+    That is not hypothetical: a task sat in ``finishing`` while the query that
+    rescues it ran every cycle, because ``JEDI_AUX_Status_MinTaskID`` had
+    stopped being updated and its watermark was above the task's id.
+
+    Only tables *nothing in this map writes* count.  A join to a table the
+    corpus maintains is a step in a query; a join to one it only ever reads is
+    a dependency on something outside, and only the second can go stale in a
+    way the map cannot account for.
+    """
+    found: dict[str, set[str]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            seen: set[str] = set()
+            for run in sql.executions(func):
+                if run.sql in seen:
+                    continue
+                seen.add(run.sql)
+                gates = {t for t in sql.joins(run.sql) if t in never_written}
+                if not gates:
+                    continue
+                for table in _tables_of(run.sql):
+                    spec_class = attributor.class_for_table(table)
+                    for column, _key in sql.predicates(run.sql):
+                        qualifier, attribute, _kind = _subject_of(
+                            attributor, spec_class, table, column
+                        )
+                        found.setdefault(
+                            SubjectNode.make_name(qualifier, attribute), set()
+                        ).update(gates)
     return found
 
 

@@ -112,6 +112,20 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             for subject, source in outside[:top]:
                 click.echo(f"    {subject} <- {source}")
 
+        gated = sorted(
+            {gate for subject in fragment.subjects for gate in subject.selection_gates}
+        )
+        if gated:
+            # The same shape as the line above, on the read side: a query's
+            # reach depends on a table nothing here keeps current, so a row
+            # can be missed for a reason no branch condition mentions.
+            click.echo(f"  queries bounded by a table nothing here writes ({len(gated)}):")
+            for table in gated[:top]:
+                users = sorted(
+                    s.name for s in fragment.subjects if table in s.selection_gates
+                )
+                click.echo(f"    {table:<34} gates {len(users)} subject(s)")
+
         drift = gates.outcomes_outside_declared_subsets(fragment)
         if drift:
             # Not a gate: the declared lists are purpose-built subsets, so an

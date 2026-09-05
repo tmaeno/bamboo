@@ -178,6 +178,25 @@ class CodeMap:
             if any(b.outcome == outcome or b.tier == 2 for b in junction.branches)
         ]
 
+    async def selection_gates_for(self, subject: str) -> list[str]:
+        """Tables that bound which rows the queries selecting *subject* can see.
+
+        The second half of "will anything pick this up".  ``selected_values``
+        answers whether a query asks for the observed value; this answers
+        whether the row is inside what that query can reach at all, and a task
+        can fail the second while passing the first.  One did: it sat in
+        ``finishing`` while the query that rescues orphaned commands ran every
+        cycle, because ``JEDI_AUX_Status_MinTaskID`` had stopped being updated
+        and its watermark had risen above the task's id.
+
+        Every table named here is one nothing in the map writes, so its
+        freshness is not something any branch condition can account for --
+        an unbound boundary, and the first thing to check when a query that
+        should have matched did not.
+        """
+        found = await self.subject(subject)
+        return list(found.selection_gates) if found else []
+
     async def carried_from(self, subject: str) -> dict[str, list[JunctionNode]]:
         """Where *subject*'s value is copied from, one hop back.
 
