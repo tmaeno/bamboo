@@ -215,7 +215,12 @@ def _report_observations(strategy: Strategy, top: int, full: bool, evaluated: bo
         carries = "" if control is None else f" · carries the line: {control.verdict}"
         click.echo(f"  {probe.verdict:<13} {probe.log_file}{carries}")
         for line in probe.sample:
-            click.echo(f"                {line.strip()[:_WIDTH - 16]}")
+            # Timestamp and tail, not the first eighty characters.  The logger
+            # name, the run key and a link sit in between; the half that says
+            # *why* is at the end -- "no candidates. brokerage failed for 1
+            # input datasets" is the finding, and the head is boilerplate.
+            body = line.strip()
+            click.echo(f"                {body if full else body[:19] + ' … ' + body[-74:]}")
         if full:
             click.echo(f"                settles: {', '.join(_short(o) for o in probe.settles)}")
     if len(probes) > len(shown):
