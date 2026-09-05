@@ -245,6 +245,26 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         + ")"
     )
 
+    # Where to look, which is a different question from what starts it: the
+    # proxy mixins declare no logger and the knights that call them do.
+    own = [j for j in fragment.junctions if j.log_files]
+    borrowed = [j for j in fragment.junctions if not j.log_files and j.caller_log_files]
+    silent = [j for j in fragment.junctions if not j.log_files and not j.caller_log_files]
+    click.echo(
+        f"log files: {len(own)} junction(s) from their own logger, "
+        f"{len(borrowed)} from a caller's, {len(silent)} from neither"
+    )
+    if silent:
+        # Not a defect: a base class logging through a caller's MsgWrapper has
+        # no file to name.  Listed because an unnamed file is an observation
+        # the map cannot offer, and that has to be visible rather than implied.
+        by_module = Counter(j.owner.split("::")[0] for j in silent)
+        click.echo("  no log file named by the source:")
+        for module, count in by_module.most_common(top):
+            click.echo(f"    {module:<58} {count} junction(s)")
+        if len(by_module) > top:
+            click.echo(f"    … {len(by_module) - top} more module(s)")
+
     fragile = trigger.fragile_subjects(fragment.junctions)
     if fragile:
         # The question the map exists to answer for a stalled task: nothing

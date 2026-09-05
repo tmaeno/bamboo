@@ -133,6 +133,89 @@ def _calls_by_name(module: SourceModule) -> dict[str, ast.Call]:
     return calls
 
 
+#: How both facades reach the implementation.  ``TaskBuffer`` and
+#: ``JediTaskBuffer`` borrow a connection and call through it, so a name bound
+#: from here is the proxy, not a collaborator.
+_POOL = "proxyPool"
+
+
+def _rooted_at_pool(node: ast.expr) -> bool:
+    """True for ``self.proxyPool.get()`` and friends, however deep."""
+    while isinstance(node, (ast.Call, ast.Attribute)):
+        if isinstance(node, ast.Call):
+            node = node.func
+        else:
+            if node.attr == _POOL:
+                return True
+            node = node.value
+    return False
+
+
+def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Names *func* binds to a borrowed proxy.
+
+    Both spellings are in the corpus: ``with self.proxyPool.get() as proxy``
+    (JediTaskBuffer) and ``proxy = self.proxyPool.getProxy()`` (TaskBuffer).
+    """
+    bound: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and _rooted_at_pool(
+                    item.context_expr
+                ):
+                    bound.add(item.optional_vars.id)
+        elif isinstance(node, ast.Assign) and _rooted_at_pool(node.value):
+            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return frozenset(bound)
+
+
+def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
+    """Return ``{method name: first call}`` for the calls *module* really makes.
+
+    :func:`_calls_by_name` with the facade hop removed.  ``TaskBuffer`` and
+    ``JediTaskBuffer`` borrow a connection from ``self.proxyPool`` and call the
+    implementation through it, so a call on a borrowed proxy is the same handoff
+    :func:`_forwards_to_itself` already refuses to count as a *definition*,
+    refused here as a *call*.
+
+    **The receiver is what identifies it, not the name.**  A facade method may
+    forward under a different name --
+    ``JediTaskBuffer.checkWaitingTaskPrio_JEDI`` calls
+    ``proxy.getTasksToBeProcessed_JEDI`` -- and conversely a call matching the
+    enclosing function's name is usually not a handoff at all:
+    ``datasetManager.run`` constructs a ``Closer`` and calls
+    ``closer_process.run()``, which is a genuine caller and the only thing that
+    puts ``closer.py`` on a daemon cycle.  Keying on the name lost that edge and
+    three others.
+
+    Why this matters for the log question in particular: ``JediTaskBuffer``
+    declares a logger and then logs twice in the entire file, both in
+    ``__init__``.  Naming ``panda-JediTaskBuffer.log`` as the place to look for
+    a proxy method would send every query to a file that says nothing, and an
+    empty answer there reads as "this code never ran".  It sat on 71 junctions
+    before the receiver rule removed it.
+    """
+    calls: dict[str, ast.Call] = {}
+    # Breadth-first over the tree, matching ``_calls_by_name``: which call a
+    # name resolves to decides the ``arg_binding`` reported for that entry.
+    queue: list[tuple[ast.AST, frozenset[str]]] = [(module.tree, frozenset())]
+    while queue:
+        node, pooled = queue.pop(0)
+        for child in ast.iter_child_nodes(node):
+            inner = (
+                _pool_bindings(child)
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else pooled
+            )
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                receiver = child.func.value
+                if not (isinstance(receiver, ast.Name) and receiver.id in pooled):
+                    calls.setdefault(child.func.attr, child)
+            queue.append((child, inner))
+    return calls
+
+
 def _forwards_to_itself(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """True when the body just hands the call on under the same name.
 
@@ -286,34 +369,41 @@ def _arg_binding(call: ast.Call) -> dict[str, str]:
     }
 
 
-def attach(
-    junctions: list[JunctionNode],
+def reaching_modules(
     modules: list[SourceModule],
-    foreign_tables: set[str],
-) -> tuple[int, int]:
-    """Record each junction's entry points.  Returns ``(reached, total)``.
+) -> dict[str, dict[str, list[tuple[str, str, ast.Call]]]]:
+    """Return ``{module: {method: [(entry module, door, call)]}}`` -- who reaches what.
 
-    A junction in an unclassified module reached by nothing is left with no
-    entry points rather than being assigned a default.  "Nothing in this map
-    starts this" is a real answer and a work item; "presumably a loop" is a
-    guess that would make the self-repair property unusable.
+    Deliberately unfiltered: *every* module is allowed to be an entry here.
+    Two different questions read this, and only one of them cares whether the
+    caller starts anything:
+
+    * **What makes this run?**  Only a module carrying a trigger answers that,
+      so :func:`attach` filters on ``classify`` before building an
+      ``EntryPoint``.
+    * **Whose log will say it ran?**  Any caller answers that.  The
+      ``db_proxy_mods`` mixins declare no logger and the knights that call them
+      do, so the file to read belongs to a caller that very often starts
+      nothing itself -- ``AtlasProdWatchDog`` is a plugin the WatchDog knight
+      drives, ``event_picker`` is driven by a daemon script.
+
+    Folding both behind one filter is what made 11 of the 18 junctions that can
+    write ``pending`` look mutually indistinguishable: they all reported
+    ``panda-DBProxy.log``, which is where the *code* lives, while production
+    writes ``set task_status=`` from the caller.  The filter belongs on the
+    trigger question alone, which is why it is not applied here.
+
+    The honesty of the cross-module hop is unchanged and does the work instead:
+    a name is followed only where it means one thing (:func:`sole_definitions`)
+    or where the entry imports the module it names.
     """
-    triggers = classify(modules, foreign_tables)
     callers: dict[str, list[tuple[str, ast.Call]]] = {}
     for module in modules:
-        if module.rel_path not in triggers:
-            continue
-        for name, call in _calls_by_name(module).items():
+        for name, call in _outward_calls(module).items():
             callers.setdefault(name, []).append((module.rel_path, call))
 
-    # Which methods of each module a classified module can reach, and through
-    # which door.  ``{module: {method: [(entry module, door, call)]}}``.
     implemented = sole_definitions(modules)
-    imports = {
-        module.rel_path: imported_modules(module)
-        for module in modules
-        if module.rel_path in triggers
-    }
+    imports = {module.rel_path: imported_modules(module) for module in modules}
     inward: dict[str, dict[str, list[tuple[str, str, ast.Call]]]] = {}
     for module in modules:
         edges = _self_calls(module)
@@ -328,6 +418,23 @@ def attach(
                     inward.setdefault(module.rel_path, {}).setdefault(method, []).append(
                         (entry, door, call)
                     )
+    return inward
+
+
+def attach(
+    junctions: list[JunctionNode],
+    modules: list[SourceModule],
+    foreign_tables: set[str],
+) -> tuple[int, int]:
+    """Record each junction's entry points.  Returns ``(reached, total)``.
+
+    A junction in an unclassified module reached by nothing is left with no
+    entry points rather than being assigned a default.  "Nothing in this map
+    starts this" is a real answer and a work item; "presumably a loop" is a
+    guess that would make the self-repair property unusable.
+    """
+    triggers = classify(modules, foreign_tables)
+    inward = reaching_modules(modules)
 
     reached = 0
     for junction in junctions:
@@ -338,7 +445,7 @@ def attach(
                 trigger=trigger, entry=owner_module
             )
         for entry, door, call in inward.get(owner_module, {}).get(method, ()):
-            for trigger in triggers[entry]:
+            for trigger in triggers.get(entry, ()):
                 found[(trigger, entry, door)] = EntryPoint(
                     trigger=trigger,
                     entry=entry,

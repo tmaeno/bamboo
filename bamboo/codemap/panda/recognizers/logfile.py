@@ -42,6 +42,7 @@ import ast
 from typing import Optional
 
 from bamboo.codemap.models import SourceModule
+from bamboo.codemap.panda.recognizers import trigger
 
 # PandaLogger.getLogger(name) opens "<logdir>/panda-<name>.log".
 _FILENAME = "panda-{}.log"
@@ -156,6 +157,15 @@ def inherited_files(
     return reached
 
 
+def files_of(
+    rel_path: str, declared: dict[str, str], inherited: dict[str, list[str]]
+) -> list[str]:
+    """The files one module's output can reach, declaration first."""
+    if rel_path in declared:
+        return [declared[rel_path]]
+    return inherited.get(rel_path, [])
+
+
 def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     """Record each node's candidate log files.  Returns ``(resolved, total)``.
 
@@ -163,17 +173,46 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     investigation is pointed at: a stage says why candidates were dropped, a
     junction says why a value was settled, and neither can be checked without
     knowing which file to read.
+
+    Junctions additionally get ``caller_log_files``, because for the largest
+    group in the map the module that holds the code is not the one that logs
+    about it.  A ``db_proxy_mods`` method inherits ``panda-DBProxy.log`` and
+    ``panda-JediDBProxy.log`` from the proxy classes that mix it in, and those
+    are true -- the SQL comment trace lands there -- but the line an
+    investigation greps for, ``set task_status=``, is written by the knight
+    that made the call.  Production settles it: of 33 files asked, that line is
+    in exactly five -- ContentsFeeder, JobGenerator, PostProcessor,
+    TaskCommando and TaskRefiner -- and in neither proxy file.  Each of the
+    five reaches a proxy junction as a caller.
+
+    Kept out of ``log_files`` on purpose.  One list would answer "where does
+    this code live" and "whose log mentions it" with the same value, and
+    conflating those is what made eleven candidates for a pending task look
+    indistinguishable when nine of them are separable.
     """
     declared = declared_files(modules)
     inherited = inherited_files(modules, declared)
+    inward = trigger.reaching_modules(modules)
     resolved = total = 0
     for node in list(fragment.filter_stages) + list(fragment.junctions):
         total += 1
-        where = node.owner.split("::")[0]
-        if where in declared:
-            node.log_files = [declared[where]]
-        else:
-            node.log_files = inherited.get(where, [])
+        node.log_files = files_of(node.owner.split("::")[0], declared, inherited)
         if node.log_files:
             resolved += 1
+
+    for junction in fragment.junctions:
+        where, _, method = junction.owner.partition("::")
+        mine = set(junction.log_files)
+        # The enclosing class is part of ``owner`` but not of the call graph's
+        # keys, which are bare method names -- the same last-segment rule the
+        # attribution slice uses to name a function.
+        reached = inward.get(where, {}).get(method.split(".")[-1], ())
+        junction.caller_log_files = sorted(
+            {
+                file
+                for entry, _door, _call in reached
+                for file in files_of(entry, declared, inherited)
+            }
+            - mine
+        )
     return resolved, total

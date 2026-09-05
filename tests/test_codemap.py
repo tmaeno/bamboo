@@ -3538,6 +3538,28 @@ def test_the_legibility_census_leaves_out_what_the_reader_never_reads():
     assert forms == {"pandaserver/dataservice/adder_gen.py:8": "JediFileSpec"}
 
 
+def test_a_tuple_is_a_record_and_states_no_element_type():
+    """The gate reported one of these and the other three were worse.
+
+    ``failedRet`` is a three-tuple: it is not a ``JediFileSpec`` and it does
+    not hold ``JediFileSpec``\\ s, but the last-argument rule said it was one.
+    The unread annotation was the honest half; the two the reader *had* read
+    were wrong, which no gate would have said.
+    """
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+
+    def element_of(text: str):
+        return attributor.element_annotation(ast.parse(text, mode="eval").body)
+
+    assert element_of("tuple[bool, JediDatasetSpec | None, JediFileSpec | None]") is None
+    assert element_of("dict[int, list[tuple[JediFileSpec, str]]]") is None
+    # A genuine container still reads, so this refuses a shape rather than a name.
+    assert element_of("list[JediFileSpec]") == "JediFileSpec"
+
+
 def test_a_yield_annotation_that_changes_no_write_is_a_finding():
     """A context manager's yield type is audited the same way, and has to be.
 
@@ -4145,6 +4167,176 @@ def test_the_inheritance_walk_does_not_stop_at_one_link():
     inherited = logfile.inherited_files(modules, logfile.declared_files(modules))
 
     assert inherited["p/mixin.py"] == ["panda-Leaf.log", "panda-Mid.log"]
+
+
+# ---------------------------------------------------------------------------
+# Whose log says it ran -- a different question from what starts it
+# ---------------------------------------------------------------------------
+
+
+def _log_attach(*sources: tuple[str, str], junctions):
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=list(junctions))
+    logfile.attach(fragment, [_module(text, rel) for text, rel in sources])
+    return fragment
+
+
+PROXY_METHOD = """
+class TaskModule:
+    def makeTaskPending_JEDI(self, task_id):
+        self.cur.execute(sql, varMap)
+"""
+
+KNIGHT = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class Knight:
+    def start(self):
+        while True:
+            self.taskBufferIF.makeTaskPending_JEDI(task_id)
+            time.sleep(60)
+"""
+
+
+def test_a_writer_with_no_logger_of_its_own_takes_its_callers():
+    """The proxy mixins hold the code; the knights write the line about it.
+
+    ``set task_status=`` is in ContentsFeeder, JobGenerator, PostProcessor and
+    TaskRefiner and in neither proxy file, so reporting only the owner's file
+    sends the query somewhere that never answers.
+    """
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (KNIGHT, "pandajedi/jediorder/Knight.py"),
+        junctions=[junction],
+    )
+
+    assert fragment.junctions[0].log_files == []
+    assert fragment.junctions[0].caller_log_files == ["panda-Knight.log"]
+
+
+def test_a_caller_that_starts_nothing_still_names_a_log():
+    """The two questions come apart here, which is the whole point.
+
+    ``event_picker`` is driven by a daemon script rather than a loop of its
+    own, so it carries no trigger -- and it is still the only thing that calls
+    ``updateTaskModTimeJEDI`` and the only file that would mention it.
+    """
+    picker = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class EventPicker:
+    def run(self):
+        self.task_buffer.makeTaskPending_JEDI(task_id)
+"""
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (picker, "pandaserver/dataservice/event_picker.py"),
+        junctions=[junction],
+    )
+
+    assert fragment.junctions[0].caller_log_files == ["panda-event_picker.log"]
+    # ...and nothing starts it, which stays a separate and still-true answer.
+    assert fragment.junctions[0].entry_points == []
+
+
+def test_the_facade_forwarding_a_call_is_not_a_caller():
+    """``JediTaskBuffer`` declares a logger and logs twice, both in __init__.
+
+    Naming its file would send every proxy query to something that never says
+    anything, and an empty answer there reads as "this code never ran".  It sat
+    on 71 junctions before the borrowed-proxy receiver was excluded.
+    """
+    facade = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class JediTaskBuffer:
+    def makeTaskPending_JEDI(self, task_id):
+        with self.proxyPool.get() as proxy:
+            return proxy.makeTaskPending_JEDI(task_id)
+
+    def checkWaitingTaskPrio_JEDI(self, task_id):
+        with self.proxyPool.get() as proxy:
+            return proxy.makeTaskPending_JEDI(task_id)
+"""
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (facade, "pandajedi/jedicore/JediTaskBuffer.py"),
+        junctions=[junction],
+    )
+
+    # Both spellings are refused: the one that forwards under the same name and
+    # the one that forwards under a different one.
+    assert fragment.junctions[0].caller_log_files == []
+
+
+def test_a_call_sharing_the_enclosing_functions_name_is_still_a_call():
+    """``datasetManager.run`` builds a ``Closer`` and calls ``closer.run()``.
+
+    Keying the facade rule on the name rather than the receiver discarded that
+    edge and three others, taking ``closer`` and ``finisher`` off the daemon
+    cycle entirely.  The receiver is what makes a handoff a handoff.
+    """
+    closer = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class Closer:
+    def run(self):
+        self.taskBufferIF.makeTaskPending_JEDI(task_id)
+"""
+    manager = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+def run():
+    closer_process = Closer(taskBuffer, blocks, job)
+    closer_process.run()
+"""
+    junction = _junction("pandaserver/dataservice/closer.py::run")
+
+    fragment = _log_attach(
+        (closer, "pandaserver/dataservice/closer.py"),
+        (manager, "pandaserver/daemons/scripts/datasetManager.py"),
+        junctions=[junction],
+    )
+
+    assert "panda-datasetManager.log" in fragment.junctions[0].caller_log_files
+
+
+def test_a_caller_log_the_owner_already_names_is_not_repeated():
+    """The lists answer different questions; saying the same file twice would
+    make one of them look like corroboration it is not."""
+    owner = """
+logger = PandaLogger().getLogger("shared")
+
+
+class Owner:
+    def writes(self):
+        pass
+"""
+    caller = """
+logger = PandaLogger().getLogger("shared")
+
+
+class Caller:
+    def go(self):
+        self.other.writes()
+"""
+    junction = _junction("p/owner.py::writes")
+
+    fragment = _log_attach((owner, "p/owner.py"), (caller, "p/caller.py"), junctions=[junction])
+
+    assert fragment.junctions[0].log_files == ["panda-shared.log"]
+    assert fragment.junctions[0].caller_log_files == []
 
 
 # ---------------------------------------------------------------------------

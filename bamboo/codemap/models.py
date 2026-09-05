@@ -231,11 +231,28 @@ class JunctionNode(BaseNode):
     log_files: list[str] = Field(
         default_factory=list,
         description=(
-            "Log files an observed transition through this junction can be "
-            "found in, e.g. 'panda-ContentsFeeder.log'.  More than one when the "
-            "code runs in more than one process: the proxy mixins land in "
+            "Log files the module holding this junction writes to, e.g. "
+            "'panda-ContentsFeeder.log'.  More than one when the code runs in "
+            "more than one process: the proxy mixins land in "
             "'panda-DBProxy.log' under the server and 'panda-JediDBProxy.log' "
             "under a knight, and which one is a runtime fact, so both are named."
+            "  This is where the code *lives*, which is not always where a line "
+            "about it firing appears -- see ``caller_log_files``."
+        ),
+    )
+    caller_log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Log files belonging to the code that reaches this junction.  A "
+            "separate field rather than more entries in ``log_files`` because "
+            "it answers a different question, and merging them would repeat "
+            "the mistake it exists to correct: a ``db_proxy_mods`` method "
+            "declares no logger of its own, so ``log_files`` names the mixin's "
+            "two proxy files while the diagnostic -- 'set task_status=' -- is "
+            "written by the knight that called it.  Production confirms the "
+            "split: of 33 files asked, that line is in exactly five -- "
+            "ContentsFeeder, JobGenerator, PostProcessor, TaskCommando and "
+            "TaskRefiner -- and in neither proxy file."
         ),
     )
     attribution: str = Field(
