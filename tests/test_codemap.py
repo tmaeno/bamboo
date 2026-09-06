@@ -40,6 +40,7 @@ from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
     errorcode,
+    flush,
     logfile,
     progress,
     selection,
@@ -1633,6 +1634,119 @@ class TaskModule:
     assert len(status) == 1
     assert [b.outcome for b in status[0].branches] == ["finished"]
     assert status[0].branches[0].row_precondition == ["status=:priorStatus"]
+
+
+# ---------------------------------------------------------------------------
+# The write that happens somewhere other than where the value was decided
+# ---------------------------------------------------------------------------
+
+_FLUSH_PROXY = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus=None):
+        taskSpec.resetChangedAttr("jediTaskID")
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE jediTaskID=:cr_jediTaskID AND "
+        if oldStatus is not None:
+            sql += "status IN (:old_1) AND "
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+
+
+def _flush(caller: str, rel: str = "pandajedi/jediorder/Knight.py"):
+    """Run the attribute slice over *caller*, then annotate it from the proxy."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(caller, rel),
+    ]
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    flush.attach(junctions, modules, attributor)
+    return [j for j in junctions if j.owner.startswith(rel)]
+
+
+def test_the_proxy_flush_is_recognised_by_the_expression_it_builds():
+    """``SET {spec.bindUpdateChangesExpression()}`` is the method saying it flushes."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_self_attributes(modules)
+
+    found = flush.flush_methods(modules, attributor)
+
+    assert set(found) == {"updateTask_JEDI"}
+    assert found["updateTask_JEDI"].spec_classes == frozenset({"JediTaskSpec"})
+    assert found["updateTask_JEDI"].excluded == frozenset({"jediTaskID"})
+    assert found["updateTask_JEDI"].guards["status"] == (
+        "status IN (:old_1)",
+        frozenset({"oldStatus"}),
+    )
+
+
+def test_a_caller_that_asks_for_the_guard_is_told_its_write_races():
+    """``oldStatus=`` is the caller opting into the compare-and-set."""
+    caller = '''
+class TaskRefiner:
+    def runImpl(self, taskSpec: JediTaskSpec, taskStatus):
+        taskSpec.status = "tobroken"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=[taskStatus])
+'''
+    status = [j for j in _flush(caller) if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert status[0].branches[0].row_precondition == ["status IN (:old_1)"]
+
+
+def test_a_caller_that_does_not_is_not():
+    """The fragment is appended under ``if oldStatus is not None``.
+
+    Reading the flush without that condition would tell ten of
+    ``updateTask_JEDI``'s callers their write races when it does not -- and an
+    invented caveat is the damaging direction, because it weakens exactly the
+    candidates production confirmed.
+    """
+    caller = '''
+class PostProcessor:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finished"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1})
+'''
+    status = [j for j in _flush(caller) if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert status[0].branches[0].row_precondition == []
+
+
+def test_a_column_the_flush_takes_back_out_is_not_one_it_writes():
+    """``resetChangedAttr("jediTaskID")`` says the ``WHERE`` is row identity.
+
+    Without it the guard identifying the row would read as a race, because
+    ``jediTaskID`` is as much a declared column as ``status`` is.
+    """
+    caller = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.jediTaskID = 1
+        taskSpec.status = "finished"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=["running"])
+'''
+    guards = {
+        j.subject: sorted({g for b in j.branches for g in b.row_precondition})
+        for j in _flush(caller)
+    }
+
+    assert guards["JediTaskSpec.status"] == ["status IN (:old_1)"]
+    assert guards.get("JediTaskSpec.jediTaskID", []) == []
 
 
 def test_table_class_is_inferred_from_the_column_names():
