@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -866,7 +867,11 @@ async def test_real_orchestrator_runs_and_commits_over_mattermost_io():
 async def test_status_snapshot_reports_functional():
     bot = _make_bot(lambda *a: None)
     bot.bot_user_id = "bot-user"
-    bot._started_at = 100.0
+    # Relative to the same clock the bot reads.  A constant here is not a start
+    # time, it is a point on ``time.monotonic()``, which counts from boot: 100.0
+    # is in the *future* on a machine up for less than that, and a fresh CI
+    # runner is up for about ninety seconds.
+    bot._started_at = time.monotonic() - 5.0
     bot._sessions = {"p1": object(), "p2": object()}  # type: ignore[dict-item]
 
     snap = await bot.status_snapshot()
@@ -876,7 +881,8 @@ async def test_status_snapshot_reports_functional():
     assert snap.bot_user_id == "bot-user"
     assert snap.active_sessions == 2
     assert snap.allowed_channels == 1
-    assert snap.uptime_seconds is not None and snap.uptime_seconds > 0
+    assert snap.uptime_seconds is not None
+    assert 5.0 <= snap.uptime_seconds < 60.0
 
 
 @pytest.mark.asyncio
