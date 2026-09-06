@@ -292,6 +292,92 @@ class _Channel:
             self.sent.setdefault(column.lower(), column)
 
 
+#: What a boundary's ``system`` says when the source does not name one.  Kept
+#: as a value rather than left blank so that it reads as an open question in
+#: the node itself -- "bind this" -- the same way an unbound pilot boundary
+#: does.
+UNRESOLVED_SYSTEM = "unresolved"
+
+
+def tables_never_written(modules: list[SourceModule]) -> set[str]:
+    """Tables this map only ever reads.
+
+    A dependency the map cannot explain: whatever keeps the table current is
+    outside the source being read, so its freshness is not something any branch
+    table can account for.
+    """
+    written: set[str] = set()
+    read: set[str] = set()
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            for run in sql.executions(func):
+                written.update(write.table for write in sql.writes(run.sql))
+                written.update(sql.deletes(run.sql))
+                read.update(table for table, _columns in sql.reads(run.sql))
+                read.update(sql.joins(run.sql))
+    return {table for table in read if table not in written and table != "{}"}
+
+
+def extract_selection_gates(
+    modules: list[SourceModule],
+    map_id: str,
+    derived_from: str,
+    never_written: set[str],
+    already_known: set[str],
+) -> list[BoundaryNode]:
+    """A boundary per table that bounds a query's reach and nothing here writes.
+
+    The other extraction reads *which schema* a statement is qualified with, so
+    it finds the tables another system owns by name.  This one reads a
+    different signal and finds tables that are nominally PanDA's own::
+
+        FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID
+
+    ``JEDI_AUX_Status_MinTaskID`` sits in JEDI's own schema, is joined by
+    thirty-one functions, and **no statement in the corpus writes it**.  A task
+    below its watermark is invisible to all of them whatever its status is, so
+    when the table goes stale the map's account of why nothing picked a task up
+    is wrong in a way no branch condition shows.  That is exactly what an
+    unbound boundary is for: a complete answer -- the value comes from outside
+    -- and a work item.
+
+    ``system`` is left unresolved rather than guessed.  The schema qualifier
+    says which database the table is in, not who maintains it, and inventing a
+    name here would put a claim where the source is silent.
+    """
+    seen: dict[str, _Channel] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            for run in sql.executions(func):
+                for table in sql.joins(run.sql):
+                    if table not in never_written or table in already_known:
+                        continue
+                    channel = _channel_for(
+                        seen, UNRESOLVED_SYSTEM, "", table, module, run.call
+                    )
+                    channel.receives(sql.joined_columns(run.sql, table))
+                    channel.operations.add("SELECT")
+    return [
+        BoundaryNode(
+            map_id=map_id,
+            derived_from=derived_from,
+            name=BoundaryNode.make_name(map_id, channel.system, channel.interface),
+            system=channel.system,
+            kind="reports_state",
+            transport="shared_table",
+            interface=channel.interface,
+            carried_values=sorted(channel.received.values()),
+            # Nothing here writes it: that emptiness is the finding, not a gap
+            # in the reading.
+            handed_over=[],
+            operations=sorted(channel.operations),
+            anchor=channel.anchor,
+        )
+        for channel in sorted(seen.values(), key=lambda c: c.interface)
+    ]
+
+
 def extract_shared_tables(
     modules: list[SourceModule],
     map_id: str,
@@ -392,7 +478,10 @@ def _channel_for(
     module: SourceModule,
     node: ast.Call,
 ) -> _Channel:
-    interface = f"{schema}.{table}"
+    # No schema when the qualifier is interpolated and names PanDA's own -- the
+    # table name is then the whole identity, which is how the rest of the map
+    # spells a table anyway.
+    interface = f"{schema}.{table}" if schema else table
     channel = channels.get(interface)
     if channel is None:
         channel = _Channel(system, interface)

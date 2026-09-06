@@ -175,6 +175,16 @@ class SqlWrite(BaseModel):
             "are part of what identifies the table."
         ),
     )
+    preconditions: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the predicate testing it, for columns this statement "
+            "also writes.  That combination is a compare-and-set: whoever moved "
+            "the row first wins and this write changes no rows, returning a "
+            "count the caller usually discards.  Predicates on columns the "
+            "statement does not write are row identity, not a race."
+        ),
+    )
 
 
 def _parts(
@@ -397,6 +407,144 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     return found
 
 
+def _concatenated(node: ast.expr) -> list[ast.expr]:
+    """Flatten a chain of ``+`` into its operands, left to right."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _concatenated(node.left) + _concatenated(node.right)
+    return [node]
+
+
+#: ``UPDATE %s SET`` and ``UPDATE ATLAS_PANDA.{0} SET`` -- a table name the call
+#: supplies rather than the statement.  Both markers are unambiguous: rendered
+#: text spells an f-string interpolation ``{}``, never either of these.
+_PERCENT_S = "%s"
+_BARE_FIELD = "{}"
+
+
+def _interpolates(node: ast.expr) -> bool:
+    """Whether any brace this expression renders could be a hole, not a brace."""
+    return any(
+        isinstance(child, ast.JoinedStr)
+        or (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "format"
+        )
+        for child in ast.walk(node)
+    )
+
+
+def _braces_are_literal(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Whether every ``{}`` in *name*'s text is a placeholder the source wrote.
+
+    Rendered text spells an f-string interpolation ``{}`` as well, so a bare
+    brace is either the hole a schema went into or a field a ``.format`` at the
+    call fills.  The fragments settle it without a guess: if none of them
+    interpolates, every brace came from a literal.
+    """
+    return not any(_interpolates(node.value) for _line, _op, _text, node in _parts(func, name))
+
+
+def _literal_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
+) -> list[str]:
+    """Return the strings *expression* can hold, where the source writes them out.
+
+    Two forms, both of which put the names in plain sight: the argument is a
+    literal, or it is the target of a ``for`` over a literal sequence --
+    ``for table in ("ATLAS_PANDA.jobsDefined4", "ATLAS_PANDA.jobsActive4")``.
+    Anything else returns nothing, and the placeholder is left as written: a
+    table name invented here would be attributed to a spec class with the same
+    confidence as one the code states.
+    """
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return [expression.value]
+    if not isinstance(expression, ast.Name):
+        return []
+    found: list[str] = []
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == expression.id
+            and isinstance(node.iter, (ast.Tuple, ast.List))
+        ):
+            values = [
+                element.value
+                for element in node.iter.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+            if len(values) == len(node.iter.elts):
+                found.extend(values)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str) and any(
+                isinstance(target, ast.Name) and target.id == expression.id
+                for target in node.targets
+            ):
+                found.append(node.value.value)
+    return found
+
+
+def _substituted(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    text: str,
+    name: str,
+    fillers: list[list[str]],
+    percent: bool,
+) -> list[str]:
+    """Return *text* with the call's arguments filled in, or as it stands."""
+    if not fillers:
+        return [text]
+    if percent:
+        return [text.replace(_PERCENT_S, value) for value in fillers[0]] or [text]
+    filled = [text]
+    for index, values in enumerate(fillers):
+        marker = f"{{{index}}}"
+        if not values:
+            continue
+        if marker in filled[0]:
+            filled = [one.replace(marker, value) for one in filled for value in values]
+        elif index == 0 and _BARE_FIELD in filled[0] and _braces_are_literal(func, name):
+            filled = [
+                one.replace(_BARE_FIELD, value) for one in filled for value in values
+            ]
+    return filled
+
+
+def _call_site_fill(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
+) -> tuple[ast.expr, list[list[str]], bool]:
+    """Split ``execute(...)``'s first argument into statement and substitution.
+
+    Three spellings put the table name at the call rather than in the
+    statement, and until now all three were read as though the name were part
+    of the text -- which for ``%s`` meant no statement at all, because the
+    table pattern does not accept a ``%``.
+    """
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mod):
+        return expression.left, [_literal_values(func, expression.right)], True
+    inner = (
+        expression.left
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add)
+        else expression
+    )
+    if (
+        isinstance(inner, ast.Call)
+        and isinstance(inner.func, ast.Attribute)
+        and inner.func.attr == "format"
+    ):
+        return (
+            inner.func.value,
+            [_literal_values(func, argument) for argument in inner.args],
+            False,
+        )
+    # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
+    # appended at the call, so the statement is everything to its left.
+    if isinstance(expression, ast.BinOp):
+        return expression.left, [], False
+    return expression, [], False
+
+
 def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     """Return one :class:`Execution` per cursor execution in *func*.
 
@@ -404,6 +552,20 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     -- every statement in the function against every bind in the function --
     would attach a task's status write to a dataset's statement whenever both
     appear in one method, which in ``db_proxy_mods`` is most of them.
+
+    **The statement can arrive in more than two pieces.**  Reading only the
+    operand to the left of the comment is right for ``execute(sqlU + comment)``
+    and wrong for ``execute(sqlU + sql + comment)``, where the second name holds
+    the ``WHERE`` clause -- and it did not merely truncate those statements, it
+    dropped them, because the left operand was itself an addition rather than a
+    name.  That cost the ``jobStatus`` write in ``updateJobStatus`` and the
+    whole of ``updateTask_JEDI``, silently: a statement that is never read
+    leaves nothing behind for a graph invariant to catch.
+
+    An operand that says nothing about its own text becomes ``{}``, the same
+    hole an f-string interpolation leaves, rather than sinking the statement.
+    The head is still required to be a readable name: it is what the statement
+    *is*, and without it there is no anchor to hang the execution on.
     """
     found: list[Execution] = []
     for node in ast.walk(func):
@@ -411,15 +573,72 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             continue
         if node.func.attr not in {"execute", "executemany"} or len(node.args) < 2:
             continue
-        # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
-        # appended at the call, so the statement is the left operand.
         expression = node.args[0]
-        base = expression.left if isinstance(expression, ast.BinOp) else expression
-        if not isinstance(base, ast.Name):
+        statement, fillers, percent = _call_site_fill(func, expression)
+        operands = _concatenated(statement)
+        if not isinstance(operands[0], ast.Name):
             continue
+        base = operands[0]
+        head = variants(func, base.id)
+        if not head:
+            continue
+        pieces: list[list[str]] = [head]
+        for operand in operands[1:]:
+            if isinstance(operand, ast.Name):
+                pieces.append(variants(func, operand.id) or ["{}"])
+                continue
+            rendered = rendered_text(operand)
+            pieces.append([rendered if rendered is not None else "{}"])
+        total = math.prod(len(choices) for choices in pieces)
+        if total > _MAX_BRANCH_VARIANTS:
+            # Said out loud, for the reason in ``_run_variants``: a silent cap
+            # reads exactly like full coverage.  Falling back to the head alone
+            # is what this function did for every statement until now.
+            logger.warning(
+                "the statement executed at line %d joins %d variants of %d name(s), "
+                "over the cap of %d: read as %s alone, so its trailing clauses are "
+                "not read here",
+                node.lineno,
+                total,
+                len(pieces),
+                _MAX_BRANCH_VARIANTS,
+                base.id,
+            )
+            pieces = [head]
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
-        for text in variants(func, base.id):
-            found.append(Execution(sql=text, varmap=varmap, variable=base.id, call=node))
+        for combination in itertools.product(*pieces):
+            for text in _substituted(func, "".join(combination), base.id, fillers, percent):
+                found.append(
+                    Execution(sql=text, varmap=varmap, variable=base.id, call=node)
+                )
+    return found
+
+
+#: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
+#: source wrote it.  ``NOT`` is part of the term rather than a separate one:
+#: ``updateJobStatus`` guards with ``AND NOT jobStatus=:ngStatus``, and dropping
+#: the negation would report the opposite condition.
+_TERM = re.compile(
+    r"(?:WHERE|AND|OR)\s+((?:NOT\s+)?(?:\w+\.)?([A-Za-z_]\w*)\s*"
+    r"(?:(?:=|<>|!=|<=|>=|<|>)\s*[^\s)]+|(?:NOT\s+)?IN\s*\([^)]*\)|IS\s+(?:NOT\s+)?NULL))",
+    re.IGNORECASE,
+)
+
+
+def _preconditions(clause: str, columns: set[str]) -> dict[str, str]:
+    """Return the terms of *clause* testing a column in *columns*.
+
+    A statement that tests a column it also assigns is doing a compare-and-set,
+    and losing that race is silent: no exception, no log, just a row count the
+    caller discards.  The map has no other way to say that seeing a value
+    *decided* is not the same as seeing the row take it.
+    """
+    found: dict[str, str] = {}
+    lowered = {column.lower(): column for column in columns}
+    for term, column in _TERM.findall(clause):
+        owner = lowered.get(column.lower())
+        if owner is not None and owner not in found:
+            found[owner] = re.sub(r"\s+", " ", term).strip()
     return found
 
 
@@ -432,7 +651,12 @@ def writes(sql: str) -> list[SqlWrite]:
         }
         if columns:
             found.append(
-                SqlWrite(kind="update", table=_table_of(match.group(1)), columns=columns)
+                SqlWrite(
+                    kind="update",
+                    table=_table_of(match.group(1)),
+                    columns=columns,
+                    preconditions=_preconditions(sql[match.end(2) :], set(columns)),
+                )
             )
     for match in _INSERT.finditer(sql):
         names = [c.strip().split(".")[-1] for c in match.group(2).split(",")]
@@ -530,6 +754,71 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
         ]
         found.append((_table_of(match.group(2)), columns))
     return found
+
+
+# The whole FROM list, aliases and all: ``FROM {0}.JEDI_Tasks tabT,
+# {0}.JEDI_AUX_Status_MinTaskID tabA``.
+_FROM_LIST = re.compile(
+    r"\bFROM\s+((?:[\w{}.]+(?:\s+\w+)?\s*,\s*)*[\w{}.]+(?:\s+\w+)?)", re.IGNORECASE
+)
+
+# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself.
+_CTE = re.compile(r"\b(?:WITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+
+
+def joins(sql: str) -> list[str]:
+    """Return the tables *sql* names in a ``FROM`` beyond the first.
+
+    Separate from :func:`reads`, which answers *where the row came from* and so
+    keeps naming the leading table.  This answers a different question -- *what
+    bounds which rows can be seen at all* -- and a join partner is the usual
+    way that bound is written::
+
+        FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA
+        WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID
+
+    A task below ``min_jediTaskID`` is invisible to that query no matter what
+    its status is, so a stale ``JEDI_AUX_Status_MinTaskID`` silently narrows
+    thirty-one functions at once -- which is a real stall this map could not
+    explain, because ``reads`` stopped at the first table and the auxiliary one
+    had never been seen.
+
+    A name the statement defines for itself is not one of these.
+    ``checkDuplication_JEDI`` builds ``WITH tmpTab AS (...)`` and then joins
+    ``tmpTab`` to itself, which is a step in the query rather than a dependency
+    on anything outside it.
+    """
+    defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
+    found: list[str] = []
+    for match in _FROM_LIST.finditer(sql):
+        parts = [part.strip() for part in match.group(1).split(",")]
+        for part in parts[1:]:
+            table = _table_of(part.split()[0]) if part.split() else ""
+            # ``{}`` means the name was interpolated, so the statement does not
+            # say which table this is.
+            if not table or table == "{}" or table.lower() in defined:
+                continue
+            if table not in found:
+                found.append(table)
+    return found
+
+
+def joined_columns(sql: str, table: str) -> list[str]:
+    """Columns of *table* the statement names, found through its alias.
+
+    The alias is how a join predicate refers to a table --
+    ``tabA.min_jediTaskID`` -- so without resolving it the most useful thing
+    about a join, *which column bounds the rows*, cannot be read.
+    """
+    found: dict[str, str] = {}
+    for match in _FROM_LIST.finditer(sql):
+        for part in match.group(1).split(","):
+            words = part.strip().split()
+            if len(words) != 2 or _table_of(words[0]) != table:
+                continue
+            for column in re.finditer(rf"\b{re.escape(words[1])}\.(\w+)", sql):
+                found.setdefault(column.group(1).lower(), column.group(1))
+    return sorted(found.values())
 
 
 def deletes(sql: str) -> list[str]:

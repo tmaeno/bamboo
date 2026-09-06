@@ -235,17 +235,53 @@ async def test_reading_refuses_a_label_outside_the_code_map_namespace():
         await backend.find_map_nodes("Cause", MAP_ID)
 
 
+async def test_what_bounds_a_query_is_asked_of_the_subject():
+    """"Does anything select this value" is only half of "will anything pick it
+    up".  A task sat in ``finishing`` while the query that rescues it ran every
+    cycle, because the table that query joins had stopped being updated."""
+    subject = _subject()
+    subject.selected_values = ["finishing", "pending"]
+    subject.selection_gates = ["JEDI_AUX_Status_MinTaskID"]
+    code_map = await _stored(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, subjects=[subject])
+    )
+
+    assert await code_map.selection_gates_for("JediTaskSpec.status") == [
+        "JEDI_AUX_Status_MinTaskID"
+    ]
+    # A subject the map does not know is not a subject with no gates.
+    assert await code_map.selection_gates_for("JobSpec.jobStatus") == []
+
+
 async def test_which_log_to_read_is_answered_per_writer():
     """The question the map exists for. Package does not decide it -- the same
-    proxy code logs to JEDI's file or the server's depending on who called."""
+    proxy code logs to JEDI's file or the server's depending on who called.
+
+    Two lists, because for the largest group of writers the file that holds the
+    code is not the file that mentions it: the proxy mixins own
+    ``panda-DBProxy.log`` and the knight that called them writes
+    ``set task_status=``.  Merging them would answer both questions with one
+    value and make eleven separable candidates look identical.
+    """
+    knight = _junction("pandajedi/jediorder/JobGenerator.py::runImpl", Branch(outcome="pending"))
+    proxy = _junction(
+        "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::makeTaskPending_JEDI",
+        Branch(outcome="pending"),
+    )
+    proxy.log_files = ["panda-DBProxy.log", "panda-JediDBProxy.log"]
+    proxy.caller_log_files = ["panda-AtlasTaskWithholderWatchDog.log"]
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
         subjects=[_subject()],
-        junctions=[_junction("pandajedi/jediorder/JobGenerator.py::runImpl", Branch(outcome="pending"))],
+        junctions=[knight, proxy],
     )
     code_map = await _stored(fragment)
 
     assert await code_map.log_files_for("JediTaskSpec.status") == {
-        "pandajedi/jediorder/JobGenerator.py::runImpl": ["panda-JobGenerator.log"]
+        knight.owner: {"own": ["panda-JobGenerator.log"], "caller": []},
+        proxy.owner: {
+            "own": ["panda-DBProxy.log", "panda-JediDBProxy.log"],
+            "caller": ["panda-AtlasTaskWithholderWatchDog.log"],
+        },
     }

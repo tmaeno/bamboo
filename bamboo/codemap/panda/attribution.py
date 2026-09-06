@@ -73,6 +73,12 @@ NOT_A_SPEC = "not-a-spec"
 # can never collide with a real one.
 UNRESOLVED_CLASS = "?"
 
+# Subscripted forms whose arguments name the members of a record rather than
+# the type of an element.  ``Callable`` describes a signature and ``Tuple``
+# describes positions, so in neither case is a spec named inside one the class
+# of the annotated object or of anything taken out of it.
+_RECORD_WRAPPERS = frozenset({"Callable", "Tuple", "tuple"})
+
 
 def _unquoted(annotation: ast.expr, depth: int = 0) -> ast.expr:
     """*annotation* with a quoted type expression opened up.
@@ -348,8 +354,28 @@ class SpecAttributor:
         return matches[0] if len(matches) == 1 else None
 
     def class_for_table(self, table: str) -> Optional[str]:
-        """Return the spec class *table* holds, if it was learned."""
-        return self._table_classes.get(table)
+        """Return the spec class *table* holds, if it was learned.
+
+        Matched without regard to case, as :meth:`_only_class_declaring` already
+        matches columns: SQL identifiers are case-insensitive and the corpus
+        uses both spellings of the same table -- ``reassignShare`` loops over
+        ``["jobsactive4", "jobsdefined4"]`` where everything else writes
+        ``jobsActive4``.  Requiring the spelling to agree made those two look
+        like tables holding no spec, which put a ``JobSpec.gshare`` write on a
+        table-qualified subject of its own.
+        """
+        found = self._table_classes.get(table)
+        if found is not None:
+            return found
+        lowered = table.lower()
+        return next(
+            (
+                spec
+                for known, spec in self._table_classes.items()
+                if known.lower() == lowered
+            ),
+            None,
+        )
 
     def _adder_methods(self, modules: list[SourceModule]) -> dict[str, str]:
         """Return ``{method name: attribute}`` for ``self.<attr>.append(<param>)``.
@@ -684,6 +710,20 @@ class SpecAttributor:
         never subscripted or iterated.  Measured at zero such columns today, so
         there is nothing to special-case -- recorded because the next reader
         would otherwise have to rediscover why it is safe.
+
+        **A tuple is a record, not a container**, so the last-argument rule does
+        not apply to it and it is refused rather than descended into.  The
+        corpus has four annotations naming a spec inside one, and taking the
+        last argument answered two of them wrongly::
+
+            failedRet: tuple[bool, JediDatasetSpec | None, JediFileSpec | None]
+
+        ``failedRet`` is a three-tuple; it is not a ``JediFileSpec`` and it does
+        not hold ``JediFileSpec``\\ s.  The spec names describe the *members* of
+        a record, which is the same reason ``Callable`` is refused: the class
+        named is not the class of the annotated thing.  A homogeneous
+        ``tuple[X, ...]`` would be a real container, and there are none, so
+        nothing is built for it.
         """
         annotation = _unquoted(annotation)
         if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
@@ -697,6 +737,8 @@ class SpecAttributor:
             return None
         base = annotation.value
         name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if name in _RECORD_WRAPPERS:
+            return None
         if name == "Optional":
             return self._annotated_element(annotation.slice)
         inner = annotation.slice
@@ -1436,11 +1478,16 @@ def spec_annotation_forms(
     counts what came back for declarations; this counts what came back for
     annotations, so the fifth form reports itself.
 
-    ``Callable`` is excluded wherever it appears.  The spec names inside a
-    callable's signature describe what it takes and returns, not the class of
-    the annotated object, so the reader is right to say nothing and a finding
-    there would be a false one.  No instance exists in the corpus today; it is
-    excluded because its meaning is known, not because it was observed.
+    ``Callable`` and ``Tuple`` are excluded wherever they appear.  Both name
+    the members of a record -- a signature's arguments, a tuple's positions --
+    so a spec inside one is not the class of the annotated object and the
+    reader is right to say nothing; a finding there would be a false one.
+    ``Callable`` was excluded on meaning alone, with no instance in the corpus.
+    ``Tuple`` was not, and the corpus corrected that: this gate reported
+    ``dict[int, list[tuple[JediTaskSpec, str, InputChunk]]]``, and looking at
+    the other three showed the reader answering ``failedRet: tuple[bool,
+    JediDatasetSpec | None, JediFileSpec | None]`` with ``JediFileSpec`` --
+    unread was the honest half, and the two it *had* read were wrong.
     """
     declared = attributor.declared_classes()
     forms: dict[str, str] = {}
@@ -1450,7 +1497,7 @@ def spec_annotation_forms(
                 text = ast.unparse(annotation)
             except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
                 continue
-            if "Callable" in text:
+            if _RECORD_WRAPPERS & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)):
                 continue
             if not declared & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)):
                 continue

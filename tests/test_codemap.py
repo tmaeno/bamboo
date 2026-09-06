@@ -40,6 +40,7 @@ from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
     errorcode,
+    flush,
     logfile,
     progress,
     selection,
@@ -1541,12 +1542,314 @@ def test_an_optional_fragment_does_not_split_the_statement():
     assert "frozenTime=NULL" in texts[0]
 
 
+def test_a_statement_executed_in_three_pieces_is_read_whole():
+    """``execute(sqlU + sql + comment, varMap)`` -- the ``WHERE`` is a name too.
+
+    ``updateTask_JEDI`` and ``updateJobStatus`` both build the ``SET`` half and
+    the ``WHERE`` half under separate names and join them at the call.  Reading
+    only the leftmost operand dropped the statement entirely, taking the
+    ``jobStatus`` write and every predicate with it.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status '\n"
+        "    sqlW = 'WHERE jediTaskID=:jediTaskID AND status IN (:old_1) '\n"
+        "    self.cur.execute(sqlU + sqlW + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    texts = [run.sql for run in sql.executions(func)]
+
+    assert len(texts) == 1
+    assert "SET status=:status" in texts[0]
+    assert "status IN (:old_1)" in texts[0]
+
+
+def test_a_table_the_call_substitutes_is_read_from_the_loop_that_supplies_it():
+    """``execute((sql + comment) % table)`` over a literal tuple of table names.
+
+    ``killJob`` and six others run one statement against ``jobsDefined4`` and
+    ``jobsActive4`` in turn.  The names are written out in the loop, so the
+    statement is two statements on tables the map already resolves to
+    ``JobSpec`` -- and reading it as ``UPDATE %s`` resolves to nothing at all,
+    since the table pattern does not even accept a ``%``.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE %s SET commandToPilot=:commandToPilot WHERE PandaID=:PandaID '\n"
+        "    for table in ('ATLAS_PANDA.jobsDefined4', 'ATLAS_PANDA.jobsActive4'):\n"
+        "        self.cur.execute((sqlU + comment) % table, varMap)\n"
+    )
+    func = _func(source)
+
+    tables = [w.table for run in sql.executions(func) for w in sql.writes(run.sql)]
+
+    assert tables == ["jobsDefined4", "jobsActive4"]
+
+
+def test_an_indexed_placeholder_is_filled_from_the_matching_argument():
+    """``sqlJ.format(tableName)`` -- an f-string never renders ``{0}``."""
+    source = (
+        "def f(self):\n"
+        "    sqlJ = 'UPDATE ATLAS_PANDA.{0} SET currentPriority=:newPriority WHERE x=:x '\n"
+        "    tableName = 'jobsActive4'\n"
+        "    self.cur.execute(sqlJ.format(tableName) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    writes = [w for run in sql.executions(func) for w in sql.writes(run.sql)]
+
+    assert [(w.table, sorted(w.columns)) for w in writes] == [
+        ("jobsActive4", ["currentPriority"])
+    ]
+
+
+def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
+    """``{}`` is ambiguous, and the fragments settle it.
+
+    The map renders an f-string interpolation as ``{}`` too, so a bare brace in
+    reassembled text is either a hole the schema went into or a placeholder the
+    call fills.  Which one is not a guess: if no fragment building the name
+    interpolates, every brace in it is a literal the source wrote.
+    """
+    plain = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.{} SET commandToPilot=:c WHERE PandaID=:P '\n"
+        "    self.cur.execute(sqlU.format('jobsActive4') + comment, varMap)\n"
+    )
+    interpolated = (
+        "def f(self):\n"
+        "    sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status WHERE x=:x '\n"
+        "    self.cur.execute(sqlU.format('jobsActive4') + comment, varMap)\n"
+    )
+
+    assert [w.table for run in sql.executions(_func(plain)) for w in sql.writes(run.sql)] == [
+        "jobsActive4"
+    ]
+    assert [
+        w.table for run in sql.executions(_func(interpolated)) for w in sql.writes(run.sql)
+    ] == ["JEDI_Tasks"]
+
+
+def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
+    """A run-time filler is not guessed at; the statement stays as written."""
+    source = (
+        "def f(self, order_by_policy):\n"
+        "    sqlR = 'UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x '\n"
+        "    self.cur.execute(sqlR.format(order_by_policy) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert [run.sql for run in sql.executions(func)] == [
+        "UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x "
+    ]
+
+
+def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
+    """A run-time operand is a hole, the same as one inside an f-string."""
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status '\n"
+        "    self.cur.execute(sqlU + where_clause(criteria) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    texts = [run.sql for run in sql.executions(func)]
+
+    assert texts == ["UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status {}"]
+
+
+def test_a_write_tested_against_the_column_it_writes_records_the_guard():
+    """``SET status=:status WHERE ... AND status IN (...)`` is a compare-and-set.
+
+    Whoever else moved the row first wins, and this write changes no rows and
+    says nothing -- so seeing the value decided in a log does not prove the row
+    took it.  Predicates on columns the statement does *not* write are row
+    identity, not a race, and are left out.
+    """
+    text = (
+        "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,frozenTime=NULL "
+        "WHERE jediTaskID=:jediTaskID AND status IN (:old_1,:old_2) "
+    )
+
+    statement = sql.writes(text)[0]
+
+    assert statement.preconditions == {"status": "status IN (:old_1,:old_2)"}
+
+
+def test_a_negated_guard_on_a_written_column_counts():
+    """``NOT jobStatus=:ngStatus`` in ``updateJobStatus`` is the same race."""
+    text = (
+        "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus "
+        "WHERE PandaID=:PandaID AND NOT jobStatus=:ngStatus "
+    )
+
+    statement = sql.writes(text)[0]
+
+    assert statement.preconditions == {"jobStatus": "NOT jobStatus=:ngStatus"}
+
+
+def test_a_write_nothing_races_for_records_no_guard():
+    """An unguarded write lands whatever the row currently says."""
+    text = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+
+    assert sql.writes(text)[0].preconditions == {}
+
+
+def test_the_branch_carries_the_row_the_write_needed():
+    """The guard reaches the branch, where prune reads it."""
+    source = '''
+class TaskModule:
+    def finishTask(self, jediTaskID):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status,oldStatus=:oldStatus "
+        sqlU += "WHERE jediTaskID=:jediTaskID AND status=:priorStatus "
+        varMap = {}
+        varMap[":status"] = "finished"
+        self.cur.execute(sqlU + comment, varMap)
+'''
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert [b.outcome for b in status[0].branches] == ["finished"]
+    assert status[0].branches[0].row_precondition == ["status=:priorStatus"]
+
+
+# ---------------------------------------------------------------------------
+# The write that happens somewhere other than where the value was decided
+# ---------------------------------------------------------------------------
+
+_FLUSH_PROXY = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus=None):
+        taskSpec.resetChangedAttr("jediTaskID")
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE jediTaskID=:cr_jediTaskID AND "
+        if oldStatus is not None:
+            sql += "status IN (:old_1) AND "
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+
+
+def _flush(caller: str, rel: str = "pandajedi/jediorder/Knight.py"):
+    """Run the attribute slice over *caller*, then annotate it from the proxy."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(caller, rel),
+    ]
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    flush.attach(junctions, modules, attributor)
+    return [j for j in junctions if j.owner.startswith(rel)]
+
+
+def test_the_proxy_flush_is_recognised_by_the_expression_it_builds():
+    """``SET {spec.bindUpdateChangesExpression()}`` is the method saying it flushes."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_self_attributes(modules)
+
+    found = flush.flush_methods(modules, attributor)
+
+    assert set(found) == {"updateTask_JEDI"}
+    assert found["updateTask_JEDI"].spec_classes == frozenset({"JediTaskSpec"})
+    assert found["updateTask_JEDI"].excluded == frozenset({"jediTaskID"})
+    assert found["updateTask_JEDI"].guards["status"] == (
+        "status IN (:old_1)",
+        frozenset({"oldStatus"}),
+    )
+
+
+def test_a_caller_that_asks_for_the_guard_is_told_its_write_races():
+    """``oldStatus=`` is the caller opting into the compare-and-set."""
+    caller = '''
+class TaskRefiner:
+    def runImpl(self, taskSpec: JediTaskSpec, taskStatus):
+        taskSpec.status = "tobroken"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=[taskStatus])
+'''
+    status = [j for j in _flush(caller) if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert status[0].branches[0].row_precondition == ["status IN (:old_1)"]
+
+
+def test_a_caller_that_does_not_is_not():
+    """The fragment is appended under ``if oldStatus is not None``.
+
+    Reading the flush without that condition would tell ten of
+    ``updateTask_JEDI``'s callers their write races when it does not -- and an
+    invented caveat is the damaging direction, because it weakens exactly the
+    candidates production confirmed.
+    """
+    caller = '''
+class PostProcessor:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finished"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1})
+'''
+    status = [j for j in _flush(caller) if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert status[0].branches[0].row_precondition == []
+
+
+def test_a_column_the_flush_takes_back_out_is_not_one_it_writes():
+    """``resetChangedAttr("jediTaskID")`` says the ``WHERE`` is row identity.
+
+    Without it the guard identifying the row would read as a race, because
+    ``jediTaskID`` is as much a declared column as ``status`` is.
+    """
+    caller = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.jediTaskID = 1
+        taskSpec.status = "finished"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=["running"])
+'''
+    guards = {
+        j.subject: sorted({g for b in j.branches for g in b.row_precondition})
+        for j in _flush(caller)
+    }
+
+    assert guards["JediTaskSpec.status"] == ["status IN (:old_1)"]
+    assert guards.get("JediTaskSpec.jediTaskID", []) == []
+
+
 def test_table_class_is_inferred_from_the_column_names():
     """Nothing declares which spec a table holds; the columns give it away."""
     _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)
 
     assert conflicts == {}
     assert attributor.class_for_table("JEDI_Tasks") == "JediTaskSpec"
+
+
+def test_a_table_named_in_another_case_is_the_same_table():
+    """SQL identifiers are case-insensitive, and the corpus uses both spellings.
+
+    ``reassignShare`` runs its update over ``["jobsactive4", "jobsdefined4"]``
+    while every other statement writes ``jobsActive4``.  Matching the spelling
+    exactly made those two look like tables holding no spec, which put the
+    ``gshare`` write on a table-qualified subject instead of ``JobSpec``.
+    """
+    _s, _j, _c, _u, _conf, attributor = _sql_extract(_SQL_SOURCE)
+
+    assert attributor.class_for_table("jedi_tasks") == "JediTaskSpec"
+    assert attributor.class_for_table("JEDI_TASKS") == "JediTaskSpec"
+    assert attributor.class_for_table("no_such_table") is None
 
 
 def test_the_statement_can_name_the_class_outright():
@@ -2133,6 +2436,44 @@ def test_a_local_holding_the_mapping_resolves_too():
     assert settle(written.value, func) == ["aborting", "finishing", "paused"]
 
 
+def test_a_loop_over_the_mapping_reaches_the_same_values():
+    """The read side spells it the other way, and only the read side matters
+    for "will anything pick this task up".
+
+    ``for commandStr, taskStatusMap in commandStatusMap.items()`` binds one
+    entry per turn, so ``taskStatusMap["doing"]`` is the same set of statuses
+    ``commandStatusMap[commandStr]["doing"]`` gives.  Reading only the
+    subscript is why every command-in-progress status looked like a value no
+    query asks for -- a state a task enters and never leaves.
+    """
+    mappings = _mappings(_COMMAND_MAP)
+    func = _func(
+        "def f(self):\n"
+        "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "        varMap[':status'] = taskStatusMap['doing']\n"
+    )
+    settle = values.resolver(mappings)
+    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    assert settle(bound.value, func) == ["aborting", "finishing", "paused"]
+
+
+def test_the_key_half_of_the_loop_is_not_a_value():
+    """Binding it would enumerate command names as if they were statuses."""
+    mappings = _mappings(_COMMAND_MAP)
+    func = _func(
+        "def f(self):\n"
+        "    commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "    for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "        varMap[':status'] = commandStr['doing']\n"
+    )
+    settle = values.resolver(mappings)
+    bound = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    assert settle(bound.value, func) == []
+
+
 def test_a_mapping_with_one_computed_entry_resolves_to_nothing():
     """Elimination treats a short candidate list as complete, so a value set
     missing a member is worse than no value set: the caller then records an
@@ -2697,6 +3038,111 @@ def test_a_shared_table_is_not_reported_as_unlogged():
     )
 
     assert gates.unobservable_boundaries(fragment) == []
+
+
+# --------------------------------------------------------------------------- #
+# what bounds a query's reach
+# --------------------------------------------------------------------------- #
+#
+# A row can be missed for a reason no predicate mentions.  One was: a task sat
+# in ``finishing`` while the query that rescues orphaned commands ran every
+# cycle, because the auxiliary table it joins had stopped being updated and its
+# watermark had risen above the task's id.
+
+_ORPHAN_RESCUE = """
+class TaskModule:
+    def getTasksToExecCommand_JEDI(self, vo):
+        sqlOrpS = "SELECT jediTaskID,errorDialog "
+        sqlOrpS += "FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA "
+        sqlOrpS += "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID "
+        sqlOrpS += "AND tabT.status=:status "
+        self.cur.execute(sqlOrpS + comment, varMap)
+        sqlOrpU = "UPDATE {0}.JEDI_Tasks SET oldStatus=:oldStatus "
+        sqlOrpU += "WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlOrpU + comment, varMap)
+"""
+
+
+def test_the_second_table_in_a_from_list_is_read():
+    """Stopping at the first hid a table joined by thirty-one functions.
+
+    ``reads`` answers where the row came from and rightly names the leading
+    table; what bounds which rows can be seen is a different question, and the
+    join partner is where the answer is written.
+    """
+    statement = (
+        "SELECT jediTaskID FROM {0}.JEDI_Tasks tabT,{0}.JEDI_AUX_Status_MinTaskID tabA "
+        "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID"
+    )
+
+    assert [table for table, _c in sql.reads(statement)] == ["JEDI_Tasks"]
+    assert sql.joins(statement) == ["JEDI_AUX_Status_MinTaskID"]
+    assert sql.joined_columns(statement, "JEDI_AUX_Status_MinTaskID") == [
+        "min_jediTaskID",
+        "status",
+    ]
+
+
+def test_a_name_the_statement_defines_for_itself_is_not_a_join_partner():
+    """``checkDuplication_JEDI`` joins its own ``WITH`` block to itself, which
+    is a step in the query rather than a dependency on anything outside it."""
+    statement = (
+        "WITH tmpTab AS (SELECT PandaID FROM {}.filesTable4) "
+        "SELECT a.PandaID FROM tmpTab a,tmpTab b WHERE a.PandaID=b.PandaID"
+    )
+
+    assert sql.joins(statement) == []
+
+
+def test_only_a_table_nothing_here_writes_is_a_gate():
+    """A join to a table the corpus maintains is a step in a query; a join to
+    one it only ever reads is a dependency that can go stale unaccounted for."""
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    never_written = boundary.tables_never_written(modules)
+
+    assert "JEDI_AUX_Status_MinTaskID" in never_written
+    assert "JEDI_Tasks" not in never_written
+
+    found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
+
+    assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
+
+
+def test_a_table_that_bounds_a_query_and_nothing_writes_is_a_boundary():
+    """A complete answer -- the value comes from outside -- and a work item.
+
+    Found from the read side rather than the schema qualifier, which is why it
+    reaches a table sitting in JEDI's own schema.
+    """
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    found = boundary.extract_selection_gates(
+        modules, MAP_ID, VERSION, boundary.tables_never_written(modules), set()
+    )
+
+    assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
+    assert found[0].system == boundary.UNRESOLVED_SYSTEM
+    assert found[0].transport == "shared_table"
+    # Read-only is the finding, not a gap in the reading.
+    assert found[0].operations == ["SELECT"]
+    assert found[0].handed_over == []
+    assert found[0].carried_values == ["min_jediTaskID", "status"]
+
+
+def test_a_table_the_schema_recognizer_already_named_is_not_repeated():
+    """One crossing, found two ways, must not become two boundaries."""
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    found = boundary.extract_selection_gates(
+        modules,
+        MAP_ID,
+        VERSION,
+        boundary.tables_never_written(modules),
+        {"JEDI_AUX_Status_MinTaskID"},
+    )
+
+    assert found == []
 
 
 # --------------------------------------------------------------------------- #
@@ -3538,6 +3984,28 @@ def test_the_legibility_census_leaves_out_what_the_reader_never_reads():
     assert forms == {"pandaserver/dataservice/adder_gen.py:8": "JediFileSpec"}
 
 
+def test_a_tuple_is_a_record_and_states_no_element_type():
+    """The gate reported one of these and the other three were worse.
+
+    ``failedRet`` is a three-tuple: it is not a ``JediFileSpec`` and it does
+    not hold ``JediFileSpec``\\ s, but the last-argument rule said it was one.
+    The unread annotation was the honest half; the two the reader *had* read
+    were wrong, which no gate would have said.
+    """
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+
+    def element_of(text: str):
+        return attributor.element_annotation(ast.parse(text, mode="eval").body)
+
+    assert element_of("tuple[bool, JediDatasetSpec | None, JediFileSpec | None]") is None
+    assert element_of("dict[int, list[tuple[JediFileSpec, str]]]") is None
+    # A genuine container still reads, so this refuses a shape rather than a name.
+    assert element_of("list[JediFileSpec]") == "JediFileSpec"
+
+
 def test_a_yield_annotation_that_changes_no_write_is_a_finding():
     """A context manager's yield type is audited the same way, and has to be.
 
@@ -4043,6 +4511,64 @@ def test_a_where_clause_says_which_values_something_acts_on():
     assert selected["JEDI_Tasks.vo"] == {"atlas", "test"}
 
 
+def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
+    """The read side settles a bind the way the write side already did.
+
+    ``varMap[":status"] = taskStatusMap["doing"]`` is the orphan-rescue query.
+    Taking only literals here left every status a command passes through
+    looking like a value no query asks for -- a state a task enters and never
+    leaves -- while the write side resolved the same mapping through the other
+    spelling.  One map, two slices, one fact, two answers.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def rescue(self):\n"
+        "        sqlT = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+        "        self.cur.execute(sqlT + comment, varMap)\n"
+        "        commandStatusMap = JediTaskSpec.commandStatusMap()\n"
+        "        for commandStr, taskStatusMap in commandStatusMap.items():\n"
+        "            varMap = {}\n"
+        "            varMap[':status'] = taskStatusMap['doing']\n"
+        "            sqlO = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "            sqlO += 'WHERE status=:status '\n"
+        "            self.cur.execute(sqlO + comment, varMap)\n"
+    )
+    modules = [
+        _module(_COMMAND_MAP, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    selected = sqlwrite.selected_values(modules, attributor)
+
+    assert selected["JediTaskSpec.status"] == {"aborting", "finishing", "paused"}
+
+
+def test_a_subject_carries_what_bounds_the_queries_that_select_it():
+    """A status the map says is selected is half an answer without this.
+
+    The task really was in a status the query asks for; it was outside what the
+    query could see, because the table it joins had stopped being updated.
+    """
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    gated = sqlwrite.selection_gates(
+        modules, attributor, boundary.tables_never_written(modules)
+    )
+
+    assert gated["JediTaskSpec.status"] == {"JEDI_AUX_Status_MinTaskID"}
+
+
 def test_a_statement_built_with_str_format_is_read():
     """62 statements still use ``.format`` rather than an f-string.
 
@@ -4145,6 +4671,198 @@ def test_the_inheritance_walk_does_not_stop_at_one_link():
     inherited = logfile.inherited_files(modules, logfile.declared_files(modules))
 
     assert inherited["p/mixin.py"] == ["panda-Leaf.log", "panda-Mid.log"]
+
+
+# ---------------------------------------------------------------------------
+# Whose log says it ran -- a different question from what starts it
+# ---------------------------------------------------------------------------
+
+
+def _log_attach(*sources: tuple[str, str], junctions):
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=list(junctions))
+    logfile.attach(fragment, [_module(text, rel) for text, rel in sources])
+    return fragment
+
+
+PROXY_METHOD = """
+class TaskModule:
+    def makeTaskPending_JEDI(self, task_id):
+        self.cur.execute(sql, varMap)
+"""
+
+KNIGHT = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class Knight:
+    def start(self):
+        while True:
+            self.taskBufferIF.makeTaskPending_JEDI(task_id)
+            time.sleep(60)
+"""
+
+
+def test_a_writer_with_no_logger_of_its_own_takes_its_callers():
+    """The proxy mixins hold the code; the knights write the line about it.
+
+    ``set task_status=`` is in ContentsFeeder, JobGenerator, PostProcessor and
+    TaskRefiner and in neither proxy file, so reporting only the owner's file
+    sends the query somewhere that never answers.
+    """
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (KNIGHT, "pandajedi/jediorder/Knight.py"),
+        junctions=[junction],
+    )
+
+    assert fragment.junctions[0].log_files == []
+    assert fragment.junctions[0].caller_log_files == ["panda-Knight.log"]
+
+
+def test_whether_a_junctions_own_files_are_its_own_is_recorded():
+    """An inherited file is not a place a line about this junction can appear.
+
+    Both of these are true of a proxy method: the SQL comment trace really does
+    land in ``panda-DBProxy.log``, and ``set task_status=`` never does, because
+    the caller writes it.  Without the distinction a reader asking the inherited
+    file gets an empty answer it cannot interpret -- and reading it as "the
+    junction did not fire" rules out every proxy candidate at once.
+    """
+    proxy = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+    knight = _junction("pandajedi/jediorder/Knight.py::start")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (KNIGHT, "pandajedi/jediorder/Knight.py"),
+        junctions=[proxy, knight],
+    )
+    owns = {j.owner.split("::")[-1]: j.owns_logger for j in fragment.junctions}
+
+    assert owns == {"makeTaskPending_JEDI": False, "start": True}
+
+
+def test_a_caller_that_starts_nothing_still_names_a_log():
+    """The two questions come apart here, which is the whole point.
+
+    ``event_picker`` is driven by a daemon script rather than a loop of its
+    own, so it carries no trigger -- and it is still the only thing that calls
+    ``updateTaskModTimeJEDI`` and the only file that would mention it.
+    """
+    picker = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class EventPicker:
+    def run(self):
+        self.task_buffer.makeTaskPending_JEDI(task_id)
+"""
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (picker, "pandaserver/dataservice/event_picker.py"),
+        junctions=[junction],
+    )
+
+    assert fragment.junctions[0].caller_log_files == ["panda-event_picker.log"]
+    # ...and nothing starts it, which stays a separate and still-true answer.
+    assert fragment.junctions[0].entry_points == []
+
+
+def test_the_facade_forwarding_a_call_is_not_a_caller():
+    """``JediTaskBuffer`` declares a logger and logs twice, both in __init__.
+
+    Naming its file would send every proxy query to something that never says
+    anything, and an empty answer there reads as "this code never ran".  It sat
+    on 71 junctions before the borrowed-proxy receiver was excluded.
+    """
+    facade = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class JediTaskBuffer:
+    def makeTaskPending_JEDI(self, task_id):
+        with self.proxyPool.get() as proxy:
+            return proxy.makeTaskPending_JEDI(task_id)
+
+    def checkWaitingTaskPrio_JEDI(self, task_id):
+        with self.proxyPool.get() as proxy:
+            return proxy.makeTaskPending_JEDI(task_id)
+"""
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::makeTaskPending_JEDI")
+
+    fragment = _log_attach(
+        (PROXY_METHOD, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        (facade, "pandajedi/jedicore/JediTaskBuffer.py"),
+        junctions=[junction],
+    )
+
+    # Both spellings are refused: the one that forwards under the same name and
+    # the one that forwards under a different one.
+    assert fragment.junctions[0].caller_log_files == []
+
+
+def test_a_call_sharing_the_enclosing_functions_name_is_still_a_call():
+    """``datasetManager.run`` builds a ``Closer`` and calls ``closer.run()``.
+
+    Keying the facade rule on the name rather than the receiver discarded that
+    edge and three others, taking ``closer`` and ``finisher`` off the daemon
+    cycle entirely.  The receiver is what makes a handoff a handoff.
+    """
+    closer = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class Closer:
+    def run(self):
+        self.taskBufferIF.makeTaskPending_JEDI(task_id)
+"""
+    manager = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+def run():
+    closer_process = Closer(taskBuffer, blocks, job)
+    closer_process.run()
+"""
+    junction = _junction("pandaserver/dataservice/closer.py::run")
+
+    fragment = _log_attach(
+        (closer, "pandaserver/dataservice/closer.py"),
+        (manager, "pandaserver/daemons/scripts/datasetManager.py"),
+        junctions=[junction],
+    )
+
+    assert "panda-datasetManager.log" in fragment.junctions[0].caller_log_files
+
+
+def test_a_caller_log_the_owner_already_names_is_not_repeated():
+    """The lists answer different questions; saying the same file twice would
+    make one of them look like corroboration it is not."""
+    owner = """
+logger = PandaLogger().getLogger("shared")
+
+
+class Owner:
+    def writes(self):
+        pass
+"""
+    caller = """
+logger = PandaLogger().getLogger("shared")
+
+
+class Caller:
+    def go(self):
+        self.other.writes()
+"""
+    junction = _junction("p/owner.py::writes")
+
+    fragment = _log_attach((owner, "p/owner.py"), (caller, "p/caller.py"), junctions=[junction])
+
+    assert fragment.junctions[0].log_files == ["panda-shared.log"]
+    assert fragment.junctions[0].caller_log_files == []
 
 
 # ---------------------------------------------------------------------------
@@ -4483,6 +5201,58 @@ def test_an_inconclusive_row_leads_with_its_reason():
     rows = gates.observables_are_emitted(fragment, _evidence(_missing())).inconclusive
 
     assert all(not row.startswith("-") for row in rows)
+
+
+def test_an_absent_caller_log_does_not_strand_a_junction_another_caller_reaches():
+    """The trap in checking caller files, and it is easy to fall into.
+
+    ``kickExhaustedTasks_JEDI`` is defined in ``TypicalWatchDogBase``, so every
+    ``Atlas*WatchDog`` inherits it.  ``panda-GenWatchDog.log`` is on no machine
+    and ``panda-AtlasProdWatchDog.log`` exists, so the component is not running
+    and the junction is reached anyway.  Reading the first as "this junction
+    never runs" would report a live code path as dead.
+    """
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::kickExhaustedTasks_JEDI",
+        caller_log_files=["panda-GenWatchDog.log", BROKER_LOG],
+        owns_logger=False,
+    )
+    ev = _evidence(
+        _missing("panda-GenWatchDog.log"),
+        _sample([_log_line("INFO", "a")], BROKER_LOG),
+    )
+
+    result = gates.code_paths_are_live(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]), ev
+    )
+
+    assert not result.passed  # the component really is absent
+    assert "reached through a log that does exist" in result.failures[0]
+    assert "never run here" not in result.failures[0]
+
+
+def test_a_junction_whose_every_log_is_absent_is_reported_as_dead():
+    """The other half: with no surviving file the node really is unreachable."""
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::onlyHere_JEDI",
+        caller_log_files=["panda-GenWatchDog.log"],
+        owns_logger=False,
+    )
+
+    result = gates.code_paths_are_live(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]),
+        _evidence(_missing("panda-GenWatchDog.log")),
+    )
+
+    assert "0 stage(s), 1 junction(s) of the map never run here" in result.failures[0]
 
 
 def test_code_paths_are_live_passes_when_every_file_is_there():
@@ -5783,6 +6553,40 @@ def test_not_concluded_collapses_to_one_line_per_gate(capsys):
 
     assert "not concluded (7)" in out
     assert "… 6 more (--full)" in out
+
+
+def test_the_files_asked_include_the_ones_only_a_caller_names():
+    """Otherwise a junction reached only through a caller is never checked.
+
+    Reading ``log_files`` alone left 66 of 495 junctions with a named log that
+    production was never asked about -- and the gate that loses most by it is
+    ``code-paths-are-live``, since a file no machine has is the one negative
+    production can prove and it cannot be proved about a file nobody asked for.
+    """
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::updateTaskModTimeJEDI",
+        log_files=["panda-DBProxy.log"],
+        caller_log_files=["panda-event_picker.log"],
+        owns_logger=False,
+    )
+    declared = {
+        "pandaserver/taskbuffer/OraDBProxy.py": "panda-DBProxy.log",
+        "pandaserver/dataservice/event_picker.py": "panda-event_picker.log",
+        "pandajedi/jediorder/ContentsFeeder.py": "panda-ContentsFeeder.log",
+    }
+
+    targets = check_map._targets(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]), declared
+    )
+
+    assert targets == {
+        "panda-DBProxy.log": evidence.SERVER,
+        "panda-event_picker.log": evidence.SERVER,
+    }
 
 
 def test_evidence_age_and_bound_sizes_are_readable():

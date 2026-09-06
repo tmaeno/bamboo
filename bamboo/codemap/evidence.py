@@ -154,6 +154,20 @@ _LEVEL_IN_LINE = re.compile(rf": ({_LEVEL_ALTERNATION})\s")
 _SEVERITY = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
 
+def missing_file(result: "GrepResult") -> bool:
+    """Whether this machine's answer is "the log file is not here".
+
+    Its own predicate because two readers want it and they want opposite things
+    from it.  For a file every machine reports missing, the absence is the
+    strongest statement production makes -- PandaLogger creates the file on the
+    logger's first emit, so no file means that code has never run here.  For one
+    machine out of a service that was asked speculatively, it is not an answer
+    at all and has to be dropped before the rest are read, or a query that was
+    always going to miss on one group would make every group inconclusive.
+    """
+    return result.error is not None and bool(_MISSING_FILE.search(result.error))
+
+
 class GrepQuery(BaseModel):
     """One question put to one service's logs, bounded on both axes.
 
@@ -341,7 +355,7 @@ class Evidence(BaseModel):
             return "unknown"
         if any(r.error is None for r in results):
             return "present"
-        if all(r.error and _MISSING_FILE.search(r.error) for r in results):
+        if all(missing_file(r) for r in results):
             return "absent"
         return "unknown"
 

@@ -112,6 +112,57 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             for subject, source in outside[:top]:
                 click.echo(f"    {subject} <- {source}")
 
+        gated = sorted(
+            {gate for subject in fragment.subjects for gate in subject.selection_gates}
+        )
+        if gated:
+            # The same shape as the line above, on the read side: a query's
+            # reach depends on a table nothing here keeps current, so a row
+            # can be missed for a reason no branch condition mentions.
+            click.echo(f"  queries bounded by a table nothing here writes ({len(gated)}):")
+            for table in gated[:top]:
+                users = sorted(
+                    s.name for s in fragment.subjects if table in s.selection_gates
+                )
+                click.echo(f"    {table:<34} gates {len(users)} subject(s)")
+
+        raced = sorted(
+            {
+                junction.subject
+                for junction in fragment.junctions
+                for branch in junction.branches
+                if branch.row_precondition
+            }
+        )
+        if raced:
+            # Neither a defect nor a gate: a compare-and-set is how PanDA keeps
+            # two knights off one row.  Shown because losing that race is the
+            # one failure the code announces and the row does not take, so a
+            # log line saying the value was set is not proof that it was.
+            writes = sum(
+                1
+                for junction in fragment.junctions
+                for branch in junction.branches
+                if branch.row_precondition
+            )
+            click.echo(
+                f"  writes conditional on the row's own prior value "
+                f"({writes} branch(es) over {len(raced)} subject(s)):"
+            )
+            for subject in raced[:top]:
+                guards = sorted(
+                    {
+                        guard
+                        for junction in fragment.junctions
+                        if junction.subject == subject
+                        for branch in junction.branches
+                        for guard in branch.row_precondition
+                    }
+                )
+                click.echo(f"    {subject:<34} {', '.join(guards[:3])}")
+            if len(raced) > top:
+                click.echo(f"    … {len(raced) - top} more")
+
         drift = gates.outcomes_outside_declared_subsets(fragment)
         if drift:
             # Not a gate: the declared lists are purpose-built subsets, so an
@@ -244,6 +295,26 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         + ", ".join(f"{k}={v}" for k, v in kinds.most_common())
         + ")"
     )
+
+    # Where to look, which is a different question from what starts it: the
+    # proxy mixins declare no logger and the knights that call them do.
+    own = [j for j in fragment.junctions if j.log_files]
+    borrowed = [j for j in fragment.junctions if not j.log_files and j.caller_log_files]
+    silent = [j for j in fragment.junctions if not j.log_files and not j.caller_log_files]
+    click.echo(
+        f"log files: {len(own)} junction(s) from their own logger, "
+        f"{len(borrowed)} from a caller's, {len(silent)} from neither"
+    )
+    if silent:
+        # Not a defect: a base class logging through a caller's MsgWrapper has
+        # no file to name.  Listed because an unnamed file is an observation
+        # the map cannot offer, and that has to be visible rather than implied.
+        by_module = Counter(j.owner.split("::")[0] for j in silent)
+        click.echo("  no log file named by the source:")
+        for module, count in by_module.most_common(top):
+            click.echo(f"    {module:<58} {count} junction(s)")
+        if len(by_module) > top:
+            click.echo(f"    … {len(by_module) - top} more module(s)")
 
     fragile = trigger.fragile_subjects(fragment.junctions)
     if fragile:

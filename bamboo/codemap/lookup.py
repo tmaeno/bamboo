@@ -178,6 +178,25 @@ class CodeMap:
             if any(b.outcome == outcome or b.tier == 2 for b in junction.branches)
         ]
 
+    async def selection_gates_for(self, subject: str) -> list[str]:
+        """Tables that bound which rows the queries selecting *subject* can see.
+
+        The second half of "will anything pick this up".  ``selected_values``
+        answers whether a query asks for the observed value; this answers
+        whether the row is inside what that query can reach at all, and a task
+        can fail the second while passing the first.  One did: it sat in
+        ``finishing`` while the query that rescues orphaned commands ran every
+        cycle, because ``JEDI_AUX_Status_MinTaskID`` had stopped being updated
+        and its watermark had risen above the task's id.
+
+        Every table named here is one nothing in the map writes, so its
+        freshness is not something any branch condition can account for --
+        an unbound boundary, and the first thing to check when a query that
+        should have matched did not.
+        """
+        found = await self.subject(subject)
+        return list(found.selection_gates) if found else []
+
     async def carried_from(self, subject: str) -> dict[str, list[JunctionNode]]:
         """Where *subject*'s value is copied from, one hop back.
 
@@ -226,14 +245,23 @@ class CodeMap:
         """
         return await self._find(FilterStageNode, criteria_tag=tag)
 
-    async def log_files_for(self, subject: str) -> dict[str, list[str]]:
+    async def log_files_for(self, subject: str) -> dict[str, dict[str, list[str]]]:
         """Which log to read for each writer of *subject*.
 
         The question the whole design is pointed at.  It cannot be answered from
         the package a junction lives in: JEDI opens its own TaskBuffer, so a
         ``db_proxy_mods`` write runs inside the JEDI process and lands in JEDI's
         log, while the same package's ``api/v1`` code lands in the server's.
-        An empty list means the module declares no logger and its output goes to
-        a caller's file the source does not name -- reported, not guessed.
+
+        Two lists per writer, ``own`` and ``caller``, kept apart because they
+        answer different questions and a caller often gives the better answer.
+        Eleven of the eighteen junctions that can write ``pending`` are proxy
+        methods whose ``own`` list is the same two files, which makes them look
+        indistinguishable; their callers name nine different logs, and it is the
+        caller that writes ``set task_status=`` in production.  Both empty means
+        nothing in the source names a file -- reported, not guessed.
         """
-        return {j.owner: list(j.log_files) for j in await self.writers_of(subject)}
+        return {
+            j.owner: {"own": list(j.log_files), "caller": list(j.caller_log_files)}
+            for j in await self.writers_of(subject)
+        }

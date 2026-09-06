@@ -936,23 +936,71 @@ def code_paths_are_live(fragment: MapFragment, ev: "evidence.Evidence") -> GateR
     and the source is right about the code existing; what this adds is that
     the deployment does not exercise it, which an investigation needs to know
     before it starts looking for lines that will never be there.
+
+    **A caller's missing file does not strand the node that names it.**  Both
+    kinds of file are checked -- for the largest group of junctions the module
+    holding the code is not the one that logs about it, so reading only
+    ``log_files`` left a third of the deployment's absent components unable to
+    be reported at all.  But the two support different claims.
+    ``panda-GenWatchDog.log`` is on no machine, and every junction reached
+    through it is *also* reached through ``panda-AtlasProdWatchDog.log``, which
+    exists: ``kickExhaustedTasks_JEDI`` lives in ``TypicalWatchDogBase`` and
+    every ``Atlas*WatchDog`` inherits it.  So the absence says that component
+    does not run here, and says nothing about the junction.  Only a node whose
+    every file is gone can be called dead, and the two are counted apart.
     """
-    counts: dict[str, Counter] = {}
-    for kind, nodes in (("stage", fragment.filter_stages), ("junction", fragment.junctions)):
-        for node in nodes:
-            for filename in node.log_files:
-                counts.setdefault(filename, Counter())[kind] += 1
+    named: dict[str, Counter] = {}
+    reachable: list[tuple[str, list[str]]] = []
+    for stage in fragment.filter_stages:
+        reachable.append(("stage", list(stage.log_files)))
+    for junction in fragment.junctions:
+        # Its own file counts here only where its module declares the logger.
+        # A proxy method inherits ``panda-DBProxy.log``, and crediting it with
+        # that file's liveness would say a junction runs because the class that
+        # mixes it in does -- which is how ``insertUpdateTaskParams_JEDI``, whose
+        # only caller's log is on no machine, looked alive.
+        reachable.append(("junction", junction.observable_log_files()))
+    for kind, files in reachable:
+        for filename in files:
+            named.setdefault(filename, Counter())[kind] += 1
+    # Still asked about, even where nothing is claimed from their absence: an
+    # inherited file is where the SQL trace lands, so its status is a fact.
+    for junction in fragment.junctions:
+        for filename in junction.log_files:
+            named.setdefault(filename, Counter())
+    verdicts = {filename: ev.file_status(filename) for filename in sorted(named)}
+    absent = {filename for filename, status in verdicts.items() if status == "absent"}
+    # A node with no surviving file at all.  Counted per file so the line can
+    # say which one, but the test is over the node's whole set.
+    stranded: dict[str, Counter] = {}
+    for kind, files in reachable:
+        if files and all(filename in absent for filename in files):
+            for filename in files:
+                stranded.setdefault(filename, Counter())[kind] += 1
     # Reported as how much of the map goes with the file, because that is the
     # consequence: these are the nodes a strategy must not send an investigation
     # to.  The module is not named -- the filename comes from the logger, which
     # comes from the module, so it would be the same word twice.
-    verdicts = {filename: ev.file_status(filename) for filename in sorted(counts)}
-    failures = [
-        f"{filename} is on no machine: {counts[filename]['stage']} stage(s), "
-        f"{counts[filename]['junction']} junction(s) of the map never run here"
-        for filename, status in verdicts.items()
-        if status == "absent"
-    ]
+    failures = []
+    for filename in sorted(absent):
+        dead = stranded.get(filename, Counter())
+        depends = sum(named[filename].values())
+        if dead:
+            failures.append(
+                f"{filename} is on no machine: {dead['stage']} stage(s), "
+                f"{dead['junction']} junction(s) of the map never run here"
+            )
+        elif depends:
+            failures.append(
+                f"{filename} is on no machine: that component does not run here, but "
+                f"the {depends} node(s) it would show are reached through a log that does exist"
+            )
+        else:
+            failures.append(
+                f"{filename} is on no machine: that component does not run here, and no "
+                "node of the map depends on it -- it is inherited rather than where any "
+                "node's own line appears"
+            )
     # Only the files the evidence answered.  Counting every file the map names
     # would put the ones nobody asked about in the denominator, which makes the
     # corroboration below read weaker than the evidence actually is -- and the
