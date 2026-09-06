@@ -397,6 +397,13 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     return found
 
 
+def _concatenated(node: ast.expr) -> list[ast.expr]:
+    """Flatten a chain of ``+`` into its operands, left to right."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _concatenated(node.left) + _concatenated(node.right)
+    return [node]
+
+
 def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     """Return one :class:`Execution` per cursor execution in *func*.
 
@@ -404,6 +411,20 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     -- every statement in the function against every bind in the function --
     would attach a task's status write to a dataset's statement whenever both
     appear in one method, which in ``db_proxy_mods`` is most of them.
+
+    **The statement can arrive in more than two pieces.**  Reading only the
+    operand to the left of the comment is right for ``execute(sqlU + comment)``
+    and wrong for ``execute(sqlU + sql + comment)``, where the second name holds
+    the ``WHERE`` clause -- and it did not merely truncate those statements, it
+    dropped them, because the left operand was itself an addition rather than a
+    name.  That cost the ``jobStatus`` write in ``updateJobStatus`` and the
+    whole of ``updateTask_JEDI``, silently: a statement that is never read
+    leaves nothing behind for a graph invariant to catch.
+
+    An operand that says nothing about its own text becomes ``{}``, the same
+    hole an f-string interpolation leaves, rather than sinking the statement.
+    The head is still required to be a readable name: it is what the statement
+    *is*, and without it there is no anchor to hang the execution on.
     """
     found: list[Execution] = []
     for node in ast.walk(func):
@@ -412,14 +433,46 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         if node.func.attr not in {"execute", "executemany"} or len(node.args) < 2:
             continue
         # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
-        # appended at the call, so the statement is the left operand.
+        # appended at the call, so the statement is everything to its left.
         expression = node.args[0]
-        base = expression.left if isinstance(expression, ast.BinOp) else expression
-        if not isinstance(base, ast.Name):
+        statement = expression.left if isinstance(expression, ast.BinOp) else expression
+        operands = _concatenated(statement)
+        if not isinstance(operands[0], ast.Name):
             continue
+        base = operands[0]
+        head = variants(func, base.id)
+        if not head:
+            continue
+        pieces: list[list[str]] = [head]
+        for operand in operands[1:]:
+            if isinstance(operand, ast.Name):
+                pieces.append(variants(func, operand.id) or ["{}"])
+                continue
+            rendered = rendered_text(operand)
+            pieces.append([rendered if rendered is not None else "{}"])
+        total = math.prod(len(choices) for choices in pieces)
+        if total > _MAX_BRANCH_VARIANTS:
+            # Said out loud, for the reason in ``_run_variants``: a silent cap
+            # reads exactly like full coverage.  Falling back to the head alone
+            # is what this function did for every statement until now.
+            logger.warning(
+                "the statement executed at line %d joins %d variants of %d name(s), "
+                "over the cap of %d: read as %s alone, so its trailing clauses are "
+                "not read here",
+                node.lineno,
+                total,
+                len(pieces),
+                _MAX_BRANCH_VARIANTS,
+                base.id,
+            )
+            pieces = [head]
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
-        for text in variants(func, base.id):
-            found.append(Execution(sql=text, varmap=varmap, variable=base.id, call=node))
+        for combination in itertools.product(*pieces):
+            found.append(
+                Execution(
+                    sql="".join(combination), varmap=varmap, variable=base.id, call=node
+                )
+            )
     return found
 
 

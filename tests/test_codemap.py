@@ -1541,6 +1541,43 @@ def test_an_optional_fragment_does_not_split_the_statement():
     assert "frozenTime=NULL" in texts[0]
 
 
+def test_a_statement_executed_in_three_pieces_is_read_whole():
+    """``execute(sqlU + sql + comment, varMap)`` -- the ``WHERE`` is a name too.
+
+    ``updateTask_JEDI`` and ``updateJobStatus`` both build the ``SET`` half and
+    the ``WHERE`` half under separate names and join them at the call.  Reading
+    only the leftmost operand dropped the statement entirely, taking the
+    ``jobStatus`` write and every predicate with it.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status '\n"
+        "    sqlW = 'WHERE jediTaskID=:jediTaskID AND status IN (:old_1) '\n"
+        "    self.cur.execute(sqlU + sqlW + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    texts = [run.sql for run in sql.executions(func)]
+
+    assert len(texts) == 1
+    assert "SET status=:status" in texts[0]
+    assert "status IN (:old_1)" in texts[0]
+
+
+def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
+    """A run-time operand is a hole, the same as one inside an f-string."""
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status '\n"
+        "    self.cur.execute(sqlU + where_clause(criteria) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    texts = [run.sql for run in sql.executions(func)]
+
+    assert texts == ["UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status {}"]
+
+
 def test_table_class_is_inferred_from_the_column_names():
     """Nothing declares which spec a table holds; the columns give it away."""
     _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)
