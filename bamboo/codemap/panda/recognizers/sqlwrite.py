@@ -214,6 +214,11 @@ def extract(
                             spec_class=qualifier,
                             attribute=attribute,
                             outcomes=outcomes,
+                            # Every predicate the statement makes about a column
+                            # it also writes, not only the one for this column:
+                            # any of them failing leaves the row untouched, so
+                            # they bound this write as much as its own does.
+                            row_precondition=sorted(statement.preconditions.values()),
                         )
         if candidates:
             coverage.append(
@@ -359,6 +364,7 @@ def _record(
     spec_class: str,
     attribute: str,
     outcomes: list[tuple[str, int, ast.stmt, list[str]]],
+    row_precondition: list[str],
 ) -> None:
     """Add one branch per decided value to this write site's junction."""
     subject = SubjectNode.make_name(spec_class, attribute)
@@ -395,6 +401,7 @@ def _record(
             Branch(
                 outcome=outcome,
                 path_condition=condition,
+                row_precondition=row_precondition,
                 order=len(junction.branches),
                 tier=tier,
             )

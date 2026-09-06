@@ -162,6 +162,12 @@ class Branch(BaseModel):
     dominating the write.  It is not solved symbolically -- the values come
     from observation and are substituted in, which answers "which branch
     actually fired" rather than "which branch could fire".
+
+    ``row_precondition`` is the other kind of condition, and the two are not
+    interchangeable: the path condition is evaluated by the code, before the
+    write, and decides whether it is attempted; the row precondition is
+    evaluated by the database, during the write, against the row as it stands,
+    and decides whether it lands.  Only the first is visible in a log.
     """
 
     outcome: str = Field(
@@ -172,6 +178,16 @@ class Branch(BaseModel):
         ),
     )
     path_condition: list[str] = Field(default_factory=list)
+    row_precondition: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the row already had to say for this write to change it, when "
+            "the statement tests a column it also writes.  Losing that race is "
+            "silent -- zero rows changed, no exception, a count the caller "
+            "usually discards -- so a branch carrying one is a branch whose "
+            "outcome the code can announce without the row ever taking it."
+        ),
+    )
     criteria_tag: Optional[str] = Field(
         default=None,
         description="Machine-readable tag the code emits for this branch, e.g. 'criteria=-diskIO'.",
@@ -900,6 +916,16 @@ class Candidate(BaseModel):
     conditions: list[str] = Field(
         default_factory=list,
         description="Path conditions of the branches that reach this outcome.",
+    )
+    row_precondition: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the row already had to say for this candidate's write to land "
+            "(see :class:`Branch`).  It does not change whether the candidate is "
+            "confirmed -- a line seen still proves the code decided the value -- "
+            "but it does change what the confirmation means, because the write "
+            "can lose the race and say nothing."
+        ),
     )
     triggers: list[str] = Field(default_factory=list)
     entries: list[str] = Field(default_factory=list)

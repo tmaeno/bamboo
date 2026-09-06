@@ -126,6 +126,43 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
                 )
                 click.echo(f"    {table:<34} gates {len(users)} subject(s)")
 
+        raced = sorted(
+            {
+                junction.subject
+                for junction in fragment.junctions
+                for branch in junction.branches
+                if branch.row_precondition
+            }
+        )
+        if raced:
+            # Neither a defect nor a gate: a compare-and-set is how PanDA keeps
+            # two knights off one row.  Shown because losing that race is the
+            # one failure the code announces and the row does not take, so a
+            # log line saying the value was set is not proof that it was.
+            writes = sum(
+                1
+                for junction in fragment.junctions
+                for branch in junction.branches
+                if branch.row_precondition
+            )
+            click.echo(
+                f"  writes conditional on the row's own prior value "
+                f"({writes} branch(es) over {len(raced)} subject(s)):"
+            )
+            for subject in raced[:top]:
+                guards = sorted(
+                    {
+                        guard
+                        for junction in fragment.junctions
+                        if junction.subject == subject
+                        for branch in junction.branches
+                        for guard in branch.row_precondition
+                    }
+                )
+                click.echo(f"    {subject:<34} {', '.join(guards[:3])}")
+            if len(raced) > top:
+                click.echo(f"    … {len(raced) - top} more")
+
         drift = gates.outcomes_outside_declared_subsets(fragment)
         if drift:
             # Not a gate: the declared lists are purpose-built subsets, so an

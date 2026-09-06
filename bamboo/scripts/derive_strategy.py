@@ -168,6 +168,14 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
         click.echo(f"  {'':<10} {detail}")
         if evaluated and candidate.because:
             click.echo(f"  {'':<10} {candidate.because}")
+        if candidate.row_precondition:
+            # Always shown, not folded into --full: it changes how the line
+            # above is to be read, and a reader who stops at the default
+            # listing is exactly the one who would otherwise over-read it.
+            click.echo(
+                f"  {'':<10} only lands on a row where "
+                f"{' and '.join(candidate.row_precondition)}"
+            )
         if full:
             click.echo(f"  {'':<10} {candidate.owner}")
             if candidate.triggers:

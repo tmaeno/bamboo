@@ -1578,6 +1578,63 @@ def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
     assert texts == ["UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status {}"]
 
 
+def test_a_write_tested_against_the_column_it_writes_records_the_guard():
+    """``SET status=:status WHERE ... AND status IN (...)`` is a compare-and-set.
+
+    Whoever else moved the row first wins, and this write changes no rows and
+    says nothing -- so seeing the value decided in a log does not prove the row
+    took it.  Predicates on columns the statement does *not* write are row
+    identity, not a race, and are left out.
+    """
+    text = (
+        "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,frozenTime=NULL "
+        "WHERE jediTaskID=:jediTaskID AND status IN (:old_1,:old_2) "
+    )
+
+    statement = sql.writes(text)[0]
+
+    assert statement.preconditions == {"status": "status IN (:old_1,:old_2)"}
+
+
+def test_a_negated_guard_on_a_written_column_counts():
+    """``NOT jobStatus=:ngStatus`` in ``updateJobStatus`` is the same race."""
+    text = (
+        "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus "
+        "WHERE PandaID=:PandaID AND NOT jobStatus=:ngStatus "
+    )
+
+    statement = sql.writes(text)[0]
+
+    assert statement.preconditions == {"jobStatus": "NOT jobStatus=:ngStatus"}
+
+
+def test_a_write_nothing_races_for_records_no_guard():
+    """An unguarded write lands whatever the row currently says."""
+    text = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID "
+
+    assert sql.writes(text)[0].preconditions == {}
+
+
+def test_the_branch_carries_the_row_the_write_needed():
+    """The guard reaches the branch, where prune reads it."""
+    source = '''
+class TaskModule:
+    def finishTask(self, jediTaskID):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status,oldStatus=:oldStatus "
+        sqlU += "WHERE jediTaskID=:jediTaskID AND status=:priorStatus "
+        varMap = {}
+        varMap[":status"] = "finished"
+        self.cur.execute(sqlU + comment, varMap)
+'''
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert [b.outcome for b in status[0].branches] == ["finished"]
+    assert status[0].branches[0].row_precondition == ["status=:priorStatus"]
+
+
 def test_table_class_is_inferred_from_the_column_names():
     """Nothing declares which spec a table holds; the columns give it away."""
     _s, _j, _c, _u, conflicts, attributor = _sql_extract(_SQL_SOURCE)

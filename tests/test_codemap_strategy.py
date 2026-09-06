@@ -440,6 +440,51 @@ async def test_a_line_seen_confirms_the_writer_whatever_the_sample_size():
     assert strategy_mod.survivors(settled)[0].verdict == SEEN
 
 
+async def test_a_confirmed_writer_whose_write_races_is_confirmed_as_the_decider():
+    """A log line proves what the code decided, not what the row became.
+
+    ``UPDATE ... SET status=:status WHERE ... AND status IN (:old_...)`` changes
+    nothing when another writer moved the row first, and says nothing about it
+    -- the count comes back zero and most callers discard it.  The candidate
+    stays confirmed, because it did decide the value; what changes is that the
+    confirmation no longer settles whether the row took it.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["pending"])],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="pending", row_precondition=["status IN (:old_1)"]),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
+    )
+
+    assert strategy.candidates[0].row_precondition == ["status IN (:old_1)"]
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, _found))
+    confirmed = settled.candidates[0]
+
+    assert confirmed.verdict == SEEN
+    assert "conditional on the row" in confirmed.because
+
+
+async def test_an_unconditional_write_is_confirmed_without_the_caveat():
+    """The caveat is a fact about the statement, not decoration on every verdict."""
+    strategy = await _two_candidates()
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, _found))
+
+    assert all(not c.row_precondition for c in settled.candidates)
+    assert all("conditional on the row" not in c.because for c in settled.candidates)
+
+
 async def test_a_silent_file_that_never_carries_the_line_rules_nothing_out():
     """The guard that makes the whole eliminator safe.
 

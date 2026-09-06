@@ -156,6 +156,24 @@ def _conditions(junction: JunctionNode, observed: str) -> list[str]:
     return seen
 
 
+def _row_precondition(junction: JunctionNode, observed: str) -> list[str]:
+    """What the row had to already say for the branches reaching *observed*.
+
+    Read from the same branches as :func:`_conditions` and kept apart from
+    them, because the two fail differently: an unmet path condition means the
+    code never got here and the log is silent, an unmet row precondition means
+    the code got here, said so, and changed nothing.
+    """
+    stated = [b for b in junction.branches if b.outcome == observed]
+    reaching = stated or [b for b in junction.branches if b.tier == 2]
+    seen: list[str] = []
+    for branch in reaching:
+        for guard in branch.row_precondition:
+            if guard not in seen:
+                seen.append(guard)
+    return seen
+
+
 def _candidate(junction: JunctionNode, observed: str) -> Candidate:
     stated = any(b.outcome == observed for b in junction.branches)
     return Candidate(
@@ -163,6 +181,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
         tier=1 if stated else 2,
         log_files=junction.observable_log_files(),
         conditions=_conditions(junction, observed),
+        row_precondition=_row_precondition(junction, observed),
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
     )
@@ -420,6 +439,12 @@ def _settle(
         if probe is not None and probe.verdict == ANSWER_SEEN:
             settled.verdict = SEEN
             settled.because = f"logged in {filename}"
+            if candidate.row_precondition:
+                # Confirmed as the decider, not as the writer of the row: this
+                # one's statement tests a column it writes, so the line above
+                # is what the code said, and a competing write could have made
+                # it change nothing.
+                settled.because += ", though its write is conditional on the row"
             return settled
 
     reasons = []

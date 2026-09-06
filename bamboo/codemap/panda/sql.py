@@ -175,6 +175,16 @@ class SqlWrite(BaseModel):
             "are part of what identifies the table."
         ),
     )
+    preconditions: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Column -> the predicate testing it, for columns this statement "
+            "also writes.  That combination is a compare-and-set: whoever moved "
+            "the row first wins and this write changes no rows, returning a "
+            "count the caller usually discards.  Predicates on columns the "
+            "statement does not write are row identity, not a race."
+        ),
+    )
 
 
 def _parts(
@@ -476,6 +486,34 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     return found
 
 
+#: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
+#: source wrote it.  ``NOT`` is part of the term rather than a separate one:
+#: ``updateJobStatus`` guards with ``AND NOT jobStatus=:ngStatus``, and dropping
+#: the negation would report the opposite condition.
+_TERM = re.compile(
+    r"(?:WHERE|AND|OR)\s+((?:NOT\s+)?(?:\w+\.)?([A-Za-z_]\w*)\s*"
+    r"(?:(?:=|<>|!=|<=|>=|<|>)\s*[^\s)]+|(?:NOT\s+)?IN\s*\([^)]*\)|IS\s+(?:NOT\s+)?NULL))",
+    re.IGNORECASE,
+)
+
+
+def _preconditions(clause: str, columns: set[str]) -> dict[str, str]:
+    """Return the terms of *clause* testing a column in *columns*.
+
+    A statement that tests a column it also assigns is doing a compare-and-set,
+    and losing that race is silent: no exception, no log, just a row count the
+    caller discards.  The map has no other way to say that seeing a value
+    *decided* is not the same as seeing the row take it.
+    """
+    found: dict[str, str] = {}
+    lowered = {column.lower(): column for column in columns}
+    for term, column in _TERM.findall(clause):
+        owner = lowered.get(column.lower())
+        if owner is not None and owner not in found:
+            found[owner] = re.sub(r"\s+", " ", term).strip()
+    return found
+
+
 def writes(sql: str) -> list[SqlWrite]:
     """Return the write statements in *sql*, as far as they can be read."""
     found: list[SqlWrite] = []
@@ -485,7 +523,12 @@ def writes(sql: str) -> list[SqlWrite]:
         }
         if columns:
             found.append(
-                SqlWrite(kind="update", table=_table_of(match.group(1)), columns=columns)
+                SqlWrite(
+                    kind="update",
+                    table=_table_of(match.group(1)),
+                    columns=columns,
+                    preconditions=_preconditions(sql[match.end(2) :], set(columns)),
+                )
             )
     for match in _INSERT.finditer(sql):
         names = [c.strip().split(".")[-1] for c in match.group(2).split(",")]
