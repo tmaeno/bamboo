@@ -103,11 +103,20 @@ def _targets(fragment: MapFragment, declared: dict[str, str]) -> dict[str, str]:
     service comes from the module that *declares* the logger -- the proxy
     mixins name two files, and each of those is declared in one package, so
     the pair resolves without guessing.
+
+    A caller's file counts as much as the node's own.  For the largest group of
+    junctions the module holding the code is not the one that logs about it, so
+    reading only ``log_files`` left 66 of 495 junctions with a named log that
+    nothing here ever asked about -- concentrated on the server side, where
+    ``panda-copyArchive.log`` and ``panda-api_task.log`` alone account for most
+    of them.  The gate that suffers is ``code-paths-are-live``: a log file no
+    machine has is the one negative production can prove, and it could not be
+    proved about a file that was never asked for.
     """
     declaring = {filename: rel_path for rel_path, filename in declared.items()}
     targets: dict[str, str] = {}
     for node in list(fragment.filter_stages) + list(fragment.junctions):
-        for filename in node.log_files:
+        for filename in list(node.log_files) + list(getattr(node, "caller_log_files", ())):
             owner = declaring.get(filename)
             if owner:
                 targets[filename] = evidence.service_for_module(owner)

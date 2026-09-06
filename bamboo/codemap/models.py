@@ -333,6 +333,30 @@ class JunctionNode(BaseNode):
     )
     anchor: Optional[Anchor] = None
 
+    def observable_log_files(self) -> list[str]:
+        """Files where a line *about this junction firing* can appear.
+
+        The caller's, plus its own only where its module declares a logger.  An
+        inherited file is deliberately left out: it is a true statement about
+        where the code's own output lands -- the SQL comment trace really is in
+        ``panda-DBProxy.log`` -- and a false one about where a line saying the
+        junction fired appears, because the code writing that line is the
+        caller.  Production settles it: of thirty-three files asked,
+        ``set task_status=`` is in exactly five, all of them callers, and in
+        neither proxy file.
+
+        A method on the node rather than a rule in one reader, because two
+        readers need it and they would drift.  Deriving an investigation asks
+        it to know where to grep; the gate that reports dead code paths asks it
+        to know whether a junction has any surviving log at all, and answering
+        that from ``log_files`` alone credits a proxy method with the liveness
+        of the mixin that inherits it.
+        """
+        files = set(self.caller_log_files)
+        if self.owns_logger:
+            files.update(self.log_files)
+        return sorted(files)
+
     @staticmethod
     def make_name(map_id: str, subject: str, signature: str) -> str:
         """Build the semantic signature used as the merge key."""

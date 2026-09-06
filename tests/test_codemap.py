@@ -4900,6 +4900,58 @@ def test_an_inconclusive_row_leads_with_its_reason():
     assert all(not row.startswith("-") for row in rows)
 
 
+def test_an_absent_caller_log_does_not_strand_a_junction_another_caller_reaches():
+    """The trap in checking caller files, and it is easy to fall into.
+
+    ``kickExhaustedTasks_JEDI`` is defined in ``TypicalWatchDogBase``, so every
+    ``Atlas*WatchDog`` inherits it.  ``panda-GenWatchDog.log`` is on no machine
+    and ``panda-AtlasProdWatchDog.log`` exists, so the component is not running
+    and the junction is reached anyway.  Reading the first as "this junction
+    never runs" would report a live code path as dead.
+    """
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::kickExhaustedTasks_JEDI",
+        caller_log_files=["panda-GenWatchDog.log", BROKER_LOG],
+        owns_logger=False,
+    )
+    ev = _evidence(
+        _missing("panda-GenWatchDog.log"),
+        _sample([_log_line("INFO", "a")], BROKER_LOG),
+    )
+
+    result = gates.code_paths_are_live(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]), ev
+    )
+
+    assert not result.passed  # the component really is absent
+    assert "reached through a log that does exist" in result.failures[0]
+    assert "never run here" not in result.failures[0]
+
+
+def test_a_junction_whose_every_log_is_absent_is_reported_as_dead():
+    """The other half: with no surviving file the node really is unreachable."""
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::onlyHere_JEDI",
+        caller_log_files=["panda-GenWatchDog.log"],
+        owns_logger=False,
+    )
+
+    result = gates.code_paths_are_live(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]),
+        _evidence(_missing("panda-GenWatchDog.log")),
+    )
+
+    assert "0 stage(s), 1 junction(s) of the map never run here" in result.failures[0]
+
+
 def test_code_paths_are_live_passes_when_every_file_is_there():
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -6198,6 +6250,40 @@ def test_not_concluded_collapses_to_one_line_per_gate(capsys):
 
     assert "not concluded (7)" in out
     assert "… 6 more (--full)" in out
+
+
+def test_the_files_asked_include_the_ones_only_a_caller_names():
+    """Otherwise a junction reached only through a caller is never checked.
+
+    Reading ``log_files`` alone left 66 of 495 junctions with a named log that
+    production was never asked about -- and the gate that loses most by it is
+    ``code-paths-are-live``, since a file no machine has is the one negative
+    production can prove and it cannot be proved about a file nobody asked for.
+    """
+    junction = JunctionNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="j",
+        subject="JediTaskSpec.status",
+        owner="pandaserver/taskbuffer/db_proxy_mods/m.py::updateTaskModTimeJEDI",
+        log_files=["panda-DBProxy.log"],
+        caller_log_files=["panda-event_picker.log"],
+        owns_logger=False,
+    )
+    declared = {
+        "pandaserver/taskbuffer/OraDBProxy.py": "panda-DBProxy.log",
+        "pandaserver/dataservice/event_picker.py": "panda-event_picker.log",
+        "pandajedi/jediorder/ContentsFeeder.py": "panda-ContentsFeeder.log",
+    }
+
+    targets = check_map._targets(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, junctions=[junction]), declared
+    )
+
+    assert targets == {
+        "panda-DBProxy.log": evidence.SERVER,
+        "panda-event_picker.log": evidence.SERVER,
+    }
 
 
 def test_evidence_age_and_bound_sizes_are_readable():

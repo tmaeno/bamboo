@@ -189,8 +189,8 @@ async def test_a_proxy_is_probed_at_its_callers_log_and_not_its_own():
     knight = _junction(
         "jediorder/ContentsFeeder.py::feed", Branch(outcome="pending"), log_files=[KNIGHT_LOG]
     )
-    assert strategy_mod.probe_files(proxy) == [OTHER_LOG]
-    assert strategy_mod.probe_files(knight) == [KNIGHT_LOG]
+    assert proxy.observable_log_files() == [OTHER_LOG]
+    assert knight.observable_log_files() == [KNIGHT_LOG]
 
 
 async def test_a_candidate_no_log_names_is_reported_rather_than_guessed_at():

@@ -138,23 +138,6 @@ def _pattern(subject: str, value: str, task_id: Optional[str]) -> Optional[str]:
     return pattern
 
 
-def probe_files(junction: JunctionNode) -> list[str]:
-    """Files where a line about *junction* firing can appear.
-
-    The caller's, plus the junction's own where its module declares a logger.
-    An inherited file is deliberately left out: it is a true statement about
-    where the code's own output lands -- the SQL comment trace really is in
-    ``panda-DBProxy.log`` -- and a false one about where a line saying the
-    junction fired appears, because the code writing that line is the caller.
-    Production settles it: of thirty-three files asked, ``set task_status=`` is
-    in exactly five, all of them callers, and in neither proxy file.
-    """
-    files = set(junction.caller_log_files)
-    if junction.owns_logger:
-        files.update(junction.log_files)
-    return sorted(files)
-
-
 def _conditions(junction: JunctionNode, observed: str) -> list[str]:
     """Path conditions of the branches that can reach *observed*, deduplicated.
 
@@ -178,7 +161,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
     return Candidate(
         owner=junction.owner,
         tier=1 if stated else 2,
-        log_files=probe_files(junction),
+        log_files=junction.observable_log_files(),
         conditions=_conditions(junction, observed),
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
