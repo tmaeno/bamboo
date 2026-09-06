@@ -354,8 +354,28 @@ class SpecAttributor:
         return matches[0] if len(matches) == 1 else None
 
     def class_for_table(self, table: str) -> Optional[str]:
-        """Return the spec class *table* holds, if it was learned."""
-        return self._table_classes.get(table)
+        """Return the spec class *table* holds, if it was learned.
+
+        Matched without regard to case, as :meth:`_only_class_declaring` already
+        matches columns: SQL identifiers are case-insensitive and the corpus
+        uses both spellings of the same table -- ``reassignShare`` loops over
+        ``["jobsactive4", "jobsdefined4"]`` where everything else writes
+        ``jobsActive4``.  Requiring the spelling to agree made those two look
+        like tables holding no spec, which put a ``JobSpec.gshare`` write on a
+        table-qualified subject of its own.
+        """
+        found = self._table_classes.get(table)
+        if found is not None:
+            return found
+        lowered = table.lower()
+        return next(
+            (
+                spec
+                for known, spec in self._table_classes.items()
+                if known.lower() == lowered
+            ),
+            None,
+        )
 
     def _adder_methods(self, modules: list[SourceModule]) -> dict[str, str]:
         """Return ``{method name: attribute}`` for ``self.<attr>.append(<param>)``.

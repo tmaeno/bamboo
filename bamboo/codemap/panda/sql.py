@@ -414,6 +414,137 @@ def _concatenated(node: ast.expr) -> list[ast.expr]:
     return [node]
 
 
+#: ``UPDATE %s SET`` and ``UPDATE ATLAS_PANDA.{0} SET`` -- a table name the call
+#: supplies rather than the statement.  Both markers are unambiguous: rendered
+#: text spells an f-string interpolation ``{}``, never either of these.
+_PERCENT_S = "%s"
+_BARE_FIELD = "{}"
+
+
+def _interpolates(node: ast.expr) -> bool:
+    """Whether any brace this expression renders could be a hole, not a brace."""
+    return any(
+        isinstance(child, ast.JoinedStr)
+        or (
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "format"
+        )
+        for child in ast.walk(node)
+    )
+
+
+def _braces_are_literal(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
+    """Whether every ``{}`` in *name*'s text is a placeholder the source wrote.
+
+    Rendered text spells an f-string interpolation ``{}`` as well, so a bare
+    brace is either the hole a schema went into or a field a ``.format`` at the
+    call fills.  The fragments settle it without a guess: if none of them
+    interpolates, every brace came from a literal.
+    """
+    return not any(_interpolates(node.value) for _line, _op, _text, node in _parts(func, name))
+
+
+def _literal_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
+) -> list[str]:
+    """Return the strings *expression* can hold, where the source writes them out.
+
+    Two forms, both of which put the names in plain sight: the argument is a
+    literal, or it is the target of a ``for`` over a literal sequence --
+    ``for table in ("ATLAS_PANDA.jobsDefined4", "ATLAS_PANDA.jobsActive4")``.
+    Anything else returns nothing, and the placeholder is left as written: a
+    table name invented here would be attributed to a spec class with the same
+    confidence as one the code states.
+    """
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return [expression.value]
+    if not isinstance(expression, ast.Name):
+        return []
+    found: list[str] = []
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == expression.id
+            and isinstance(node.iter, (ast.Tuple, ast.List))
+        ):
+            values = [
+                element.value
+                for element in node.iter.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+            if len(values) == len(node.iter.elts):
+                found.extend(values)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str) and any(
+                isinstance(target, ast.Name) and target.id == expression.id
+                for target in node.targets
+            ):
+                found.append(node.value.value)
+    return found
+
+
+def _substituted(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    text: str,
+    name: str,
+    fillers: list[list[str]],
+    percent: bool,
+) -> list[str]:
+    """Return *text* with the call's arguments filled in, or as it stands."""
+    if not fillers:
+        return [text]
+    if percent:
+        return [text.replace(_PERCENT_S, value) for value in fillers[0]] or [text]
+    filled = [text]
+    for index, values in enumerate(fillers):
+        marker = f"{{{index}}}"
+        if not values:
+            continue
+        if marker in filled[0]:
+            filled = [one.replace(marker, value) for one in filled for value in values]
+        elif index == 0 and _BARE_FIELD in filled[0] and _braces_are_literal(func, name):
+            filled = [
+                one.replace(_BARE_FIELD, value) for one in filled for value in values
+            ]
+    return filled
+
+
+def _call_site_fill(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
+) -> tuple[ast.expr, list[list[str]], bool]:
+    """Split ``execute(...)``'s first argument into statement and substitution.
+
+    Three spellings put the table name at the call rather than in the
+    statement, and until now all three were read as though the name were part
+    of the text -- which for ``%s`` meant no statement at all, because the
+    table pattern does not accept a ``%``.
+    """
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mod):
+        return expression.left, [_literal_values(func, expression.right)], True
+    inner = (
+        expression.left
+        if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add)
+        else expression
+    )
+    if (
+        isinstance(inner, ast.Call)
+        and isinstance(inner.func, ast.Attribute)
+        and inner.func.attr == "format"
+    ):
+        return (
+            inner.func.value,
+            [_literal_values(func, argument) for argument in inner.args],
+            False,
+        )
+    # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
+    # appended at the call, so the statement is everything to its left.
+    if isinstance(expression, ast.BinOp):
+        return expression.left, [], False
+    return expression, [], False
+
+
 def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     """Return one :class:`Execution` per cursor execution in *func*.
 
@@ -442,10 +573,8 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             continue
         if node.func.attr not in {"execute", "executemany"} or len(node.args) < 2:
             continue
-        # ``execute(sqlU + comment, varMap)`` -- the comment is a tracing tag
-        # appended at the call, so the statement is everything to its left.
         expression = node.args[0]
-        statement = expression.left if isinstance(expression, ast.BinOp) else expression
+        statement, fillers, percent = _call_site_fill(func, expression)
         operands = _concatenated(statement)
         if not isinstance(operands[0], ast.Name):
             continue
@@ -478,11 +607,10 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             pieces = [head]
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
         for combination in itertools.product(*pieces):
-            found.append(
-                Execution(
-                    sql="".join(combination), varmap=varmap, variable=base.id, call=node
+            for text in _substituted(func, "".join(combination), base.id, fillers, percent):
+                found.append(
+                    Execution(sql=text, varmap=varmap, variable=base.id, call=node)
                 )
-            )
     return found
 
 

@@ -1565,6 +1565,86 @@ def test_a_statement_executed_in_three_pieces_is_read_whole():
     assert "status IN (:old_1)" in texts[0]
 
 
+def test_a_table_the_call_substitutes_is_read_from_the_loop_that_supplies_it():
+    """``execute((sql + comment) % table)`` over a literal tuple of table names.
+
+    ``killJob`` and six others run one statement against ``jobsDefined4`` and
+    ``jobsActive4`` in turn.  The names are written out in the loop, so the
+    statement is two statements on tables the map already resolves to
+    ``JobSpec`` -- and reading it as ``UPDATE %s`` resolves to nothing at all,
+    since the table pattern does not even accept a ``%``.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE %s SET commandToPilot=:commandToPilot WHERE PandaID=:PandaID '\n"
+        "    for table in ('ATLAS_PANDA.jobsDefined4', 'ATLAS_PANDA.jobsActive4'):\n"
+        "        self.cur.execute((sqlU + comment) % table, varMap)\n"
+    )
+    func = _func(source)
+
+    tables = [w.table for run in sql.executions(func) for w in sql.writes(run.sql)]
+
+    assert tables == ["jobsDefined4", "jobsActive4"]
+
+
+def test_an_indexed_placeholder_is_filled_from_the_matching_argument():
+    """``sqlJ.format(tableName)`` -- an f-string never renders ``{0}``."""
+    source = (
+        "def f(self):\n"
+        "    sqlJ = 'UPDATE ATLAS_PANDA.{0} SET currentPriority=:newPriority WHERE x=:x '\n"
+        "    tableName = 'jobsActive4'\n"
+        "    self.cur.execute(sqlJ.format(tableName) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    writes = [w for run in sql.executions(func) for w in sql.writes(run.sql)]
+
+    assert [(w.table, sorted(w.columns)) for w in writes] == [
+        ("jobsActive4", ["currentPriority"])
+    ]
+
+
+def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
+    """``{}`` is ambiguous, and the fragments settle it.
+
+    The map renders an f-string interpolation as ``{}`` too, so a bare brace in
+    reassembled text is either a hole the schema went into or a placeholder the
+    call fills.  Which one is not a guess: if no fragment building the name
+    interpolates, every brace in it is a literal the source wrote.
+    """
+    plain = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.{} SET commandToPilot=:c WHERE PandaID=:P '\n"
+        "    self.cur.execute(sqlU.format('jobsActive4') + comment, varMap)\n"
+    )
+    interpolated = (
+        "def f(self):\n"
+        "    sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status WHERE x=:x '\n"
+        "    self.cur.execute(sqlU.format('jobsActive4') + comment, varMap)\n"
+    )
+
+    assert [w.table for run in sql.executions(_func(plain)) for w in sql.writes(run.sql)] == [
+        "jobsActive4"
+    ]
+    assert [
+        w.table for run in sql.executions(_func(interpolated)) for w in sql.writes(run.sql)
+    ] == ["JEDI_Tasks"]
+
+
+def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
+    """A run-time filler is not guessed at; the statement stays as written."""
+    source = (
+        "def f(self, order_by_policy):\n"
+        "    sqlR = 'UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x '\n"
+        "    self.cur.execute(sqlR.format(order_by_policy) + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert [run.sql for run in sql.executions(func)] == [
+        "UPDATE ATLAS_PANDA.{0} SET status=:status WHERE x=:x "
+    ]
+
+
 def test_an_unreadable_piece_leaves_a_hole_rather_than_dropping_the_statement():
     """A run-time operand is a hole, the same as one inside an f-string."""
     source = (
@@ -1755,6 +1835,21 @@ def test_table_class_is_inferred_from_the_column_names():
 
     assert conflicts == {}
     assert attributor.class_for_table("JEDI_Tasks") == "JediTaskSpec"
+
+
+def test_a_table_named_in_another_case_is_the_same_table():
+    """SQL identifiers are case-insensitive, and the corpus uses both spellings.
+
+    ``reassignShare`` runs its update over ``["jobsactive4", "jobsdefined4"]``
+    while every other statement writes ``jobsActive4``.  Matching the spelling
+    exactly made those two look like tables holding no spec, which put the
+    ``gshare`` write on a table-qualified subject instead of ``JobSpec``.
+    """
+    _s, _j, _c, _u, _conf, attributor = _sql_extract(_SQL_SOURCE)
+
+    assert attributor.class_for_table("jedi_tasks") == "JediTaskSpec"
+    assert attributor.class_for_table("JEDI_TASKS") == "JediTaskSpec"
+    assert attributor.class_for_table("no_such_table") is None
 
 
 def test_the_statement_can_name_the_class_outright():
