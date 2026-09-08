@@ -411,14 +411,23 @@ def _record(
 
 def selected_values(
     modules: list[SourceModule], attributor: SpecAttributor
-) -> dict[str, set[str]]:
-    """Return ``{subject: values some query selects rows on}``.
+) -> dict[str, dict[str, set[str]]]:
+    """Return ``{subject: {value: the functions whose query selects on it}}``.
 
     The same statements read the other way.  A write says what a value becomes;
     a predicate says which rows were asked for, and only both together make a
     state machine out of a pile of writes -- a status nothing ever selects on
     is a status nothing ever moves a task out of, which is the shape of "stuck"
     that no branch table can show.
+
+    **The asking function is kept, not only the value.**  It is in hand here --
+    the walk is over functions -- and dropping it left "something selects
+    ``finishing``" as the whole answer when exactly one query does, which is
+    the difference between a fact and a direction to look in.  Measured over
+    the corpus: 134 ``(subject, value)`` pairs have a named reader and 69 of
+    them have exactly one.  Downstream, ``FollowUp`` had been pooling triggers
+    over the subject's *writers* as a stand-in for the reader's -- an
+    approximation its own docstring had to name.
 
     Attributed exactly like a write, so ``JediTaskSpec.status`` means the same
     thing on both sides and the two can be compared at all.
@@ -444,9 +453,14 @@ def selected_values(
     for this subject, so nothing is hidden by it.
     """
     settle = values.resolver(values.declared_mappings(modules))
-    found: dict[str, set[str]] = {}
+    found: dict[str, dict[str, set[str]]] = {}
+
+    def record(subject: str, value: str, owner: str) -> None:
+        found.setdefault(subject, {}).setdefault(value, set()).add(owner)
+
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
+            owner = f"{module.rel_path}::{func.name}"
             seen: set[str] = set()
             for run in sql.executions(func):
                 if run.sql in seen:
@@ -460,16 +474,13 @@ def selected_values(
                         )
                         subject = SubjectNode.make_name(qualifier, attribute)
                         for bind in sql.bound_values(func, run.varmap or "", key):
-                            found.setdefault(subject, set()).update(
-                                settle(bind.value, func)
-                            )
+                            for value in settle(bind.value, func):
+                                record(subject, value, owner)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
-                        found.setdefault(
-                            SubjectNode.make_name(qualifier, attribute), set()
-                        ).add(value)
+                        record(SubjectNode.make_name(qualifier, attribute), value, owner)
     return found
 
 

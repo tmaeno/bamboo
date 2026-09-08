@@ -211,9 +211,31 @@ def _findings(candidates: list[Candidate], junctions: list[JunctionNode]) -> lis
     return findings
 
 
+def short_owner(owner: str) -> str:
+    """``pandaserver/taskbuffer/db_proxy_mods/x.py::m`` -> ``x.py::m``.
+
+    The directory is dropped for display only.  It carries no information a
+    reader uses -- the package does not decide which service runs the code,
+    which is the one thing they might reach for it for -- and keeping it pushes
+    the log file, which they do use, off the line.
+    """
+    where, sep, method = owner.partition("::")
+    return where.rsplit("/", 1)[-1] + sep + method
+
+
+def _readers_phrase(selected_by: list[str], reader_files: list[str]) -> str:
+    """Name the query that has to pick the row up, and where it says so."""
+    named = ", ".join(short_owner(owner) for owner in selected_by[:2])
+    if len(selected_by) > 2:
+        named += f" and {len(selected_by) - 2} more"
+    where = f" ({', '.join(reader_files)})" if reader_files else ""
+    return f"{named}{where}"
+
+
 def _follow_up(
     observed: str,
     selected_values: list[str],
+    selected_by: list[str],
     selection_gates: list[str],
     writers: list[JunctionNode],
     carried_from: list[str],
@@ -226,10 +248,33 @@ def _follow_up(
     an artefact of reading the query's ``WHERE`` and not its ``FROM`` list.  A
     query did select it, every cycle, and the row was outside what that query
     could see because the table it joins had stopped being updated.
+
+    The reader's own triggers are used where the map names one that is also a
+    junction.  Pooling them over the subject's *writers* is what this did while
+    the reader was unknown, and it answers a different question -- how work
+    reaches anything that touches the subject, rather than how it reaches the
+    query that has to pick this row up.  Kept as the fallback, because an empty
+    trigger set reads as "nothing reaches it", which is a stronger claim than
+    "the map cannot say".
     """
     selected = observed in selected_values
-    triggers = sorted({entry.trigger for j in writers for entry in j.entry_points})
+    by_owner = {j.owner: j for j in writers}
+    readers = [by_owner[o] for o in selected_by if o in by_owner]
+    reader_files = sorted({f for r in readers for f in r.observable_log_files()})
+    # The reader's own triggers where it has any.  Most readers are proxy
+    # methods the trigger slice reaches through a knight rather than directly,
+    # so their entry points are empty -- and reading that as the answer says
+    # "nothing reaches this subject", which is a stronger claim than the map
+    # can make and, for ``pending``, the opposite of true.
+    triggers = sorted({entry.trigger for j in readers for entry in j.entry_points}) or sorted(
+        {entry.trigger for j in writers for entry in j.entry_points}
+    )
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
+    asks = (
+        f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
+        if selected_by
+        else f"a query selects on {observed!r}"
+    )
     if selected and repairing:
         bounded = (
             "bounded by " + ", ".join(selection_gates)
@@ -237,14 +282,14 @@ def _follow_up(
             else "bounded by nothing this map can name"
         )
         question = (
-            f"a query selects on {observed!r} and a re-evaluating trigger reaches this "
+            f"{asks} and a re-evaluating trigger reaches this "
             f"subject, so ask why it did not pick the row up -- its reach is {bounded}, "
             "and nothing in the map writes those tables"
         )
     elif selected:
         question = (
-            f"a query selects on {observed!r}, but only {', '.join(triggers) or 'nothing the map recognises'} "
-            "reaches this subject, and none of those re-evaluate -- so ask whether the "
+            f"{asks}, but only {', '.join(triggers) or 'nothing the map recognises'} "
+            "reaches it, and none of those re-evaluate -- so ask whether the "
             "command or message arrived, not which condition blocked it"
         )
     else:
@@ -255,6 +300,8 @@ def _follow_up(
         )
     return FollowUp(
         selected=selected,
+        selected_by=list(selected_by),
+        reader_log_files=reader_files,
         selection_gates=list(selection_gates),
         triggers=triggers,
         self_repairing=repairing,
@@ -349,6 +396,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         follow_up=_follow_up(
             symptom.observed,
             subject.selected_values,
+            subject.selected_by.get(symptom.observed, []),
             subject.selection_gates,
             writers,
             carried,

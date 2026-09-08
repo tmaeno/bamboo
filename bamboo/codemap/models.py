@@ -131,6 +131,17 @@ class SubjectNode(BaseNode):
             "nothing ever moves away from."
         ),
     )
+    selected_by: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "``{value: the functions whose query selects rows on it}``.  Kept "
+            "per value rather than per subject because the two answer different "
+            "questions: ``JediTaskSpec.status`` is selected on thirty-one values "
+            "by dozens of functions, and pooling them says only that the subject "
+            "is read.  Per value it says who to ask -- ``finishing`` is selected "
+            "by exactly one query in the whole corpus."
+        ),
+    )
     selection_gates: list[str] = Field(
         default_factory=list,
         description=(
@@ -998,13 +1009,30 @@ class FollowUp(BaseModel):
             "passing every condition on its own status."
         ),
     )
+    selected_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions whose query selects rows on the observed value.  "
+            "Where the row has to be picked up, so where to ask why it was not."
+        ),
+    )
+    reader_log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where those readers' diagnostics land, for the ones the map holds "
+            "a log for -- which is the readers that also settle something, "
+            "since a function that only selects is not a junction and has no "
+            "node to hang a file on.  Empty is a finding, not a licence to "
+            "guess a file."
+        ),
+    )
     triggers: list[str] = Field(
         default_factory=list,
         description=(
-            "Triggers pooled over every writer of the subject.  Pooled over "
-            "*writers* rather than over the query that selects the value, "
-            "because the map records ``selected_values`` on the subject without "
-            "saying which junction asked -- an approximation, and named as one."
+            "Triggers of the query that selects the observed value, where the "
+            "map names a reader that is also a junction; otherwise pooled over "
+            "the subject's writers, which is the older approximation and stays "
+            "as the fallback rather than leaving the field empty."
         ),
     )
     self_repairing: bool = False

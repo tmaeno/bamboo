@@ -49,6 +49,7 @@ def _subject(
     selected: list[str] | None = None,
     gates: list[str] | None = None,
     name: str = SUBJECT,
+    selected_by: dict[str, list[str]] | None = None,
 ) -> SubjectNode:
     spec_class, _, attribute = name.rpartition(".")
     return SubjectNode(
@@ -58,6 +59,7 @@ def _subject(
         spec_class=spec_class,
         attribute=attribute,
         selected_values=selected or [],
+        selected_by=selected_by or {},
         selection_gates=gates or [],
     )
 
@@ -339,6 +341,119 @@ async def test_a_selected_value_with_a_polled_trigger_points_at_what_bounds_the_
     assert follow.self_repairing is True
     assert follow.selection_gates == ["JEDI_AUX_Status_MinTaskID"]
     assert "JEDI_AUX_Status_MinTaskID" in follow.question
+
+
+async def test_the_query_that_selects_the_value_is_named_with_the_log_it_writes_to():
+    """"Something selects it" is half an answer; exactly one query does.
+
+    The reader is what an investigation goes and reads, and where it is also a
+    writer the map already knows its log file -- so the follow-up can say where
+    to look rather than only that looking is worthwhile.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                gates=["JEDI_AUX_Status_MinTaskID"],
+                selected_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.selected_by == ["jediorder/TaskCommando.py::run"]
+    assert strategy.follow_up.reader_log_files == [OTHER_LOG]
+    assert "TaskCommando" in strategy.follow_up.question
+
+
+async def test_a_reader_the_map_holds_no_log_for_is_named_without_one():
+    """Being unable to say where to look is a finding, not a reason to guess.
+
+    Sixty of the corpus's readers are pure readers -- they select on a value and
+    settle nothing, so they are not junctions and no log file is attached to
+    them.  Naming one with an invented file would be worse than naming it with
+    none.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["pending"],
+                selected_by={"pending": ["taskbuffer/db_proxy_mods/entity_module.py::calc"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="pending"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
+    )
+
+    assert strategy.follow_up.selected_by == [
+        "taskbuffer/db_proxy_mods/entity_module.py::calc"
+    ]
+    assert strategy.follow_up.reader_log_files == []
+
+
+async def test_a_reader_with_no_entry_point_does_not_empty_the_triggers():
+    """The reader's triggers replace the writers' only where it has some.
+
+    Most readers are proxy methods, which nothing in the trigger slice reaches
+    directly -- a knight calls them.  Taking their empty set as the answer
+    turned ``pending`` from self-repairing into "nothing reaches this subject",
+    which is a stronger claim than the map can make and the opposite of true.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["pending"],
+                selected_by={"pending": ["taskbuffer/db_proxy_mods/task_module.py::reactivate"]},
+            )
+        ],
+        junctions=[
+            # The reader is a junction, and no trigger reaches it directly.
+            _junction(
+                "taskbuffer/db_proxy_mods/task_module.py::reactivate",
+                Branch(outcome="pending"),
+                log_files=PROXY_LOGS,
+                owns_logger=False,
+                caller_log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="pending"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
+    )
+
+    assert strategy.follow_up.triggers == ["polled"]
+    assert strategy.follow_up.self_repairing is True
 
 
 async def test_a_selected_value_reached_only_by_a_message_asks_whether_it_arrived():

@@ -4507,8 +4507,39 @@ def test_a_where_clause_says_which_values_something_acts_on():
     attributor.learn_table_classes(modules)
 
     selected = sqlwrite.selected_values(modules, attributor)
-    assert selected["JediTaskSpec.status"] == {"pending"}
-    assert selected["JEDI_Tasks.vo"] == {"atlas", "test"}
+    assert set(selected["JediTaskSpec.status"]) == {"pending"}
+    assert set(selected["JEDI_Tasks.vo"]) == {"atlas", "test"}
+
+
+def test_the_query_that_selects_a_value_is_named_and_not_only_the_value():
+    """Which function asked is in hand while the value is read, and was dropped.
+
+    "Something selects ``finishing``" is half an answer; the other half is that
+    exactly one query does, and where its diagnostics land.  Discarding the
+    enclosing function left ``FollowUp`` pooling triggers over the *writers* of
+    the subject as a stand-in -- an approximation its own docstring named.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def write(self):\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+        "    def rescue(self, vo):\n"
+        "        varMap = {}\n"
+        "        varMap[':oldStatus'] = 'pending'\n"
+        "        sqlO = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlO += 'WHERE status=:oldStatus '\n"
+        "        self.cur.execute(sqlO + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    selected = sqlwrite.selected_values(modules, attributor)
+
+    assert selected["JediTaskSpec.status"] == {"pending": {"x.py::rescue"}}
 
 
 def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
@@ -4544,7 +4575,7 @@ def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
 
     selected = sqlwrite.selected_values(modules, attributor)
 
-    assert selected["JediTaskSpec.status"] == {"aborting", "finishing", "paused"}
+    assert set(selected["JediTaskSpec.status"]) == {"aborting", "finishing", "paused"}
 
 
 def test_a_subject_carries_what_bounds_the_queries_that_select_it():

@@ -283,7 +283,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         selected = sqlwrite.selected_values(self._modules, attributor)
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
-            subject.selected_values = sorted(selected.get(subject.name, ()))
+            readers = selected.get(subject.name, {})
+            subject.selected_values = sorted(readers)
+            subject.selected_by = {
+                value: sorted(owners) for value, owners in sorted(readers.items())
+            }
             subject.selection_gates = sorted(gated.get(subject.name, ()))
 
         # A function that writes a status both ways produces one junction from

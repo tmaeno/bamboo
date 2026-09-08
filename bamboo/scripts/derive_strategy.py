@@ -61,18 +61,6 @@ _WIDTH = 96
 _VERDICT_ORDER = (SEEN, UNSETTLED, UNASKABLE, ELIMINATED)
 
 
-def _short(owner: str) -> str:
-    """``pandaserver/taskbuffer/db_proxy_mods/x.py::m`` -> ``x.py::m``.
-
-    The directory is dropped for the listing only.  It carries no information
-    a reader of this report uses -- the package does not decide which service
-    runs the code, which is the one thing they might reach for it for -- and
-    keeping it pushes the log file, which they do use, off the line.
-    """
-    where, sep, method = owner.partition("::")
-    return where.rsplit("/", 1)[-1] + sep + method
-
-
 def _report_header(strategy: Strategy, evidence_path: Optional[Path], ev) -> None:
     symptom = strategy.symptom
     scope = f" · task {symptom.task_id}" if symptom.task_id else ""
@@ -103,7 +91,7 @@ def _report_verdict(strategy: Strategy, evaluated: bool) -> None:
     seen = counts[SEEN]
     if seen:
         for candidate in seen:
-            click.echo(f"           {_short(candidate.owner)} wrote it -- {candidate.because}")
+            click.echo(f"           {strategy_mod.short_owner(candidate.owner)} wrote it -- {candidate.because}")
     remaining = len(strategy.candidates) - len(counts[ELIMINATED])
     click.echo(
         f"           {len(counts[ELIMINATED])} ruled out, {remaining} left "
@@ -134,6 +122,20 @@ def _report_follow_up(strategy: Strategy) -> None:
         f"  a re-evaluating trigger reaches  {repair}"
         + (f"  ({', '.join(follow.triggers)})" if follow.triggers else "")
     )
+    if follow.selected_by:
+        # The reader, not the writers: this is the query that has to pick the
+        # row up, so it is the one an investigation goes and reads.
+        for index, owner in enumerate(follow.selected_by):
+            label = "  which query selects it        " if index == 0 else " " * 33
+            click.echo(f"{label} {strategy_mod.short_owner(owner)}")
+        click.echo(
+            "                                   "
+            + (
+                ", ".join(follow.reader_log_files)
+                if follow.reader_log_files
+                else "the map holds no log for it -- it settles nothing, so it is not a junction"
+            )
+        )
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")
@@ -163,7 +165,7 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
     shown = candidates if full else candidates[:top]
     for candidate in shown:
         mark = f"{candidate.verdict:<10}" if evaluated else f"tier {candidate.tier}   "
-        click.echo(f"  {mark} {_short(candidate.owner)}")
+        click.echo(f"  {mark} {strategy_mod.short_owner(candidate.owner)}")
         detail = ", ".join(candidate.log_files) or "no log file names it"
         click.echo(f"  {'':<10} {detail}")
         if evaluated and candidate.because:
@@ -230,7 +232,7 @@ def _report_observations(strategy: Strategy, top: int, full: bool, evaluated: bo
             body = line.strip()
             click.echo(f"                {body if full else body[:19] + ' … ' + body[-74:]}")
         if full:
-            click.echo(f"                settles: {', '.join(_short(o) for o in probe.settles)}")
+            click.echo(f"                settles: {', '.join(strategy_mod.short_owner(o) for o in probe.settles)}")
     if len(probes) > len(shown):
         click.echo(f"  … {len(probes) - len(shown)} more (--full)")
 
