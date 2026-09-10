@@ -194,18 +194,30 @@ def _report_observations(strategy: Strategy, top: int, full: bool, evaluated: bo
     Controls are listed with the probes rather than folded away: the reason a
     file's silence did or did not count is the part of this a reader has to be
     able to check.
+
+    The row-count question is listed separately because it is about a different
+    thing.  The probe asks whether the code decided the value; this asks whether
+    the row took it, and a write can announce the first and do neither -- which
+    is the only failure the map cannot settle from the decision alone.
     """
     if not strategy.observations:
         return
     probes = [o for o in strategy.observations if o.role == strategy_mod.PROBE]
+    rows = [o for o in strategy.observations if o.role == strategy_mod.ROWS]
     if not evaluated:
         queries = strategy_mod.queries(strategy)
+        controls = [o for o in strategy.observations if o.role == strategy_mod.CONTROL]
         click.echo(
             f"\nquestions to put to production: {len(queries)} over {len(probes)} log file(s), "
-            f"{len(strategy.observations) - len(probes)} of them controls"
+            f"{len(controls)} of them controls"
         )
-        click.echo(f"  probe    {probes[0].pattern}")
-        click.echo(f"  control  {evidence_mod.TRANSITION_PATTERN}  (does this file carry the line)")
+        if probes:
+            click.echo(f"  probe    {probes[0].pattern}   (did the code decide it)")
+            click.echo(f"  control  {controls[0].pattern if controls else '-'}"
+                       "   (does this file carry the line)")
+        if rows:
+            click.echo(f"  rows     {rows[0].pattern}   (did the row take it)")
+            click.echo(f"           in {', '.join(sorted({o.log_file for o in rows}))}")
         return
     click.echo("\nquestions put to production")
     controls = {o.log_file: o for o in strategy.observations if o.role == strategy_mod.CONTROL}

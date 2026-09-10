@@ -69,6 +69,7 @@ from bamboo.codemap.models import (
     ANSWER_SEEN,
     ELIMINATED,
     REPORTS_DECISION,
+    REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     UNASKABLE,
@@ -90,6 +91,14 @@ logger = logging.getLogger(__name__)
 #: files of exactly that kind.
 PROBE = "probe"
 CONTROL = "control"
+
+#: A third question, about the same junction and a different thing.  The probe
+#: asks whether the code decided the value; this asks whether the row took it.
+#: They are separate because a write can announce a decision and change nothing
+#: -- the count comes back, most callers discard it, and the flush's own log is
+#: the one place it is written down.  Kept out of the eliminator: its silence
+#: says nothing about which writer fired.
+ROWS = "rows"
 
 #: Log line shapes, per subject.  Not read from the map -- see the module
 #: docstring.  ``{task}`` and ``{value}`` are filled in; a subject absent from
@@ -163,6 +172,34 @@ def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
         best = max(heads, key=lambda head: (len(heads[head]), len(head)))
         return re.escape(best) + "{value}"
     return _LINE_SHAPE.get(subject)
+
+
+def rows_shape(producers: list[JunctionNode]) -> tuple[Optional[str], list[str]]:
+    """The line saying how many rows a write changed, and where it lands.
+
+    Chosen the same way the decision shape is -- the head the most writers
+    share -- and returned with its own files, which are not the files the
+    decision line lands in.  That is the point of it: the knight announces the
+    value in its own log and the proxy reports the row count in the proxy's,
+    and only the second can distinguish a write that landed from one that lost
+    a compare-and-set.
+    """
+    heads: dict[str, set[str]] = {}
+    files: dict[str, set[str]] = {}
+    for junction in producers:
+        for branch in junction.branches:
+            for emit in branch.emits:
+                if emit.reports != REPORTS_ROWS_CHANGED:
+                    continue
+                head = emit.template.partition("{}")[0]
+                if not head.strip():
+                    continue
+                heads.setdefault(head, set()).add(junction.owner)
+                files.setdefault(head, set()).update(emit.log_files)
+    if not heads:
+        return None, []
+    best = max(heads, key=lambda head: (len(heads[head]), len(head)))
+    return re.escape(best), sorted(files[best])
 
 
 def _pattern(
@@ -364,7 +401,12 @@ def _follow_up(
 
 
 def _observations(
-    candidates: list[Candidate], pattern: str, control: str, with_control: bool
+    candidates: list[Candidate],
+    pattern: str,
+    control: str,
+    with_control: bool,
+    rows: Optional[str] = None,
+    rows_files: Optional[list[str]] = None,
 ) -> list[Observation]:
     """One probe per log file, and its control where a control is meaningful.
 
@@ -407,6 +449,20 @@ def _observations(
                     settles=[],
                 )
             )
+    for filename in rows_files or []:
+        if not rows:
+            break
+        observations.append(
+            Observation(
+                log_file=filename,
+                pattern=rows,
+                role=ROWS,
+                services=list(evidence.SERVICES),
+                # Settles nothing on its own: it says whether the row moved,
+                # not which of the candidates moved it.
+                settles=[],
+            )
+        )
     return observations
 
 
@@ -429,6 +485,17 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
 
     candidates = [_candidate(j, symptom.observed) for j in producers]
     pattern = _pattern(symptom.subject, symptom.observed, symptom.task_id, producers)
+    rows_head, rows_files = rows_shape(producers)
+    # Scoped to the row, like the probe: an unscoped row count answers about
+    # every write the proxy made, which is no answer about this one.
+    rows_pattern = (
+        _TASK_PREFIX.format(task=re.escape(str(symptom.task_id))) + rows_head
+        if rows_head and symptom.task_id is not None
+        and symptom.subject.startswith(_TASK_SCOPED)
+        else None
+    )
+    if rows_pattern is None:
+        rows_files = []
 
     gaps: list[str] = []
     if pattern is None:
@@ -458,6 +525,8 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 pattern,
                 control_shape(symptom.subject, producers) or "",
                 with_control=symptom.task_id is not None,
+                rows=rows_pattern,
+                rows_files=rows_files,
             )
             if pattern
             else []
