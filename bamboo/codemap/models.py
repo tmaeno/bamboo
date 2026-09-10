@@ -161,6 +161,63 @@ class SubjectNode(BaseNode):
         return f"{spec_class}.{attribute}"
 
 
+#: What a line is about.  A junction leaves two kinds and they are not
+#: interchangeable: one carries the value, so a probe can be built from it by
+#: substituting the value observed; the other carries the row count the write
+#: returned, which is the only trace a compare-and-set leaves when it loses.
+#: Reading the second as the first would build a pattern for a value that
+#: never appears in it.
+REPORTS_DECISION = "decision"
+REPORTS_ROWS_CHANGED = "rows_changed"
+
+
+class Emit(BaseModel):
+    """A log line the code leaves when it settles a value, and where it lands.
+
+    The file belongs to the emit rather than to the node, because one junction
+    leaves two kinds of line in two different places.  ``updateTask_JEDI``
+    writes ``updated N rows`` through the proxy's own inherited logger, while
+    the ``set task_status=`` line about that same junction is written by the
+    knight that called it.  ``JunctionNode.owns_logger`` answers that with one
+    bit for the whole node, which was right for the question it was added for
+    and is the wrong shape for this one.
+
+    ``log_files`` empty means the module writes through a wrapper its caller
+    supplied and the map cannot say where that goes.  Left empty rather than
+    filled in: a probe against a guessed file comes back silent, and silence is
+    what the eliminator reads.
+    """
+
+    template: str = Field(
+        ...,
+        description=(
+            "The line as the source frames it, with run-time parts left as "
+            "``{}`` -- the literal frame is what a production log is matched on."
+        ),
+    )
+    log_level: Optional[str] = Field(
+        default=None,
+        description=(
+            "Level it is written at, or None where one hop could not settle it. "
+            "A DEBUG line the map offers as an observable does not exist if the "
+            "deployment runs at INFO, which only production can say."
+        ),
+    )
+    log_files: list[str] = Field(
+        default_factory=list, description="Files this particular line lands in."
+    )
+    reports: str = Field(
+        default=REPORTS_DECISION,
+        description=(
+            f"{REPORTS_DECISION} | {REPORTS_ROWS_CHANGED} -- whether the line "
+            "carries the value the code settled, or the number of rows the "
+            "write actually changed.  Both are evidence and they answer "
+            "different questions: the first says the code decided, the second "
+            "says the row took it."
+        ),
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -203,8 +260,17 @@ class Branch(BaseModel):
         default=None,
         description="Machine-readable tag the code emits for this branch, e.g. 'criteria=-diskIO'.",
     )
-    emits: list[str] = Field(
-        default_factory=list, description="Log/error templates emitted on this branch."
+    emits: list[Emit] = Field(
+        default_factory=list,
+        description=(
+            "Lines the code writes when this branch settles the value, each "
+            "with the file it lands in.  Withdrawn once, when the only "
+            "templates that survived promotion were identifier frames rather "
+            "than diagnostics; raised again now that a consumer needs them -- "
+            "``strategy.line_shape`` reads them to build the probe, and while "
+            "they were empty it fell back to one hard-coded shape covering one "
+            "subject."
+        ),
     )
     log_level: Optional[str] = Field(
         default=None,
@@ -404,7 +470,7 @@ class JunctionNode(BaseNode):
                     "outcome": b.outcome,
                     "path_condition": b.path_condition,
                     "criteria_tag": b.criteria_tag,
-                    "emits": b.emits,
+                    "emits": [e.model_dump() for e in b.emits],
                 }
                 for b in self.branches
             ],

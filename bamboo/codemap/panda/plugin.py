@@ -42,6 +42,7 @@ from bamboo.codemap.panda.attribution import (
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
+    emit,
     errorcode,
     flush,
     logfile,
@@ -113,6 +114,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     """Builds the ``panda`` Code Map from installed or checked-out source."""
 
     def __init__(self) -> None:
+        self._emits = 0
         self._flush_guards = 0
         self._roots: dict[str, Path] = {}
         self._version: str = ""
@@ -336,6 +338,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._log_files = logfile.attach(fragment, self._modules)
         self._declared_files = logfile.declared_files(self._modules)
 
+        # After the log files, because the file an emit lands in is resolved
+        # from the module that writes the line.  Reads the callers with
+        # ``audited`` for the reason the flush pass does: it asks which class
+        # an attribute belongs to, which is the progress slice's question.
+        self._emits = emit.attach(fragment, self._modules, audited)
+        if self._emits:
+            logger.info(
+                "PandaCodeMapPlugin: %d branch(es) carry the line the code writes",
+                self._emits,
+            )
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -345,6 +358,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             len(fragment.junctions),
         )
         return fragment
+
+    @property
+    def emits(self) -> int:
+        """Branches given the log line the code writes when they fire."""
+        return self._emits
 
     @property
     def flush_guards(self) -> int:

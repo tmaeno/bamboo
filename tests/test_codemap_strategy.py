@@ -27,6 +27,7 @@ from bamboo.codemap.models import (
     UNSETTLED,
     Anchor,
     Branch,
+    Emit,
     EntryPoint,
     JunctionNode,
     MapFragment,
@@ -269,9 +270,9 @@ async def test_without_an_entity_there_is_no_control_and_nothing_can_be_ruled_ou
 
 
 async def test_a_subject_with_no_known_line_shape_is_a_gap_not_a_weaker_answer():
-    """The map records no diagnostic line on any junction, so most subjects
-    can be enumerated and explained but not observed.  Saying so names the next
-    thing to record; returning an empty observation list quietly would not."""
+    """A writer that logs nothing about the value can be enumerated and
+    explained but not observed.  Saying so names the next thing to record;
+    returning an empty observation list quietly would not."""
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -292,7 +293,72 @@ async def test_a_subject_with_no_known_line_shape_is_a_gap_not_a_weaker_answer()
 
     assert strategy.candidates
     assert strategy.observations == []
-    assert any("no log line shape is known" in gap for gap in strategy.gaps)
+    assert any("records no diagnostic line" in gap for gap in strategy.gaps)
+
+
+async def test_an_entity_of_the_wrong_kind_is_a_gap_rather_than_a_query():
+    """The prefix that scopes a query to one row names a task.
+
+    A job is tagged ``PandaID``.  Building a ``jediTaskID=`` pattern for one
+    asks production something that cannot match, and an answer that cannot
+    match is a silence -- which is exactly what the eliminator reads as
+    evidence.  Refused rather than asked.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(name="JobSpec.jobStatus")],
+        junctions=[
+            _junction(
+                "a.py::f",
+                Branch(
+                    outcome="holding",
+                    emits=[Emit(template="set job status to {}", log_level="info")],
+                ),
+                log_files=[KNIGHT_LOG],
+                subject="JobSpec.jobStatus",
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject="JobSpec.jobStatus", observed="holding", task_id="1"),
+    )
+
+    assert strategy.observations == []
+    assert any("rows are not" in gap for gap in strategy.gaps)
+
+
+async def test_the_control_asks_about_the_probes_own_sentence():
+    """A control about a different line answers a question nobody asked.
+
+    It licenses the probe's silence, so it has to be the same sentence with the
+    entity and the value taken out.  While the shape was a constant the control
+    was that constant too, which was right for one subject and would have been
+    silently wrong for every other.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["pending"])],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(
+                    outcome="pending",
+                    emits=[Emit(template="moved task to {}", log_level="info")],
+                ),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
+    )
+    controls = [o for o in strategy.observations if o.role == strategy_mod.CONTROL]
+
+    assert [o.pattern for o in controls] == [r"moved\ task\ to\ "]
 
 
 async def test_a_subject_the_map_does_not_hold_is_refused_with_what_it_does_hold():

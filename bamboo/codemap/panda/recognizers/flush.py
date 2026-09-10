@@ -53,7 +53,7 @@ import ast
 import re
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap.models import JunctionNode, SourceModule, SubjectNode
+from bamboo.codemap.models import Emit, JunctionNode, SourceModule, SubjectNode
 from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
@@ -61,6 +61,8 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     path_condition,
 )
+from bamboo.codemap.panda.recognizers import logfile
+from bamboo.codemap.panda.recognizers.emit import row_count_lines
 from bamboo.codemap.panda.recognizers.trigger import sole_definitions
 from bamboo.codemap.panda.values import rendered_text
 
@@ -81,6 +83,8 @@ class Flush(NamedTuple):
     #: columns the method takes back out of the clause before writing
     excluded: frozenset[str]
     parameters: tuple[str, ...]
+    #: lines the method writes about how many rows its write changed
+    rows_emits: tuple[Emit, ...] = ()
 
 
 def _string_fragments(
@@ -142,6 +146,8 @@ def flush_methods(
     limit the trigger slice puts on a cross-module hop, for the same reason.
     """
     only_here = sole_definitions(modules)
+    declared = logfile.declared_files(modules)
+    inherited = logfile.inherited_files(modules, declared)
     found: dict[str, Flush] = {}
     for module in modules:
         # Whether a fragment is appended under a test is half of what this
@@ -188,6 +194,11 @@ def flush_methods(
                 guards=guards,
                 excluded=frozenset(excluded),
                 parameters=parameters,
+                rows_emits=tuple(
+                    row_count_lines(
+                        func, logfile.files_of(module.rel_path, declared, inherited)
+                    )
+                ),
             )
     return found
 
@@ -272,7 +283,7 @@ def attach(
                         if column in written
                         and all(_supplied(node, p, flush.parameters) for p in gating)
                     )
-                    if not guards:
+                    if not guards and not flush.rows_emits:
                         continue
                     for junction in here:
                         if junction.subject not in {
@@ -286,4 +297,11 @@ def attach(
                                     branch.row_precondition + missing
                                 )
                                 annotated += 1
+                            # The line saying whether the row actually moved is
+                            # written by the flush, in the flush's own log, and
+                            # the code that chose the value never sees it.
+                            for line in flush.rows_emits:
+                                if any(e.template == line.template for e in branch.emits):
+                                    continue
+                                branch.emits.append(line)
     return annotated

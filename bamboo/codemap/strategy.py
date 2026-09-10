@@ -37,13 +37,19 @@ it, and they are independent:
 The second is the more important, because it is sound without the map being
 right about the first.
 
-**The line shape does not come from the map.**  ``Branch.emits`` is empty for
-every junction -- the assembled-string index that survives is about text landing
-in a *field*, not in a log -- so the pattern used here is a constant in
-:mod:`bamboo.codemap.evidence`, put there for the transition gate.  That covers
-one subject.  For any other, this can enumerate and explain but not observe,
-and it says so as a capability gap rather than returning a weaker answer: the
-gap names the next thing to record.
+**The line shape comes from the map.**  It did not for a long time: junctions
+carried no emits at all, so the pattern was a constant covering the one subject
+the transition gate needed, and every other subject came back as a capability
+gap.  ``Branch.emits`` now holds the sentence each writer leaves, and the probe
+is built from the head the most writers of the observed value share -- writers
+agreeing on a head are writers one question reaches.
+
+Two things still bound what can be asked, and both are reported as gaps rather
+than papered over.  A writer that logs nothing about the value cannot be
+observed at all.  And the prefix that scopes a query to a single row names a
+task, so a subject whose rows are jobs cannot be scoped by it -- asking anyway
+would produce a pattern that never matches, and a silence is what the
+eliminator reads as evidence.
 """
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ from bamboo.codemap.models import (
     ANSWER_NOT_ASKED,
     ANSWER_SEEN,
     ELIMINATED,
+    REPORTS_DECISION,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     UNASKABLE,
@@ -91,6 +98,12 @@ _LINE_SHAPE: dict[str, str] = {
     evidence.TRANSITION_SUBJECT: r"set task_status={value}",
 }
 
+#: Subjects the task prefix can scope.  A job is tagged ``PandaID``, a dataset
+#: by its own id, so building a ``jediTaskID=`` pattern for one of those asks a
+#: question that cannot match -- which is worse than saying nothing, because a
+#: silence is what the eliminator reads.  Reported as a gap instead.
+_TASK_SCOPED = ("JediTaskSpec.", "JEDI_Tasks.")
+
 # ``<jediTaskID=52266181 datasetID=685030095>`` is what the log wrapper puts in
 # front of the message, so the id and the transition are on one line and one
 # pattern can require both.  The trailing class matters: without it
@@ -117,25 +130,65 @@ CONTROL_MAX_MATCHES = evidence.TRANSITION_MAX_MATCHES
 _SAMPLE_LINES = 3
 
 
-def line_shape(subject: str) -> Optional[str]:
-    """The log line a writer of *subject* leaves, or None when none is known."""
+def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
+    """The log line a writer of *subject* leaves, or None when none is known.
+
+    Read from the map first.  The constant below covers one subject and was
+    what this had while junctions carried no emits at all; keeping it as the
+    fallback costs nothing and means a map built before the emits existed still
+    answers for the subject it could always answer for.
+
+    The literal frame is turned into a pattern by anchoring on the text either
+    side of the hole the value goes in.  Only lines that *carry the value* can
+    do that, which is why the emits say which they are: a line reporting how
+    many rows changed is evidence about the same junction and answers a
+    different question, so building a value pattern out of it would ask
+    production for something that never appears in it.
+    """
+    heads: dict[str, set[str]] = {}
+    for junction in producers:
+        for branch in junction.branches:
+            for emit in branch.emits:
+                if emit.reports != REPORTS_DECISION:
+                    continue
+                head = emit.template.partition("{}")[0]
+                if head.strip():
+                    heads.setdefault(head, set()).add(junction.owner)
+    if heads:
+        # The head is the part a pattern anchors on, so writers agreeing on a
+        # head are writers a single question reaches.  Most-shared first, and
+        # longest to break a tie: taking the shortest instead picked ``set to``
+        # out of one junction over ``set task_status=`` out of four, which is
+        # both less selective and about a different sentence.
+        best = max(heads, key=lambda head: (len(heads[head]), len(head)))
+        return re.escape(best) + "{value}"
     return _LINE_SHAPE.get(subject)
 
 
-def _pattern(subject: str, value: str, task_id: Optional[str]) -> Optional[str]:
+def _pattern(
+    subject: str, value: str, task_id: Optional[str], producers: list[JunctionNode]
+) -> Optional[str]:
     """The regular expression to put to production, or None.
 
     Values are escaped even though every status in the corpus is alphanumeric:
     the symptom comes from a record, and a pattern assembled from data is one
     place a stray metacharacter turns a precise question into a vague one.
     """
-    shape = line_shape(subject)
+    shape = line_shape(subject, producers)
     if shape is None:
         return None
     pattern = shape.format(value=re.escape(value))
     if task_id is not None:
+        if not subject.startswith(_TASK_SCOPED):
+            return None
         pattern = _TASK_PREFIX.format(task=re.escape(str(task_id))) + pattern
     return pattern
+
+
+def control_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
+    """The probe's sentence with nothing filled in -- does this file say it at all."""
+    shape = line_shape(subject, producers)
+    return None if shape is None else shape.replace("{value}", "")
 
 
 def _conditions(junction: JunctionNode, observed: str) -> list[str]:
@@ -310,12 +363,19 @@ def _follow_up(
     )
 
 
-def _observations(candidates: list[Candidate], pattern: str, with_control: bool) -> list[Observation]:
+def _observations(
+    candidates: list[Candidate], pattern: str, control: str, with_control: bool
+) -> list[Observation]:
     """One probe per log file, and its control where a control is meaningful.
 
     Grouped by file rather than by candidate: candidates share files -- the two
     watchdog junctions reach three of them between them -- and one query per
     candidate would ask the same question of the same file several times.
+
+    The control is the probe's own sentence with the entity and the value
+    taken out -- it has to be, or it answers about a line the probe was never
+    about.  While the shape was a constant this was the constant too, which was
+    right for the one subject it covered and silently wrong for any other.
 
     The control is skipped when the symptom names no entity, because then the
     probe *is* the control and the two would be one query asked twice.  That
@@ -341,7 +401,7 @@ def _observations(candidates: list[Candidate], pattern: str, with_control: bool)
             observations.append(
                 Observation(
                     log_file=filename,
-                    pattern=evidence.TRANSITION_PATTERN,
+                    pattern=control,
                     role=CONTROL,
                     services=list(evidence.SERVICES),
                     settles=[],
@@ -368,14 +428,18 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     carried = sorted(await code_map.carried_from(symptom.subject))
 
     candidates = [_candidate(j, symptom.observed) for j in producers]
-    pattern = _pattern(symptom.subject, symptom.observed, symptom.task_id)
+    pattern = _pattern(symptom.subject, symptom.observed, symptom.task_id, producers)
 
     gaps: list[str] = []
     if pattern is None:
         gaps.append(
-            f"no log line shape is known for {symptom.subject}, so its writers can be "
-            "enumerated but not observed -- the map records no diagnostic line on any "
-            "junction, and the one shape that exists is a constant in codemap.evidence"
+            f"no question can be put to production about {symptom.subject}: "
+            + (
+                "the map records no diagnostic line on any of its writers"
+                if line_shape(symptom.subject, producers) is None
+                else "the entity given is a task and this subject's rows are not, "
+                "so the log prefix that scopes a query to one row does not apply"
+            )
         )
     if symptom.task_id is None:
         gaps.append(
@@ -389,7 +453,12 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         derived_from=subject.derived_from,
         candidates=candidates,
         observations=(
-            _observations(candidates, pattern, with_control=symptom.task_id is not None)
+            _observations(
+                candidates,
+                pattern,
+                control_shape(symptom.subject, producers) or "",
+                with_control=symptom.task_id is not None,
+            )
             if pattern
             else []
         ),

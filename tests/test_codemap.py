@@ -22,6 +22,7 @@ import pytest
 from bamboo.codemap import diff, evidence, gates
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    REPORTS_ROWS_CHANGED,
     Anchor,
     AnnotationAudit,
     BoundaryNode,
@@ -39,6 +40,7 @@ from bamboo.codemap.panda import attribution, pathcond, promotion, sql, values
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
+    emit,
     errorcode,
     flush,
     logfile,
@@ -1717,10 +1719,244 @@ class TaskModule:
 
 
 # ---------------------------------------------------------------------------
+# The line a junction leaves behind
+# ---------------------------------------------------------------------------
+
+
+_PROXY_CHAIN = [
+    (
+        '_logger = PandaLogger().getLogger("DBProxy")\n'
+        "class DBProxy(task_module.TaskModule):\n    pass\n",
+        "pandaserver/taskbuffer/OraDBProxy.py",
+    ),
+    (
+        'logger = PandaLogger().getLogger(__name__.split(".")[-1])\n'
+        "class DBProxy(OraDBProxy.DBProxy):\n    pass\n",
+        "pandajedi/jedicore/JediDBProxy.py",
+    ),
+]
+
+
+def _emits(
+    source: str,
+    rel: str = "pandajedi/jediorder/Knight.py",
+    with_proxy_chain: bool = False,
+):
+    """Extract from *source*, resolve log files, then attach the emits."""
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, rel),
+    ]
+    if with_proxy_chain:
+        modules += [_module(text, where) for text, where in _PROXY_CHAIN]
+    subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.subjects.extend(subjects)
+    fragment.junctions.extend(junctions)
+    logfile.attach(fragment, modules)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    emit.attach(fragment, modules, attributor)
+    return [j for j in fragment.junctions if j.owner.startswith(rel)]
+
+
+def test_the_line_a_junction_writes_is_recorded_with_its_level():
+    """``observe`` needs the sentence, not only the file it lands in."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finishing"
+        tmpLog.info(f"set task_status={taskSpec.status}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert len(status) == 1
+    assert [(e.template, e.log_level) for e in status[0].branches[0].emits] == [
+        ("set task_status={}", "info")
+    ]
+
+
+def test_a_message_built_into_a_local_first_is_still_the_line():
+    """``tmpMsg = f"..."`` then ``tmpLog.info(tmpMsg)`` -- 37% of the corpus.
+
+    Without this hop all four knights that write ``set task_status=`` are
+    missed, which is every one the transition gate reads.  The same shape gate
+    1 found when ``criteria = "-link_unusable"`` was assigned before being
+    interpolated.
+    """
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finishing"
+        tmpMsg = f"set task_status={taskSpec.status}"
+        tmpLog.info(tmpMsg)
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [e.template for e in status[0].branches[0].emits] == ["set task_status={}"]
+
+
+def test_a_line_naming_the_value_through_a_local_counts():
+    """``f"set task_status={newTaskStatus}"`` -- the value, not the attribute.
+
+    ``TaskRefiner`` logs the local it just assigned rather than reading the
+    spec back, so an attribute test alone does not see it.  What ties the line
+    to the junction is that the local holds a value this junction writes.
+    """
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        newTaskStatus = "tobroken"
+        taskSpec.status = newTaskStatus
+        tmpLog.info(f"set task_status={newTaskStatus}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [e.template for e in status[0].branches[0].emits] == ["set task_status={}"]
+
+
+def test_a_line_naming_the_expression_a_tier_two_outcome_is_named_for():
+    """``runtime(newTaskStatus)`` and ``f"...={newTaskStatus}"`` are one fact.
+
+    ``TaskRefiner`` assigns a local the reaching definitions cannot settle, so
+    the outcome is recorded as the expression itself -- and the line it logs
+    interpolates that same expression.  Without this the map has a branch it
+    admits it cannot value and a line that would have shown the value, and
+    fails to connect them.
+    """
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, newTaskStatus):
+        taskSpec.status = newTaskStatus
+        tmpLog.info(f"set task_status={newTaskStatus} sourceLabel={self.label}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(newTaskStatus)"]
+    assert [e.template for e in status[0].branches[0].emits] == [
+        "set task_status={} sourceLabel={}"
+    ]
+
+
+def test_the_line_reporting_how_many_rows_changed_is_kept_apart():
+    """The only trace a compare-and-set leaves when it loses.
+
+    ``updateTask_JEDI`` ends with ``updated {nRows} rows``, tagged with the
+    task id and written at DEBUG, which production runs -- so whether a write
+    landed is already observable and the map simply did not know the line.
+    It carries no value, so it is marked as reporting the row count: read as a
+    decision line it would build a probe for a value that never appears in it.
+    """
+    source = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finishing"
+        self.cur.execute(sqlU + comment, varMap)
+        nRows = self.cur.rowcount
+        tmpLog.debug(f"updated {nRows} rows")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+    rows = [
+        e
+        for b in status[0].branches
+        for e in b.emits
+        if e.reports == REPORTS_ROWS_CHANGED
+    ]
+
+    assert [(e.template, e.log_level) for e in rows] == [("updated {} rows", "debug")]
+
+
+def test_a_line_about_something_else_is_not_this_junctions():
+    """Every function logs; only some of it is about the value being settled."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finishing"
+        tmpLog.info(f"start for {self.pid}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert status[0].branches[0].emits == []
+
+
+def test_the_line_lands_in_the_log_of_the_module_that_writes_it():
+    """One junction can leave two lines in two files.
+
+    ``updateTask_JEDI`` writes ``updated N rows`` into the proxy's own
+    inherited logger, while the ``set task_status=`` line about the same
+    junction is written by the knight that called it.  ``owns_logger`` answers
+    that per junction; the truth is per line -- so the file belongs to the emit,
+    resolved from the module the line is written in.
+    """
+    source = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finishing"
+        tmpLog.debug(f"set task_status={taskSpec.status}")
+'''
+    proxy = _emits(
+        source,
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py",
+        with_proxy_chain=True,
+    )
+    status = [j for j in proxy if j.subject == "JediTaskSpec.status"]
+
+    assert status[0].branches[0].emits[0].log_files == [
+        "panda-DBProxy.log",
+        "panda-JediDBProxy.log",
+    ]
+
+
+def test_a_line_from_a_module_with_no_logger_of_its_own_names_no_file():
+    """``PostProcessorBase`` logs through the wrapper its caller passed in.
+
+    Nothing in the map says where that lands from here, and naming a file for
+    it would be worse than naming none -- a probe against an invented file
+    comes back empty, and an empty answer is what the eliminator reads.
+    """
+    source = '''
+class PostProcessorBase:
+    def doBasicPostProcess(self, taskSpec: JediTaskSpec, tmpLog):
+        taskSpec.status = "finished"
+        tmpLog.info(f"set task_status={taskSpec.status}")
+'''
+    base = _emits(source, "pandajedi/jedipprocess/PostProcessorBase.py")
+    status = [j for j in base if j.subject == "JediTaskSpec.status"]
+
+    assert status[0].branches[0].emits[0].template == "set task_status={}"
+    assert status[0].branches[0].emits[0].log_files == []
+
+
+def test_an_emit_under_an_exclusive_branch_stays_on_that_branch():
+    """Two arms, two lines, and neither is evidence for the other."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, broken):
+        if broken:
+            taskSpec.status = "tobroken"
+            tmpLog.info(f"set task_status={taskSpec.status} broken")
+        else:
+            taskSpec.status = "finishing"
+            tmpLog.info(f"set task_status={taskSpec.status} ok")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+    by_outcome = {b.outcome: [e.template for e in b.emits] for b in status[0].branches}
+
+    assert by_outcome["tobroken"] == ["set task_status={} broken"]
+    assert by_outcome["finishing"] == ["set task_status={} ok"]
+
+
+# ---------------------------------------------------------------------------
 # The write that happens somewhere other than where the value was decided
 # ---------------------------------------------------------------------------
 
 _FLUSH_PROXY = '''
+_logger = PandaLogger().getLogger("DBProxy")
+
+
 class TaskModule:
     def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus=None):
         taskSpec.resetChangedAttr("jediTaskID")
@@ -1730,6 +1966,8 @@ class TaskModule:
             sql += "status IN (:old_1) AND "
         sql = sql[:-4]
         self.cur.execute(sqlU + sql + comment, varMap)
+        nRows = self.cur.rowcount
+        tmpLog.debug(f"updated {nRows} rows")
 '''
 
 
@@ -1771,6 +2009,29 @@ def test_the_proxy_flush_is_recognised_by_the_expression_it_builds():
         "status IN (:old_1)",
         frozenset({"oldStatus"}),
     )
+
+
+def test_the_caller_is_told_where_its_flush_reports_the_row_count():
+    """The decision is here; the line saying whether the row took it is there.
+
+    ``updateTask_JEDI`` ends with ``updated {nRows} rows`` in the proxy's own
+    log, and the knight that chose the value never sees it.  Carrying it to the
+    caller's branches is what makes "did the write land" a question the map can
+    point at a file for -- and it needs no change to PanDA, because the line is
+    already written, already tagged with the task id, and already at a level
+    this deployment runs.
+    """
+    caller = '''
+class PostProcessor:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "finished"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1})
+'''
+    status = [j for j in _flush(caller) if j.subject == "JediTaskSpec.status"]
+    rows = [e for b in status[0].branches for e in b.emits if e.reports == REPORTS_ROWS_CHANGED]
+
+    assert [(e.template, e.log_level) for e in rows] == [("updated {} rows", "debug")]
+    assert rows[0].log_files == ["panda-DBProxy.log"]
 
 
 def test_a_caller_that_asks_for_the_guard_is_told_its_write_races():
