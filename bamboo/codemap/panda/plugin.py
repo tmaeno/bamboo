@@ -206,6 +206,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(progress_coverage)
         fragment.diagnostics.extend(written_text)
         fragment.enumeration_writes.extend(bindings)
+        self._tagged_branches = sum(1 for j in junctions for b in j.branches if b.tags)
+        self._unclaimed_tags = progress.unclaimed_tags(self._modules, junctions)
 
         # The SQL slice needs an attributor that already knows the table map,
         # which is learned from the whole corpus rather than from one module.
@@ -442,6 +444,22 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def table_conflicts(self) -> dict[str, set[str]]:
         """Tables whose column evidence named more than one spec class."""
         return getattr(self, "_table_conflicts", {})
+
+    @property
+    def tagged_branches(self) -> int:
+        """Branches that name a machine-readable tag for their own decision."""
+        return getattr(self, "_tagged_branches", 0)
+
+    @property
+    def unclaimed_tags(self) -> list[tuple[str, list[str]]]:
+        """Tags named where subjects are settled that no branch claims.
+
+        The second reading of the same fact: the code names an action, and the
+        branch table says which branch takes it.  A tag with no claimant is
+        either a decision this slice does not model or a message about
+        something the code no longer does -- the corpus has one of the latter.
+        """
+        return getattr(self, "_unclaimed_tags", [])
 
     @property
     def runtime_dispatch_writes(self) -> list[str]:

@@ -459,6 +459,25 @@ def main(
 
     _report_triggers(fragment, plugin, top)
 
+    tagged = getattr(plugin, "tagged_branches", 0)
+    unclaimed = getattr(plugin, "unclaimed_tags", [])
+    if tagged or unclaimed:
+        click.echo(f"\nbranches naming their own decision: {tagged}")
+        if unclaimed:
+            # The other half of the same comparison.  A tag with no branch is
+            # either a decision this slice does not model or a message about
+            # something the code stopped doing -- and the corpus has one of the
+            # latter, a block logging ``action=set_exhausted`` with the write
+            # on the next line commented out.
+            click.echo(
+                f"  tags named where subjects are settled that no branch claims "
+                f"({len(unclaimed)}):"
+            )
+            for where, tags in unclaimed[:top]:
+                click.echo(f"    {where}  {' '.join(tags)}")
+            if len(unclaimed) > top:
+                click.echo(f"    … {len(unclaimed) - top} more")
+
     dispatched = getattr(plugin, "runtime_dispatch_writes", [])
     if dispatched:
         # Dropped writes rather than junctions: nothing here says the receiver

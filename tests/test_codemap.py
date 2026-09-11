@@ -1949,6 +1949,59 @@ class Knight:
     assert by_outcome["finishing"] == ["set task_status={} ok"]
 
 
+def test_a_tagged_line_goes_to_the_branch_that_names_those_tags():
+    """Six arms of ``setScoutJobData_JEDI`` write ``exhausted`` and none of
+    their lines interpolates the value -- they name the reason instead.  Without
+    reading the tag the deciding junction has no line to ask production for, and
+    reading it by anything looser gives all six arms the same line.
+    """
+    source = '''
+class Knight:
+    def scout(self, taskSpec: JediTaskSpec, scoutData, thr):
+        if scoutData["cpuTime"] > thr:
+            errMsg = f"#KV #ATM action=set_exhausted reason=scout_cpuTime {thr}"
+            tmpLog.info(errMsg)
+            taskSpec.status = "exhausted"
+        if taskSpec.status != "exhausted":
+            if scoutData["ramCount"] > thr:
+                errMsg = f"#KV #ATM action=set_exhausted reason=scout_ramCount {thr}"
+                tmpLog.info(errMsg)
+                taskSpec.status = "exhausted"
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+    lines = [[e.template for e in b.emits] for b in status[0].branches]
+
+    assert lines == [
+        ["#KV #ATM action=set_exhausted reason=scout_cpuTime {}"],
+        ["#KV #ATM action=set_exhausted reason=scout_ramCount {}"],
+    ]
+
+
+def test_an_untagged_line_does_not_displace_a_tag():
+    """A branch that names its own decision is not also described by a line that
+    merely mentions the value.
+
+    The line here is one ``_names_the_value`` accepts -- it interpolates the
+    status -- and it is in the same block, so nothing else would keep it out.
+    Letting it in would put arms that differ only by reason back on one shared
+    sentence, which is the distinction this reading exists to make.
+    """
+    source = '''
+class Knight:
+    def scout(self, taskSpec: JediTaskSpec, thr):
+        if thr:
+            errMsg = f"#ATM action=set_exhausted reason=low_efficiency {thr}"
+            tmpLog.info(errMsg)
+            taskSpec.status = "exhausted"
+            tmpLog.info(f"set task_status={taskSpec.status}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [e.template for e in status[0].branches[0].emits] == [
+        "#ATM action=set_exhausted reason=low_efficiency {}"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # The write that happens somewhere other than where the value was decided
 # ---------------------------------------------------------------------------
@@ -2875,6 +2928,166 @@ def test_the_index_survives_promotion_dropping_the_field():
     assert "JobSpec.ddmErrorDiag" not in {s.name for s in fragment.subjects}
     assert "JobSpec.ddmErrorDiag" not in {j.subject for j in fragment.junctions}
     assert [d.template for d in fragment.diagnostics] == ["failed to get {} files"]
+
+
+# --------------------------------------------------------------------------- #
+# the tag a branch names for itself
+# --------------------------------------------------------------------------- #
+
+_TAGGED = (
+    "class M:\n"
+    "    def setScoutJobData(self, taskSpec, scoutData, thr):\n"
+    "        tmpLog = self.create_logger()\n"
+    "        if scoutData['cpuTime'] > thr:\n"
+    "            errMsg = f\"#KV #ATM action=set_exhausted reason=scout_cpuTime\"\n"
+    "            errMsg += f\" cpuTime ({scoutData['cpuTime']}) is larger than {thr}\"\n"
+    "            tmpLog.info(errMsg)\n"
+    "            taskSpec.setErrDiag(errMsg)\n"
+    "            taskSpec.status = 'exhausted'\n"
+    "        if taskSpec.status != 'exhausted':\n"
+    "            if scoutData['ramCount'] > thr:\n"
+    "                other = f'#ATM action=set_exhausted reason=scout_ramCount {thr}'\n"
+    "                tmpLog.info(other)\n"
+    "                taskSpec.setErrDiag(other)\n"
+    "                taskSpec.status = 'exhausted'\n"
+)
+
+_SETTER = (
+    "class JediTaskSpec(object):\n"
+    "    _attributes = ('jediTaskID', 'status', 'oldStatus', 'errorDialog')\n"
+    "    def setErrDiag(self, diag, append=False):\n"
+    "        self.errorDialog = diag\n"
+)
+
+
+def _tagged_modules(source: str = _TAGGED):
+    return [
+        _module(_SETTER, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(source, "pandaserver/taskbuffer/db_proxy_mods/task_utils_module.py"),
+    ]
+
+
+def test_a_branch_carries_the_tag_the_block_records():
+    """Which of six arms fired is the whole question for ``exhausted``, and the
+    arms are not if/elif siblings -- each is its own ``if taskSpec.status !=
+    'exhausted':`` -- so the path condition cannot separate them.  The block
+    that records the line can: it holds exactly one write and names the reason.
+    """
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(), MAP_ID, VERSION)
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+    tags = [b.tags for b in junction.branches if b.outcome == "exhausted"]
+    assert tags == [
+        ["action=set_exhausted", "reason=scout_cpuTime"],
+        ["action=set_exhausted", "reason=scout_ramCount"],
+    ]
+
+
+def test_a_branch_knows_the_line_of_its_own_write():
+    """The junction's anchor is the first write; six branches sharing it answer
+    "which branch" with a line belonging to another."""
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(), MAP_ID, VERSION)
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+    lines = [b.line for b in junction.branches if b.outcome == "exhausted"]
+    assert lines == [9, 15]
+    assert junction.anchor.line_start == 9
+
+
+def test_a_tag_assigned_in_a_sibling_arm_still_reaches_the_branch():
+    """``reason=low_efficiency`` is assigned in the ``else`` of an unrelated
+    check and only the local reaches the block that writes.  One hop is the
+    same reading the emit pass needs, and without it the reason is lost."""
+    source = (
+        "class M:\n"
+        "    def scout(self, taskSpec, io, limit):\n"
+        "        tmpLog = self.create_logger()\n"
+        "        if io > limit:\n"
+        "            errMsg = 'not to set exhausted since high IO intensity'\n"
+        "        else:\n"
+        "            errMsg = f'#ATM action=set_exhausted reason=low_efficiency {io}'\n"
+        "        if taskSpec.useExhausted():\n"
+        "            tmpLog.info(errMsg)\n"
+        "            taskSpec.setErrDiag(errMsg)\n"
+        "            taskSpec.status = 'exhausted'\n"
+    )
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+    assert [b.tags for b in junction.branches] == [
+        ["action=set_exhausted", "reason=low_efficiency"]
+    ]
+
+
+def test_a_block_settling_two_subjects_is_not_tagged():
+    """Which write the tag is about is what the block answers, and a block with
+    two of them does not answer it.  Reported rather than guessed at -- the
+    corpus has none today, and the day it has one the map should say so."""
+    source = (
+        "class M:\n"
+        "    def scout(self, taskSpec, n):\n"
+        "        tmpLog = self.create_logger()\n"
+        "        if n > 1:\n"
+        "            tmpLog.info('#ATM action=set_exhausted reason=low_efficiency')\n"
+        "            taskSpec.oldStatus = 'scouting'\n"
+        "            taskSpec.status = 'exhausted'\n"
+    )
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
+
+    settled = [j for j in junctions if j.owner.endswith("::scout")]
+    assert sorted(j.subject for j in settled) == [
+        "JediTaskSpec.oldStatus",
+        "JediTaskSpec.status",
+    ]
+    assert [b.tags for j in settled for b in j.branches] == [[], []]
+
+
+def test_a_message_a_setter_persists_is_indexed_against_the_field_it_lands_in():
+    """``setErrDiag`` is a method call, so the attribute slice never saw it --
+    and it is how ``errorDialog`` is written 127 times in the corpus, which is
+    the field an investigation actually starts from.
+
+    One row per assembled piece, not one for the concatenation: ``errMsg +=``
+    under a condition may not run, so composing them would claim an order the
+    reading has not established.
+    """
+    _s, _j, _c, diagnostics, _e = progress.extract(_tagged_modules(), MAP_ID, VERSION)
+
+    assert [(d.template, d.field, d.form) for d in diagnostics] == [
+        ("#KV #ATM action=set_exhausted reason=scout_cpuTime", "JediTaskSpec.errorDialog", "alias"),
+        (" cpuTime ({}) is larger than {}", "JediTaskSpec.errorDialog", "alias"),
+        ("#ATM action=set_exhausted reason=scout_ramCount {}", "JediTaskSpec.errorDialog", "alias"),
+    ]
+
+
+def test_a_setter_two_classes_define_differently_indexes_neither():
+    """``setDdmBackEnd`` writes ``JediTaskSpec.splitRule`` and
+    ``JobSpec.specialHandling``; the name alone cannot say which field the text
+    landed in.  The same restriction the trigger slice and ``callers_of`` put on
+    every name-based hop, and the corpus has this collision today.
+    """
+    both = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'status', 'splitRule')\n"
+        "    def setDdmBackEnd(self, backEnd):\n"
+        "        self.splitRule = backEnd\n"
+        "class JobSpec(object):\n"
+        "    _attributes = ('PandaID', 'specialHandling')\n"
+        "    def setDdmBackEnd(self, backEnd):\n"
+        "        self.specialHandling = backEnd\n"
+    )
+    caller = (
+        "class M:\n"
+        "    def f(self, taskSpec, n):\n"
+        "        taskSpec.setDdmBackEnd(f'ddm {n}')\n"
+    )
+    modules = [
+        _module(both, "pandaserver/taskbuffer/Specs.py"),
+        _module(caller, "pandaserver/jediorder/TaskRefiner.py"),
+    ]
+    _s, _j, _c, diagnostics, _e = progress.extract(modules, MAP_ID, VERSION)
+
+    assert diagnostics == []
 
 
 _ENUM_WRITER = (

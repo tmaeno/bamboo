@@ -52,6 +52,24 @@ Mapping = dict[str, Union[str, "Mapping"]]
 # ``{0}`` / ``{}`` / ``{schema}`` in a ``str.format`` template.
 _FIELD = re.compile(r"\{[^{}]*\}")
 
+# ``action=set_exhausted`` / ``reason=low_efficiency`` -- PanDA's own name for
+# the decision a message is about, the same machine-readable shape the
+# brokerage slice reads as ``criteria=-<tag>``.  Whole tokens: the token is what
+# an observed message is matched on, and it survives interpolation because it is
+# the literal part of the frame.
+_TAG = re.compile(r"\b((?:action|reason)=[A-Za-z_][A-Za-z0-9_]*)")
+
+
+def decision_tags(text: str) -> set[str]:
+    """The tags *text* names for the decision it reports.
+
+    Here rather than in a recognizer because two of them read it for opposite
+    ends: the progress slice asks which branch a tag belongs to, and the emit
+    pass asks which line belongs to a tagged branch.  Two copies of this
+    pattern would be two things to keep in step.
+    """
+    return set(_TAG.findall(text))
+
 
 def rendered_text(node: ast.expr) -> Optional[str]:
     """Render a string expression, marking the parts only run time knows as ``{}``.

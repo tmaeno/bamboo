@@ -256,9 +256,31 @@ class Branch(BaseModel):
             "outcome the code can announce without the row ever taking it."
         ),
     )
-    criteria_tag: Optional[str] = Field(
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Machine-readable tags the code names when this branch fires, e.g. "
+            "``action=set_exhausted`` and ``reason=low_efficiency``.  A list "
+            "because the signature is a *set*: PanDA writes an action and a "
+            "reason as separate tokens and puts words between them (``action="
+            "set_exhausted since reason=many_shorter_jobs``), so a single "
+            "joined string would match no message production ever writes.  "
+            "Read where the write is read, from the block that records the "
+            "line, and the same tokens land in the record itself when the "
+            "block also calls a message setter -- which is what lets an "
+            "observed ``errorDialog`` name one branch out of six."
+        ),
+    )
+    line: Optional[int] = Field(
         default=None,
-        description="Machine-readable tag the code emits for this branch, e.g. 'criteria=-diskIO'.",
+        description=(
+            "Where this branch's write is.  The junction's anchor is the first "
+            "of them, and six branches of one function sharing it answers "
+            "*which branch* with a line that belongs to another; an index that "
+            "names a branch has to be able to say where to read.  Not part of "
+            "the content hash: a branch's identity is its outcome, and a line "
+            "moves whenever anything above it is edited."
+        ),
     )
     emits: list[Emit] = Field(
         default_factory=list,
@@ -469,7 +491,7 @@ class JunctionNode(BaseNode):
                 {
                     "outcome": b.outcome,
                     "path_condition": b.path_condition,
-                    "criteria_tag": b.criteria_tag,
+                    "tags": b.tags,
                     "emits": [e.model_dump() for e in b.emits],
                 }
                 for b in self.branches

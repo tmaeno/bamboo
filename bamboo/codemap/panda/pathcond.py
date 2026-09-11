@@ -90,6 +90,35 @@ def single_definition(
     return found[0] if len(found) == 1 else None
 
 
+def assigned_expressions(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> dict[str, list[ast.expr]]:
+    """Every expression bound to each local name in *func*, ``+=`` included.
+
+    The unrestricted sibling of :func:`single_definition`, for the readers that
+    want *all* the values a name can hold rather than the one that explains a
+    condition.  Both of them are the same hop: a message is written into a
+    local and logged or persisted a few lines later, and following it is what
+    the emit pass needs to find ``set task_status=`` at all and what the tag
+    reading needs to find the reason a branch names for itself.
+
+    An augmented assignment contributes its own right-hand side rather than the
+    concatenation.  ``errMsg += ...`` under a condition may not run, so the
+    pieces are what the reading establishes and the whole is not.
+    """
+    found: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            found.setdefault(target.id, []).append(node.value)
+    return found
+
+
 def path_condition(node: ast.AST) -> list[str]:
     """Return the conjunction of tests dominating *node*, outermost first.
 

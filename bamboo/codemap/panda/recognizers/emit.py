@@ -56,6 +56,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
+    assigned_expressions,
     attach_parents,
     exclusive,
     functions_with_owner,
@@ -63,7 +64,7 @@ from bamboo.codemap.panda.pathcond import (
     path_condition,
 )
 from bamboo.codemap.panda.recognizers import logfile
-from bamboo.codemap.panda.recognizers.selection import _log_level
+from bamboo.codemap.panda.recognizers.selection import log_level
 
 #: ``runtime(<expr>)`` -- how a branch records an outcome it cannot value.
 #: The expression is the connection to a line that interpolates the same one.
@@ -81,16 +82,7 @@ def _logged_arguments(
     are read from, and the expression carries the text -- and for the local
     spelling those are in two different places.
     """
-    assignments: dict[str, list[ast.expr]] = {}
-    for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            targets = [t for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            targets = [node.target]
-        else:
-            continue
-        for target in targets:
-            assignments.setdefault(target.id, []).append(node.value)
+    assignments = assigned_expressions(func)
 
     found: list[tuple[ast.expr, ast.expr]] = []
     for node in ast.walk(func):
@@ -99,9 +91,9 @@ def _logged_arguments(
         if not node.args:
             continue
         argument = node.args[0]
-        # ``_log_level`` reads the level off the call *enclosing* a node, so it
+        # ``log_level`` reads the level off the call *enclosing* a node, so it
         # is asked about the argument rather than about the call.
-        if _log_level(argument) is None:
+        if log_level(argument) is None:
             continue
         if isinstance(argument, ast.Name):
             found.extend((argument, built) for built in assignments.get(argument.id, ()))
@@ -163,7 +155,7 @@ def row_count_lines(
         found.append(
             Emit(
                 template=template,
-                log_level=_log_level(at_call),
+                log_level=log_level(at_call),
                 log_files=files,
                 reports=REPORTS_ROWS_CHANGED,
             )
@@ -212,6 +204,35 @@ def _names_the_value(
     return False
 
 
+def _about(branch, named: set[str], names_value: bool, reports: str) -> bool:
+    """Whether a line is about *branch*, given what it names.
+
+    The fourth reading, and the one the others cannot make.  Six arms of
+    ``setScoutJobData_JEDI`` write ``exhausted`` and none of their lines
+    interpolates the value -- they say ``action=set_exhausted reason=
+    scout_cpuTime`` and let the tag carry the meaning -- so ``_names_the_value``
+    finds nothing and the deciding junction ends up with no line to ask
+    production for at all.
+
+    **The branch's tags decide, not the line's.**  A tagged branch takes only a
+    line covering its tags, which is what keeps the six arms apart; an untagged
+    branch is judged the way it always was.  Reading it the other way round --
+    a tagged *line* belongs only to a tagged branch -- cost three branches of
+    ``doActionForReassign`` their line, because ``#ATM #KV label=managed
+    action=trigger_new_brokerage by setting task_status={}`` does both at once
+    and those branches carry no tag of their own (the block settles two
+    subjects, so the tag reading declines to say which).
+
+    A row count is about the write landing rather than about which branch chose
+    it, so it is exempt.
+    """
+    if reports == REPORTS_ROWS_CHANGED:
+        return True
+    if branch.tags:
+        return set(branch.tags) <= named
+    return names_value
+
+
 def attach(
     fragment,
     modules: list[SourceModule],
@@ -247,16 +268,18 @@ def attach(
                 spec_class, _, attribute = junction.subject.rpartition(".")
                 outcomes = {b.outcome for b in junction.branches}
                 for at_call, message in logged:
-                    if _reports_rows(message, counts):
-                        reports = REPORTS_ROWS_CHANGED
-                    elif _names_the_value(
+                    template = values.rendered_text(message)
+                    named = values.decision_tags(template) if template else set()
+                    names_value = _names_the_value(
                         message, func, owner, attributor, spec_class, attribute,
                         outcomes, settle,
-                    ):
+                    )
+                    if _reports_rows(message, counts):
+                        reports = REPORTS_ROWS_CHANGED
+                    elif named or names_value:
                         reports = REPORTS_DECISION
                     else:
                         continue
-                    template = values.rendered_text(message)
                     if not template or not values.has_literal_text(template):
                         # A frame with no literal text is not something a
                         # production line can be matched on -- it says only
@@ -264,12 +287,14 @@ def attach(
                         continue
                     emit = Emit(
                         template=template,
-                        log_level=_log_level(at_call),
+                        log_level=log_level(at_call),
                         log_files=files,
                         reports=reports,
                     )
                     where = path_condition(at_call)
                     for branch in junction.branches:
+                        if not _about(branch, named, names_value, reports):
+                            continue
                         if exclusive(branch.path_condition, where):
                             continue
                         if any(e.template == template for e in branch.emits):

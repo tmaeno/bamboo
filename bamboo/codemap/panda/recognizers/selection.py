@@ -174,7 +174,15 @@ def _emitting_call(node: ast.AST) -> Optional[ast.Call]:
     return None
 
 
-def _log_level(node: ast.AST) -> Optional[str]:
+def log_level(node: ast.AST) -> Optional[str]:
+    """The level of the logging call *node* is an argument of, if any.
+
+    Public because three slices ask it -- this one for a filter stage's
+    message, the emit pass for a junction's, and the progress slice to tell a
+    line the code records from an expression that merely happens to be a
+    string.  The same reason ``pathcond.single_definition`` is public: a second
+    copy of the level vocabulary is a second thing to keep current.
+    """
     call = _emitting_call(node)
     if call is None or not isinstance(call.func, ast.Attribute):
         return None
@@ -292,7 +300,7 @@ def _steps(
         # broker runs 1176 times in a day's logs, and requiring the name to be
         # fixed left the funnel counting cuts the map could not place.  The
         # threshold is a detail of the run; the frame is the step's name.
-        found.append(_Step(node.lineno, label, _log_level(node), funnel_line=True))
+        found.append(_Step(node.lineno, label, log_level(node), funnel_line=True))
     found.sort(key=lambda step: step.line)
     return _merged(found)
 
@@ -393,7 +401,7 @@ def extract(
                         stage = _Stage(tag, label, line)
                         stage.level = step.level if step else None
                         found[(label, tag)] = stage
-                    stage.add(conditions, template, _log_level(node))
+                    stage.add(conditions, template, log_level(node))
             named = _untagged_steps(func, steps, found)
             # A tag repeated at several sites is one reason, so the denominator
             # counts reasons and steps rather than lines -- otherwise a stage

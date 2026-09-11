@@ -57,12 +57,16 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
 )
 from bamboo.codemap.panda.pathcond import (
+    assigned_expressions,
     attach_parents,
     enclosing_class,
     enclosing_function,
+    exclusive,
+    functions_with_owner,
     literal_values,
     path_condition,
 )
+from bamboo.codemap.panda.recognizers.selection import log_level
 
 SLICE_NAME = "progress"
 
@@ -167,6 +171,337 @@ def _attribute_writes(
         for target in node.targets:
             if isinstance(target, ast.Attribute):
                 yield target, node.value, node
+
+
+# --------------------------------------------------------------------------- #
+# the tag a branch names for itself, and the setter that persists it
+# --------------------------------------------------------------------------- #
+
+
+class _Setter(NamedTuple):
+    """A method that writes one declared column from one of its parameters."""
+
+    spec_class: str
+    attribute: str
+    parameter: str
+    position: int
+
+
+def spec_setters(
+    modules: list[SourceModule], declarations: dict[str, set[str]]
+) -> dict[str, _Setter]:
+    """Methods whose call site writes a declared column, by method name.
+
+    ``taskSpec.setErrDiag(errMsg)`` is how ``errorDialog`` is written 127 times
+    in the corpus, and the attribute slice never saw one of them: a call is not
+    an assignment.  That field is where an investigation starts -- it is in the
+    record, so reading it costs one API call and no log window -- so the index
+    that says *who wrote this message* has to cover the call form.
+
+    Narrow on purpose, and the corpus drew both edges.
+
+    **One column and one parameter.**  ``Share.__init__`` writes twelve and
+    ``convertFromJobFileSpec`` ten; matching a call's arguments to those needs
+    positional binding for a reading that buys nothing, since neither assembles
+    a message.
+
+    **One defining class.**  ``setDdmBackEnd`` writes ``JediTaskSpec.splitRule``
+    in one class and ``JobSpec.specialHandling`` in another, so the name alone
+    cannot say which field the text landed in -- the same restriction the
+    trigger slice and ``callers_of`` put on every name-based hop, for the same
+    reason.
+    """
+    found: dict[str, Optional[_Setter]] = {}
+    for module in modules:
+        for func, owner in functions_with_owner(module.tree):
+            if owner not in declarations:
+                continue
+            parameters = [argument.arg for argument in func.args.args[1:]]
+            if not parameters:
+                continue
+            written: dict[str, set[str]] = {}
+            for node in ast.walk(func):
+                if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                    continue
+                target = node.targets[0]
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and target.attr in declarations[owner]
+                ):
+                    continue
+                flowing = {
+                    name.id for name in ast.walk(node.value) if isinstance(name, ast.Name)
+                } & set(parameters)
+                if flowing:
+                    written.setdefault(target.attr, set()).update(flowing)
+            if len(written) != 1:
+                continue
+            attribute, flowing = next(iter(written.items()))
+            if len(flowing) != 1:
+                continue
+            parameter = next(iter(flowing))
+            setter = _Setter(owner, attribute, parameter, parameters.index(parameter))
+            if found.setdefault(func.name, setter) != setter:
+                # Two classes, two fields, one name: nothing here can say which.
+                found[func.name] = None
+    return {name: setter for name, setter in found.items() if setter is not None}
+
+
+def _recorded_argument(call: ast.Call, setters: dict[str, _Setter]) -> Optional[ast.expr]:
+    """The message *call* records, whether it logs it or persists it.
+
+    Both spellings sit in the block that writes, and they are the same text:
+    ``tmpLog.info(errMsg)`` is what a grep can find and
+    ``taskSpec.setErrDiag(errMsg)`` is what the record keeps.
+    """
+    if not isinstance(call.func, ast.Attribute):
+        return None
+    setter = setters.get(call.func.attr)
+    if setter is not None:
+        for keyword in call.keywords:
+            if keyword.arg == setter.parameter:
+                return keyword.value
+        if len(call.args) > setter.position:
+            return call.args[setter.position]
+        return None
+    if call.args and log_level(call.args[0]) is not None:
+        return call.args[0]
+    return None
+
+
+def _one_hop(argument: ast.expr, assignments: dict[str, list[ast.expr]]) -> list[ast.expr]:
+    """Every expression *argument* can be, following a local back one step.
+
+    All of them, because the index this feeds asks which texts can land in a
+    field.  The reading that asks which text belongs to *one* write needs the
+    definitions that reach it instead -- see :func:`_reaching`.
+    """
+    if isinstance(argument, ast.Name):
+        return assignments.get(argument.id, [])
+    return [argument]
+
+
+def _reaching(
+    name: str, write: ast.stmt, func: ast.FunctionDef | ast.AsyncFunctionDef
+) -> list[ast.expr]:
+    """The definitions of *name* that reach *write*.
+
+    Following every definition instead is what the corpus punished: the six
+    arms of ``setScoutJobData_JEDI`` all build their message in a local called
+    ``errMsg``, so taking the whole function's definitions gave every arm all
+    eight tags -- a branch table that names six reasons and cannot tell them
+    apart is worse than one that names none.
+
+    A later assignment shadows an earlier one **unless the two are arms of the
+    same decision**, and an augmented one appends rather than replaces.  That
+    second clause is not a refinement: ``reason=low_efficiency`` is assigned in
+    the ``else`` of an IO-intensity check whose ``if`` assigns an untagged
+    message, and dropping one arm because the other is written later would be
+    picking by source order between two things that can both hold.
+    """
+    definitions = sorted(
+        (
+            node
+            for node in ast.walk(func)
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+            )
+            or (
+                isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == name
+            )
+        ),
+        key=lambda node: node.lineno,
+    )
+    current: list[ast.stmt] = []
+    for definition in definitions:
+        if definition.lineno > write.lineno:
+            break
+        if isinstance(definition, ast.AugAssign):
+            current.append(definition)
+            continue
+        conditions = path_condition(definition)
+        current = [
+            held for held in current if exclusive(path_condition(held), conditions)
+        ] + [definition]
+    return [definition.value for definition in current]
+
+
+def _block_containing(node: ast.AST) -> list[ast.stmt]:
+    """The statement list *node* is a member of."""
+    parent = getattr(node, "parent", None)
+    if parent is None:
+        return []
+    for _field, value in ast.iter_fields(parent):
+        if isinstance(value, list) and any(statement is node for statement in value):
+            return value
+    return []
+
+
+def _write_tags(
+    node: ast.Assign,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    setters: dict[str, _Setter],
+    spec_names: set[str],
+) -> list[str]:
+    """Tags the block around *node* names for the decision *node* makes.
+
+    **The block, not the path condition.**  ``setScoutJobData_JEDI`` reaches
+    ``exhausted`` from six arms, and they are not ``if``/``elif`` siblings --
+    each is its own ``if taskSpec.status != "exhausted":`` -- so nothing in the
+    conditions contradicts anything, ``exclusive`` separates none of them, and
+    attaching by non-exclusivity puts all nine tags on all six branches.  The
+    block that records the line holds exactly one write and names one reason.
+
+    **One hop through the local**, because ``reason=low_efficiency`` is assigned
+    in the ``else`` arm of an unrelated check and only the local reaches the
+    block that writes.
+
+    **Nothing when the block settles two subjects.**  Which write the tag is
+    about is precisely what the block answers, and a block with two of them
+    does not answer it.  The corpus has none today; the day it has one, the map
+    should say so rather than pick.
+    """
+    block = _block_containing(node)
+    if not block:
+        return []
+    settling = sum(
+        1
+        for statement in block
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute) and target.attr in spec_names
+            for target in statement.targets
+        )
+    )
+    if settling != 1:
+        return []
+    tags: set[str] = set()
+    for statement in block:
+        for call in ast.walk(statement):
+            if not isinstance(call, ast.Call):
+                continue
+            argument = _recorded_argument(call, setters)
+            if argument is None:
+                continue
+            held = (
+                _reaching(argument.id, node, func)
+                if isinstance(argument, ast.Name)
+                else [argument]
+            )
+            for expression in held:
+                text = values.rendered_text(expression)
+                if text:
+                    tags.update(values.decision_tags(text))
+    return sorted(tags)
+
+
+def _persisted_templates(
+    module: SourceModule,
+    setters: dict[str, _Setter],
+    map_id: str,
+    derived_from: str,
+) -> list[DiagnosticTemplate]:
+    """Index rows for the text a setter call persists into a declared column.
+
+    Anchored where the text is *assembled*, not where the setter is called:
+    the index answers "this message was seen, who wrote it", and the frame is
+    written in the block that decided, which is the place worth reading.  One
+    row per piece for the same reason :func:`assigned_expressions` keeps them
+    apart -- an ``errMsg +=`` under a condition may not have run.
+    """
+    found: list[DiagnosticTemplate] = []
+    seen: set[tuple[str, str, int]] = set()
+    for func, _owner in functions_with_owner(module.tree):
+        assignments = assigned_expressions(func)
+        for call in ast.walk(func):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+                continue
+            setter = setters.get(call.func.attr)
+            if setter is None:
+                continue
+            argument = _recorded_argument(call, setters)
+            if argument is None:
+                continue
+            field = SubjectNode.make_name(setter.spec_class, setter.attribute)
+            for expression in _one_hop(argument, assignments):
+                template = values.diagnostic_template(expression)
+                if template is None:
+                    continue
+                key = (template, field, expression.lineno)
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(
+                    DiagnosticTemplate(
+                        map_id=map_id,
+                        derived_from=derived_from,
+                        template=template,
+                        field=field,
+                        form="alias",
+                        anchor=Anchor(
+                            package=module.package,
+                            file=module.rel_path,
+                            line_start=expression.lineno,
+                            line_end=expression.end_lineno,
+                            blob_sha=module.blob_sha,
+                        ),
+                    )
+                )
+    return found
+
+
+def unclaimed_tags(
+    modules: list[SourceModule], junctions: list[JunctionNode]
+) -> list[tuple[str, list[str]]]:
+    """Tags named in a function that settles subjects, that no branch claims.
+
+    The second reading of the same fact, and the only one that can report a
+    message whose action never happens.  The corpus already has one: a block
+    logs ``action=set_exhausted reason=scout_memory_leak`` with the write on
+    the next line commented out, so production can carry a tag saying the task
+    was exhausted by a path that no longer exhausts it.
+
+    Restricted to functions that own a junction.  Half the corpus names an
+    action for something this slice does not model -- a priority boost, a share
+    reassignment -- and reporting those as unclaimed would be reporting that
+    the map is a map of subjects.
+    """
+    claimed: dict[str, set[str]] = {}
+    for junction in junctions:
+        for branch in junction.branches:
+            claimed.setdefault(junction.owner, set()).update(branch.tags)
+    found: list[tuple[str, list[str]]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            owner = f"{module.rel_path}::{func.name}"
+            if owner not in claimed:
+                continue
+            # A literal piece of an f-string renders as itself and the whole
+            # renders as the frame, so counting both reports every tag twice.
+            inside = {
+                id(part)
+                for node in ast.walk(func)
+                if isinstance(node, ast.JoinedStr)
+                for part in node.values
+            }
+            for node in ast.walk(func):
+                if not isinstance(node, (ast.Constant, ast.JoinedStr)) or id(node) in inside:
+                    continue
+                text = values.rendered_text(node)
+                if not text:
+                    continue
+                left = tuple(sorted(values.decision_tags(text) - claimed[owner]))
+                key = (f"{module.rel_path}:{node.lineno}", left)
+                if left and key not in seen:
+                    seen.add(key)
+                    found.append((key[0], list(left)))
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -451,6 +786,7 @@ def extract(
     """
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
+    setters = spec_setters(modules, declarations)
     attributor = SpecAttributor(declarations, class_bases(modules))
     attributor.learn_element_types(modules)
     attributor.learn_self_attributes(modules)
@@ -473,6 +809,7 @@ def extract(
 
     for module in modules:
         attach_parents(module.tree)
+        diagnostics.extend(_persisted_templates(module, setters, map_id, derived_from))
         candidates = 0
         explained = 0
         for target, value, node in _attribute_writes(module.tree):
@@ -561,6 +898,11 @@ def extract(
             # The write's own guards, shared by every outcome its right-hand
             # side can produce: reaching a write is necessary for any of them.
             dominating = path_condition(node)
+            tags = (
+                _write_tags(node, func, setters, spec_attribute_names)
+                if func is not None
+                else []
+            )
             for resolved in _resolve(
                 value,
                 func=func,
@@ -576,6 +918,8 @@ def extract(
                         path_condition=dominating + list(resolved.conditions),
                         order=len(junction.branches),
                         tier=resolved.tier,
+                        tags=tags,
+                        line=node.lineno,
                     )
                 )
         if candidates:
