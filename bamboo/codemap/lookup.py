@@ -119,6 +119,21 @@ class CodeMap:
             {k: v for k, v in match.items() if v is not None} or None,
             self.version,
         )
+        if self.version is not None:
+            # A pin selects which nodes that build had; it cannot select which
+            # build's *content* they carry, because the store merges on the
+            # semantic signature and the later write wins.  So a node present in
+            # both builds comes back with the later one's conditions.  Said out
+            # loud rather than left to be discovered: reading a months-old
+            # incident against edited conditions is the skew the version stamp
+            # exists to make visible, not a thing to hide behind a pin.
+            elsewhere = sum(1 for p in props if p.get("derived_from") != self.version)
+            if elsewhere:
+                logger.warning(
+                    "%d of %d %s node(s) were last written by a build other than %s, "
+                    "so their content is that build's",
+                    elsewhere, len(props), _MODELS[model].value, self.version,
+                )
         return [_decode(model, p) for p in props]
 
     async def versions(self) -> list[str]:

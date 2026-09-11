@@ -226,6 +226,53 @@ async def test_a_tag_from_a_log_line_finds_every_stage_that_emits_it():
     }
 
 
+async def test_a_version_pin_reads_every_node_that_version_had():
+    """Pinning asks which nodes a build had, not which nodes it changed.
+
+    A node the next build leaves alone keeps answering, and a node that build
+    rewrote carries the later stamp -- so matching on ``derived_from`` returns
+    only what moved.  Measured against the stored map, that was one filter
+    stage out of a hundred and ten and twenty-seven junctions out of five
+    hundred and twenty-four, returned silently as though the rest of the chain
+    did not exist.  ``valid_for`` is the record of membership and had no
+    reader.
+    """
+    backend = InMemoryGraphBackend()
+    await backend.connect()
+    later = "git:0.0.31-3805-g91639d30"
+    shared = _stage("status check", "-status", 0)
+    await store_fragment(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            filter_stages=[shared, _stage("jumbo job check", "-jumbo", 1)],
+        ),
+        backend,
+    )
+    moved = _stage("status check", "-status", 0)
+    moved.derived_from = later
+    moved.conditions = ["site.status != 'online'"]
+    added = _stage("network check", "-network", 2)
+    added.derived_from = later
+    await store_fragment(
+        MapFragment(map_id=MAP_ID, derived_from=later, filter_stages=[moved, added]),
+        backend,
+    )
+
+    pinned = CodeMap(backend, map_id=MAP_ID, version=VERSION)
+    assert [s.criteria_tag for s in await pinned.chain("b.py::doBrokerage")] == [
+        "-status",
+        "-jumbo",
+    ]
+    # And it still excludes both ways: the later build dropped the jumbo stage
+    # and added the network one, so neither pin answers for the other's.
+    newer = CodeMap(backend, map_id=MAP_ID, version=later)
+    assert {s.criteria_tag for s in await newer.chain("b.py::doBrokerage")} == {
+        "-status",
+        "-network",
+    }
+
+
 async def test_reading_refuses_a_label_outside_the_code_map_namespace():
     """The separation is what stops a Code Map read reaching incident knowledge."""
     backend = InMemoryGraphBackend()

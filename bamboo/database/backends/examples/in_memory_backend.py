@@ -375,8 +375,16 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
             props = node.model_dump(exclude={"node_type"})
             if props.get("map_id") != map_id:
                 continue
-            if version is not None and props.get("derived_from") != version:
-                continue
+            if version is not None:
+                # Membership, not the stamp -- see the Neo4j backend for why.
+                # ``valid_for`` lives under ``metadata`` here because the models
+                # do not declare it; it is what the store adds, not what the
+                # recogniser found.
+                valid_for = (props.get("metadata") or {}).get("valid_for") or [
+                    props.get("derived_from")
+                ]
+                if version not in valid_for:
+                    continue
             if any(props.get(k) != v for k, v in (match or {}).items()):
                 continue
             found.append(props)

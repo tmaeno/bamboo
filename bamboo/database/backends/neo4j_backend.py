@@ -481,7 +481,14 @@ class Neo4jBackend(GraphDatabaseBackend):
         params: dict[str, Any] = {"map_id": map_id}
         clauses = ["n.map_id = $map_id"]
         if version is not None:
-            clauses.append("n.derived_from = $version")
+            # Membership, not the stamp.  ``derived_from`` says which build last
+            # wrote the node -- a later build that leaves a node alone still
+            # overwrites that on merge -- so matching it answers "what changed in
+            # this version", which for a chain returns a fragment and calls it
+            # the chain.  ``valid_for`` is the record of which builds had the
+            # node, and until now nothing read it.  The coalesce covers a node
+            # written before the property existed.
+            clauses.append("$version IN coalesce(n.valid_for, [n.derived_from])")
             params["version"] = version
         for index, (key, value) in enumerate(sorted((match or {}).items())):
             # Parameterised on the value; the key is interpolated because Cypher
