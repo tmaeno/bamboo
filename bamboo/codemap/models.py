@@ -271,6 +271,19 @@ class Branch(BaseModel):
             "observed ``errorDialog`` name one branch out of six."
         ),
     )
+    messages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The frames the block records when this branch fires, holes left "
+            "open.  The untagged half of the same signature, and the one "
+            "production mostly writes: of thirty tasks found in ``exhausted`` "
+            "with a message on the record, none carried a tag -- they were "
+            "retry refusals and the goal check, which write prose.  Weaker "
+            "evidence than a tag, since wording drifts between releases and "
+            "two arms can share a frame, so a match names an arm only where it "
+            "is the only one."
+        ),
+    )
     line: Optional[int] = Field(
         default=None,
         description=(
@@ -1037,6 +1050,13 @@ class CandidateBranch(BaseModel):
             "``reason=low_efficiency``.  Both a search key in production's logs "
             "and, where the same message is persisted, the part of the record "
             "that names this arm."
+        ),
+    )
+    messages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The frames the block records, holes left open.  What names the arm "
+            "where no tag does, which in production is most of the time."
         ),
     )
     conditions: list[str] = Field(default_factory=list)

@@ -65,6 +65,12 @@ from bamboo.codemap.panda.pathcond import (
     path_condition,
 )
 
+# The block a decision records about itself reads the same way whichever slice
+# found the write, so it is read in one place and imported rather than copied.
+# Both halves of the map disagreeing about a fact is the failure this codebase
+# has spent the most effort undoing.
+from bamboo.codemap.panda.recognizers import progress
+
 SLICE_NAME = "sql-write"
 
 
@@ -149,6 +155,14 @@ def extract(
     uncovered: set[str] = set()
     diagnostics: list[DiagnosticTemplate] = []
     settle = values.resolver(values.declared_mappings(modules))
+    # The same census the attribute slice makes, for the same reading: which
+    # call persists a message into a declared column.  Asked of the attributor
+    # rather than recomputed from the source, so the two halves of the map
+    # cannot disagree about what a setter is.
+    setters = progress.spec_setters(
+        modules,
+        {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
+    )
 
     for module in modules:
         attach_parents(module.tree)
@@ -219,6 +233,7 @@ def extract(
                             # any of them failing leaves the row untouched, so
                             # they bound this write as much as its own does.
                             row_precondition=sorted(statement.preconditions.values()),
+                            setters=setters,
                         )
         if candidates:
             coverage.append(
@@ -277,8 +292,8 @@ def _outcomes(
     spec_class: Optional[str],
     settle,
     templates: list[tuple[str, ast.stmt]],
-) -> list[tuple[str, int, ast.stmt, list[str]]]:
-    """Return ``(outcome, tier, node, extra conditions)`` for one written column.
+) -> list[tuple[str, int, ast.stmt, list[str], ast.stmt]]:
+    """Return ``(outcome, tier, node, extra conditions, decided at)`` for a column.
 
     The node is where the value was decided, which differs by form: a bind is
     decided at the Python assignment filling it, and a literal or a copied
@@ -304,7 +319,7 @@ def _outcomes(
             value = bind.value
             settled = settle(value, func)
             if settled:
-                found.extend((outcome, 1, bind, []) for outcome in settled)
+                found.extend((outcome, 1, bind, [], bind) for outcome in settled)
                 continue
             template = values.diagnostic_template(value)
             if template:
@@ -317,21 +332,31 @@ def _outcomes(
                 if reached:
                     dominating = path_condition(bind)
                     found.extend(
-                        (outcome, 1, bind, [c for c in conditions if c not in dominating])
-                        for outcome, conditions, _line in reached
+                        (
+                            outcome,
+                            1,
+                            bind,
+                            [c for c in conditions if c not in dominating],
+                            # Where the value was chosen, which is not where it
+                            # was bound: ``newTaskStatus = "exhausted"`` sits in
+                            # the block that also records why, and the bind is
+                            # further down, after the chain has closed.
+                            _statement_at(func, line) or bind,
+                        )
+                        for outcome, conditions, line in reached
                     )
                     continue
             # The writer is known, the value is not until run time.
             # Recorded rather than dropped: localize and prune read
             # observed values, so they work from the writer alone.
-            found.append((f"runtime({ast.unparse(value)})", 2, bind, []))
+            found.append((f"runtime({ast.unparse(value)})", 2, bind, [], bind))
         return found
 
     node = _deciding_fragment(func, run.variable, column, supplied)
     if node is None:
         return []
     if supplied.kind == "literal":
-        return [(supplied.text, 1, node, [])]
+        return [(supplied.text, 1, node, [], node)]
     if supplied.kind == "expression":
         # ``stateChangeTime=CURRENT_DATE``, ``nFiles=nFiles+:iFiles``: the
         # database decides, from the clock or from the row's own prior
@@ -341,7 +366,7 @@ def _outcomes(
         # literal writes against all of them, so a column the source only ever
         # increments looked, from its one ``= 0``, like a field with a closed
         # vocabulary of one.
-        return [(f"runtime({supplied.text})", 2, node, [])]
+        return [(f"runtime({supplied.text})", 2, node, [], node)]
 
     # A copied column.  The source is named as a subject rather than as a bare
     # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
@@ -351,7 +376,23 @@ def _outcomes(
         attributor, spec_class, statement.table, supplied.text
     )
     outcome = f"passthrough({SubjectNode.make_name(source, attribute)})"
-    return [(outcome, 2, node, [])]
+    return [(outcome, 2, node, [], node)]
+
+
+def _statement_at(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int
+) -> Optional[ast.stmt]:
+    """The statement of *func* that starts on *line*.
+
+    ``literal_values`` answers with a line rather than a node, and the block
+    around that line is what says why the value was chosen.  Looked up rather
+    than threaded through because the resolver is shared with the attribute
+    slice, which has the node in hand and needs no line at all.
+    """
+    for node in ast.walk(func):
+        if isinstance(node, ast.stmt) and node.lineno == line:
+            return node
+    return None
 
 
 def _record(
@@ -363,8 +404,9 @@ def _record(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     spec_class: str,
     attribute: str,
-    outcomes: list[tuple[str, int, ast.stmt, list[str]]],
+    outcomes: list[tuple[str, int, ast.stmt, list[str], ast.stmt]],
     row_precondition: list[str],
+    setters: dict[str, object],
 ) -> None:
     """Add one branch per decided value to this write site's junction."""
     subject = SubjectNode.make_name(spec_class, attribute)
@@ -392,11 +434,17 @@ def _record(
         junctions[name] = junction
 
     known = {(branch.outcome, tuple(branch.path_condition)) for branch in junction.branches}
-    for outcome, tier, node, extra in outcomes:
+    for outcome, tier, node, extra, decided_at in outcomes:
         condition = path_condition(node) + extra
         if (outcome, tuple(condition)) in known:
             continue
         known.add((outcome, tuple(condition)))
+        # Read at the deciding statement rather than at the bind.  The two are
+        # the same for a literal and far apart for a local: ``retryTask_JEDI``
+        # picks the status and writes the reason in one block and binds it
+        # after the whole chain has closed, so the bind's block says nothing
+        # about which of five refusals this is.
+        tags, messages = progress.recorded_signature(decided_at, func, setters)
         junction.branches.append(
             Branch(
                 outcome=outcome,
@@ -404,6 +452,9 @@ def _record(
                 row_precondition=row_precondition,
                 order=len(junction.branches),
                 tier=tier,
+                tags=tags,
+                messages=messages,
+                line=decided_at.lineno,
             )
         )
 

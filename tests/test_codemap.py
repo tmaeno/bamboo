@@ -3019,27 +3019,73 @@ def test_a_tag_assigned_in_a_sibling_arm_still_reaches_the_branch():
     ]
 
 
-def test_a_block_settling_two_subjects_is_not_tagged():
-    """Which write the tag is about is what the block answers, and a block with
-    two of them does not answer it.  Reported rather than guessed at -- the
-    corpus has none today, and the day it has one the map should say so."""
+def test_a_block_settling_two_attributes_names_both():
+    """The message names the *block*, and the block ran, so both writes are in
+    it.  ``doActionForReassign`` is this shape -- it logs
+    ``action=trigger_new_brokerage by setting task_status={}`` beside a write to
+    ``status`` and one to ``oldStatus`` -- and refusing there was the reading
+    being over-cautious about a question that does not arise.
+    """
+    source = (
+        "class M:\n"
+        "    def reassign(self, taskSpec, n):\n"
+        "        tmpLog = self.create_logger()\n"
+        "        if n > 1:\n"
+        "            tmpLog.info('#ATM action=trigger_new_brokerage by setting it')\n"
+        "            taskSpec.oldStatus = 'scouting'\n"
+        "            taskSpec.status = 'exhausted'\n"
+    )
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
+
+    settled = [j for j in junctions if j.owner.endswith("::reassign")]
+    assert sorted(j.subject for j in settled) == [
+        "JediTaskSpec.oldStatus",
+        "JediTaskSpec.status",
+    ]
+    assert [b.tags for j in settled for b in j.branches] == [
+        ["action=trigger_new_brokerage"],
+        ["action=trigger_new_brokerage"],
+    ]
+
+
+def test_a_block_settling_the_same_attribute_twice_names_neither():
+    """Here the question does arise: two writes of one attribute in one block,
+    and nothing says which of them the message is about."""
     source = (
         "class M:\n"
         "    def scout(self, taskSpec, n):\n"
         "        tmpLog = self.create_logger()\n"
         "        if n > 1:\n"
         "            tmpLog.info('#ATM action=set_exhausted reason=low_efficiency')\n"
-        "            taskSpec.oldStatus = 'scouting'\n"
+        "            taskSpec.status = 'scouting'\n"
         "            taskSpec.status = 'exhausted'\n"
     )
     _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
 
     settled = [j for j in junctions if j.owner.endswith("::scout")]
-    assert sorted(j.subject for j in settled) == [
-        "JediTaskSpec.oldStatus",
-        "JediTaskSpec.status",
-    ]
     assert [b.tags for j in settled for b in j.branches] == [[], []]
+
+
+def test_a_branch_keeps_the_untagged_frame_as_well():
+    """Of thirty tasks found in ``exhausted`` with a message on the record, none
+    carried a tag: they were retry refusals and the goal check, which write
+    prose.  The frame is weaker evidence and the only evidence there is."""
+    source = (
+        "class M:\n"
+        "    def check(self, taskSpec, rate, limit):\n"
+        "        tmpLog = self.create_logger()\n"
+        "        if rate > limit:\n"
+        "            msg = f'exhausted upon retry since failed rate ({rate}) exceeds {limit}'\n"
+        "            tmpLog.debug(msg)\n"
+        "            taskSpec.status = 'exhausted'\n"
+    )
+    _s, junctions, _c, _d, _e = progress.extract(_tagged_modules(source), MAP_ID, VERSION)
+
+    junction = next(j for j in junctions if j.subject == "JediTaskSpec.status")
+    assert [b.tags for b in junction.branches] == [[]]
+    assert [b.messages for b in junction.branches] == [
+        ["exhausted upon retry since failed rate ({}) exceeds {}"]
+    ]
 
 
 def test_a_message_a_setter_persists_is_indexed_against_the_field_it_lands_in():

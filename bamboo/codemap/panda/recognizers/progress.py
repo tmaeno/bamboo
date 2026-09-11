@@ -271,6 +271,34 @@ def _recorded_argument(call: ast.Call, setters: dict[str, _Setter]) -> Optional[
     return None
 
 
+def _recorded_in(
+    statement: ast.stmt, setters: dict[str, _Setter], settling: Optional[str]
+) -> Iterator[Optional[ast.expr]]:
+    """Every message *statement* records, by any of the three spellings.
+
+    Logged, handed to a setter, or written straight into a message column --
+    ``PostProcessorBase.doPreCheck`` uses the third, and it is the one task in
+    the production sample whose record says why it was exhausted in the words
+    of the code rather than of a retry refusal.
+
+    The column being settled is excluded from the third.  ``taskSpec.status =
+    "exhausted"`` is a string assigned to a declared field like any other, and
+    reading it as this branch's message would make the value its own
+    description -- a frame that matches any message with the word in it.
+    """
+    for node in ast.walk(statement):
+        if isinstance(node, ast.Call):
+            yield _recorded_argument(node, setters)
+        elif (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and node.targets[0].attr != settling
+            and isinstance(node.value, (ast.Constant, ast.JoinedStr, ast.BinOp))
+        ):
+            yield node.value
+
+
 def _one_hop(argument: ast.expr, assignments: dict[str, list[ast.expr]]) -> list[ast.expr]:
     """Every expression *argument* can be, following a local back one step.
 
@@ -317,6 +345,7 @@ def _reaching(
         ),
         key=lambda node: node.lineno,
     )
+    settled = path_condition(write)
     current: list[ast.stmt] = []
     for definition in definitions:
         if definition.lineno > write.lineno:
@@ -325,6 +354,13 @@ def _reaching(
             current.append(definition)
             continue
         conditions = path_condition(definition)
+        if exclusive(conditions, settled):
+            # An arm the write's own conditions rule out never ran.  Without
+            # this, ``retryTask_JEDI`` -- five refusals in one ``elif`` chain,
+            # each assigning the same local -- gave its fifth branch all five
+            # messages, since the arms are mutually exclusive with each other
+            # and that is exactly what the clause below preserves.
+            continue
         current = [
             held for held in current if exclusive(path_condition(held), conditions)
         ] + [definition]
@@ -342,50 +378,56 @@ def _block_containing(node: ast.AST) -> list[ast.stmt]:
     return []
 
 
-def _write_tags(
-    node: ast.Assign,
+def recorded_signature(
+    node: ast.stmt,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     setters: dict[str, _Setter],
-    spec_names: set[str],
-) -> list[str]:
-    """Tags the block around *node* names for the decision *node* makes.
+    attribute: Optional[str] = None,
+) -> tuple[list[str], list[str]]:
+    """``(tags, messages)`` the block around *node* records about its decision.
 
     **The block, not the path condition.**  ``setScoutJobData_JEDI`` reaches
     ``exhausted`` from six arms, and they are not ``if``/``elif`` siblings --
     each is its own ``if taskSpec.status != "exhausted":`` -- so nothing in the
     conditions contradicts anything, ``exclusive`` separates none of them, and
     attaching by non-exclusivity puts all nine tags on all six branches.  The
-    block that records the line holds exactly one write and names one reason.
+    block that records the line names one reason.
 
     **One hop through the local**, because ``reason=low_efficiency`` is assigned
     in the ``else`` arm of an unrelated check and only the local reaches the
     block that writes.
 
-    **Nothing when the block settles two subjects.**  Which write the tag is
-    about is precisely what the block answers, and a block with two of them
-    does not answer it.  The corpus has none today; the day it has one, the map
-    should say so rather than pick.
+    **Both halves, because production writes the untagged one.**  The tag is the
+    contract and survives rewording, but of thirty tasks found in ``exhausted``
+    with a message on the record, *none* carried a tag: they are the retry
+    refusals and the goal check, which write prose.  So the frame comes back
+    alongside, and matching it is how those thirty name an arm -- weaker
+    evidence, and the only evidence there is.
+
+    **Refused when the block writes this same attribute twice.**  Which write
+    the message is about is then unanswerable.  Two writes to *different*
+    attributes are not the same problem: the block ran, so both happened, and a
+    message naming it names both.
     """
     block = _block_containing(node)
     if not block:
-        return []
-    settling = sum(
-        1
-        for statement in block
-        if isinstance(statement, ast.Assign)
-        and any(
-            isinstance(target, ast.Attribute) and target.attr in spec_names
-            for target in statement.targets
+        return [], []
+    if attribute is not None:
+        settling = sum(
+            1
+            for statement in block
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Attribute) and target.attr == attribute
+                for target in statement.targets
+            )
         )
-    )
-    if settling != 1:
-        return []
+        if settling > 1:
+            return [], []
     tags: set[str] = set()
+    messages: list[str] = []
     for statement in block:
-        for call in ast.walk(statement):
-            if not isinstance(call, ast.Call):
-                continue
-            argument = _recorded_argument(call, setters)
+        for argument in _recorded_in(statement, setters, attribute):
             if argument is None:
                 continue
             held = (
@@ -395,9 +437,12 @@ def _write_tags(
             )
             for expression in held:
                 text = values.rendered_text(expression)
-                if text:
-                    tags.update(values.decision_tags(text))
-    return sorted(tags)
+                if not text:
+                    continue
+                tags.update(values.decision_tags(text))
+                if values.has_literal_text(text) and text not in messages:
+                    messages.append(text)
+    return sorted(tags), messages
 
 
 def _persisted_templates(
@@ -898,10 +943,10 @@ def extract(
             # The write's own guards, shared by every outcome its right-hand
             # side can produce: reaching a write is necessary for any of them.
             dominating = path_condition(node)
-            tags = (
-                _write_tags(node, func, setters, spec_attribute_names)
+            tags, messages = (
+                recorded_signature(node, func, setters, target.attr)
                 if func is not None
-                else []
+                else ([], [])
             )
             for resolved in _resolve(
                 value,
@@ -919,6 +964,7 @@ def extract(
                         order=len(junction.branches),
                         tier=resolved.tier,
                         tags=tags,
+                        messages=messages,
                         line=node.lineno,
                     )
                 )

@@ -259,6 +259,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
                 tier=branch.tier,
                 line=branch.line,
                 tags=list(branch.tags),
+                messages=list(branch.messages),
                 conditions=list(branch.path_condition),
                 row_precondition=list(branch.row_precondition),
             )
@@ -282,26 +283,61 @@ def _names_tags(text: str, tags: list[str]) -> bool:
     )
 
 
+def _speaks(template: str, text: str) -> bool:
+    """Whether *text* contains something *template* could have rendered.
+
+    Contained rather than equal: ``errorDialog`` is appended to, and a frame
+    that has to account for the whole field would match none of the records
+    that carry two messages.  The holes are the only wildcards, and a frame
+    with no literal text never reaches here -- the extraction drops those,
+    because a pattern of nothing but wildcards names every arm at once.
+    """
+    if not template.strip():
+        return False
+    parts = [re.escape(part) for part in re.split(r"\{[^{}]*\}", template) if part.strip()]
+    return bool(parts) and re.search(".*".join(parts), text, re.DOTALL) is not None
+
+
 def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
     """Mark the arms the record's message names, and settle what that proves.
 
     One direction only, and the asymmetry is not the usual one about sample
-    size.  A match is proof: the message and the branch carry the same tokens
-    because the code wrote both in the same block.  A record that names no arm
-    proves nothing at all, because the field holds the *last* message written
-    to it and any later junction may have overwritten it -- so a junction is
-    never ruled out by this, only confirmed.
+    size.  A match is proof: the message and the branch were written in the
+    same block.  A record that names no arm proves nothing at all, because the
+    field holds the *last* message written to it and any later junction may
+    have overwritten it -- so a junction is never ruled out by this, only
+    confirmed.  Within the junction it does rule out: six arms write
+    ``exhausted``, and which one is the whole question.
 
-    Within the junction it does rule out: six arms write ``exhausted`` and the
-    message names one, which is the whole reason the arms are separate.
+    **Tags first, then frames, and the frames have to be unique.**  A tag is
+    exact -- the tokens are the contract, and two arms cannot share them -- so
+    every arm carrying them is named.  A frame is the author's wording: it
+    drifts between releases and two arms can share one, so it names an arm only
+    where it is the only frame in the whole set that matches.  That makes the
+    failure "says nothing" rather than "says the wrong thing", and it is needed
+    because production mostly writes the untagged half: of thirty tasks found
+    in ``exhausted`` with a message on the record, none carried a tag.
     """
     settled = strategy.model_copy(deep=True)
+    tagged = False
     for candidate in settled.candidates:
         for branch in candidate.branches:
             # Only ever set: a tagged probe may already have matched this arm
             # from the log, and the two are the same positive evidence reaching
             # it by different routes.
-            branch.matched = branch.matched or _names_tags(diag, branch.tags)
+            if _names_tags(diag, branch.tags):
+                branch.matched = True
+                tagged = True
+    if not tagged:
+        spoken = [
+            (candidate, branch)
+            for candidate in settled.candidates
+            for branch in candidate.branches
+            if any(_speaks(message, diag) for message in branch.messages)
+        ]
+        if len(spoken) == 1:
+            spoken[0][1].matched = True
+    for candidate in settled.candidates:
         if candidate.named:
             candidate.verdict = SEEN
             candidate.because = "the record's own message names this branch"

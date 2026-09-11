@@ -975,3 +975,68 @@ async def test_a_record_for_another_task_settles_nothing():
     settled = strategy_mod.evaluate(strategy, ev)
 
     assert all(not c.named for c in settled.candidates)
+
+
+async def _prose_arms(diag: str | None = None):
+    """Two refusals in one chain, telling themselves apart in prose only."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["exhausted"])],
+        junctions=[
+            _junction(
+                "db_proxy_mods/task_complex_module.py::retryTask_JEDI",
+                Branch(
+                    outcome="exhausted",
+                    path_condition=["attempts >= task_max_attempt"],
+                    line=5025,
+                    messages=["no longer continue because too many task attempts more than {}"],
+                ),
+                Branch(
+                    outcome="exhausted",
+                    path_condition=["rate >= max_failed_hep_score_rate"],
+                    line=5057,
+                    messages=["no longer continue because failed/total HEP score rate ({}) exceeds {}"],
+                ),
+                log_files=[OTHER_LOG],
+            ),
+        ],
+    )
+    return await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="exhausted", task_id="7", observed_diag=diag),
+    )
+
+
+async def test_an_untagged_frame_names_the_arm_when_it_is_the_only_one():
+    """Of thirty tasks found in exhausted with a message on the record, none
+    carried a tag: they are retry refusals, which write prose.  Matching the
+    frame is weaker evidence and the only evidence there is."""
+    strategy = await _prose_arms(
+        "no longer continue because failed/total HEP score rate (0.914) exceeds 0.9"
+    )
+
+    retry = strategy.candidates[0]
+    assert [b.line for b in retry.named] == [5057]
+    assert retry.verdict == SEEN
+
+
+async def test_a_frame_two_arms_share_names_neither():
+    """A frame is the author's wording, not a contract: two arms can have one.
+    Saying nothing is the failure this should have, rather than saying the
+    wrong one."""
+    strategy = await _prose_arms("no longer continue because ")
+
+    assert strategy.candidates[0].named == []
+    assert strategy.candidates[0].verdict != SEEN
+
+
+async def test_a_frame_is_matched_inside_a_longer_message():
+    """errorDialog is appended to, so a frame that had to account for the whole
+    field would match none of the records carrying two messages."""
+    strategy = await _prose_arms(
+        "task was retried; no longer continue because too many task attempts more than 5 "
+        "are forbidden. No further retries are accepted."
+    )
+
+    assert [b.line for b in strategy.candidates[0].named] == [5025]
