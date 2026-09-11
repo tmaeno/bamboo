@@ -454,6 +454,7 @@ def extract(
     attributor = SpecAttributor(declarations, class_bases(modules))
     attributor.learn_element_types(modules)
     attributor.learn_self_attributes(modules)
+    attributor.learn_return_types(modules)
     settle = values.resolver(values.declared_mappings(modules))
 
     # The subject universe is what the spec classes declare.  Without this

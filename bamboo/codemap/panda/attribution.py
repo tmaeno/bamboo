@@ -168,6 +168,7 @@ class SpecAttributor:
         self._table_classes: dict[str, str] = {}
         self._self_fields: dict[tuple[str, str], set[str]] = {}
         self._class_nodes: dict[str, ast.ClassDef] = {}
+        self._return_annotations: dict[str, ast.expr] = {}
 
     # -- container element types ----------------------------------------- #
 
@@ -266,6 +267,141 @@ class SpecAttributor:
                     except Exception:  # noqa: BLE001
                         continue
                     self._self_fields.setdefault((node.name, expression), set()).add(inner.attr)
+
+    # -- what a call states it hands back --------------------------------- #
+
+    def learn_return_types(self, modules: list[SourceModule]) -> None:
+        """Index the return annotation of every function the corpus states one for.
+
+        JEDI reads a row, changes it and writes it back, so the object most
+        writes land on arrives from the task buffer rather than from a
+        constructor::
+
+            tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)
+            taskSpec.status = "ready"
+
+        Nothing between the call and the write names a class, and the
+        attributes touched are declared by several specs, so this used to be
+        settled -- correctly, but by inference -- through structural matching.
+        The facade now says it outright: ``getTaskWithID_JEDI`` is annotated
+        ``-> tuple[bool, JediTaskSpec | None]``.  ``queryDatasetWithMap`` is
+        annotated too, and that is the call this design once singled out as
+        needing interprocedural analysis and chose to ask PanDA to annotate
+        instead of inferring.  Reading it is reading a statement.
+
+        Keyed by bare name, which is the same restriction the trigger slice
+        puts on a cross-module hop, and it is kept honest the same way: a name
+        is only indexed when **every** definition of it carries a return
+        annotation and they all say the same thing.  PanDA defines its JEDI
+        methods twice -- the ``TaskBuffer`` facade and the ``db_proxy_mods``
+        module -- and the campaign annotated both, identically, for all
+        seventy-five names that state a spec.  The one name whose definitions
+        disagree is real and must not be read: ``doGenerate`` returns a bare
+        status code in two plugins and a tuple in a third.
+
+        This records the annotation rather than a class, so that the caller
+        decides how to read it: the whole thing for ``x = f()``, the element
+        for ``for x in f()``, the member the assignment names for
+        ``a, b = f()``.  Committing to one interpretation here would answer
+        ``list[JediTaskSpec]`` with a class no variable ever holds.
+        """
+        seen: dict[str, list[Optional[str]]] = {}
+        first: dict[str, ast.expr] = {}
+        for module in modules:
+            for node in ast.walk(module.tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                annotation = node.returns
+                text: Optional[str] = None
+                if annotation is not None:
+                    try:
+                        text = ast.unparse(annotation)
+                    except Exception:  # noqa: BLE001 -- synthesised nodes do not unparse
+                        text = None
+                    if text is not None:
+                        first.setdefault(node.name, annotation)
+                seen.setdefault(node.name, []).append(text)
+        self._return_annotations = {
+            name: first[name]
+            for name, texts in seen.items()
+            if name in first and None not in texts and len(set(texts)) == 1
+        }
+
+    def _stated_return(self, value: ast.expr) -> Optional[ast.expr]:
+        """The return annotation of the function *value* calls, if it is indexed."""
+        if not isinstance(value, ast.Call):
+            return None
+        called = value.func
+        if isinstance(called, ast.Attribute):
+            name: Optional[str] = called.attr
+        elif isinstance(called, ast.Name):
+            name = called.id
+        else:
+            # ``registry[key](...)`` -- the class is a run-time choice and there
+            # is no definition to have annotated.
+            name = None
+        return self._return_annotations.get(name) if name else None
+
+    @staticmethod
+    def _record_member(annotation: ast.expr, index: int) -> Optional[ast.expr]:
+        """The *index*-th member of a tuple annotation, or ``None``.
+
+        A tuple is a record, so the last-argument rule that reads containers
+        does not apply -- and the position is not tracked through the program
+        either.  It is read off the assignment target standing next to the
+        call, which is the only place the corpus states which member was taken:
+        ``tmpStat, taskSpec = f()`` says taskSpec is the second.  A reader that
+        scanned the record for a spec instead would answer the same class
+        whichever name the write is on.
+        """
+        if not isinstance(annotation, ast.Subscript):
+            return None
+        base = annotation.value
+        wrapper = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if wrapper not in {"tuple", "Tuple"}:
+            return None
+        inner = annotation.slice
+        parts = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+        return parts[index] if index < len(parts) else None
+
+    def _returned_annotation_of(
+        self,
+        variable: str,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> Optional[ast.expr]:
+        """The stated return type a local was assigned from, if just one was.
+
+        Every assignment to the name is collected rather than the first one
+        returned, for the reason the annotated-local hop gives: an answer that
+        depends on walk order is not a reading, and a name assigned from two
+        differently typed calls states nothing about either.
+        """
+        if func is None:
+            return None
+        found: list[ast.expr] = []
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            stated = self._stated_return(node.value)
+            if stated is None:
+                continue
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                if target.id == variable:
+                    found.append(stated)
+            elif isinstance(target, ast.Tuple):
+                for index, element in enumerate(target.elts):
+                    if isinstance(element, ast.Name) and element.id == variable:
+                        member = self._record_member(stated, index)
+                        if member is not None:
+                            found.append(member)
+        texts = set()
+        for annotation in found:
+            try:
+                texts.add(ast.unparse(annotation))
+            except Exception:  # noqa: BLE001
+                return None
+        return found[0] if len(texts) == 1 else None
 
     # -- table -> spec class --------------------------------------------- #
 
@@ -892,7 +1028,15 @@ class SpecAttributor:
             built = self._constructed_class(node.value, func, seen | {variable})
             if built is not None:
                 constructors.add(built)
-        return next(iter(constructors)) if len(constructors) == 1 else None
+        if len(constructors) == 1:
+            return next(iter(constructors))
+        # Last, and after the constructor: the class the called function states
+        # it returns.  Ranked here so that a local the code visibly builds keeps
+        # the answer it already had, and this only fills the silence -- which is
+        # where JEDI's read-modify-write shape leaves it, since the spec arrives
+        # from the task buffer rather than from a constructor.
+        returned = self._returned_annotation_of(variable, func)
+        return self._annotated_class(returned) if returned is not None else None
 
     def _constructed_class(
         self,
@@ -1053,14 +1197,33 @@ class SpecAttributor:
                 not isinstance(node, (ast.For, ast.AsyncFor))
                 or not isinstance(node.target, ast.Name)
                 or node.target.id != variable
-                or not isinstance(node.iter, (ast.Attribute, ast.Name))
+                or not isinstance(node.iter, (ast.Attribute, ast.Name, ast.Call))
             ):
+                continue
+            if isinstance(node.iter, ast.Call):
+                # ``for taskSpec in self.taskBufferIF.getTasksToReassign_JEDI()``
+                # -- the element type is stated on the call rather than on a
+                # name, and no annotation was ever written here to find.
+                stated_return = self._stated_return(node.iter)
+                stated = (
+                    self._annotated_element(stated_return)
+                    if stated_return is not None
+                    else None
+                )
+                if stated is not None:
+                    found.add(stated)
                 continue
             if isinstance(node.iter, ast.Name):
                 # ``for job in jobs`` -- a parameter rather than a spec's own
                 # list, so there is no adder to have taught us anything and the
                 # annotation is the only statement of the element type.
                 annotation = self._annotation_of(node.iter, func)
+                if annotation is None:
+                    # ``taskList = self.taskBufferIF.getTasksToReassign_JEDI()``
+                    # one line above the loop: the list is never annotated,
+                    # the function that produced it is.  This is how every
+                    # watchdog in the corpus reads its work list.
+                    annotation = self._returned_annotation_of(node.iter.id, func)
                 stated = (
                     self._annotated_element(annotation) if annotation is not None else None
                 )

@@ -4482,6 +4482,170 @@ def test_an_iterator_that_is_not_a_context_manager_types_nothing():
     assert [(j.subject, j.attribution) for j in junctions] == [("?.status", "unresolved")]
 
 
+_FACADE = """
+class JediTaskBuffer(object):
+    def getTaskWithID_JEDI(self, jediTaskID: int) -> tuple[bool, JediTaskSpec | None]:
+        return True, self.proxy.peek(jediTaskID)
+
+    def getTasksToReassign_JEDI(self, vo: str | None = None) -> list[JediTaskSpec]:
+        return self.proxy.reassign(vo)
+
+    def queryDatasetWithMap(self, criteria: dict) -> FileSpec | None:
+        return self.proxy.query(criteria)
+"""
+
+
+def test_a_stated_return_type_settles_the_local_it_is_assigned_to():
+    """The facade states what it hands back, and the caller writes to it.
+
+    ``queryDatasetWithMap`` is the very call the design once cited as needing
+    interprocedural analysis, and decided to ask PanDA to annotate instead.
+    PanDA annotated it, so the reading is of a statement rather than an
+    inference -- ``status`` alone is declared by three classes here, which is
+    what structural inference is left with when the return type goes unread.
+    """
+    source = (
+        "def main(taskBuffer):\n"
+        "    tmpDS = taskBuffer.queryDatasetWithMap({'name': 'sub'})\n"
+        "    tmpDS.status = 'deleting'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (source, "pandaserver/daemons/scripts/datasetManager.py"),
+    )
+    written = [j for j in junctions if "datasetManager" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [("FileSpec.status", "certain")]
+
+
+def test_a_stated_return_type_is_read_at_the_position_the_assignment_names():
+    """``tmpStat, taskSpec = f()`` against ``-> tuple[bool, JediTaskSpec | None]``.
+
+    A tuple is a record, so the last-argument rule that reads containers does
+    not apply to it.  The position is not tracked through the program either:
+    it is read off the assignment target standing right there, which is the
+    only place it is stated.
+    """
+    source = (
+        "class ContentsFeeder:\n"
+        "    def feed_contents_to_tasks(self, jediTaskID):\n"
+        "        tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)\n"
+        "        taskSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (source, "pandajedi/jediorder/ContentsFeeder.py"),
+    )
+    written = [j for j in junctions if "ContentsFeeder" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("JediTaskSpec.status", "certain")
+    ]
+
+
+def test_the_other_position_of_the_same_return_states_nothing():
+    """Position 0 of that tuple is a ``bool``, and answering anyway is a guess.
+
+    The point of reading the assignment target is that it says *which* member
+    was taken; a reader that scanned the record for a spec would answer the
+    same class whichever name the write is on.
+    """
+    source = (
+        "class ContentsFeeder:\n"
+        "    def feed_contents_to_tasks(self, jediTaskID):\n"
+        "        taskSpec, tmpStat = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)\n"
+        "        taskSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (source, "pandajedi/jediorder/ContentsFeeder.py"),
+    )
+    written = [j for j in junctions if "ContentsFeeder" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [("?.status", "unresolved")]
+
+
+def test_a_loop_over_what_a_stated_return_hands_back_is_read():
+    """``taskList = f()`` then ``for taskSpec in taskList``, with ``-> list[X]``.
+
+    The element type is stated one assignment away from the loop, which is how
+    every watchdog in the corpus reads its work list.
+    """
+    source = (
+        "class AtlasProdWatchDog:\n"
+        "    def doActionForReassign(self, gTmpLog):\n"
+        "        taskList = self.taskBufferIF.getTasksToReassign_JEDI(self.vo)\n"
+        "        for taskSpec in taskList:\n"
+        "            taskSpec.status = 'assigning'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (source, "pandajedi/jedidog/AtlasProdWatchDog.py"),
+    )
+    written = [j for j in junctions if "AtlasProdWatchDog" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [
+        ("JediTaskSpec.status", "container")
+    ]
+
+
+def test_return_types_that_disagree_state_nothing():
+    """The facade and the proxy declare one method twice, and must agree.
+
+    They do, for all seventy-five names the corpus states a spec return for --
+    and the one name whose definitions disagree is real: ``doGenerate`` returns
+    a bare status code in two plugins and a tuple in a third.  Reading either
+    would be picking one at random.
+    """
+    other = (
+        "class JobGeneratorProxy(object):\n"
+        "    def getTaskWithID_JEDI(self, jediTaskID: int) -> FileSpec:\n"
+        "        return self.proxy.peek(jediTaskID)\n"
+    )
+    source = (
+        "class ContentsFeeder:\n"
+        "    def feed_contents_to_tasks(self, jediTaskID):\n"
+        "        tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)\n"
+        "        taskSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (other, "pandaserver/taskbuffer/TaskBuffer.py"),
+        (source, "pandajedi/jediorder/ContentsFeeder.py"),
+    )
+    written = [j for j in junctions if "ContentsFeeder" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [("?.status", "unresolved")]
+
+
+def test_an_unannotated_definition_of_the_same_name_states_nothing():
+    """One definition annotated is not the corpus stating a return type.
+
+    PanDA defines its JEDI methods twice -- the facade and the proxy module --
+    and the campaign annotated both.  Trusting a name where one definition is
+    silent would be reading an annotation about the other one.
+    """
+    other = (
+        "class JobGeneratorProxy(object):\n"
+        "    def getTaskWithID_JEDI(self, jediTaskID):\n"
+        "        return True, self.proxy.peek(jediTaskID)\n"
+    )
+    source = (
+        "class ContentsFeeder:\n"
+        "    def feed_contents_to_tasks(self, jediTaskID):\n"
+        "        tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)\n"
+        "        taskSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress_multi(
+        (_FACADE, "pandajedi/jedicore/JediTaskBuffer.py"),
+        (other, "pandaserver/taskbuffer/TaskBuffer.py"),
+        (source, "pandajedi/jediorder/ContentsFeeder.py"),
+    )
+    written = [j for j in junctions if "ContentsFeeder" in j.owner]
+
+    assert [(j.subject, j.attribution) for j in written] == [("?.status", "unresolved")]
+
+
 def test_the_typed_declaration_form_yields_the_same_column_names():
     """Both forms say the same thing, so both are read the same way."""
     source = (
