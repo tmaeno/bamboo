@@ -787,3 +787,191 @@ async def test_a_candidate_with_no_log_is_never_ruled_out_by_the_others_answers(
     assert verdicts["jediorder/ContentsFeeder.py::feed"] == SEEN
     assert verdicts["base/PostProcessorBase.py::doBasicPostProcess"] == UNASKABLE
     assert len(strategy_mod.survivors(settled)) == 2
+
+
+# ---------------------------------------------------------------------------
+# The arm, not only the junction
+# ---------------------------------------------------------------------------
+
+_SCOUT = "taskbuffer/db_proxy_mods/task_utils_module.py::setScoutJobData_JEDI"
+
+
+def _arm(reason: str, condition: str, line: int) -> Branch:
+    """One arm of the scout check, as the map records it."""
+    return Branch(
+        outcome="exhausted",
+        path_condition=[condition],
+        line=line,
+        tags=["action=set_exhausted", f"reason={reason}"],
+        emits=[
+            Emit(
+                template=f"#ATM #KV action=set_exhausted reason={reason} measured {{}}",
+                log_level="info",
+                log_files=PROXY_LOGS,
+                reports="decision",
+            )
+        ],
+    )
+
+
+async def _six_arms(diag: str | None = None):
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["exhausted"])],
+        junctions=[
+            _junction(
+                _SCOUT,
+                _arm("scout_cpuTime", "scoutData['cpuTime'] > thr", 1239),
+                _arm("low_efficiency", "not high_io_intensity", 1423),
+                _arm("low_success_rate", "extraInfo['successRate'] < rate", 1449),
+                owns_logger=False,
+            ),
+            _junction(
+                "jediorder/TaskCommando.py::runImpl",
+                Branch(outcome="runtime(newTaskStatus)", tier=2),
+                log_files=[OTHER_LOG],
+            ),
+        ],
+    )
+    return await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="exhausted", task_id="7", observed_diag=diag),
+    )
+
+
+async def test_the_arms_of_one_junction_are_not_pooled_into_one_reason():
+    """Six arms send a task to ``exhausted`` and differ only in the reason they
+    give.  Pooling their conditions answers "why" with the union of six answers,
+    which was right for ``pending`` -- where fourteen of eighteen candidates
+    have no condition at all -- and hides the question entirely here."""
+    strategy = await _six_arms()
+
+    scout = next(c for c in strategy.candidates if c.owner == _SCOUT)
+    assert [b.tags[1] for b in scout.branches] == [
+        "reason=scout_cpuTime",
+        "reason=low_efficiency",
+        "reason=low_success_rate",
+    ]
+    assert [b.line for b in scout.branches] == [1239, 1423, 1449]
+
+
+async def test_the_message_the_record_carries_names_one_arm():
+    """The evidence with no window: ``errordialog`` is a column, so one call
+    returns it whole, and PanDA writes the reason into the same text it logs."""
+    strategy = await _six_arms(
+        "#ATM #KV action=set_exhausted reason=low_efficiency lowest CPU efficiency 23 is less than 50"
+    )
+
+    scout = next(c for c in strategy.candidates if c.owner == _SCOUT)
+    assert [b.tags[1] for b in scout.named] == ["reason=low_efficiency"]
+    assert scout.verdict == SEEN
+    assert scout.because == "the record's own message names this branch"
+
+
+async def test_naming_one_arm_rules_out_no_other_junction():
+    """The field holds the *last* message written to it, so a later junction may
+    have overwritten it.  A match is proof and a silence is not evidence, which
+    is the same asymmetry as everywhere else here and arrived at for a different
+    reason."""
+    strategy = await _six_arms(
+        "#ATM #KV action=set_exhausted reason=low_efficiency measured 23"
+    )
+
+    others = [c for c in strategy.candidates if c.owner != _SCOUT]
+    assert [c.verdict for c in others] == [UNSETTLED]
+    assert len(strategy_mod.survivors(strategy)) == 2
+
+
+async def test_a_reason_is_not_matched_by_a_message_naming_a_different_one():
+    strategy = await _six_arms("#ATM #KV action=set_exhausted reason=low_success_rate 3")
+
+    scout = next(c for c in strategy.candidates if c.owner == _SCOUT)
+    assert [b.tags[1] for b in scout.named] == ["reason=low_success_rate"]
+
+
+async def test_a_tagged_arm_is_asked_for_in_the_file_its_own_line_lands_in():
+    """The shared head belongs to the other writers entirely: six arms write the
+    value and none of their lines interpolates it.  The emit carries its own
+    files because the arm logs in the proxy's file while the value line is
+    written by the caller."""
+    strategy = await _six_arms()
+
+    tagged = [
+        o
+        for o in strategy.observations
+        if o.role == strategy_mod.PROBE and "set_exhausted" in o.pattern
+    ]
+    assert {o.log_file for o in tagged} == set(PROXY_LOGS)
+    assert all(_SCOUT in o.settles for o in tagged)
+    assert all(o.pattern.startswith("jediTaskID=7[ >]") for o in tagged)
+    # One control per tagged probe, paired by pattern rather than by file: the
+    # file also carries the value line, which is a different sentence.
+    controls = {
+        o.control_for for o in strategy.observations if o.role == strategy_mod.CONTROL
+    }
+    assert {o.pattern for o in tagged} <= controls
+
+
+async def test_production_carrying_the_tagged_line_settles_the_arm():
+    strategy = await _six_arms()
+
+    results = []
+    for query in strategy_mod.queries(strategy):
+        # Only the one arm's line is in production, which is what makes the
+        # answer say which arm rather than which junction.
+        matched = 1 if "low_efficiency" in query.pattern else 0
+        results.append(
+            _result(query, matched=matched, lines=["... reason=low_efficiency"] if matched else [])
+        )
+    settled = strategy_mod.evaluate(
+        strategy, Evidence(fetched_at="2026-09-05T00:00:00+00:00", results=results)
+    )
+
+    scout = next(c for c in settled.candidates if c.owner == _SCOUT)
+    assert scout.verdict == SEEN
+    assert [b.tags[1] for b in scout.named] == ["reason=low_efficiency"]
+
+
+async def test_the_record_fetched_with_the_logs_names_the_arm_too():
+    """The same reading whichever route the message arrives by.  Fetched
+    alongside the greps rather than instead of them: the record holds the last
+    message written to the field, so it confirms an arm and never rules one
+    out, and the log line is what survives a later junction overwriting it."""
+    strategy = await _six_arms()
+    ev = Evidence(
+        fetched_at="2026-09-05T00:00:00+00:00",
+        results=[_result(q, matched=0) for q in strategy_mod.queries(strategy)],
+        tasks=[
+            evidence_mod.TaskRecord(
+                task_id="7",
+                fields={
+                    "status": "exhausted",
+                    "errordialog": "#ATM #KV action=set_exhausted reason=low_efficiency 23 < 50",
+                },
+            )
+        ],
+    )
+
+    settled = strategy_mod.evaluate(strategy, ev)
+
+    scout = next(c for c in settled.candidates if c.owner == _SCOUT)
+    assert [b.tags[1] for b in scout.named] == ["reason=low_efficiency"]
+    assert scout.verdict == SEEN
+
+
+async def test_a_record_for_another_task_settles_nothing():
+    strategy = await _six_arms()
+    ev = Evidence(
+        fetched_at="2026-09-05T00:00:00+00:00",
+        tasks=[
+            evidence_mod.TaskRecord(
+                task_id="8",
+                fields={"errordialog": "#ATM action=set_exhausted reason=low_efficiency"},
+            )
+        ],
+    )
+
+    settled = strategy_mod.evaluate(strategy, ev)
+
+    assert all(not c.named for c in settled.candidates)

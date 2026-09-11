@@ -271,6 +271,27 @@ class JobRecords(BaseModel):
     error: Optional[str] = None
 
 
+class TaskRecord(BaseModel):
+    """One task's row, reduced to the fields an investigation reads.
+
+    The cheapest evidence in the system, and the only kind with no window: a
+    column is returned whole by one API call, where a log line has to be found
+    in a rotation under a byte cap and its absence proves nothing.  What it
+    carries that a log line does not is ``errordialog`` -- the message the
+    deciding branch wrote about itself, still in the record hours later.
+
+    Not free of its own asymmetry.  The field holds the *last* message written
+    to it, so naming a branch is proof and naming none is not, which is why
+    this is used to confirm and never to eliminate.
+    """
+
+    task_id: str
+    fields: dict[str, Any] = Field(
+        default_factory=dict, description="Only KEPT_TASK_FIELDS."
+    )
+    error: Optional[str] = None
+
+
 class Evidence(BaseModel):
     """Everything read from production for one ``check-map`` run.
 
@@ -295,6 +316,15 @@ class Evidence(BaseModel):
             "How many task ids the log evidence offered when the records were "
             "fetched.  With ``len(records)`` this is the whole sample story -- "
             "a record query has no ``truncated`` to carry it."
+        ),
+    )
+    tasks: list[TaskRecord] = Field(
+        default_factory=list,
+        description=(
+            "Task rows, one per task asked about.  Kept apart from ``records`` "
+            "rather than generalised into it: the two answer different "
+            "questions of different endpoints, and a list of jobs and a single "
+            "row would have to be told apart by shape."
         ),
     )
 
@@ -561,6 +591,46 @@ async def collect_job_records(
 
     chosen = sorted(task_ids)[:sample]
     return list(await asyncio.gather(*(one(t) for t in chosen))), len(task_ids)
+
+
+#: What a task row is kept down to.  The status pair says where the row is and
+#: where it came from, ``errordialog`` is the message the deciding branch left
+#: about itself, and the rest place the task without pulling in the parameter
+#: blob -- a full task description is large and nothing here reads it.
+KEPT_TASK_FIELDS = (
+    "jeditaskid",
+    "status",
+    "oldstatus",
+    "errordialog",
+    "modificationtime",
+    "prodsourcelabel",
+    "username",
+)
+
+
+async def collect_task_records(task_ids: list[str]) -> list[TaskRecord]:
+    """Fetch one row per task, compacted.
+
+    ``task/get_detailed_info`` takes an id and checks no owner, which is what
+    makes this usable at all -- every endpoint returning a *population* scopes
+    it to the caller's DN.  The keys PanDA returns are lower-cased column names,
+    so they are matched case-insensitively rather than assumed.
+    """
+    from bamboo.utils.panda_client import fetch_task_data  # noqa: PLC0415
+
+    async def one(task_id: str) -> TaskRecord:
+        try:
+            data = await fetch_task_data(task_id)
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            logger.warning("evidence: task record for %s failed: %s", task_id, exc)
+            return TaskRecord(task_id=task_id, error=str(exc))
+        lowered = {str(k).lower(): v for k, v in (data or {}).items()}
+        return TaskRecord(
+            task_id=task_id,
+            fields={k: lowered.get(k) for k in KEPT_TASK_FIELDS if lowered.get(k) is not None},
+        )
+
+    return list(await asyncio.gather(*(one(t) for t in task_ids)))
 
 
 def observed_codes(evidence: Evidence) -> dict[str, Counter]:

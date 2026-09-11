@@ -145,6 +145,11 @@ def _report_follow_up(strategy: Strategy) -> None:
         click.echo(line)
 
 
+def _at(branch) -> str:
+    """``:1423`` -- where to go and read, when the map knows."""
+    return f"  :{branch.line}" if branch.line else ""
+
+
 def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool) -> None:
     candidates = strategy_mod.survivors(strategy) if evaluated else strategy.candidates
     stated = sum(1 for c in strategy.candidates if c.tier == 1)
@@ -178,12 +183,24 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
                 f"  {'':<10} only lands on a row where "
                 f"{' and '.join(candidate.row_precondition)}"
             )
+        for branch in candidate.named:
+            # Always shown: when one arm is named, which arm it is *is* the
+            # answer.  Six of these reach ``exhausted`` from one function and
+            # differ only in the reason they give.
+            click.echo(f"  {'':<10} → {' '.join(branch.tags)}" + _at(branch))
+            for condition in branch.conditions:
+                click.echo(f"  {'':<10}   when: {condition}")
         if full:
             click.echo(f"  {'':<10} {candidate.owner}")
             if candidate.triggers:
                 click.echo(f"  {'':<10} triggers: {', '.join(candidate.triggers)}")
-            for condition in candidate.conditions:
-                click.echo(f"  {'':<10} when: {condition}")
+            for branch in candidate.branches:
+                if branch.matched:
+                    continue  # already shown above, with its reason
+                head = " ".join(branch.tags) or branch.outcome
+                click.echo(f"  {'':<10} {head}{_at(branch)}")
+                for condition in branch.conditions:
+                    click.echo(f"  {'':<10}   when: {condition}")
     if len(candidates) > len(shown):
         click.echo(f"  … {len(candidates) - len(shown)} more (--full)")
 
@@ -299,6 +316,17 @@ async def _derive(map_id: str, version: Optional[str], symptom: Symptom) -> Stra
     ),
 )
 @click.option(
+    "--observed-diag",
+    "observed_diag",
+    default=None,
+    help=(
+        "The message the record carries, when it is already to hand.  PanDA "
+        "writes the reason a branch took into the same text it logs, so this "
+        "names the arm and not only the junction.  With --fetch it is read from "
+        "the task row instead."
+    ),
+)
+@click.option(
     "--evidence",
     "evidence_path",
     default=DEFAULT_EVIDENCE,
@@ -330,6 +358,7 @@ def main(
     subject: str,
     observed: str,
     task_id: Optional[str],
+    observed_diag: Optional[str],
     evidence_path: Path,
     fetch: bool,
     timeout: float,
@@ -340,7 +369,9 @@ def main(
     """Ask the Code Map which code could have produced an observed value."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
-    symptom = Symptom(subject=subject, observed=observed, task_id=task_id)
+    symptom = Symptom(
+        subject=subject, observed=observed, task_id=task_id, observed_diag=observed_diag
+    )
     try:
         strategy = asyncio.run(_derive(map_id, version, symptom))
     except LookupError as exc:
@@ -360,6 +391,12 @@ def main(
             f"across {len({q.service for q in queries})} service(s)"
         )
         ev = asyncio.run(evidence_mod.collect(queries, timeout=timeout))
+        if task_id is not None:
+            # One row, one call, no window.  Asked alongside the greps rather
+            # than instead of them: the record holds the last message written
+            # to the field, so it confirms an arm and never rules one out, and
+            # the log line is what survives a later junction overwriting it.
+            ev.tasks = asyncio.run(evidence_mod.collect_task_records([task_id]))
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
     elif evidence_path.exists():

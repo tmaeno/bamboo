@@ -1001,6 +1001,55 @@ class Symptom(BaseModel):
             "recorded rather than defaulted."
         ),
     )
+    observed_diag: Optional[str] = Field(
+        default=None,
+        description=(
+            "The message the record carries, when it carries one.  The cheapest "
+            "evidence in the system and the only kind with no window: it is a "
+            "column, so one API call returns it whole, where a log line has to "
+            "be found in a rotation under a byte cap.  What it buys is the arm "
+            "rather than the junction, because PanDA writes the reason into the "
+            "same message it logs."
+        ),
+    )
+
+
+class CandidateBranch(BaseModel):
+    """One way a candidate reaches the observed value.
+
+    Junctions were the unit until a symptom came along whose whole question is
+    *which arm*: ``setScoutJobData_JEDI`` sends a task to ``exhausted`` from six
+    arms, one per reason, and pooling their conditions into one list per
+    candidate answers "why" with the union of six answers.  Flattening was
+    right for ``pending``, where fourteen of eighteen candidates have no
+    condition at all -- and it hid the question here entirely.
+    """
+
+    outcome: str
+    tier: int = 1
+    line: Optional[int] = Field(
+        default=None, description="Where the write is, so a reader can go and look."
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the code calls this decision -- ``action=set_exhausted`` and "
+            "``reason=low_efficiency``.  Both a search key in production's logs "
+            "and, where the same message is persisted, the part of the record "
+            "that names this arm."
+        ),
+    )
+    conditions: list[str] = Field(default_factory=list)
+    row_precondition: list[str] = Field(default_factory=list)
+    matched: bool = Field(
+        default=False,
+        description=(
+            "Whether the message the record carries names this arm.  One "
+            "direction only: a match proves this arm decided, and a record that "
+            "names none proves nothing, because the field holds the last message "
+            "written to it and a later junction may have overwritten it."
+        ),
+    )
 
 
 class Candidate(BaseModel):
@@ -1031,19 +1080,9 @@ class Candidate(BaseModel):
             "is a finding rather than a reason to guess one."
         ),
     )
-    conditions: list[str] = Field(
+    branches: list[CandidateBranch] = Field(
         default_factory=list,
-        description="Path conditions of the branches that reach this outcome.",
-    )
-    row_precondition: list[str] = Field(
-        default_factory=list,
-        description=(
-            "What the row already had to say for this candidate's write to land "
-            "(see :class:`Branch`).  It does not change whether the candidate is "
-            "confirmed -- a line seen still proves the code decided the value -- "
-            "but it does change what the confirmation means, because the write "
-            "can lose the race and say nothing."
-        ),
+        description="The arms that reach this outcome, each with its own reason.",
     )
     triggers: list[str] = Field(default_factory=list)
     entries: list[str] = Field(default_factory=list)
@@ -1052,6 +1091,42 @@ class Candidate(BaseModel):
         description=f"{SEEN} | {ELIMINATED} | {UNSETTLED} | {UNASKABLE}",
     )
     because: str = Field(default="", description="Why the verdict, in one clause.")
+
+    @property
+    def conditions(self) -> list[str]:
+        """Every condition any of the arms is under, in order, deduplicated.
+
+        The summary the arms compose to.  Derived rather than stored so that the
+        two cannot say different things -- which is the failure the arms were
+        introduced to fix, one level up.
+        """
+        seen: list[str] = []
+        for branch in self.branches:
+            for condition in branch.conditions:
+                if condition not in seen:
+                    seen.append(condition)
+        return seen
+
+    @property
+    def row_precondition(self) -> list[str]:
+        """What the row had to already say for any of these arms to land.
+
+        Kept apart from the conditions because the two fail differently: an
+        unmet path condition means the code never got here and the log is
+        silent; an unmet row precondition means the code got here, said so, and
+        changed nothing.
+        """
+        seen: list[str] = []
+        for branch in self.branches:
+            for guard in branch.row_precondition:
+                if guard not in seen:
+                    seen.append(guard)
+        return seen
+
+    @property
+    def named(self) -> list[CandidateBranch]:
+        """The arms the record's message names, if it names any."""
+        return [branch for branch in self.branches if branch.matched]
 
 
 class Observation(BaseModel):
@@ -1080,6 +1155,16 @@ class Observation(BaseModel):
     services: list[str] = Field(default_factory=list)
     settles: list[str] = Field(
         default_factory=list, description="Owners of the candidates this can settle."
+    )
+    control_for: Optional[str] = Field(
+        default=None,
+        description=(
+            "For a control, the probe pattern it controls.  Paired by pattern "
+            "rather than by file because one file can carry two probes that are "
+            "different sentences -- the value line every writer shares, and the "
+            "tagged line one branch names itself with -- and a control answers "
+            "for exactly one of them."
+        ),
     )
     verdict: str = Field(
         default=ANSWER_NOT_ASKED,

@@ -75,6 +75,7 @@ from bamboo.codemap.models import (
     UNASKABLE,
     UNSETTLED,
     Candidate,
+    CandidateBranch,
     FollowUp,
     JunctionNode,
     Observation,
@@ -157,6 +158,13 @@ def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
     heads: dict[str, set[str]] = {}
     for junction in producers:
         for branch in junction.branches:
+            if branch.tags:
+                # An arm that names its own decision speaks its own sentence,
+                # and it is asked for separately in the file that sentence lands
+                # in.  Pooled here it would win the shared head whenever the
+                # other writers log nothing, and then be put to every
+                # candidate's file as though they all said it.
+                continue
             for emit in branch.emits:
                 if emit.reports != REPORTS_DECISION:
                     continue
@@ -228,40 +236,15 @@ def control_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
     return None if shape is None else shape.replace("{value}", "")
 
 
-def _conditions(junction: JunctionNode, observed: str) -> list[str]:
-    """Path conditions of the branches that can reach *observed*, deduplicated.
+def _reaching(junction: JunctionNode, observed: str) -> list:
+    """The branches that can have produced *observed*.
 
-    Reported rather than evaluated.  Substituting observed values into them is
-    what the plan called for, and it stays available -- but it is not what
-    narrows the set here, because most of these branches have no condition to
-    substitute into.
+    The ones that state it, or -- when none does -- the ones whose value is
+    only settled at run time.  A tier-2 branch is never ruled out by the value,
+    because "this one could have" is the honest answer for it.
     """
     stated = [b for b in junction.branches if b.outcome == observed]
-    reaching = stated or [b for b in junction.branches if b.tier == 2]
-    seen: list[str] = []
-    for branch in reaching:
-        for condition in branch.path_condition:
-            if condition not in seen:
-                seen.append(condition)
-    return seen
-
-
-def _row_precondition(junction: JunctionNode, observed: str) -> list[str]:
-    """What the row had to already say for the branches reaching *observed*.
-
-    Read from the same branches as :func:`_conditions` and kept apart from
-    them, because the two fail differently: an unmet path condition means the
-    code never got here and the log is silent, an unmet row precondition means
-    the code got here, said so, and changed nothing.
-    """
-    stated = [b for b in junction.branches if b.outcome == observed]
-    reaching = stated or [b for b in junction.branches if b.tier == 2]
-    seen: list[str] = []
-    for branch in reaching:
-        for guard in branch.row_precondition:
-            if guard not in seen:
-                seen.append(guard)
-    return seen
+    return stated or [b for b in junction.branches if b.tier == 2]
 
 
 def _candidate(junction: JunctionNode, observed: str) -> Candidate:
@@ -270,11 +253,59 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
         owner=junction.owner,
         tier=1 if stated else 2,
         log_files=junction.observable_log_files(),
-        conditions=_conditions(junction, observed),
-        row_precondition=_row_precondition(junction, observed),
+        branches=[
+            CandidateBranch(
+                outcome=branch.outcome,
+                tier=branch.tier,
+                line=branch.line,
+                tags=list(branch.tags),
+                conditions=list(branch.path_condition),
+                row_precondition=list(branch.row_precondition),
+            )
+            for branch in _reaching(junction, observed)
+        ],
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
     )
+
+
+def _names_tags(text: str, tags: list[str]) -> bool:
+    """Whether *text* carries every one of *tags* as a whole token.
+
+    Matched here rather than re-derived from the text, so this layer needs to
+    know nothing about how a tag is spelled: the map extracted the tokens and
+    this asks whether the message contains them.  Whole tokens because
+    ``reason=low`` must not answer for ``reason=low_efficiency``.
+    """
+    return bool(tags) and all(
+        re.search(rf"(?<![\w=]){re.escape(tag)}\b", text) for tag in tags
+    )
+
+
+def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
+    """Mark the arms the record's message names, and settle what that proves.
+
+    One direction only, and the asymmetry is not the usual one about sample
+    size.  A match is proof: the message and the branch carry the same tokens
+    because the code wrote both in the same block.  A record that names no arm
+    proves nothing at all, because the field holds the *last* message written
+    to it and any later junction may have overwritten it -- so a junction is
+    never ruled out by this, only confirmed.
+
+    Within the junction it does rule out: six arms write ``exhausted`` and the
+    message names one, which is the whole reason the arms are separate.
+    """
+    settled = strategy.model_copy(deep=True)
+    for candidate in settled.candidates:
+        for branch in candidate.branches:
+            # Only ever set: a tagged probe may already have matched this arm
+            # from the log, and the two are the same positive evidence reaching
+            # it by different routes.
+            branch.matched = branch.matched or _names_tags(diag, branch.tags)
+        if candidate.named:
+            candidate.verdict = SEEN
+            candidate.because = "the record's own message names this branch"
+    return settled
 
 
 def _findings(candidates: list[Candidate], junctions: list[JunctionNode]) -> list[str]:
@@ -400,6 +431,80 @@ def _follow_up(
     )
 
 
+def _tag_pattern(template: str, tags: list[str]) -> Optional[str]:
+    """The tokens of *tags* in the order *template* writes them.
+
+    The tag rather than the sentence around it, for the reason the brokerage
+    slice made the tag the identity of a filter stage: the wording is the
+    author's and the tag is the contract.  ``action=set_exhausted since
+    reason=many_shorter_jobs`` puts a word between the two, so the order is read
+    off the template instead of assumed.
+    """
+    placed = [(template.find(tag), tag) for tag in tags]
+    if any(at < 0 for at, _tag in placed):
+        return None
+    return ".*".join(re.escape(tag) for _at, tag in sorted(placed))
+
+
+def _tag_observations(
+    producers: list[JunctionNode], task_id: Optional[str], scoped: bool
+) -> list[Observation]:
+    """A probe per branch that names its own decision, in the file it writes to.
+
+    A second family, because the sentence differs.  ``line_shape`` picks the one
+    head the most writers share, which is right for a value every writer
+    announces the same way and useless for a branch whose line is about the
+    reason -- six arms write ``exhausted`` and the shared head belongs to the
+    other writers entirely.
+
+    Its file comes from the emit rather than from the junction: the arm logs in
+    the proxy's own file, while the line the shared head matches is written by
+    the caller.  That is the whole point of an emit carrying its own files.
+    """
+    observations: list[Observation] = []
+    seen: set[tuple[str, str]] = set()
+    for junction in producers:
+        for branch in junction.branches:
+            if not branch.tags:
+                continue
+            for emit in branch.emits:
+                if emit.reports != REPORTS_DECISION:
+                    continue
+                body = _tag_pattern(emit.template, branch.tags)
+                if body is None:
+                    continue
+                pattern = (
+                    _TASK_PREFIX.format(task=re.escape(str(task_id))) + body
+                    if task_id is not None and scoped
+                    else body
+                )
+                for filename in emit.log_files:
+                    if (filename, pattern) in seen:
+                        continue
+                    seen.add((filename, pattern))
+                    observations.append(
+                        Observation(
+                            log_file=filename,
+                            pattern=pattern,
+                            role=PROBE,
+                            services=list(evidence.SERVICES),
+                            settles=[junction.owner],
+                        )
+                    )
+                    if pattern != body:
+                        observations.append(
+                            Observation(
+                                log_file=filename,
+                                pattern=body,
+                                role=CONTROL,
+                                services=list(evidence.SERVICES),
+                                settles=[],
+                                control_for=pattern,
+                            )
+                        )
+    return observations
+
+
 def _observations(
     candidates: list[Candidate],
     pattern: str,
@@ -447,6 +552,7 @@ def _observations(
                     role=CONTROL,
                     services=list(evidence.SERVICES),
                     settles=[],
+                    control_for=pattern,
                 )
             )
     for filename in rows_files or []:
@@ -514,23 +620,28 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             "rules nothing out -- elimination needs a pattern scoped to one row"
         )
 
-    return Strategy(
+    asked = (
+        _observations(
+            candidates,
+            pattern,
+            control_shape(symptom.subject, producers) or "",
+            with_control=symptom.task_id is not None,
+            rows=rows_pattern,
+            rows_files=rows_files,
+        )
+        if pattern
+        else []
+    )
+    asked += _tag_observations(
+        producers, symptom.task_id, symptom.subject.startswith(_TASK_SCOPED)
+    )
+
+    strategy = Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
         derived_from=subject.derived_from,
         candidates=candidates,
-        observations=(
-            _observations(
-                candidates,
-                pattern,
-                control_shape(symptom.subject, producers) or "",
-                with_control=symptom.task_id is not None,
-                rows=rows_pattern,
-                rows_files=rows_files,
-            )
-            if pattern
-            else []
-        ),
+        observations=asked,
         follow_up=_follow_up(
             symptom.observed,
             subject.selected_values,
@@ -542,6 +653,10 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         findings=_findings(candidates, producers),
         gaps=gaps,
     )
+    # Applied here when the caller already has the message, so the plan a reader
+    # inspects before any query goes out is the narrowed one.  When it arrives
+    # with the evidence instead, ``evaluate`` applies the same function.
+    return name_the_arm(strategy, symptom.observed_diag) if symptom.observed_diag else strategy
 
 
 def queries(strategy: Strategy) -> list[GrepQuery]:
@@ -599,10 +714,21 @@ def _answer(ev: evidence.Evidence, observation: Observation) -> Observation:
     return settled
 
 
+def _recorded_message(ev: evidence.Evidence, symptom: Symptom) -> Optional[str]:
+    """The message the record carries for this symptom's entity, if any."""
+    if symptom.task_id is None:
+        return None
+    for record in ev.tasks:
+        if str(record.task_id) == str(symptom.task_id):
+            message = record.fields.get("errordialog")
+            return str(message) if message else None
+    return None
+
+
 def _settle(
     candidate: Candidate,
-    probes: dict[str, Observation],
-    controls: dict[str, Observation],
+    probes: list[Observation],
+    controls: dict[tuple[str, str], Observation],
 ) -> Candidate:
     """Decide what production said about one candidate.
 
@@ -615,12 +741,25 @@ def _settle(
       look is not evidence.
     """
     settled = candidate.model_copy(deep=True)
-    if not candidate.log_files:
+    mine = [probe for probe in probes if candidate.owner in probe.settles]
+    if not candidate.log_files and not mine:
         settled.verdict = UNASKABLE
         settled.because = "no log file names it"
         return settled
 
-    asked = [(f, probes.get(f), controls.get(f)) for f in candidate.log_files]
+    asked = [
+        (probe.log_file, probe, controls.get((probe.log_file, probe.pattern)))
+        for probe in mine
+    ]
+    # Every seen probe marks what it names before any of them decides the
+    # verdict: a tagged probe names one arm, and returning on the first would
+    # leave the arm a later probe confirmed unmarked.
+    for _filename, probe, _control in asked:
+        if probe is None or probe.verdict != ANSWER_SEEN:
+            continue
+        for branch in settled.branches:
+            if branch.tags and _names_tags(probe.pattern, branch.tags):
+                branch.matched = True
     for filename, probe, _control in asked:
         if probe is not None and probe.verdict == ANSWER_SEEN:
             settled.verdict = SEEN
@@ -666,10 +805,18 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     """
     settled = strategy.model_copy(deep=True)
     settled.observations = [_answer(ev, o) for o in strategy.observations]
-    probes = {o.log_file: o for o in settled.observations if o.role == PROBE}
-    controls = {o.log_file: o for o in settled.observations if o.role == CONTROL}
+    probes = [o for o in settled.observations if o.role == PROBE]
+    # Keyed by file *and* probe, because one file now carries two sentences --
+    # the value line every writer shares and the tagged line one arm names
+    # itself with -- and a control answers for exactly one of them.
+    controls = {
+        (o.log_file, o.control_for): o
+        for o in settled.observations
+        if o.role == CONTROL and o.control_for
+    }
     settled.candidates = [_settle(c, probes, controls) for c in settled.candidates]
-    return settled
+    diag = _recorded_message(ev, strategy.symptom)
+    return name_the_arm(settled, diag) if diag else settled
 
 
 def survivors(strategy: Strategy) -> list[Candidate]:
