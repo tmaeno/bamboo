@@ -459,6 +459,21 @@ def main(
 
     _report_triggers(fragment, plugin, top)
 
+    dispatched = getattr(plugin, "runtime_dispatch_writes", [])
+    if dispatched:
+        # Dropped writes rather than junctions: nothing here says the receiver
+        # is a spec.  Printed because that is this reader's inference and not
+        # something the code states, and a drop nobody can see is how
+        # ``unresolved`` came to absorb "not read" once already.
+        click.echo(
+            f"\nreceivers whose class is a run-time choice ({len(dispatched)} write(s), "
+            "not attributed):"
+        )
+        for row in dispatched[:top]:
+            click.echo(f"  {row}")
+        if len(dispatched) > top:
+            click.echo(f"  … {len(dispatched) - top} more")
+
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:
         # Not a gap in extraction: these are written by the code and hold no

@@ -4732,6 +4732,77 @@ def test_an_iterator_that_is_not_a_context_manager_types_nothing():
     assert [(j.subject, j.attribution) for j in junctions] == [("?.status", "unresolved")]
 
 
+def test_a_receiver_built_from_a_runtime_registry_is_not_a_spec_write():
+    """``impl = srcImplMap[subType](*args)`` -- the class is chosen at run time.
+
+    ``FactoryBase`` instantiates the knight plugins named in a config string
+    and stamps two fields on each, and those two are ``vo`` and
+    ``prodSourceLabel``, which among the declaring classes only ``JediTaskSpec``
+    has both of.  So structural inference answered ``JediTaskSpec`` -- for a
+    plugin object that is not a spec at all -- and the map ended up naming a
+    plugin factory as one of the four places a task's ``vo`` is decided, on a
+    promoted subject, which is half of its writers.
+
+    This is the trap the design named at the start, arriving by a different
+    road: ``WatchDog.vo = "atlas"`` was refused because ``self`` resolves
+    through the class, and here there is no class to resolve through.
+    """
+    source = (
+        "class FactoryBase:\n"
+        "    def instantiateImpl(self, vo, sourceLabel, subType, *args):\n"
+        "        impl = self.classMap[vo][sourceLabel][subType](*args)\n"
+        "        use(impl.proc_status)\n"
+        "        impl.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedicore/FactoryBase.py")
+
+    assert junctions == []
+
+
+def test_a_receiver_built_from_a_class_looked_up_by_name_is_not_a_spec_write():
+    """The same factory, one line earlier: ``cls = getattr(mod, className)``.
+
+    ``initializeMods`` imports the module named in the config and pulls the
+    class out of it by name, so the class is a string until run time.  Two
+    spellings of one fact, and reading only the subscript would have left half
+    of the writes standing.
+    """
+    source = (
+        "class FactoryBase:\n"
+        "    def initializeMods(self, *args):\n"
+        "        mod = __import__(moduleName)\n"
+        "        cls = getattr(mod, className)\n"
+        "        impl = cls(*args)\n"
+        "        use(impl.proc_status)\n"
+        "        impl.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedicore/FactoryBase.py")
+
+    assert junctions == []
+
+
+def test_a_receiver_from_a_named_method_still_resolves_structurally():
+    """The guard is about a class chosen at run time, not about calls.
+
+    Every knight takes its spec from the task buffer, and where the facade has
+    no return annotation structural inference is what settles those writes --
+    three of them in the corpus.  A rule that refused any call-assigned
+    receiver would take those away to remove four wrong ones.
+    """
+    source = (
+        "class ContentsFeeder:\n"
+        "    def feed(self, jediTaskID):\n"
+        "        spec = self.taskBufferIF.peekFileSpec(jediTaskID)\n"
+        "        use(spec.proc_status)\n"
+        "        spec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jediorder/ContentsFeeder.py")
+
+    assert [(j.subject, j.attribution) for j in junctions] == [
+        ("JediFileSpec.status", "structural")
+    ]
+
+
 _FACADE = """
 class JediTaskBuffer(object):
     def getTaskWithID_JEDI(self, jediTaskID: int) -> tuple[bool, JediTaskSpec | None]:

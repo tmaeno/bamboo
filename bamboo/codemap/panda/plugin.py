@@ -39,6 +39,7 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
     spec_annotation_forms,
 )
+from bamboo.codemap.panda.pathcond import functions_with_owner
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -231,6 +232,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         audited.learn_element_types(self._modules)
         audited.learn_self_attributes(self._modules)
         audited.learn_return_types(self._modules)
+
+        # Writes the attribution drops for having a receiver whose class is a
+        # run-time choice.  Collected here rather than counted inside the
+        # progress slice so that the reading lives in one place: the slice asks
+        # the attributor, and so does this.
+        spec_attribute_names = (
+            set().union(*declarations.values()) if declarations else set()
+        )
+        self._runtime_dispatch = [
+            f"{module.rel_path}:{target.lineno} {ast.unparse(target)}"
+            for module in self._modules
+            for func, _owner in functions_with_owner(module.tree)
+            for target in ast.walk(func)
+            if isinstance(target, ast.Attribute)
+            and isinstance(target.ctx, ast.Store)
+            and target.attr in spec_attribute_names
+            and isinstance(target.value, ast.Name)
+            and audited.built_at_runtime(target.value.id, func)
+        ]
         fragment.annotation_readings = [
             AnnotationAudit(
                 where=row.where,
@@ -422,6 +442,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def table_conflicts(self) -> dict[str, set[str]]:
         """Tables whose column evidence named more than one spec class."""
         return getattr(self, "_table_conflicts", {})
+
+    @property
+    def runtime_dispatch_writes(self) -> list[str]:
+        """Writes dropped because the receiver's class is chosen at run time.
+
+        Reported rather than left silent.  These are not junctions -- nothing
+        says the object is a spec -- but the reason is an inference of this
+        reader's rather than something the code states, and a drop nobody can
+        see is how ``unresolved`` came to absorb "not read" once before.
+        """
+        return getattr(self, "_runtime_dispatch", [])
 
     # -- source discovery ------------------------------------------------- #
 

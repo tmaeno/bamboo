@@ -1192,6 +1192,66 @@ class SpecAttributor:
                 built.add(name)
         return next(iter(built)) if len(built) == 1 else None
 
+    def built_at_runtime(
+        self,
+        variable: str,
+        func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    ) -> bool:
+        """Whether *variable* holds an object whose class is chosen at run time.
+
+        ``FactoryBase`` builds the knight plugins two ways, and neither names a
+        class anywhere a reader could see::
+
+            impl = srcImplMap[subType](*args)        # a registry, keyed by config
+            cls = getattr(mod, className)            # a class named by a string
+            impl = cls(*args)
+
+        and then stamps ``vo`` and ``prodSourceLabel`` on the result.  Among
+        the declaring classes only ``JediTaskSpec`` has both, so structural
+        inference answered ``JediTaskSpec`` for an object that is no spec at
+        all, and the map named a plugin factory as one of four places a task's
+        ``vo`` is decided.  Four writes in one file -- and half the writers of
+        a promoted subject, which is why they are worth a rule.
+
+        A construction the reader can *see* and cannot *name* is evidence, not
+        absence: it says the class is not statically knowable here, so
+        inference from the attributes touched is inference stacked on a known
+        unknown.  The write is dropped rather than left unresolved, because
+        what is missing is not which spec it is but any reason to think it is
+        one.
+
+        Restricted to those two shapes on purpose.  ``taskSpec =
+        self.taskBufferIF.getTaskWithID_JEDI(...)`` is also a call, and where
+        that facade has no return annotation structural inference is exactly
+        what settles the write -- three of them in the corpus.  Refusing every
+        call-assigned receiver would take those away to remove these.
+        """
+        if func is None:
+            return False
+        reflected = {
+            target.id
+            for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "getattr"
+        }
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign) or not any(
+                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            ):
+                continue
+            if not isinstance(node.value, ast.Call):
+                continue
+            callee = node.value.func
+            if isinstance(callee, ast.Subscript):
+                return True
+            if isinstance(callee, ast.Name) and callee.id in reflected:
+                return True
+        return False
+
     def _copied_element_class(
         self,
         variable: str,
@@ -1578,6 +1638,13 @@ class SpecAttributor:
             # the worst kind for elimination, since it can never be the answer.
             built = self._built_class(target.value.id, func)
             if built is not None and built not in self._declarations:
+                return None, NOT_A_SPEC
+
+            # And the same conclusion where the construction is visible but the
+            # class is not: a registry lookup or a name pulled out with
+            # ``getattr`` decides the class at run time, so there is nothing
+            # here saying this is a spec -- see ``_built_at_runtime``.
+            if self.built_at_runtime(target.value.id, func):
                 return None, NOT_A_SPEC
 
             # A loop over a container whose element type the code states:
