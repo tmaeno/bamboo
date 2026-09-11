@@ -825,7 +825,9 @@ def _settle(
 
     if reasons:
         settled.verdict = UNSETTLED
-        settled.because = "; ".join(reasons[:2])
+        # Deduplicated: one file now carries two probes -- the value line and
+        # the arm's own -- and both being silent is one reason, said once.
+        settled.because = "; ".join(dict.fromkeys(reasons))[:200]
     else:
         settled.verdict = ELIMINATED
         settled.because = "absent from every log that would carry the line"
