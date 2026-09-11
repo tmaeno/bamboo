@@ -1774,6 +1774,15 @@ class AnnotationReading(NamedTuple):
     stated: str  # the spec class the annotation names
     put_in: frozenset[str]  # classes the code stores in it, where they resolve
     read: bool  # whether removing it would change any write in scope
+    #: Whether the ablation had anything to compare -- false where no spec
+    #: attribute is written in scope, which makes ``read`` vacuous while
+    #: leaving ``put_in`` a real reading.
+    audited: bool = True
+    #: "line:attribute" for each write in scope of an attribute the stated
+    #: class declares that still resolves by inference or not at all.  What
+    #: separates an annotation with a missing read path from one the map
+    #: simply does not need.
+    unsettled: frozenset[str] = frozenset()
 
 
 Scope = list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[str]]]
@@ -1867,6 +1876,7 @@ def annotation_readings(
             )
             if not scope or not used:
                 continue
+            resolutions = _scope_resolutions(scope, attributor, spec_attribute_names)
             readings.append(
                 AnnotationReading(
                     where=f"{module.rel_path}:{node.lineno}",
@@ -1884,8 +1894,23 @@ def annotation_readings(
                         if kind == "container"
                         else frozenset()
                     ),
+                    # The ablation removes the annotation and re-resolves the
+                    # writes around it, so with no write around it both runs
+                    # answer the same thing because there was nothing to
+                    # answer.  Recorded rather than dropped: the row still
+                    # carries the second reading that ``container_annotations
+                    # _agree`` compares, which has nothing to do with whether
+                    # a spec attribute is written here -- dropping it took
+                    # twenty-one comparisons away from that gate.
+                    audited=bool(resolutions),
                     read=_annotation_changes_a_write(
                         node, scope, attributor, spec_attribute_names
+                    ),
+                    unsettled=frozenset(
+                        f"{line}:{attribute}"
+                        for (line, attribute), (_cls, basis) in resolutions.items()
+                        if basis in (STRUCTURAL, UNRESOLVED)
+                        and attribute in attributor.declared_attributes(stated)
                     ),
                 )
             )

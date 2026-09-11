@@ -753,6 +753,25 @@ class AnnotationAudit(BaseModel):
             "on it: either it is redundant or a read form is missing."
         )
     )
+    audited: bool = Field(
+        default=True,
+        description=(
+            "Whether the ablation had anything to compare.  False where no "
+            "spec attribute is written in the annotation's scope, which makes "
+            "``read`` vacuous -- the row is kept because its other reading, "
+            "what the code puts in the container, is unaffected by that."
+        ),
+    )
+    unsettled: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``line:attribute`` for each write in scope of an attribute the "
+            "stated class declares that still resolves by inference or not at "
+            "all.  This is what separates the two readings of ``read=False``: "
+            "with nothing unsettled the map simply reaches the class another "
+            "way, which an annotated tree makes the normal case."
+        ),
+    )
 
 
 class DiagnosticTemplate(BaseModel):

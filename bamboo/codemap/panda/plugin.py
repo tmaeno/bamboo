@@ -239,6 +239,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 stated=row.stated,
                 put_in=sorted(row.put_in),
                 read=row.read,
+                audited=row.audited,
+                unsettled=sorted(row.unsettled),
             )
             for row in annotation_readings(
                 self._modules,

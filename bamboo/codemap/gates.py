@@ -620,23 +620,33 @@ def annotations_are_read(fragment: MapFragment) -> GateResult:
     by every workflow spec, so ``structural_attribution_agrees`` corroborates
     the step lock's annotation and says nothing about the other two.
     """
-    unread = [row for row in fragment.annotation_readings if not row.read]
+    audited = [row for row in fragment.annotation_readings if row.audited]
+    unread = [row for row in audited if not row.read]
+    missing = [row for row in unread if row.unsettled]
+    redundant = len(unread) - len(missing)
+    note = (
+        "The annotation changes nothing while a write of the class it names is "
+        "still unsettled here, which is what a missing read form looks like "
+        "from the outside."
+    )
+    if redundant:
+        note += (
+            f"  {redundant} more state a class the map reaches another way; "
+            "on an annotated tree that is the normal case, not a defect."
+        )
     return GateResult(
         gate="annotations-are-read",
-        passed=not unread,
-        checked=len(fragment.annotation_readings),
+        passed=not missing,
+        checked=len(audited),
         unit="spec annotations",
-        question="does the extraction read every annotation it asked for?",
-        finding="an annotation the map asked for changes nothing",
+        question="is any annotation the map trusts hiding a read it cannot do?",
+        finding="an annotation changes nothing and leaves a write of its class unsettled",
         failures=[
             f"{row.where} states {row.stated} for {row.container} "
             "and no write in scope resolves differently without it"
-            for row in unread
+            for row in missing
         ],
-        note=(
-            "Either the annotation is redundant or the read form is missing; "
-            "the two look identical from here, so both are worth a look."
-        ),
+        note=note,
     )
 
 

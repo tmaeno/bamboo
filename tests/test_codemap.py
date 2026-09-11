@@ -4164,6 +4164,11 @@ def test_an_annotation_that_changes_no_write_is_a_finding():
     ``data_spec_map: Dict[str, WFDataSpec]`` named the right class and closed
     nothing, because the receiver is bound by ``data_spec_map.get(name)`` and
     only ``d[key]`` was read.  It was reported as resolving three writes.
+
+    What makes it a finding rather than a redundancy is the write left over: a
+    ``WFDataSpec`` attribute is written in that scope and still resolves by
+    inference or not at all, which is what a missing read form looks like from
+    here.
     """
     fragment = _audited(
         AnnotationAudit(
@@ -4172,6 +4177,7 @@ def test_an_annotation_that_changes_no_write_is_a_finding():
             stated="WFDataSpec",
             put_in=[],
             read=False,
+            unsettled=["880:status"],
         )
     )
 
@@ -4182,6 +4188,36 @@ def test_an_annotation_that_changes_no_write_is_a_finding():
         "workflow_core.py:859 states WFDataSpec for data_spec_map "
         "and no write in scope resolves differently without it"
     ]
+
+
+def test_an_annotation_a_stronger_reading_made_redundant_is_not_a_finding():
+    """The population changed under this gate, and the verdict had to follow.
+
+    It was built when the only spec annotations in panda-server were the ones
+    this map asked for -- five of them -- so "nothing depends on it" meant
+    something was wrong.  An annotation campaign then annotated the tree, and
+    inert became the normal case: ``closer.py`` states ``DatasetSpec`` for a
+    mapping whose element type the extraction now learns from what the code
+    puts in it, so the annotation changes nothing and nothing is wrong.
+
+    The remaining defect is narrower and still fails: an annotation that
+    changes nothing *while a write of the class it names is unsettled*.
+    """
+    fragment = _audited(
+        AnnotationAudit(
+            where="closer.py:54",
+            container="dataset_map",
+            stated="DatasetSpec",
+            put_in=["DatasetSpec"],
+            read=False,
+            unsettled=[],
+        )
+    )
+
+    result = gates.annotations_are_read(fragment)
+
+    assert result.passed
+    assert "1 more state a class the map reaches another way" in (result.note or "")
 
 
 def test_an_annotation_the_extraction_cannot_read_is_a_finding():
@@ -4208,6 +4244,109 @@ def test_an_annotation_the_extraction_cannot_read_is_a_finding():
     assert result.checked == 2
     assert result.failures == [
         "adder_gen.py:42 names a declared spec class and the extraction read none"
+    ]
+
+
+def test_an_annotation_with_no_write_in_its_scope_is_not_audited():
+    """A comparison that never happens must not be reported as one.
+
+    The ablation removes the annotation and re-resolves the writes around it.
+    Where there are none, both runs answer the same thing for the same reason
+    -- there was nothing to answer -- and counting that as an annotation the
+    map depends on inflates the gate with rows it never examined.  Twenty-one
+    of the checkout's fifty-seven audited rows were this.
+    """
+    source = (
+        "class Setupper:\n"
+        "    def __init__(self):\n"
+        "        self.jobs: List[JobSpec] = []\n"
+        "\n"
+        "    def count(self):\n"
+        "        total = 0\n"
+        "        for job in self.jobs:\n"
+        "            total += job.PandaID\n"
+        "        return total\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/dataservice/setupper_plugin_base.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    scope = [
+        (node, "Setupper")
+        for node in ast.walk(modules[1].tree)
+        if isinstance(node, ast.FunctionDef)
+    ]
+
+    readings = attribution.annotation_readings(
+        modules, attributor, set().union(*progress.spec_attributes(modules).values())
+    )
+
+    # The container is opened here -- the row is marked unaudited for having no
+    # write to compare, not skipped for going unnoticed, which is how the same
+    # test passed for the wrong reason when the loop was a comprehension.  It
+    # stays on the list because its other reading, what the code puts in, is
+    # what ``container-annotations-agree`` compares.
+    assert attribution._container_is_opened("jobs", scope)
+    assert [(r.container, r.audited) for r in readings] == [("jobs", False)]
+    assert gates.annotations_are_read(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            annotation_readings=[
+                AnnotationAudit(
+                    where=r.where,
+                    kind=r.kind,
+                    container=r.container,
+                    stated=r.stated,
+                    put_in=sorted(r.put_in),
+                    read=r.read,
+                    audited=r.audited,
+                    unsettled=sorted(r.unsettled),
+                )
+                for r in readings
+            ],
+        )
+    ).checked == 0
+
+
+def test_an_annotation_leaving_a_write_of_its_own_class_unsettled_is_a_finding():
+    """The narrowed gate still catches what it was built for.
+
+    ``tasks: List[JediTaskSpec]`` changes no write here -- ``oldStatus`` has
+    one declaring class and resolves without it -- but a ``status`` write in
+    the same scope is unresolved, and ``JediTaskSpec`` declares ``status``.
+    That is what a missing read path looks like from the outside, so the row
+    keeps its failure while the merely redundant ones stop failing.
+    """
+    source = (
+        "class Refiner:\n"
+        "    def refine(self, tasks: List[JediTaskSpec]):\n"
+        "        for task in tasks:\n"
+        "            task.oldStatus = None\n"
+        "        spec = self.fetch()\n"
+        "        spec.status = 'ready'\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandajedi/jedirefine/TaskRefinerBase.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+
+    readings = attribution.annotation_readings(
+        modules, attributor, set().union(*progress.spec_attributes(modules).values())
+    )
+
+    assert [(r.container, r.read, sorted(r.unsettled)) for r in readings] == [
+        ("tasks", False, ["6:status"])
     ]
 
 
@@ -4359,7 +4498,7 @@ def test_a_tuple_is_a_record_and_states_no_element_type():
     assert element_of("list[JediFileSpec]") == "JediFileSpec"
 
 
-def test_a_yield_annotation_that_changes_no_write_is_a_finding():
+def test_a_yield_annotation_is_audited_the_same_way_as_a_container_one():
     """A context manager's yield type is audited the same way, and has to be.
 
     It is the *only* mechanical check available for it.  Two of the three
@@ -4367,6 +4506,14 @@ def test_a_yield_annotation_that_changes_no_write_is_a_finding():
     locked spec are declared by every workflow spec -- so the agreement gate
     corroborates one annotation and is silent about the other two.  What is
     left is the ablation: does removing it change a write.
+
+    ``request_lock`` is the case that decided *not* to ask PanDA for one: the
+    seven ``with`` sites write nothing on the locked spec, so the annotation
+    would resolve nothing.  That is still worth saying and still reported --
+    it is how the harvest of a proposed annotation gets measured -- but it is
+    not a defect in the map, and after an annotation campaign filled the tree
+    with annotations the map does not need, failing on it would have made the
+    gate permanently red for the normal case.
     """
     fragment = _audited(
         AnnotationAudit(
@@ -4376,16 +4523,27 @@ def test_a_yield_annotation_that_changes_no_write_is_a_finding():
             stated="DataCarouselRequestSpec",
             put_in=[],
             read=False,
-        )
+            unsettled=[],
+        ),
+        AnnotationAudit(
+            where="workflow_core.py:266",
+            kind="yield",
+            container="workflow_lock()",
+            stated="WorkflowSpec",
+            put_in=[],
+            read=False,
+            unsettled=["445:status"],
+        ),
     )
 
     result = gates.annotations_are_read(fragment)
 
     assert not result.passed
     assert result.failures == [
-        "DataCarousel.py:691 states DataCarouselRequestSpec for request_lock() "
+        "workflow_core.py:266 states WorkflowSpec for workflow_lock() "
         "and no write in scope resolves differently without it"
     ]
+    assert "1 more state a class the map reaches another way" in (result.note or "")
 
 
 def test_the_agreement_gate_counts_only_what_it_can_compare():
