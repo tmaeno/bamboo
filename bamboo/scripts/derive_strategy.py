@@ -85,13 +85,16 @@ def _report_verdict(strategy: Strategy, evaluated: bool) -> None:
     """The one line that says where the question stands."""
     counts = {v: [c for c in strategy.candidates if c.verdict == v] for v in _VERDICT_ORDER}
     click.echo(f"\nverdict    {len(strategy.candidates)} junction(s) can write this value")
+    seen = counts[SEEN]
+    for candidate in seen:
+        click.echo(f"           {strategy_mod.short_owner(candidate.owner)} wrote it -- {candidate.because}")
+        for branch in candidate.named:
+            # The arm, on the verdict line, because for a junction reached from
+            # six of them the arm *is* the answer and the reason is in it.
+            click.echo(f"           {'':<10} {_arm(branch)}{_at(branch)}")
     if not evaluated:
         click.echo("           nothing asked of production yet -- run again with --fetch")
         return
-    seen = counts[SEEN]
-    if seen:
-        for candidate in seen:
-            click.echo(f"           {strategy_mod.short_owner(candidate.owner)} wrote it -- {candidate.because}")
     remaining = len(strategy.candidates) - len(counts[ELIMINATED])
     click.echo(
         f"           {len(counts[ELIMINATED])} ruled out, {remaining} left "
@@ -150,6 +153,11 @@ def _at(branch) -> str:
     return f"  :{branch.line}" if branch.line else ""
 
 
+def _arm(branch) -> str:
+    """What to call this arm: its tags, or failing those the words it leaves."""
+    return " ".join(branch.tags) or (branch.messages[0] if branch.messages else branch.outcome)
+
+
 def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool) -> None:
     candidates = strategy_mod.survivors(strategy) if evaluated else strategy.candidates
     stated = sum(1 for c in strategy.candidates if c.tier == 1)
@@ -187,7 +195,7 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
             # Always shown: when one arm is named, which arm it is *is* the
             # answer.  Six of these reach ``exhausted`` from one function and
             # differ only in the reason they give.
-            click.echo(f"  {'':<10} → {' '.join(branch.tags)}" + _at(branch))
+            click.echo(f"  {'':<10} → {_arm(branch)}{_at(branch)}")
             for condition in branch.conditions:
                 click.echo(f"  {'':<10}   when: {condition}")
         if full:
@@ -197,8 +205,7 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
             for branch in candidate.branches:
                 if branch.matched:
                     continue  # already shown above, with its reason
-                head = " ".join(branch.tags) or branch.outcome
-                click.echo(f"  {'':<10} {head}{_at(branch)}")
+                click.echo(f"  {'':<10} {_arm(branch)}{_at(branch)}")
                 for condition in branch.conditions:
                     click.echo(f"  {'':<10}   when: {condition}")
     if len(candidates) > len(shown):
@@ -405,10 +412,13 @@ def main(
     if ev is not None:
         strategy = strategy_mod.evaluate(strategy, ev)
 
+    # A record that names an arm settles the question without a grep, so the
+    # listing is ordered by verdict even when nothing was asked of production.
+    named = any(c.named for c in strategy.candidates)
     _report_header(strategy, evidence_path if ev else None, ev)
     _report_verdict(strategy, ev is not None)
     _report_follow_up(strategy)
-    _report_candidates(strategy, top, full, ev is not None)
+    _report_candidates(strategy, top, full, ev is not None or named)
     _report_observations(strategy, top, full, ev is not None)
     _report_findings(strategy, top, full)
 
