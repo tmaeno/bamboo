@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 from bamboo.codemap import evidence
 from bamboo.codemap.models import MapFragment
 from bamboo.codemap.panda import values
+from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 
 # ``passthrough(JediTaskSpec.oldStatus)`` -- the subject a branch copies from.
 _PASSTHROUGH = re.compile(r"^passthrough\((.+)\)$")
@@ -518,6 +519,18 @@ def annotation_forms_are_understood(fragment: MapFragment) -> GateResult:
     114 annotations naming a spec class sit one refactor away from that form.
     """
     unread = sorted(where for where, cls in fragment.spec_annotation_forms.items() if not cls)
+    open_on_purpose = sum(
+        1 for cls in fragment.spec_annotation_forms.values() if cls.startswith(AMBIGUOUS_FORM)
+    )
+    note = (
+        "The annotation is there and correct; the reader cannot see it, "
+        "which looks exactly like an annotation about something else."
+    )
+    if open_on_purpose:
+        note += (
+            f"  {open_on_purpose} more name a spec and are left open on purpose -- "
+            "two classes at once, or a class under a second container."
+        )
     return GateResult(
         gate="annotation-forms-are-understood",
         passed=not unread,
@@ -526,10 +539,7 @@ def annotation_forms_are_understood(fragment: MapFragment) -> GateResult:
         question="can the extraction read every annotation that names a spec?",
         finding="an annotation names a spec class in a form the extraction cannot read",
         failures=[f"{where} names a declared spec class and the extraction read none" for where in unread],
-        note=(
-            "The annotation is there and correct; the reader cannot see it, "
-            "which looks exactly like an annotation about something else."
-        ),
+        note=note,
     )
 
 

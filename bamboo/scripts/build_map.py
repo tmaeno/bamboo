@@ -39,6 +39,7 @@ import click
 from bamboo.codemap import gates
 from bamboo.codemap.factory import available_map_ids, get_code_map_plugin
 from bamboo.codemap.models import MapFragment
+from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 from bamboo.codemap.store import store_fragment
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,22 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
         for basis in ("certain", "container", "structural", "unresolved"):
             count = bases.get(basis, 0)
             click.echo(f"  {basis:<12} {count:>5}  ({count * 100 // total if total else 0}%)")
+        open_forms = sorted(
+            f"{where} {form.removeprefix(AMBIGUOUS_FORM)}"
+            for where, form in fragment.spec_annotation_forms.items()
+            if form.startswith(AMBIGUOUS_FORM)
+        )
+        if open_forms:
+            # A form the reader understands and declines to answer.  Reported
+            # here rather than in the gate's note, which only prints on a
+            # failure -- and these are on the passing side by design, so the
+            # note would be the one place nobody sees them.
+            click.echo(f"  annotations naming a spec and left open ({len(open_forms)}):")
+            for row in open_forms[:top]:
+                click.echo(f"    {row}")
+            if len(open_forms) > top:
+                click.echo(f"    … {len(open_forms) - top} more")
+
         thin = gates.unresolved_attributes(fragment)
         if thin:
             # Each of these is a candidate for one line of type annotation

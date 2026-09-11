@@ -79,6 +79,12 @@ UNRESOLVED_CLASS = "?"
 # of the annotated object or of anything taken out of it.
 _RECORD_WRAPPERS = frozenset({"Callable", "Tuple", "tuple"})
 
+#: Prefix marking a legibility-census entry where the reader understood the
+#: form and correctly answered no class, as opposed to one it could not read.
+#: The two look identical from the answer alone, which is why the reason is
+#: recorded in the class's place rather than left blank.
+AMBIGUOUS_FORM = "ambiguous: "
+
 
 def _unquoted(annotation: ast.expr, depth: int = 0) -> ast.expr:
     """*annotation* with a quoted type expression opened up.
@@ -881,6 +887,84 @@ class SpecAttributor:
         parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
         return self._annotated_class(parts[-1]) if parts else None
 
+    def _union_classes(self, annotation: ast.expr) -> set[str]:
+        """Every declared class a union names, however the union is spelled."""
+        annotation = _unquoted(annotation)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            return self._union_classes(annotation.left) | self._union_classes(
+                annotation.right
+            )
+        named = self._annotated_class(annotation)
+        return {named} if named is not None else set()
+
+    def _nested_element(self, annotation: ast.expr, depth: int = 0) -> Optional[str]:
+        """The class at the bottom of containers nested more than one deep.
+
+        Not a resolution: one read peels one level, so the class down here is
+        not what ``d[k]`` or ``for x in d`` produces, and no reading returns
+        it.  It exists so that the legibility census can tell a form it
+        understands and declines to answer from a form it cannot parse -- the
+        two are indistinguishable by the answer alone, which is the whole
+        reason that census exists.
+        """
+        if depth >= 4 or not isinstance(annotation, ast.Subscript):
+            return None
+        base = annotation.value
+        name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if name in _RECORD_WRAPPERS:
+            return None
+        inner = annotation.slice
+        parts = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+        if not parts:
+            return None
+        last = _unquoted(parts[-1])
+        found = self._annotated_element(last)
+        return found if found is not None else self._nested_element(last, depth + 1)
+
+    def explained_silence(self, annotation: ast.expr) -> Optional[str]:
+        """Why an annotation naming a spec class correctly yields none, if it does.
+
+        Two shapes say a spec's name and still leave the class of the annotated
+        object open, and in both the silence is the right answer rather than a
+        gap:
+
+        ``fileSpec: FileSpec | JediFileSpec``
+            Two classes, one of which this is -- ``SiteCandidate`` accepts both
+            on purpose and says so in a comment.  Picking one would be a guess.
+        ``dict[str, dict[str, list[WorkQueue]]]``
+            The class is real but further down than any single read reaches:
+            ``d[k]`` is a mapping here.  A deep read would surface as an
+            unresolved write rather than a wrong one, and the corpus performs
+            none -- no write goes through a chained subscript.
+
+        Separated from the readings themselves because nothing in attribution
+        may change: this only lets the legibility census distinguish a form
+        understood from a form unparsed, which by the answer alone it cannot.
+        """
+        annotation = _unquoted(annotation)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            named = self._union_classes(annotation)
+            if len(named) > 1:
+                return "names " + " and ".join(sorted(named))
+            return None
+        if isinstance(annotation, ast.Subscript):
+            base = annotation.value
+            name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+            if name in _RECORD_WRAPPERS:
+                return None
+            inner = annotation.slice
+            parts = list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+            if not parts:
+                return None
+            last = _unquoted(parts[-1])
+            if name == "Optional":
+                return self.explained_silence(last)
+            deeper = self._nested_element(annotation)
+            if deeper is not None:
+                return f"holds containers of {deeper}"
+            return self.explained_silence(last)
+        return None
+
     def _yielded_class(
         self, method: ast.FunctionDef | ast.AsyncFunctionDef
     ) -> Optional[str]:
@@ -1670,6 +1754,13 @@ def spec_annotation_forms(
                 else attributor.stated_annotation(annotation)
                 or attributor.element_annotation(annotation)
             )
+            if read is None:
+                # A form the reader understands and declines to answer is not
+                # the drift this counts.  The two are indistinguishable by the
+                # answer, so the reason is asked for separately and recorded
+                # instead of the class -- see ``explained_silence``.
+                explained = attributor.explained_silence(annotation)
+                read = f"{AMBIGUOUS_FORM}{explained}" if explained else None
             forms[f"{module.rel_path}:{node.lineno}"] = read or ""
     return forms
 

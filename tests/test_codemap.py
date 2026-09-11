@@ -4211,6 +4211,98 @@ def test_an_annotation_the_extraction_cannot_read_is_a_finding():
     ]
 
 
+def test_an_annotation_naming_two_spec_classes_is_not_a_finding():
+    """``fileSpec: FileSpec | JediFileSpec`` -- correct, and deliberately open.
+
+    ``SiteCandidate.getFileLocality`` says so in a comment of its own: the
+    callers pass a JEDI file spec from a dataset and a job file spec built from
+    one, so both have to be accepted.  Answering either class would be a guess,
+    so the reader is right to say nothing -- and a gate that calls a correct
+    annotation a defect is the failure this repo has treated as the most
+    expensive one there is.
+    """
+    source = (
+        "class SiteCandidate:\n"
+        "    def getFileLocality(self, fileSpec: FileSpec | JediFileSpec):\n"
+        "        return fileSpec.status\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandajedi/jedicore/SiteCandidate.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+
+    forms = attribution.spec_annotation_forms(modules, attributor)
+
+    assert forms == {
+        "pandajedi/jedicore/SiteCandidate.py:2": "ambiguous: names FileSpec and JediFileSpec"
+    }
+    assert gates.annotation_forms_are_understood(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, spec_annotation_forms=forms)
+    ).passed
+
+
+def test_an_annotation_whose_spec_sits_under_another_container_is_not_a_finding():
+    """``dict[str, dict[str, list[WorkQueue]]]`` -- legible, and correctly silent.
+
+    One read peels one level, so ``d[k]`` here is a mapping rather than a
+    ``WorkQueue``, and the reader answering the class at the bottom would name
+    something no single read produces.  The corpus performs no read deep enough
+    to reach it -- no write in it goes through a chained subscript -- so this is
+    a form understood rather than a form missed, and if a deep read ever
+    appears it surfaces as an unresolved write rather than a wrong one.
+    """
+    source = (
+        "class WorkQueueMapper:\n"
+        "    def __init__(self):\n"
+        "        self.queue_map: dict[str, dict[str, list[JobSpec]]] = {}\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/WorkQueueMapper.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+
+    forms = attribution.spec_annotation_forms(modules, attributor)
+
+    assert forms == {
+        "pandaserver/taskbuffer/WorkQueueMapper.py:3": "ambiguous: holds containers of JobSpec"
+    }
+    assert gates.annotation_forms_are_understood(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, spec_annotation_forms=forms)
+    ).passed
+
+
+def test_a_form_the_reader_cannot_read_still_fails_beside_the_ambiguous_ones():
+    """The gate keeps the only failure it was built for.
+
+    An explained silence and an unexplained one look the same from the outside
+    -- both answer no class -- so widening the vocabulary is only safe while
+    the unexplained kind still fails.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        spec_annotation_forms={
+            "setupper_plugin_base.py:13": "JobSpec",
+            "SiteCandidate.py:65": "ambiguous: names FileSpec and JediFileSpec",
+            "adder_gen.py:42": "",
+        },
+    )
+
+    result = gates.annotation_forms_are_understood(fragment)
+
+    assert not result.passed
+    assert result.checked == 3
+    assert result.failures == [
+        "adder_gen.py:42 names a declared spec class and the extraction read none"
+    ]
+
+
 def test_the_legibility_census_leaves_out_what_the_reader_never_reads():
     """Two exclusions, both measured, both about not inventing a finding.
 
