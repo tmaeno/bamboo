@@ -23,6 +23,7 @@ from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
     ELIMINATED,
     SEEN,
+    SYMPTOM_DISTRIBUTION,
     UNASKABLE,
     UNSETTLED,
     Anchor,
@@ -31,6 +32,7 @@ from bamboo.codemap.models import (
     EntryPoint,
     JunctionNode,
     MapFragment,
+    MapTerm,
     SubjectNode,
     Symptom,
 )
@@ -1040,3 +1042,66 @@ async def test_a_frame_is_matched_inside_a_longer_message():
     )
 
     assert [b.line for b in strategy.candidates[0].named] == [5025]
+
+
+# ---------------------------------------------------------------------------
+# Resolving a description into a symptom
+# ---------------------------------------------------------------------------
+
+
+def _term(kind: str, key: str, words: list[str], symptom: Symptom) -> MapTerm:
+    return MapTerm(kind=kind, key=key, words=words, symptom=symptom)
+
+
+def test_a_rare_word_outweighs_one_every_entry_carries():
+    """Counting matched words makes ``check`` worth what ``lowmemory`` is worth,
+    and ``check`` ends forty of the forty-nine funnel steps.  The weight comes
+    from the vocabulary in hand rather than from a list someone maintains, so
+    it moves on its own as the map grows."""
+    terms = [
+        _term("step", "memory check", ["memory", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="memory check")),
+        _term("step", "status check", ["status", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="status check")),
+        _term("step", "disk check", ["disk", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="disk check")),
+        _term("step", "network check", ["network", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="network check")),
+    ]
+
+    ranked = strategy_mod.resolve("sites dropped on memory check", terms)
+
+    assert ranked[0].term.key == "memory check"
+    assert ranked[0].score > ranked[1].score
+
+
+def test_a_description_naming_two_things_comes_back_as_two():
+    """Picking one silently is ``too_many_candidates`` answered as though it
+    were one candidate -- the retrieval failure the map exists to remove, put
+    back one layer up."""
+    terms = [
+        _term("value", "JediTaskSpec.status=pending", ["jedi", "task", "spec", "status", "pending"], Symptom(subject="JediTaskSpec.status", observed="pending")),
+        _term("value", "JobSpec.jobStatus=pending", ["job", "spec", "status", "pending"], Symptom(subject="JobSpec.jobStatus", observed="pending")),
+    ]
+
+    ranked = strategy_mod.resolve("stuck in pending", terms)
+
+    assert len(ranked) == 2
+    assert all(m.words == ["pending"] for m in ranked)
+
+
+def test_a_description_saying_nothing_the_map_knows_resolves_to_nothing():
+    """An empty answer is the honest one.  A best match out of words the
+    vocabulary never used would be a guess wearing a score."""
+    terms = [
+        _term("value", "JediTaskSpec.status=pending", ["jedi", "task", "spec", "status", "pending"], Symptom(subject="JediTaskSpec.status", observed="pending")),
+    ]
+
+    assert strategy_mod.resolve("the cluster is on fire", terms) == []
+
+
+def test_the_entity_is_read_apart_from_the_question():
+    """An id says which row, not which question, so it is not matched against
+    the vocabulary -- where eight digits would score against every numeric
+    fragment in it."""
+    assert strategy_mod.entity_in("task 52249469 went nowhere") == "52249469"
+    # Two different ids name no single row, and guessing which is meant is
+    # exactly the kind of pick this layer refuses to make.
+    assert strategy_mod.entity_in("52249469 and 52357008") is None
+    assert strategy_mod.entity_in("no id here") is None

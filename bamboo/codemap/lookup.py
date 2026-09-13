@@ -31,10 +31,18 @@ import re
 from typing import Any, Optional, Type, TypeVar
 
 from bamboo.codemap.models import (
+    SYMPTOM_DISTRIBUTION,
+    SYMPTOM_VALUE,
+    TERM_CHAIN,
+    TERM_CUT,
+    TERM_STEP,
+    TERM_VALUE,
     BoundaryNode,
     FilterStageNode,
     JunctionNode,
+    MapTerm,
     SubjectNode,
+    Symptom,
     ValueEnumNode,
 )
 from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -54,6 +62,24 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
 
 #: ``passthrough(JediTaskSpec.oldStatus)`` -> ``JediTaskSpec.oldStatus``.
 _PASSTHROUGH = re.compile(r"^passthrough\((?P<field>[^)]+)\)$")
+
+#: An outcome that names where the value came from rather than what it is.
+#: Neither is something to be asked about by value -- nobody observes a task in
+#: ``runtime(newStatus)``.
+_DERIVED = re.compile(r"^(passthrough|runtime)\(")
+
+#: Splits an identifier into the words a person would use for it:
+#: ``AtlasProdJobBroker.py::doBrokerage`` -> prod, job, broker, do, brokerage.
+_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
+
+#: What a chain is called when nobody names the file.  Hand-written, which this
+#: design normally refuses -- but the alternative is that a description of this
+#: symptom class matches nothing at all, because no identifier in the map
+#: contains the words people use for it: the code says ``doBrokerage`` and a
+#: person says "the jobs only went to two sites".  Six words, attached to the
+#: one node kind whose name is never spoken, and counted as part of what the
+#: resolver's measurement has to account for.
+_BROKERAGE_WORDS = ("brokerage", "broker", "site", "sites", "distribution", "candidates")
 
 
 def _decode(model: Type[NodeT], props: dict[str, Any]) -> NodeT:
@@ -82,6 +108,28 @@ def _decode(model: Type[NodeT], props: dict[str, Any]) -> NodeT:
             pass
     decoded.pop("valid_for", None)  # storage bookkeeping, not part of the model
     return model.model_validate(decoded)
+
+
+def _short(owner: str) -> str:
+    """``pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage`` -> the last two names."""
+    where, sep, method = owner.partition("::")
+    return where.rsplit("/", 1)[-1].removesuffix(".py") + sep + method
+
+
+def _words(*sources: str) -> list[str]:
+    """The words *sources* are made of, lower-cased, in order, deduplicated.
+
+    Identifiers are split on case and on punctuation so that ``lowmemory``,
+    ``low memory`` and ``LowMemory`` all reduce to the same two words.  Order is
+    kept because it reads better in a report; matching does not depend on it.
+    """
+    found: list[str] = []
+    for source in sources:
+        for word in _WORD.findall(source or ""):
+            lowered = word.lower()
+            if lowered not in found:
+                found.append(lowered)
+    return found
 
 
 class CodeMap:
@@ -259,6 +307,85 @@ class CodeMap:
         already in hand into the code that put it there, with no search.
         """
         return await self._find(FilterStageNode, criteria_tag=tag)
+
+    async def vocabulary(self) -> list[MapTerm]:
+        """Everything this map can be asked about, with the symptom each becomes.
+
+        The thing that makes a free-text description tractable without a
+        search.  A source navigator turns "the jobs all went to two sites" into
+        grep terms and ranks thirty files, and fails as no-candidates,
+        too-many-candidates or irrelevant; against this the same description is
+        matched into a set that is **closed and enumerable**.  Measured on the
+        stored PanDA map: 296 ``(subject, value)`` pairs over 62 of 112
+        subjects, 70 cut tags, 49 funnel steps, 5 chains -- 420 entries.
+
+        Values come from both directions and are unioned.  A branch that states
+        the value says the system can *produce* it; ``selected_values`` says
+        some query *asks* for it.  Either makes the value something to be asked
+        about, and a value only the second knows -- one settled at run time and
+        never written as a literal -- would be missing from a list built from
+        branches alone.
+        """
+        terms: list[MapTerm] = []
+        writers: dict[str, list[JunctionNode]] = {}
+        for junction in await self._find(JunctionNode):
+            writers.setdefault(junction.subject, []).append(junction)
+        for subject in await self.subjects():
+            produced = {
+                branch.outcome
+                for junction in writers.get(subject.name, [])
+                for branch in junction.branches
+                if branch.tier == 1 and branch.outcome and not _DERIVED.match(branch.outcome)
+            }
+            for value in sorted(produced | set(subject.selected_values)):
+                terms.append(
+                    MapTerm(
+                        kind=TERM_VALUE,
+                        key=f"{subject.name}={value}",
+                        words=_words(subject.attribute, subject.spec_class, value),
+                        symptom=Symptom(
+                            kind=SYMPTOM_VALUE, subject=subject.name, observed=value
+                        ),
+                    )
+                )
+        stages = await self._find(FilterStageNode)
+        # A cut carries its step's words as well.  Production spells the reason
+        # ``-lowmemory`` and a person says "memory", so matching the tag alone
+        # would miss the wording everyone actually uses.
+        labels: dict[str, str] = {s.criteria_tag: s.funnel_label for s in stages if s.criteria_tag}
+        for tag in sorted(labels):
+            terms.append(
+                MapTerm(
+                    kind=TERM_CUT,
+                    key=tag,
+                    words=_words(tag, labels[tag]),
+                    symptom=Symptom(kind=SYMPTOM_DISTRIBUTION, focus=tag),
+                )
+            )
+        for label in sorted({s.funnel_label for s in stages if s.funnel_label}):
+            terms.append(
+                MapTerm(
+                    kind=TERM_STEP,
+                    key=label,
+                    words=_words(label),
+                    symptom=Symptom(kind=SYMPTOM_DISTRIBUTION, focus=label),
+                )
+            )
+        for owner in sorted({s.owner for s in stages}):
+            terms.append(
+                MapTerm(
+                    kind=TERM_CHAIN,
+                    key=owner,
+                    # The directory and the extension are dropped, for the reason
+                    # ``short_owner`` drops them from the report: they carry
+                    # nothing a reader uses, and here they would be six words of
+                    # ``pandajedi jedibrokerage py`` diluting the four that mean
+                    # something.
+                    words=_words(_short(owner), *_BROKERAGE_WORDS),
+                    symptom=Symptom(kind=SYMPTOM_DISTRIBUTION, focus=owner),
+                )
+            )
+        return terms
 
     async def log_files_for(self, subject: str) -> dict[str, dict[str, list[str]]]:
         """Which log to read for each writer of *subject*.

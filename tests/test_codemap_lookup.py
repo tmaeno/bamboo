@@ -13,6 +13,7 @@ import pytest
 
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    SYMPTOM_DISTRIBUTION,
     Anchor,
     Branch,
     EntryPoint,
@@ -20,6 +21,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     MapFragment,
     SubjectNode,
+    Symptom,
 )
 from bamboo.codemap.store import store_fragment
 from bamboo.database.backends.examples.in_memory_backend import InMemoryGraphBackend
@@ -271,6 +273,55 @@ async def test_a_version_pin_reads_every_node_that_version_had():
         "-status",
         "-network",
     }
+
+
+async def test_the_vocabulary_is_every_question_the_map_can_be_asked():
+    """What turns free text into a lookup: the set of questions is closed.
+
+    A value reaches it from either direction -- a branch that states it, or a
+    query that selects on it -- because either makes the value a thing to ask
+    about, and one settled at run time is known only to the second.  Outcomes
+    that name where a value came from rather than what it is are not questions:
+    nobody observes a task in ``runtime(newStatus)``.
+    """
+    subject = _subject()
+    subject.selected_values = ["scouting"]
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[subject],
+        junctions=[
+            _junction(
+                "a.py::f",
+                Branch(outcome="exhausted"),
+                Branch(outcome="runtime(newStatus)", tier=2),
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)"),
+            )
+        ],
+        filter_stages=[_stage("memory check", "-lowmemory", 1)],
+    )
+    code_map = await _stored(fragment)
+
+    terms = await code_map.vocabulary()
+
+    assert {(t.kind, t.key) for t in terms} == {
+        ("value", "JediTaskSpec.status=exhausted"),
+        ("value", "JediTaskSpec.status=scouting"),
+        ("cut", "-lowmemory"),
+        ("step", "memory check"),
+        ("chain", "b.py::doBrokerage"),
+    }
+    by_key = {t.key: t for t in terms}
+    assert by_key["JediTaskSpec.status=exhausted"].symptom == Symptom(
+        subject="JediTaskSpec.status", observed="exhausted"
+    )
+    # A cut carries its step's words as well: production spells the reason
+    # ``-lowmemory`` and a person says "memory".
+    assert "memory" in by_key["-lowmemory"].words
+    assert by_key["-lowmemory"].symptom.kind == SYMPTOM_DISTRIBUTION
+    # The directory and the extension say nothing a reader uses, and would be
+    # three words diluting the two that mean something.
+    assert "py" not in by_key["b.py::doBrokerage"].words
 
 
 async def test_reading_refuses_a_label_outside_the_code_map_namespace():

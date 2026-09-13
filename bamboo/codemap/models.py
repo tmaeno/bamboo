@@ -42,7 +42,7 @@ import hashlib
 import json
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from bamboo.models.graph_element import BaseNode, NodeType
 
@@ -993,6 +993,13 @@ ANSWER_INCONCLUSIVE = "inconclusive"
 ANSWER_NOT_ASKED = "not_asked"
 
 
+#: What kind of question a symptom is, which decides which derivation answers it.
+#: Not a flag anyone types -- a symptom is resolved out of the map's own
+#: vocabulary, and the vocabulary entry carries the kind.  See :class:`MapTerm`.
+SYMPTOM_VALUE = "value"
+SYMPTOM_DISTRIBUTION = "distribution"
+
+
 class Symptom(BaseModel):
     """What was observed, in the map's own vocabulary.
 
@@ -1001,10 +1008,34 @@ class Symptom(BaseModel):
     to remove; naming a subject and a value instead makes the lookup exact, and
     the quality of the answer stops depending on how well the question was
     phrased.
+
+    **Two kinds, because the system settles values two different ways.**  A
+    value is settled by one branch of one junction, so the question is *which
+    arm*.  A site list is not settled at all -- brokerage starts with every
+    candidate and narrows about twenty-five times, every step runs, and the
+    question is *which step threw them away*.  One shape cannot carry both
+    without one of them lying, and the kind is what the derivation dispatches
+    on.  It is deliberately not a command-line flag: adding an option per
+    symptom would put the retrieval problem back in the caller's hands, one
+    layer up.
     """
 
-    subject: str = Field(..., description="Qualified subject, e.g. JediTaskSpec.status.")
-    observed: str = Field(..., description="The value the record actually holds.")
+    kind: str = Field(
+        default=SYMPTOM_VALUE,
+        description=f"{SYMPTOM_VALUE} | {SYMPTOM_DISTRIBUTION}.",
+    )
+    subject: str = Field(default="", description="Qualified subject, e.g. JediTaskSpec.status.")
+    observed: str = Field(default="", description="The value the record actually holds.")
+    focus: str = Field(
+        default="",
+        description=(
+            "For a distribution, what the description landed on -- a chain, a "
+            "``criteria=-`` tag or a funnel step.  It decides what the answer "
+            "*leads* with, never what it contains: the whole chain is read "
+            "either way, because a description naming one cut is a guess about "
+            "which cut mattered and the evidence is what settles that."
+        ),
+    )
     task_id: Optional[str] = Field(
         default=None,
         description=(
@@ -1024,6 +1055,90 @@ class Symptom(BaseModel):
             "rather than the junction, because PanDA writes the reason into the "
             "same message it logs."
         ),
+    )
+
+    @model_validator(mode="after")
+    def _the_kind_has_what_it_needs(self) -> "Symptom":
+        """Refuse a symptom its own kind cannot be asked.
+
+        The fields are optional per-field because the two kinds use different
+        ones, and leaving it there would let a distribution with no focus reach
+        the derivation and come back empty -- an answer shaped like "nothing is
+        wrong".  Checked here so the failure is at the point the question is
+        formed, where the caller still knows what it meant.
+        """
+        if self.kind == SYMPTOM_VALUE and not (self.subject and self.observed):
+            raise ValueError("a value symptom needs both a subject and an observed value")
+        if self.kind == SYMPTOM_DISTRIBUTION and not self.focus:
+            raise ValueError("a distribution symptom needs a focus -- a chain, a tag or a step")
+        if self.kind not in (SYMPTOM_VALUE, SYMPTOM_DISTRIBUTION):
+            raise ValueError(f"{self.kind!r} is not a symptom kind")
+        return self
+
+
+#: What part of the map a vocabulary entry names.  Distinct from
+#: ``Symptom.kind``, which says which derivation answers it: several term kinds
+#: resolve to one derivation, because a chain, one of its cuts and one of its
+#: steps are three ways of pointing at the same brokerage question.
+TERM_VALUE = "value"
+TERM_CUT = "cut"
+TERM_STEP = "step"
+TERM_CHAIN = "chain"
+
+
+class MapTerm(BaseModel):
+    """One thing the map can be asked about, and the symptom it resolves to.
+
+    The entry that makes free text tractable.  Asking a source navigator means
+    turning a description into grep terms and ranking thirty files; asking the
+    map means picking from a set that is *closed and enumerable* -- measured at
+    420 entries for PanDA: 296 ``(subject, value)`` pairs, 70 cut tags, 49
+    funnel steps and 5 chains.  That number is what "the retrieval problem is
+    removed" means quantitatively, and it is small enough to match against
+    deterministically and small enough to hand an LLM whole.
+
+    Each entry carries the :class:`Symptom` it resolves to, so resolution has
+    nothing to decide beyond which entry the words meant.  Building the symptom
+    at the far end instead would put the map's vocabulary into the resolver,
+    where it would be a second copy free to drift.
+    """
+
+    kind: str = Field(..., description=f"{TERM_VALUE} | {TERM_CUT} | {TERM_STEP} | {TERM_CHAIN}")
+    key: str = Field(..., description="How the map spells it, e.g. 'JediTaskSpec.status=exhausted'.")
+    words: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The text a description is matched against -- the key split into "
+            "words, plus whatever else names the same thing.  A cut carries its "
+            "step's words too, because production spells it ``-lowmemory`` and "
+            "people say 'memory'."
+        ),
+    )
+    symptom: Symptom
+
+
+class Match(BaseModel):
+    """One vocabulary entry a description could have meant, and how well.
+
+    Ranked rather than chosen.  A description that names two things is a fact
+    about the description, and picking one of them silently is the failure mode
+    the map was built to remove -- ``too_many_candidates`` answered as though it
+    were one candidate.
+    """
+
+    term: MapTerm
+    score: float = Field(
+        default=0.0,
+        description=(
+            "Share of the entry's own weight the description accounted for. "
+            "Words are weighted by how rare they are across the vocabulary, "
+            "computed from the vocabulary itself rather than tuned: 'check' "
+            "appears in most steps and settles nothing, 'lowmemory' appears in "
+            "one and settles it."
+        ),
+    )
+    words: list[str] = Field(
+        default_factory=list, description="Which of the entry's words the description said."
     )
 
 
@@ -1259,6 +1374,110 @@ class FollowUp(BaseModel):
     question: str = Field(default="", description="What to ask next, in one sentence.")
 
 
+class StageCut(BaseModel):
+    """One filter stage, and what it actually removed for this entity.
+
+    The unit of the brokerage answer.  A stage is not a candidate explanation
+    the way a junction is -- every stage runs, on every pass -- so what has to
+    be measured is not *whether* it fired but *how much of the list it took*.
+
+    Counted in distinct sites rather than in log lines.  Brokerage re-runs for
+    a task many times over the window, so a line count is a count of passes
+    multiplied by an effect, and the ranking it produces is about how often the
+    task was brokered.  The same weight-not-count reading that made one branch
+    the answer for ``'cleanup'``.
+    """
+
+    tag: str = Field(default="", description="The ``criteria=-`` token, e.g. '-lowmemory'.")
+    funnel_label: str = Field(default="", description="The coarser step, e.g. 'memory check'.")
+    owner: str = Field(default="", description="The chain this stage belongs to.")
+    order: int = Field(default=0, description="Its position in that chain.")
+    line: Optional[int] = Field(default=None, description="Where to go and read.")
+    conditions: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(
+        default_factory=list, description="What those conditions read -- where a backward walk goes."
+    )
+    sites: list[str] = Field(
+        default_factory=list, description="The distinct candidates this cut removed."
+    )
+    reasons: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the log line said as it dropped each one, most frequent first "
+            "-- ``status=offline (31)``.  These carry the measured values that "
+            "made the condition true, which is what turns a condition into a "
+            "reason and is why the line is better evidence than re-reading the "
+            "value now."
+        ),
+    )
+    verdict: str = Field(default=UNSETTLED, description=f"{SEEN} | {ELIMINATED} | {UNSETTLED}")
+    because: str = Field(default="")
+
+
+class FunnelStep(BaseModel):
+    """How many candidates were left after one step, as production counted them.
+
+    Reported in the *map's* order, and aggregated rather than split into
+    passes.  Splitting was measured and refused: over 51,128 adjacent pairs
+    within one ``(file, machine, run key)``, 11.0% of them show the count going
+    *up*, and the largest single offender is inside a pass rather than at its
+    boundary.  So "the count only falls, therefore a rise is a new pass" is a
+    property the code looks like it has and does not, and every way of guessing
+    a boundary this check has tried cost it a false finding.
+    """
+
+    label: str
+    order: Optional[int] = Field(
+        default=None, description="Position in the chain, or None where the map has no step for it."
+    )
+    most: int = Field(default=0, description="The largest count seen after this step.")
+    fewest: int = Field(default=0, description="The smallest.")
+    seen: int = Field(default=0, description="How many times the step reported at all.")
+
+
+class Localization(BaseModel):
+    """Which step of a chain threw the candidates away.
+
+    The answer to the second symptom class.  ``follow_up`` has no counterpart
+    here: a filter stage carries no entry points, and pooling the chain's
+    triggers over the module's junctions is the same over-approximation that
+    was reverted once already, so what would have gone in it is reported as a
+    gap instead.
+    """
+
+    chain: str = Field(default="", description="module::function holding the chain.")
+    chains_sharing_the_file: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Other chains whose lines land in the same file.  A task broker calls "
+            "a job broker and passes its own log slot, so one file holds two "
+            "chains and a tag can belong to either.  Named rather than chosen "
+            "between: the map records where a stage's own module writes, not who "
+            "delegated to it."
+        ),
+    )
+    log_files: list[str] = Field(default_factory=list)
+    cuts: list[StageCut] = Field(
+        default_factory=list, description="Ranked by how much of the list each took."
+    )
+    funnel: list[FunnelStep] = Field(default_factory=list)
+    entered: Optional[int] = Field(
+        default=None, description="Candidates the first step of the chain counted."
+    )
+    left: Optional[int] = Field(default=None, description="Candidates the last step counted.")
+    passes: int = Field(
+        default=0, description="How often the chain reported -- not used to split, only stated."
+    )
+    sample: str = Field(
+        default="partial",
+        description=(
+            "complete | partial.  Only a complete sample licenses saying a stage "
+            "removed nothing: an answer cut off at a byte or match bound is "
+            "indistinguishable from a stage that never fired."
+        ),
+    )
+
+
 class Strategy(BaseModel):
     """What the map has to say about one symptom.
 
@@ -1276,6 +1495,15 @@ class Strategy(BaseModel):
     candidates: list[Candidate] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     follow_up: Optional[FollowUp] = None
+    localization: Optional[Localization] = Field(
+        default=None,
+        description=(
+            "Filled in for a distribution symptom instead of ``candidates``.  "
+            "Both live on one model because everything around them is shared -- "
+            "the observations, the evidence file, the two-phase split -- and "
+            "only what the map says in the middle differs."
+        ),
+    )
     findings: list[str] = Field(
         default_factory=list,
         description="Facts about the map itself that this question turned up.",

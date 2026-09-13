@@ -55,7 +55,9 @@ eliminator reads as evidence.
 from __future__ import annotations
 
 import logging
+import math
 import re
+from collections import Counter
 from typing import Optional
 
 from bamboo.codemap import evidence
@@ -78,6 +80,8 @@ from bamboo.codemap.models import (
     CandidateBranch,
     FollowUp,
     JunctionNode,
+    MapTerm,
+    Match,
     Observation,
     Strategy,
     Symptom,
@@ -138,6 +142,76 @@ CONTROL_MAX_MATCHES = evidence.TRANSITION_MAX_MATCHES
 # How many matched lines a finding shows.  Enough to read a timestamp and a
 # component off the answer; the rest is in the evidence file.
 _SAMPLE_LINES = 3
+
+
+# The entity a description carries.  PanDA ids are long, so this does not have
+# to guess: nothing else in a sentence about a task is eight digits.  Kept apart
+# from the vocabulary match because an id is not a symptom -- it says which row,
+# not which question.
+_ENTITY = re.compile(r"\b\d{7,}\b")
+
+# Words of a description.  The same split the vocabulary uses, so that
+# ``LowMemory``, ``low memory`` and ``lowmemory`` reduce alike.  Non-ASCII text
+# yields nothing here, which is a real limit and is reported as one rather than
+# papered over with a hand-built lexicon -- see ``resolve``.
+_DESCRIPTION_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
+
+
+def entity_in(description: str) -> Optional[str]:
+    """The id a description names, if it names exactly one."""
+    found = _ENTITY.findall(description)
+    return found[0] if len(set(found)) == 1 else None
+
+
+def resolve(description: str, terms: list[MapTerm], limit: int = 5) -> list[Match]:
+    """Rank the vocabulary entries *description* could have meant.
+
+    This is the step that makes a free-text question answerable without a
+    search.  The map's vocabulary is closed and enumerable -- 420 entries for
+    PanDA -- so the problem is not retrieval but selection out of a known set,
+    and selection out of a known set can be measured.
+
+    **Weighted by rarity, computed from the vocabulary itself.**  Counting
+    matched words makes ``check`` worth as much as ``lowmemory``, and ``check``
+    ends 40 of the 49 funnel steps.  The weight is ``log(N / documents
+    containing the word)`` over the entries in hand, so nothing is tuned and the
+    weights move on their own when the map grows.  A score is the share of an
+    entry's own weight the description accounted for, which is why a two-word
+    entry fully said beats a seven-word entry half said.
+
+    **Deterministic on purpose, and measured rather than assumed.**  An LLM
+    belongs here only where this is shown not to reach, and where that is can
+    only be said by running it: the honest known limit is that the word split
+    is ASCII, so a description written in Japanese contributes only the
+    identifiers embedded in it.  Returning a ranked list rather than a pick is
+    what keeps that limit visible -- a caller that cannot tell one entry from
+    the next is told so.
+    """
+    said = {word.lower() for word in _DESCRIPTION_WORD.findall(description)}
+    if not said or not terms:
+        return []
+    documents = Counter(word for term in terms for word in set(term.words))
+    total = len(terms)
+    weight = {word: math.log(total / count) + 1.0 for word, count in documents.items()}
+    # Normalised by whichever side said more, so neither direction wins on its
+    # own: an entry that is fully accounted for but says far less than the
+    # description was not what the description was about, and dividing by the
+    # entry alone would put a two-word entry above every longer one.
+    spoken = sum(weight[word] for word in said if word in weight)
+    matches = []
+    for term in terms:
+        hit = [word for word in term.words if word in said]
+        if not hit:
+            continue
+        carried = sum(weight.get(word, 1.0) for word in term.words)
+        against = max(carried, spoken)
+        if against <= 0:
+            continue
+        matches.append(
+            Match(term=term, score=sum(weight[word] for word in hit) / against, words=hit)
+        )
+    matches.sort(key=lambda m: (-m.score, m.term.key))
+    return matches[:limit]
 
 
 def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
