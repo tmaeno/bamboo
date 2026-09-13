@@ -64,7 +64,12 @@ _VERDICT_ORDER = (SEEN, UNSETTLED, UNASKABLE, ELIMINATED)
 def _report_header(strategy: Strategy, evidence_path: Optional[Path], ev) -> None:
     symptom = strategy.symptom
     scope = f" · task {symptom.task_id}" if symptom.task_id else ""
-    click.echo(f"\nsymptom    {symptom.subject} = {symptom.observed!r}{scope}")
+    asked = (
+        f"the distribution around {symptom.focus}"
+        if strategy.localization is not None
+        else f"{symptom.subject} = {symptom.observed!r}"
+    )
+    click.echo(f"\nsymptom    {asked}{scope}")
     click.echo(f"map        {strategy.map_id} @ {strategy.derived_from}")
     if ev is None:
         click.echo("evidence   none asked for -- this is what the map says on its own")
@@ -288,14 +293,111 @@ def _report_findings(strategy: Strategy, top: int, full: bool) -> None:
             click.echo(f"  … {len(rows) - len(shown)} more (--full)")
 
 
-async def _derive(map_id: str, version: Optional[str], symptom: Symptom) -> Strategy:
+def _report_resolution(description: str, matches: list) -> None:
+    """What the description was taken to mean, and what else it could have.
+
+    Shown rather than assumed.  The alternatives are the part a reader has to
+    be able to check: a description naming two things is a fact about the
+    description, and silently picking one of them is the retrieval failure the
+    map exists to remove, put back one layer up.
+    """
+    click.echo(f"\ndescribed  {description}")
+    top, rest = matches[0], matches[1:3]
+    click.echo(
+        f"resolved   {top.term.kind:<6} {top.term.key}   "
+        f"({', '.join(top.words)})  {top.score:.2f}"
+    )
+    for other in rest:
+        click.echo(f"  also     {other.term.kind:<6} {other.term.key}  {other.score:.2f}")
+
+
+def _report_localization(strategy: Strategy, top: int, full: bool) -> None:
+    """Which step of the chain took the list, and how much of it.
+
+    The cuts first and the funnel second, because they answer from two
+    directions and the first needs no assumptions: a rejection line is complete
+    on its own, while the counts are aggregated over passes that cannot be told
+    apart.
+    """
+    local = strategy.localization
+    if local is None:
+        return
+    click.echo(f"\nchain      {strategy_mod.short_owner(local.chain)}")
+    click.echo(f"           {', '.join(local.log_files[:2]) or 'no log file names it'}")
+    for owner in local.chains_sharing_the_file:
+        click.echo(f"           with {strategy_mod.short_owner(owner)} in the same file")
+    if local.entered is not None:
+        click.echo(
+            f"           {local.entered} candidate(s) in, {local.left} out, "
+            f"over {local.passes} pass(es) · sample {local.sample}"
+        )
+    took = [cut for cut in local.cuts if cut.sites]
+    click.echo(f"\nwhat took the list ({len(took)} of {len(local.cuts)} step(s) named a candidate)")
+    shown = took if full else took[:top]
+    for cut in shown:
+        click.echo(
+            f"  {len(cut.sites):5d}  {cut.tag or cut.funnel_label:<22} "
+            f"{cut.funnel_label:<24} #{cut.order}{_at(cut)}"
+        )
+        for reason in cut.reasons[: None if full else 1]:
+            click.echo(f"  {'':<7} said: {reason}")
+        for condition in cut.conditions[: None if full else 1]:
+            click.echo(f"  {'':<7} when: {condition[:78]}")
+        if full:
+            click.echo(f"  {'':<7} sites: {', '.join(cut.sites[:12])}")
+    if len(took) > len(shown):
+        click.echo(f"  … {len(took) - len(shown)} more (--full)")
+    if not took:
+        click.echo("  nothing was seen -- the questions came back empty, which settles nothing")
+
+    if not local.funnel:
+        return
+    click.echo("\nthe funnel, in the order the map runs it")
+    click.echo("           most … fewest left after each step, pooled over passes")
+    click.echo("           no difference is taken: the log marks no boundary between passes, so")
+    click.echo("           two steps' maxima can come from two different ones")
+    steps = local.funnel if full else local.funnel[:top]
+    for step in steps:
+        where = f"#{step.order}" if step.order is not None else "  ?"
+        spread = f"{step.most:5d} … {step.fewest:<5d}"
+        click.echo(f"  {where:>5}  {spread}  {step.label}")
+    if len(local.funnel) > len(steps):
+        click.echo(f"  … {len(local.funnel) - len(steps)} more (--full)")
+
+
+async def _derive(
+    map_id: str,
+    version: Optional[str],
+    symptom: Optional[Symptom],
+    description: Optional[str],
+    task_id: Optional[str],
+    observed_diag: Optional[str],
+) -> tuple[Strategy, list]:
     from bamboo.database.graph_database_client import GraphDatabaseClient
 
     graph_db = GraphDatabaseClient()
     await graph_db.connect()
     try:
         code_map = CodeMap(graph_db, map_id=map_id, version=version)
-        return await strategy_mod.derive(code_map, symptom)
+        matches: list = []
+        if symptom is None:
+            # Resolution needs the map, so it happens here rather than in the
+            # command: the vocabulary is the map's, and building a second copy
+            # of it outside would be a second thing to keep current.
+            matches = strategy_mod.resolve(description or "", await code_map.vocabulary())
+            if not matches:
+                raise LookupError(
+                    "nothing in this map's vocabulary matches that description.  "
+                    "Name a subject and a value instead, or say it in the map's own "
+                    "words -- a status, a rejection reason, a brokerage step."
+                )
+            symptom = matches[0].term.symptom.model_copy(
+                update={
+                    "task_id": task_id or strategy_mod.entity_in(description or ""),
+                    "observed_diag": observed_diag,
+                }
+            )
+        return await strategy_mod.derive(code_map, symptom), matches
     finally:
         await graph_db.close()
 
@@ -310,8 +412,19 @@ async def _derive(map_id: str, version: Optional[str], symptom: Symptom) -> Stra
         "incident from months ago has to be read against the code that ran then."
     ),
 )
-@click.option("--subject", required=True, help="Qualified subject, e.g. JediTaskSpec.status.")
-@click.option("--observed", required=True, help="The value the record actually holds.")
+@click.option(
+    "--describe",
+    "description",
+    default=None,
+    help=(
+        "What is wrong, in words.  Resolved against the map's own vocabulary -- "
+        "every question it can be asked, 420 of them for PanDA -- so the "
+        "derivation is chosen by what the words meant and not by a flag per "
+        "symptom.  What it resolved to is printed, with the alternatives."
+    ),
+)
+@click.option("--subject", default=None, help="Qualified subject, e.g. JediTaskSpec.status.")
+@click.option("--observed", default=None, help="The value the record actually holds.")
 @click.option(
     "--task",
     "task_id",
@@ -362,8 +475,9 @@ async def _derive(map_id: str, version: Optional[str], symptom: Symptom) -> Stra
 def main(
     map_id: str,
     version: Optional[str],
-    subject: str,
-    observed: str,
+    description: Optional[str],
+    subject: Optional[str],
+    observed: Optional[str],
     task_id: Optional[str],
     observed_diag: Optional[str],
     evidence_path: Path,
@@ -373,14 +487,25 @@ def main(
     top: int,
     verbose: bool,
 ) -> None:
-    """Ask the Code Map which code could have produced an observed value."""
+    """Ask the Code Map what it has to say about a symptom."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
-    symptom = Symptom(
-        subject=subject, observed=observed, task_id=task_id, observed_diag=observed_diag
-    )
+    if bool(description) == bool(subject or observed):
+        raise click.UsageError(
+            "Give either --describe or a --subject and --observed pair.  The first "
+            "resolves against the map's vocabulary; the second names the entry itself."
+        )
+    symptom = None
+    if subject or observed:
+        if not (subject and observed):
+            raise click.UsageError("--subject and --observed are only meaningful together.")
+        symptom = Symptom(
+            subject=subject, observed=observed, task_id=task_id, observed_diag=observed_diag
+        )
     try:
-        strategy = asyncio.run(_derive(map_id, version, symptom))
+        strategy, matches = asyncio.run(
+            _derive(map_id, version, symptom, description, task_id, observed_diag)
+        )
     except LookupError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -398,12 +523,14 @@ def main(
             f"across {len({q.service for q in queries})} service(s)"
         )
         ev = asyncio.run(evidence_mod.collect(queries, timeout=timeout))
-        if task_id is not None:
+        if strategy.symptom.task_id is not None and strategy.localization is None:
             # One row, one call, no window.  Asked alongside the greps rather
             # than instead of them: the record holds the last message written
             # to the field, so it confirms an arm and never rules one out, and
             # the log line is what survives a later junction overwriting it.
-            ev.tasks = asyncio.run(evidence_mod.collect_task_records([task_id]))
+            ev.tasks = asyncio.run(
+                evidence_mod.collect_task_records([strategy.symptom.task_id])
+            )
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
     elif evidence_path.exists():
@@ -416,9 +543,14 @@ def main(
     # listing is ordered by verdict even when nothing was asked of production.
     named = any(c.named for c in strategy.candidates)
     _report_header(strategy, evidence_path if ev else None, ev)
-    _report_verdict(strategy, ev is not None)
-    _report_follow_up(strategy)
-    _report_candidates(strategy, top, full, ev is not None or named)
+    if matches:
+        _report_resolution(description or "", matches)
+    if strategy.localization is not None:
+        _report_localization(strategy, top, full)
+    else:
+        _report_verdict(strategy, ev is not None)
+        _report_follow_up(strategy)
+        _report_candidates(strategy, top, full, ev is not None or named)
     _report_observations(strategy, top, full, ev is not None)
     _report_findings(strategy, top, full)
 

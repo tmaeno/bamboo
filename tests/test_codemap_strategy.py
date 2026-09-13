@@ -1320,3 +1320,28 @@ async def test_another_task_s_lines_are_not_this_task_s_answer():
     )
 
     assert strategy.localization.cuts[0].sites == ["MINE"]
+
+
+# ---------------------------------------------------------------------------
+# The one entry point
+# ---------------------------------------------------------------------------
+
+
+def test_the_command_refuses_to_be_given_the_question_twice():
+    """One way in.  A description is resolved against the map's vocabulary and a
+    subject names an entry outright; accepting both would leave it to the
+    command to decide which the caller meant, which is the choice this layer
+    exists to take away from whoever phrased the question."""
+    from click.testing import CliRunner
+
+    from bamboo.scripts.derive_strategy import main
+
+    both = CliRunner().invoke(
+        main, ["--describe", "x", "--subject", "JediTaskSpec.status", "--observed", "pending"]
+    )
+    neither = CliRunner().invoke(main, [])
+    half = CliRunner().invoke(main, ["--subject", "JediTaskSpec.status"])
+
+    assert both.exit_code != 0 and "either --describe" in both.output
+    assert neither.exit_code != 0
+    assert half.exit_code != 0 and "only meaningful together" in half.output

@@ -1217,6 +1217,18 @@ def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localizat
             "the sample was cut off at a bound, so no step can be said to have removed "
             "nothing -- only what was seen counts"
         )
+    if rejections and not any(
+        o.role == PROBE and o.verdict != ANSWER_NOT_ASKED for o in strategy.observations
+    ):
+        # The lines were found, but not by the questions derived here: a survey
+        # of every broker log was already in the file and it contains them.
+        # Worth saying, because that survey is the reason the sample is partial
+        # -- it reaches its cap where a question naming one task would not.
+        strategy.gaps.append(
+            "these lines came from a wider question already in the evidence file rather "
+            "than from the scoped ones derived here -- --fetch asks those, and only they "
+            "come back whole enough for an absence to mean anything"
+        )
     return settled
 
 
