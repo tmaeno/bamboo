@@ -74,15 +74,19 @@ from bamboo.codemap.models import (
     REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
+    SYMPTOM_DISTRIBUTION,
     UNASKABLE,
     UNSETTLED,
     Candidate,
     CandidateBranch,
     FollowUp,
+    FunnelStep,
     JunctionNode,
+    Localization,
     MapTerm,
     Match,
     Observation,
+    StageCut,
     Strategy,
     Symptom,
 )
@@ -118,12 +122,12 @@ _LINE_SHAPE: dict[str, str] = {
 #: silence is what the eliminator reads.  Reported as a gap instead.
 _TASK_SCOPED = ("JediTaskSpec.", "JEDI_Tasks.")
 
-# ``<jediTaskID=52266181 datasetID=685030095>`` is what the log wrapper puts in
-# front of the message, so the id and the transition are on one line and one
-# pattern can require both.  The trailing class matters: without it
-# ``jediTaskID=5226618`` matches ``jediTaskID=52266181`` and the answer is about
-# a different task.
-_TASK_PREFIX = r"jediTaskID={task}[ >].*"
+# What the log wrapper puts in front of the message, so the id and the line are
+# together and one pattern can require both.  Shared with the module that reads
+# the answers back: a second spelling of the same convention is a second thing
+# to keep current, and there the reader's containment check depends on the two
+# being literally the same string.
+_TASK_PREFIX = evidence.TASK_PREFIX
 
 # Bounds for the probe.  Wide window, because a task that went ``pending``
 # hours ago is the case being asked about, and a cap that will not be reached --
@@ -138,6 +142,13 @@ PROBE_KEEP_LINES = 50
 # under truncation.  Keeping no lines follows: the answer is a count.
 CONTROL_TAIL_BYTES = evidence.TRANSITION_TAIL_BYTES
 CONTROL_MAX_MATCHES = evidence.TRANSITION_MAX_MATCHES
+
+# A brokerage probe keeps everything it matched.  Its answer is not "did this
+# fire" but "which candidates went and why", so the lines are the answer rather
+# than a sample of it -- the same reason the transition query keeps its cap's
+# worth.  Equal to the cap, so "the answer came back whole" and "nothing was
+# dropped writing it down" are one question.
+BROKERAGE_KEEP_LINES = evidence.DEFAULT_MAX_MATCHES
 
 # How many matched lines a finding shows.  Enough to read a timestamp and a
 # component off the answer; the rest is in the evidence file.
@@ -682,6 +693,150 @@ def _observations(
     return observations
 
 
+# ---------------------------------------------------------------------------
+# The second symptom class: which step of a chain threw the candidates away
+# ---------------------------------------------------------------------------
+
+
+def _leading(focus: str, chains: dict[str, list]) -> str:
+    """Which chain the answer opens with before any evidence has been read.
+
+    Only the opening.  Every chain stays in play, because a description naming
+    one cut is a guess about which cut mattered and the file the lines landed in
+    is a fact -- narrowing here instead cost exactly what it was meant to
+    prevent: a focus resolved to a task broker's ``-job`` dropped the job
+    broker's forty-eight stages, and its rejections were then attributed to the
+    task broker's ``status check``, condition and all.
+    """
+    if focus in chains:
+        return focus
+    named = sorted(
+        owner
+        for owner, stages in chains.items()
+        if any(focus in (stage.criteria_tag, stage.funnel_label) for stage in stages)
+    )
+    return named[0] if named else sorted(chains)[0]
+
+
+def _cut(stage) -> StageCut:
+    return StageCut(
+        tag=stage.criteria_tag,
+        funnel_label=stage.funnel_label,
+        owner=stage.owner,
+        order=stage.order,
+        line=stage.anchor.line_start if stage.anchor else None,
+        conditions=list(stage.conditions),
+        inputs=list(stage.inputs),
+        log_files=list(stage.log_files),
+    )
+
+
+def _brokerage_observations(
+    files: list[str], owners: list[str], task_id: Optional[str]
+) -> list[Observation]:
+    """One scoped question per file, and the control that licenses its silence.
+
+    The survey form of these questions reaches its cap on every machine --
+    45,000 matches against a bound of 5,000 -- so its emptiness is never
+    readable.  Scoped to one task the same question comes back whole.  The
+    control is the unscoped pattern, which answers whether the file carries
+    rejections at all: ``panda-GenJobBroker.log`` does not exist in this
+    deployment, and without the control its silence would read as a chain that
+    dropped nothing.
+    """
+    observations: list[Observation] = []
+    for filename in files:
+        for pattern in (evidence.TAG_PATTERN, evidence.FUNNEL_PATTERN):
+            scoped = evidence.task_scoped(pattern, task_id) if task_id is not None else pattern
+            observations.append(
+                Observation(
+                    log_file=filename,
+                    pattern=scoped,
+                    role=PROBE,
+                    services=[evidence.JEDI],
+                    settles=list(owners),
+                    keep_lines=BROKERAGE_KEEP_LINES,
+                )
+            )
+            if scoped != pattern:
+                observations.append(
+                    Observation(
+                        log_file=filename,
+                        pattern=pattern,
+                        role=CONTROL,
+                        services=[evidence.JEDI],
+                        settles=[],
+                        control_for=scoped,
+                    )
+                )
+    return observations
+
+
+async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
+    """Read the map for a distribution symptom.
+
+    Brokerage does not settle a value, so there is no branch table and no
+    candidate set to prune: every stage runs on every pass and each takes some
+    of the list.  What the map contributes here is the chain in order, the
+    condition each step tests, where to read it, and which file to ask -- and
+    what production contributes is how much of the list each step actually
+    took, which is the half that says *which* step is the answer.
+
+    Nothing is filled in from the map about the cuts themselves.  That is the
+    honest shape: "this stage removed 161 sites" is not something a map can
+    know, and the two-phase split is what keeps the map's part inspectable
+    before a query goes out.
+    """
+    chains = await code_map.chains()
+    if not chains:
+        raise LookupError("this map holds no filter chains, so it has no distribution to localize")
+    leads = _leading(symptom.focus, chains)
+    owners = [leads, *sorted(set(chains) - {leads})]
+    stages = [stage for owner in owners for stage in chains[owner]]
+    files = sorted({f for stage in stages for f in stage.log_files})
+
+    gaps: list[str] = []
+    if symptom.task_id is None:
+        gaps.append(
+            "no entity was named, so what comes back is every task the window holds -- "
+            "a survey of what this chain does, not of what it did to one task"
+        )
+    # A filter stage carries no entry points, and pooling the module's junctions
+    # would answer how work reaches anything in the file rather than how this
+    # chain is run.  That approximation was reverted once already, so it is a
+    # gap rather than a field.
+    gaps.append(
+        "the map cannot say what re-runs this chain: a filter stage has no entry point, "
+        "and the triggers of the junctions in the same module are a different question"
+    )
+    # Summarised per helper rather than per tag.  These are true and they are
+    # about a chain the evidence may well not choose, so five lines of them
+    # would push the answer off the first screen for no extra information.
+    unreadable: Counter = Counter(
+        stage.owner for stage in stages if stage.criteria_tag and not stage.log_files
+    )
+    findings = [
+        f"{short_owner(owner)} emits {count} tag(s) and its module declares no logger, so "
+        "the map cannot say which file to read for them -- they surface in whichever "
+        "broker called it"
+        for owner, count in sorted(unreadable.items())
+    ]
+
+    return Strategy(
+        symptom=symptom,
+        map_id=code_map.map_id,
+        derived_from=next(iter(stages)).derived_from if stages else "",
+        observations=_brokerage_observations(files, owners, symptom.task_id),
+        localization=Localization(
+            chain=leads,
+            log_files=files,
+            cuts=sorted((_cut(stage) for stage in stages), key=lambda c: (c.owner, c.order)),
+        ),
+        findings=findings,
+        gaps=gaps,
+    )
+
+
 async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     """Read the map and return what it has to say about *symptom*.
 
@@ -689,7 +844,16 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     production not at all.  Everything that needs the deployment is expressed as
     an :class:`Observation` to be run later, so the plan can be inspected --
     and its model corrected -- before a single query goes out.
+
+    Dispatches on the symptom's kind rather than on anything the caller passed
+    alongside it.  The kind came off the vocabulary entry the description
+    resolved to, which is what keeps the choice of derivation out of the user
+    interface: a flag per symptom class would put the selection back in the
+    hands of whoever phrased the question.
     """
+    if symptom.kind == SYMPTOM_DISTRIBUTION:
+        return await localize(code_map, symptom)
+
     subject = await code_map.subject(symptom.subject)
     if subject is None:
         known = ", ".join(s.name for s in await code_map.subjects())
@@ -786,7 +950,11 @@ def queries(strategy: Strategy) -> list[GrepQuery]:
             service=service,
             tail_bytes=PROBE_TAIL_BYTES if observation.role == PROBE else CONTROL_TAIL_BYTES,
             max_matches=PROBE_MAX_MATCHES if observation.role == PROBE else CONTROL_MAX_MATCHES,
-            keep_lines=PROBE_KEEP_LINES if observation.role == PROBE else 0,
+            keep_lines=(
+                observation.keep_lines
+                if observation.keep_lines is not None
+                else (PROBE_KEEP_LINES if observation.role == PROBE else 0)
+            ),
         )
         for observation in strategy.observations
         for service in observation.services
@@ -908,6 +1076,150 @@ def _settle(
     return settled
 
 
+def _reasons_said(rows: list[evidence.Rejection]) -> list[str]:
+    """What the log said as it dropped each one, most frequent first.
+
+    Counted over lines rather than over sites, unlike the sites themselves: a
+    reason repeated across passes is the same reason, and what matters about it
+    is which of a stage's several wordings production actually used.  Trimmed,
+    because one of these runs to two hundred characters of arithmetic.
+    """
+    counts = Counter(row.reason for row in rows if row.reason)
+    return [f"{reason[:120]} ({seen}x)" for reason, seen in counts.most_common(4)]
+
+
+def _by_tag(
+    rejections: list[evidence.Rejection], here: set[str]
+) -> dict[str, list[evidence.Rejection]]:
+    """Rejections grouped by tag, from the file the chain actually wrote to."""
+    grouped: dict[str, list[evidence.Rejection]] = {}
+    for row in rejections:
+        if here and row.log_file not in here:
+            continue
+        grouped.setdefault(row.tag, []).append(row)
+    return grouped
+
+
+def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localization:
+    """Fill in how much of the list each step actually took.
+
+    Everything numeric here comes from production; the map supplied the order,
+    the condition and the place to read.  The chain is re-chosen from the
+    evidence rather than kept from the focus, because a description naming one
+    cut is a guess and the file the lines landed in is a fact.
+
+    **Attribution when one file holds two chains.**  A task broker calls a job
+    broker and hands over its own log slot, so both write to one file and the
+    map cannot say so -- it records where a stage's own module writes.  A tag
+    seen in a file is therefore attributed to the stages that carry it *and*
+    name that file; where none does, every stage carrying it is named and the
+    ambiguity is reported rather than resolved.
+    """
+    settled = strategy.localization.model_copy(deep=True)
+    rejections, whole_cuts = evidence.observed_rejections(ev, strategy.symptom.task_id)
+    survivors, whole_funnel = evidence.observed_survivors(ev, strategy.symptom.task_id)
+    settled.sample = "complete" if whole_cuts and whole_funnel else "partial"
+
+    seen_in = Counter(row.log_file for row in rejections) + Counter(
+        row.log_file for row in survivors
+    )
+    if seen_in:
+        settled.log_files = [file for file, _ in seen_in.most_common()]
+    here = set(settled.log_files[:1])
+
+    by_tag: dict[str, list[StageCut]] = {}
+    for cut in settled.cuts:
+        by_tag.setdefault(cut.tag, []).append(cut)
+    unknown: Counter = Counter()
+    for tag, rows in _by_tag(rejections, here).items():
+        carrying = by_tag.get(tag, [])
+        # The file is what separates two chains that emit the same tag.  Where
+        # no stage carrying the tag names this file, every one of them is named
+        # instead and the ambiguity is reported -- a helper that declares no
+        # logger, or a broker that handed its log slot to the one it called.
+        owned = [cut for cut in carrying if here & set(cut.log_files)] or carrying
+        if not owned:
+            unknown[tag] = len({row.site for row in rows})
+            continue
+        for cut in owned:
+            cut.sites = sorted({row.site for row in rows})
+            cut.reasons = _reasons_said(rows)
+
+    # Every chain was carried this far so that the evidence could choose; now it
+    # has, and the chains whose lines are nowhere near this file are not part of
+    # the answer.  A cut with sites is kept whatever file it names -- that is
+    # how a helper with no logger of its own stays in.
+    if here:
+        settled.cuts = [cut for cut in settled.cuts if cut.sites or (here & set(cut.log_files))]
+    for cut in settled.cuts:
+        if cut.sites:
+            cut.verdict = SEEN
+            cut.because = f"removed {len(cut.sites)} candidate(s)"
+        elif settled.sample == "complete":
+            cut.verdict = ELIMINATED
+            cut.because = "this chain ran and never named it"
+        else:
+            cut.verdict = UNSETTLED
+            cut.because = "the sample is partial, so nothing follows from not seeing it"
+    settled.cuts.sort(key=lambda c: (-len(c.sites), c.owner, c.order))
+
+    weight: Counter = Counter()
+    for cut in settled.cuts:
+        weight[cut.owner] += len(cut.sites)
+    if weight and max(weight.values()):
+        settled.chain = weight.most_common(1)[0][0]
+    settled.chains_sharing_the_file = sorted({c.owner for c in settled.cuts} - {settled.chain})
+
+    order = {cut.funnel_label: cut.order for cut in settled.cuts if cut.funnel_label}
+    counts: dict[str, list[int]] = {}
+    for row in survivors:
+        if row.log_file in here or not here:
+            counts.setdefault(row.label, []).append(row.count)
+    settled.funnel = sorted(
+        (
+            FunnelStep(
+                label=label,
+                order=order.get(label),
+                most=max(seen),
+                fewest=min(seen),
+                seen=len(seen),
+            )
+            for label, seen in counts.items()
+        ),
+        # Unmapped steps last: the map has no position for them, and putting
+        # them at nought would claim one.
+        key=lambda s: (s.order is None, s.order or 0, s.label),
+    )
+    mapped = [step for step in settled.funnel if step.order is not None]
+    if mapped:
+        settled.entered, settled.left = mapped[0].most, mapped[-1].most
+        settled.passes = mapped[0].seen
+
+    strategy.findings.extend(
+        f"production logs {tag} against {sites} site(s) for this entity and the map has "
+        "no stage for it"
+        for tag, sites in sorted(unknown.items())
+    )
+    strategy.findings.extend(
+        f"production counts a cut at {step.label!r} and the map has no step for it"
+        for step in settled.funnel
+        if step.order is None
+    )
+    if settled.chains_sharing_the_file:
+        named = [settled.chain, *settled.chains_sharing_the_file]
+        strategy.findings.append(
+            f"{', '.join(short_owner(o) for o in named)} all have cuts in "
+            f"{', '.join(sorted(here)) or 'this file'}, so a tag there can belong to either "
+            "-- the map records where a stage's own module writes, not who delegated to it"
+        )
+    if settled.sample != "complete":
+        strategy.gaps.append(
+            "the sample was cut off at a bound, so no step can be said to have removed "
+            "nothing -- only what was seen counts"
+        )
+    return settled
+
+
 def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     """Return *strategy* with production's answers filled in.
 
@@ -927,6 +1239,8 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
         if o.role == CONTROL and o.control_for
     }
     settled.candidates = [_settle(c, probes, controls) for c in settled.candidates]
+    if settled.localization is not None:
+        settled.localization = _settle_localization(settled, ev)
     diag = _recorded_message(ev, strategy.symptom)
     return name_the_arm(settled, diag) if diag else settled
 

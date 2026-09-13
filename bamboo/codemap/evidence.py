@@ -47,7 +47,7 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
@@ -126,6 +126,26 @@ TRANSITION_SUBJECT = "JediTaskSpec.status"
 
 _TAG_IN_LINE = re.compile(r"\bcriteria=(-[\w.]+)")
 _FUNNEL_IN_LINE = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
+
+# ``skip site=EMMY_KIT due to insufficient RAM ... criteria=-lowmemory`` -- the
+# whole rejection on one line.  The middle is kept because it carries the
+# measured values that made the stage's condition true, which is what a
+# condition needs to become a reason.
+_SKIP_IN_LINE = re.compile(r"skip\s+site=(?P<site>\S+)\s+(?P<why>.*?)\s*criteria=(?P<tag>-[\w.]+)")
+
+# The funnel line with its count.  ``_FUNNEL_IN_LINE`` begins at the words and
+# so throws the number away, which is right for a check that asks whether the
+# map knows the step and useless for one that asks how much the step took.  The
+# optional bracket admits ``398 candidates (398 with AUTO, 0 with ANY) passed``.
+_SURVIVORS_IN_LINE = re.compile(
+    r"(?P<count>\d+)\s+candidates?(?:\s*\([^)]*\))?\s+passed(?:\s+for)?\s+(?P<label>.+?)\s*$"
+)
+
+# What the log wrapper puts in front of every line about one task, so a pattern
+# can require the id and the message together.  The trailing character class
+# matters: without it ``jediTaskID=5226618`` matches ``jediTaskID=52266181`` and
+# the answer is about a different task.
+TASK_PREFIX = r"jediTaskID={task}[ >].*"
 
 # ``<jediTaskID=52266181 datasetID=685030095>`` -- what the log wrapper puts in
 # front of every line of one chain run, and so the only trustworthy way to tell
@@ -691,6 +711,39 @@ def reading_queries(targets: dict[str, str]) -> list[GrepQuery]:
     ]
 
 
+def task_scoped(pattern: str, task_id: str) -> str:
+    """*pattern*, narrowed to the lines about one task.
+
+    The survey form of a brokerage question runs into its bounds on every
+    machine -- 45,000 matches against a 5,000 cap -- so its silence is never
+    readable.  Scoped to one task the same question is selective enough to come
+    back whole, and that is the only thing that lets an absence be evidence.
+
+    A prefix rather than a separate query because the log wrapper puts the id on
+    the same line as the message, and because containment is then what tells a
+    reader the two spellings are the same question -- see ``_brokerage_results``.
+    """
+    return TASK_PREFIX.format(task=re.escape(str(task_id))) + pattern
+
+
+def brokerage_queries(targets: dict[str, str], task_id: Optional[str] = None) -> list[GrepQuery]:
+    """The brokerage questions, scoped to one task where there is one.
+
+    Both spellings keep the same bounds as the survey: wide window, default cap.
+    Scoping does not need a tighter window -- it needs a question that will not
+    reach the cap, which is what it is for.
+    """
+    return [
+        GrepQuery(
+            pattern=task_scoped(pattern, task_id) if task_id is not None else pattern,
+            log_filename=filename,
+            service=service,
+        )
+        for pattern in (TAG_PATTERN, FUNNEL_PATTERN)
+        for filename, service in sorted(targets.items())
+    ]
+
+
 def sample_state(
     evidence: Evidence,
     pattern: str,
@@ -827,6 +880,133 @@ def observed_tags(evidence: Evidence, log_filename: Optional[str] = None) -> Cou
         for tag in _TAG_IN_LINE.findall(line):
             counts[tag] += 1
     return counts
+
+
+class Rejection(NamedTuple):
+    """One candidate a filter stage threw away, as production wrote it down."""
+
+    log_file: str
+    site: str
+    tag: str
+    reason: str
+
+
+class Survivors(NamedTuple):
+    """How many candidates were left after one step, as production counted them."""
+
+    log_file: str
+    count: int
+    label: str
+
+
+def _brokerage_results(evidence: Evidence, base: str) -> list[GrepResult]:
+    """Answers to any question built around *base*.
+
+    ``Evidence.matching`` keys on the pattern string exactly, which is right for
+    a gate that asks one fixed question.  These questions come in two spellings
+    of the same thing -- the bare pattern a survey asks of every broker log, and
+    the same pattern scoped to one task -- and both carry the lines wanted here.
+    Containment is sound because the scoped form is literally the bare form with
+    a prefix: see :func:`task_scoped`.
+
+    Only answers that were asked to bring lines back.  The same pattern is also
+    put as a control, which asks whether the file carries the line at all and so
+    keeps none -- reading those in would count every line twice and, worse,
+    would fold "this answer has no lines" into the judgement of whether the
+    sample was whole, making every sample partial no matter how selective the
+    question was.
+    """
+    return [
+        r
+        for r in evidence.results
+        if base in r.query.pattern and r.query.keep_lines > 0 and not missing_file(r)
+    ]
+
+
+def _task_of(line: str) -> Optional[str]:
+    """The task the log wrapper's prefix attributes this line to.
+
+    Read out of ``<...>`` rather than from anywhere in the line, because a
+    rejection message can carry other numbers and a message that mentions
+    another task would otherwise be attributed to it.
+    """
+    key = _RUN_KEY.search(line)
+    if not key:
+        return None
+    found = _TASK_ID.search(key.group(1))
+    return found.group(1) if found else None
+
+
+def observed_rejections(
+    evidence: Evidence, task_id: Optional[str] = None
+) -> tuple[list[Rejection], bool]:
+    """Every candidate production dropped, with the reason it gave.
+
+    The primary reading for "the distribution is wrong", and the reason it
+    needs no ordering and no splitting into passes: each line is complete on
+    its own.  It names the site, the tag that identifies the stage, and the
+    text in between -- which carries the *measured values* that made the
+    condition true, ``due to status=brokeroff``.  That is what turns a
+    condition into a reason, and it is better evidence than reading the value
+    now, because it is the value at the moment of the decision.
+
+    Returns the rows and whether the sample they came from was whole.  The
+    second is not decoration: only a whole sample licenses saying that a stage
+    dropped nothing, and a survey of every broker log runs into its bounds
+    where a question scoped to one task does not.
+    """
+    rows: list[Rejection] = []
+    whole = True
+    for result in _brokerage_results(evidence, TAG_PATTERN):
+        whole = whole and result.complete
+        for line in result.lines:
+            if task_id is not None and _task_of(line) != str(task_id):
+                continue
+            found = _SKIP_IN_LINE.search(line)
+            if found:
+                rows.append(
+                    Rejection(
+                        log_file=result.query.log_filename,
+                        site=found.group("site"),
+                        tag=found.group("tag"),
+                        reason=found.group("why").strip(),
+                    )
+                )
+    return rows, whole and bool(rows)
+
+
+def observed_survivors(
+    evidence: Evidence, task_id: Optional[str] = None
+) -> tuple[list[Survivors], bool]:
+    """The counts the funnel reported, with the count kept.
+
+    ``observed_runs`` drops both halves this needs -- the leading integer,
+    because its pattern starts at ``candidates passed``, and the run key,
+    because it returns only the lists.  Neither mattered to a check that asks
+    whether the map knows the step names; both are the whole answer to how much
+    of the list a step took.
+
+    The parenthetical form is admitted: ``398 candidates (398 with AUTO, 0 with
+    ANY) passed SW/HW check`` is one step reporting one count, and a pattern
+    that stopped at the bracket would read the step as unreported.
+    """
+    rows: list[Survivors] = []
+    whole = True
+    for result in _brokerage_results(evidence, FUNNEL_PATTERN):
+        whole = whole and result.complete
+        for line in result.lines:
+            if task_id is not None and _task_of(line) != str(task_id):
+                continue
+            found = _SURVIVORS_IN_LINE.search(line)
+            if found:
+                rows.append(
+                    Survivors(
+                        log_file=result.query.log_filename,
+                        count=int(found.group("count")),
+                        label=found.group("label").strip(),
+                    )
+                )
+    return rows, whole and bool(rows)
 
 
 def observed_runs(evidence: Evidence, log_filename: str) -> list[list[str]]:

@@ -30,6 +30,7 @@ from bamboo.codemap.models import (
     Branch,
     Emit,
     EntryPoint,
+    FilterStageNode,
     JunctionNode,
     MapFragment,
     MapTerm,
@@ -1105,3 +1106,217 @@ def test_the_entity_is_read_apart_from_the_question():
     # exactly the kind of pick this layer refuses to make.
     assert strategy_mod.entity_in("52249469 and 52357008") is None
     assert strategy_mod.entity_in("no id here") is None
+
+
+# ---------------------------------------------------------------------------
+# The second symptom class: which step of a chain threw the candidates away
+# ---------------------------------------------------------------------------
+
+PROD_JOB_LOG = "panda-AtlasProdJobBroker.log"
+PROD_JOB = "pandajedi/jedibrokerage/AtlasProdJobBroker.py::doBrokerage"
+PROD_TASK = "pandajedi/jedibrokerage/AtlasProdTaskBroker.py::runImpl"
+
+
+def _filter_stage(
+    owner: str,
+    tag: str,
+    label: str,
+    order: int,
+    files: list[str] | None = None,
+    condition: str = "site.status != 'online'",
+) -> FilterStageNode:
+    return FilterStageNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=FilterStageNode.make_name(MAP_ID, owner, f"{label}|{tag}"),
+        owner=owner,
+        criteria_tag=tag,
+        funnel_label=label,
+        order=order,
+        conditions=[condition],
+        log_files=[] if files is None else files,
+        anchor=Anchor(package="pandajedi", file=owner.split("::")[0], line_start=400 + order),
+    )
+
+
+def _skip(task: str, site: str, tag: str, why: str = "due to status=offline") -> str:
+    return f"2026-09-06 04:10:24,902 panda.log.x: INFO     <jediTaskID={task}>   skip site={site} {why} criteria={tag}"
+
+
+def _passed(task: str, count: int, label: str) -> str:
+    return f"2026-09-06 04:10:24,902 panda.log.x: INFO     <jediTaskID={task}> {count} candidates passed {label}"
+
+
+async def _localized(stages, lines, task="52249469", focus=None, whole=False):
+    """Derive a distribution strategy and answer its questions with *lines*."""
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+    strategy = await strategy_mod.derive(
+        code_map,
+        Symptom(kind=SYMPTOM_DISTRIBUTION, focus=focus or stages[0].criteria_tag, task_id=task),
+    )
+    results = []
+    for query in strategy_mod.queries(strategy):
+        mine = [
+            line
+            for line in lines.get(query.log_filename, [])
+            if ("criteria=" in line) == (evidence_mod.TAG_PATTERN in query.pattern)
+        ]
+        results.append(
+            _result(query, matched=len(mine), lines=mine, truncated=not whole and bool(mine))
+        )
+    return strategy_mod.evaluate(
+        strategy, Evidence(fetched_at="2026-09-05T00:00:00+00:00", results=results)
+    )
+
+
+async def test_the_evidence_chooses_the_chain_and_the_focus_only_opens_the_answer():
+    """A description naming one cut is a guess; the file the lines landed in is
+    a fact.  Narrowing on the focus first cost exactly what it was meant to
+    prevent -- a focus resolved to the task broker's ``-job`` dropped the job
+    broker's stages, and its rejections were then attributed to the task
+    broker's ``status check``, condition and all."""
+    stages = [
+        _filter_stage(PROD_TASK, "-status", "status check", 0, ["panda-AtlasProdTaskBroker.log"],
+                      condition="taskSpec.nucleus in siteMapper.nuclei"),
+        _filter_stage(PROD_TASK, "-job", "job check", 6, ["panda-AtlasProdTaskBroker.log"]),
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG],
+                      condition="not sitePreAssigned"),
+    ]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status"), _skip("52249469", "SITE_B", "-status")]},
+        focus="-job",
+    )
+
+    assert strategy.localization.chain == PROD_JOB
+    (cut,) = [c for c in strategy.localization.cuts if c.sites]
+    assert cut.owner == PROD_JOB
+    assert cut.conditions == ["not sitePreAssigned"]
+
+
+async def test_a_cut_is_weighed_in_candidates_not_in_log_lines():
+    """Brokerage re-runs for a task many times over a window, so a line count is
+    a count of passes multiplied by an effect and ranks by how often the task
+    was brokered."""
+    stages = [_filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG])]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status")] * 5
+         + [_skip("52249469", "SITE_B", "-status")]},
+    )
+
+    (cut,) = strategy.localization.cuts
+    assert cut.sites == ["SITE_A", "SITE_B"]
+    assert cut.verdict == SEEN
+
+
+async def test_the_reason_the_line_gave_is_kept_with_the_cut():
+    """The text between the site and the tag carries the measured values that
+    made the condition true, which is what turns a condition into a reason --
+    and it is the value at the moment of the decision, not now."""
+    stages = [_filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG])]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [
+            _skip("52249469", "SITE_A", "-status", "due to status=brokeroff"),
+            _skip("52249469", "SITE_B", "-status", "due to status=brokeroff"),
+            _skip("52249469", "SITE_C", "-status", "due to status=test"),
+        ]},
+    )
+
+    assert strategy.localization.cuts[0].reasons == [
+        "due to status=brokeroff (2x)",
+        "due to status=test (1x)",
+    ]
+
+
+async def test_a_partial_sample_rules_no_step_out():
+    """An answer cut off at a bound is indistinguishable from a step that never
+    fired, so only what was seen counts."""
+    stages = [
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_JOB, "-lowmemory", "memory check", 14, [PROD_JOB_LOG]),
+    ]
+    strategy = await _localized(
+        stages, {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status")]}
+    )
+
+    verdicts = {c.tag: c.verdict for c in strategy.localization.cuts}
+    assert verdicts == {"-status": SEEN, "-lowmemory": UNSETTLED}
+    assert strategy.localization.sample == "partial"
+    assert any("cut off at a bound" in gap for gap in strategy.gaps)
+
+
+async def test_a_whole_sample_does_rule_out_a_step_that_took_nothing():
+    """The other direction, and the only thing that licenses it."""
+    stages = [
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_JOB, "-lowmemory", "memory check", 14, [PROD_JOB_LOG]),
+    ]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status"), _passed("52249469", 9, "status check")]},
+        whole=True,
+    )
+
+    verdicts = {c.tag: c.verdict for c in strategy.localization.cuts}
+    assert verdicts == {"-status": SEEN, "-lowmemory": ELIMINATED}
+    assert strategy.localization.sample == "complete"
+
+
+async def test_the_funnel_keeps_the_count_and_is_read_in_the_map_s_order():
+    """The step the log reports last is not the step the chain runs last: the
+    chain re-runs, and over 51,128 adjacent pairs in one file 11% of them show
+    the count going up.  So the order comes from the map and the passes are
+    aggregated rather than guessed apart."""
+    stages = [
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_JOB, "-shortwalltime", "walltime check", 19, [PROD_JOB_LOG]),
+    ]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [
+            _passed("52249469", 40, "walltime check"),
+            _passed("52249469", 151, "status check"),
+            _passed("52249469", 2, "walltime check"),
+            _passed("52249469", 150, "status check"),
+        ]},
+    )
+
+    funnel = strategy.localization.funnel
+    assert [(f.label, f.most, f.fewest, f.seen) for f in funnel] == [
+        ("status check", 151, 150, 2),
+        ("walltime check", 40, 2, 2),
+    ]
+    assert (strategy.localization.entered, strategy.localization.left) == (151, 40)
+    assert strategy.localization.passes == 2
+
+
+async def test_a_step_production_counts_that_the_map_has_no_stage_for_is_a_finding():
+    """Positive evidence, so it holds whatever the sample size: the map is
+    missing a cut production makes."""
+    stages = [_filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG])]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [
+            _skip("52249469", "SITE_A", "-nucleus"),
+            _passed("52249469", 9, "endpoint check with DISK_THRESHOLD=10 TB"),
+        ]},
+    )
+
+    assert any("-nucleus" in finding for finding in strategy.findings)
+    assert any("endpoint check" in finding for finding in strategy.findings)
+
+
+async def test_another_task_s_lines_are_not_this_task_s_answer():
+    """The wrapper's prefix is what attributes a line, and a rejection message
+    can carry other numbers of its own."""
+    stages = [_filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG])]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "MINE", "-status"), _skip("52357008", "THEIRS", "-status")]},
+    )
+
+    assert strategy.localization.cuts[0].sites == ["MINE"]

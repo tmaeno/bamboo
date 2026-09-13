@@ -1310,6 +1310,16 @@ class Observation(BaseModel):
             "reason this is not a count."
         ),
     )
+    keep_lines: Optional[int] = Field(
+        default=None,
+        description=(
+            "How many matched lines this question needs kept, where the role's "
+            "default is wrong for it.  A probe asking *whether* a writer fired "
+            "wants a handful for the report; a probe whose answer **is** the "
+            "lines -- every candidate a chain dropped -- wants all of them, and "
+            "a trimmed answer there is not a smaller sample but a different one."
+        ),
+    )
     matched: int = 0
     sample: list[str] = Field(
         default_factory=list, description="A few matched lines, for the report."
@@ -1396,6 +1406,16 @@ class StageCut(BaseModel):
     conditions: list[str] = Field(default_factory=list)
     inputs: list[str] = Field(
         default_factory=list, description="What those conditions read -- where a backward walk goes."
+    )
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where this stage's own module writes.  What attributes an observed "
+            "tag to a chain: two chains emit ``-status`` and the file the line "
+            "landed in is the only thing that separates them.  Empty for a "
+            "helper that declares no logger, whose lines surface in whichever "
+            "broker called it."
+        ),
     )
     sites: list[str] = Field(
         default_factory=list, description="The distinct candidates this cut removed."
