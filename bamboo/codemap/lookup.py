@@ -31,6 +31,7 @@ import re
 from typing import Any, Optional, Type, TypeVar
 
 from bamboo.codemap.models import (
+    PASSTHROUGH_OUTCOME,
     SYMPTOM_DISTRIBUTION,
     SYMPTOM_VALUE,
     TERM_CHAIN,
@@ -60,8 +61,6 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     ValueEnumNode: NodeType.VALUE_ENUM,
 }
 
-#: ``passthrough(JediTaskSpec.oldStatus)`` -> ``JediTaskSpec.oldStatus``.
-_PASSTHROUGH = re.compile(r"^passthrough\((?P<field>[^)]+)\)$")
 
 #: An outcome that names where the value came from rather than what it is.
 #: Neither is something to be asked about by value -- nobody observes a task in
@@ -272,7 +271,7 @@ class CodeMap:
         upstream: dict[str, list[JunctionNode]] = {}
         for junction in await self.writers_of(subject):
             for branch in junction.branches:
-                carried = _PASSTHROUGH.match(branch.outcome or "")
+                carried = PASSTHROUGH_OUTCOME.match(branch.outcome or "")
                 if not carried:
                     continue
                 field = carried.group("field")

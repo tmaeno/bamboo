@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from bamboo.codemap import evidence as evidence_mod
+from bamboo.codemap import models
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.evidence import Evidence, GrepQuery, GrepResult
 from bamboo.codemap.lookup import CodeMap
@@ -1345,3 +1346,320 @@ def test_the_command_refuses_to_be_given_the_question_twice():
     assert both.exit_code != 0 and "either --describe" in both.output
     assert neither.exit_code != 0
     assert half.exit_code != 0 and "only meaningful together" in half.output
+
+
+# ---------------------------------------------------------------------------
+# Leads -- where the answer goes next
+# ---------------------------------------------------------------------------
+
+
+async def test_a_carried_value_opens_the_next_question_with_the_value_intact():
+    """The one hop the map can license without observing anything new.
+
+    ``status = oldStatus`` says the value arrived unchanged, so the observed
+    value is also the answer to the next question.  That is what makes the lead
+    a whole symptom rather than a field to go and look at -- the caller can put
+    it straight back in, which is the contract the loop runs on.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(), _subject(name="JediTaskSpec.oldStatus")],
+        junctions=[
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::doActionForReassign",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    carried = [lead for lead in strategy.leads if lead.field == "JediTaskSpec.oldStatus"]
+    assert len(carried) == 1
+    assert carried[0].symptom is not None
+    assert carried[0].symptom.subject == "JediTaskSpec.oldStatus"
+    assert carried[0].symptom.observed == "finishing"
+    assert carried[0].symptom.task_id == "7"
+    assert carried[0].stop == ""
+
+
+async def test_a_carried_value_with_no_upstream_writer_stops_and_says_so():
+    """Reaching the edge of the map is an answer, not a failure to find one.
+
+    The value came in from outside anything this map explains, which is exactly
+    what an unbound boundary is -- a complete statement and a work item at the
+    same time.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "a.py::f",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    carried = [lead for lead in strategy.leads if lead.field == "JediTaskSpec.oldStatus"]
+    assert carried and carried[0].symptom is None
+    assert carried[0].stop == models.STOP_NO_WRITER
+
+
+async def test_the_walk_does_not_lead_back_to_the_question_it_is_answering():
+    """``JediTaskSpec.status`` and ``oldStatus`` carry from each other, and
+    ``JobSpec.jobStatus`` carries from itself.  Emitting those as leads would
+    hand the caller a loop dressed as progress, and the caller cannot tell it
+    from a real hop without already knowing the map."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "a.py::f",
+                Branch(outcome=f"passthrough({SUBJECT})", tier=2),
+                log_files=[KNIGHT_LOG],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_gate_the_map_only_reads_is_a_lead_that_stops():
+    """The table that bounded the query nobody could see past.  It is a
+    terminal of the walk rather than a junction, and saying which terminal is
+    the answer -- ``JEDI_AUX_Status_MinTaskID`` had stopped being updated."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["finishing"], gates=["JEDI_AUX_Status_MinTaskID"])],
+        junctions=[_junction("a.py::f", Branch(outcome="finishing"), log_files=[KNIGHT_LOG])],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    gate = [lead for lead in strategy.leads if lead.field == "JEDI_AUX_Status_MinTaskID"]
+    assert gate and gate[0].stop == models.STOP_SHARED_TABLE
+    assert gate[0].symptom is None
+
+
+async def test_eliminating_a_candidate_takes_its_leads_with_it():
+    """A walk that keeps descending from a branch the evidence ruled out is
+    following a path the system did not take.  This is the same asymmetry the
+    candidates carry, applied one step further out."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(), _subject(name="JediTaskSpec.oldStatus")],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="pending"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    code_map = await _map(fragment)
+    strategy = await strategy_mod.derive(
+        code_map, Symptom(subject=SUBJECT, observed="pending", task_id="1")
+    )
+    assert [lead.field for lead in strategy.leads] == ["JediTaskSpec.oldStatus"]
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, _quiet))
+
+    assert [c.verdict for c in settled.candidates] == [ELIMINATED]
+    assert settled.leads == []
+
+
+async def test_a_cut_names_the_field_it_tested_and_the_value_the_line_reported():
+    """The strongest hop in the system, and the evidence supplies it.
+
+    A rejection line carries the measured value that made the condition true --
+    ``due to status=offline`` -- so the next question is not "go and look at the
+    site status" but a whole symptom with the value already in it.  The map
+    alone could never have said ``offline``.
+    """
+    stages = [
+        _filter_stage(
+            PROD_JOB,
+            "-status",
+            "status check",
+            0,
+            [PROD_JOB_LOG],
+            condition="tmpSiteSpec.status not in ('online',) and tmpSiteSpec.maxwdir",
+        )
+    ]
+    code_map = await _map(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            subjects=[
+                _subject(name="SiteSpec.status"),
+                _subject(name="SiteSpec.maxwdir"),
+                _subject(name="JediTaskSpec.status"),
+            ],
+            junctions=[
+                _junction(
+                    "configurator.py::run",
+                    Branch(outcome="offline"),
+                    log_files=[OTHER_LOG],
+                    subject="SiteSpec.status",
+                )
+            ],
+            filter_stages=stages,
+        )
+    )
+    strategy = await strategy_mod.derive(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-status", task_id="52249469")
+    )
+    results = []
+    for query in strategy_mod.queries(strategy):
+        mine = [_skip("52249469", "SITE_A", "-status")] if evidence_mod.TAG_PATTERN in query.pattern else []
+        results.append(_result(query, matched=len(mine), lines=mine))
+    settled = strategy_mod.evaluate(
+        strategy, Evidence(fetched_at="2026-09-05T00:00:00+00:00", results=results)
+    )
+
+    site = [lead for lead in settled.leads if lead.field == "SiteSpec.status"]
+    assert site, [lead.field for lead in settled.leads]
+    assert site[0].symptom is not None
+    assert site[0].symptom.subject == "SiteSpec.status"
+    assert site[0].symptom.observed == "offline"
+    # The task id is the *task*'s, and this question is about a site.
+    assert site[0].symptom.task_id is None
+
+
+async def test_a_name_several_subjects_declare_is_reported_rather_than_picked():
+    """``status`` is declared by a dozen specs, and the record keeps only the
+    leaf of each read -- the receiver that would settle it was thrown away when
+    the stage was stored.  Choosing one anyway is the retrieval failure this
+    design exists to remove, so the ambiguity is the answer."""
+    stages = [
+        _filter_stage(
+            PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG],
+            condition="tmpSiteSpec.status != 'online'",
+        )
+    ]
+    code_map = await _map(
+        MapFragment(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            subjects=[_subject(name="SiteSpec.status"), _subject(name="JobSpec.status")],
+            filter_stages=stages,
+        )
+    )
+    strategy = await strategy_mod.derive(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-status", task_id="52249469")
+    )
+
+    ambiguous = [lead for lead in strategy.leads if lead.stop == models.STOP_AMBIGUOUS]
+    assert ambiguous and ambiguous[0].field == "status"
+    assert "SiteSpec.status" in ambiguous[0].why and "JobSpec.status" in ambiguous[0].why
+
+
+async def test_a_lead_survives_while_any_surviving_candidate_still_opens_it():
+    """Five writers of ``oldStatus`` copy it from ``status``.  Folding them to
+    one before the evidence has spoken makes the field's presence depend on
+    which candidate happened to be listed first: rule that one out and the
+    whole hop disappears, although four others still open it."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(), _subject(name="JediTaskSpec.oldStatus")],
+        junctions=[
+            _junction(
+                "a.py::ruled_out",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "b.py::no_log_to_ask",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=PROXY_LOGS,
+                owns_logger=False,
+            ),
+            _junction(
+                "c.py::upstream",
+                Branch(outcome="pending"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="1")
+    )
+    assert [lead.opened_by for lead in strategy.leads] == ["a.py::ruled_out", "b.py::no_log_to_ask"]
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, _quiet))
+
+    ruled_out = [c for c in settled.candidates if c.verdict == ELIMINATED]
+    assert [c.owner for c in ruled_out] == ["a.py::ruled_out"]
+    assert [lead.opened_by for lead in settled.leads] == ["b.py::no_log_to_ask"]
+
+
+def test_a_continuing_lead_is_printed_as_the_command_that_asks_it():
+    """The loop's contract, and the only part of it a reader can check.
+
+    Describing the next question in prose would leave nobody able to take the
+    hop, and leave this layer free to emit one that cannot be asked.  Printing
+    it as the invocation makes the two the same thing.
+    """
+    import click
+
+    from bamboo.scripts.derive_strategy import _report_leads
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        leads=[
+            models.Lead(
+                field="JEDI_AUX_Status_MinTaskID",
+                stop=models.STOP_SHARED_TABLE,
+                why="it bounds which rows the query can see",
+            ),
+            models.Lead(
+                field="JediTaskSpec.oldStatus",
+                symptom=Symptom(
+                    subject="JediTaskSpec.oldStatus", observed="finishing", task_id="7"
+                ),
+                why="the writer copies the value from it",
+            ),
+        ],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_leads(strategy, 5, False))
+    output = runner.invoke(command).output
+
+    # Continuing first: one can be asked now, the other is where it ran out.
+    assert output.index("ask   ") < output.index("stops ")
+    assert (
+        "--subject JediTaskSpec.oldStatus --observed finishing --task 7" in output
+    ), output

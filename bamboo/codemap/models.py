@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -216,6 +217,13 @@ class Emit(BaseModel):
             "says the row took it."
         ),
     )
+
+
+#: ``passthrough(JediTaskSpec.oldStatus)`` -> ``JediTaskSpec.oldStatus``.  Kept
+#: beside the field whose spelling it reads, so the grammar of an outcome has
+#: one definition: the readers of it are in two modules and a second copy of the
+#: pattern is a second thing free to drift from what the extractor writes.
+PASSTHROUGH_OUTCOME = re.compile(r"^passthrough\((?P<field>[^)]+)\)$")
 
 
 class Branch(BaseModel):
@@ -1407,6 +1415,16 @@ class StageCut(BaseModel):
     inputs: list[str] = Field(
         default_factory=list, description="What those conditions read -- where a backward walk goes."
     )
+    reads: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Attribute name -> the subject the map says that read names.  "
+            "Resolved while the map is open, because the rejection line that "
+            "supplies the *value* arrives later and by then there is nothing to "
+            "resolve it against.  Names several subjects declare and the map "
+            "cannot separate are absent here and reported as leads instead."
+        ),
+    )
     log_files: list[str] = Field(
         default_factory=list,
         description=(
@@ -1498,6 +1516,61 @@ class Localization(BaseModel):
     )
 
 
+#: Why a lead stops instead of continuing.  Each is a terminal category of the
+#: backward walk -- a place the value came from that this map does not explain
+#: -- and naming which one is the answer, not the absence of one.
+STOP_NO_WRITER = "nothing in the map writes that field"
+STOP_SHARED_TABLE = "a table the map only ever reads"
+STOP_NEEDS_VALUE = "read by the condition, but its value was not observed"
+STOP_AMBIGUOUS = "several subjects declare that name and the map cannot say which"
+
+
+class Lead(BaseModel):
+    """Where the answer continues after this one, or the reason it stops.
+
+    **The map is asked once per hop, not once per investigation.**  A symptom is
+    not one question but a path: "the task sits in ``finishing``" opens the
+    read, the modify and the write, and learning that the modify stalled opens a
+    different question -- which job it waits on -- that nobody typed and that
+    the evidence, not the description, chose.  The vocabulary being closed is
+    what makes each hop a selection out of a known set; the set of *paths* is
+    not closed and does not need to be.
+
+    So this deliberately does not recurse.  A hop needs evidence before the next
+    one is worth taking, and evidence collection is a separate cadence -- a
+    ``derive`` that walked would have to reach production from inside the
+    derivation, which is the split the two phases exist to keep.  The loop
+    belongs to whoever holds the history: enumeration is the map's job and
+    selection is the reasoning's, and that seam is where an LLM can sit while
+    still being checkable.
+
+    A lead that continues carries a whole :class:`Symptom`, so the caller can
+    put it straight back in.  That is the contract, and it is why a field read
+    without a value *stops*: naming something to go and observe is a true and
+    useful answer, but it is not yet a question the map can be asked.
+    """
+
+    field: str = Field(..., description="What was carried or read, qualified where known.")
+    symptom: Optional[Symptom] = Field(
+        default=None,
+        description="The next question, ready to ask.  None when the walk stops here.",
+    )
+    stop: str = Field(
+        default="",
+        description="Why it stops, when it does -- one of the STOP_* categories.",
+    )
+    why: str = Field(default="", description="What opened this, in one clause.")
+    opened_by: str = Field(
+        default="",
+        description=(
+            "The candidate or cut that opened it.  Kept so that eliminating a "
+            "candidate takes its leads with it: a walk that keeps descending "
+            "from a branch the evidence ruled out is following a path the "
+            "system did not take."
+        ),
+    )
+
+
 class Strategy(BaseModel):
     """What the map has to say about one symptom.
 
@@ -1522,6 +1595,15 @@ class Strategy(BaseModel):
             "Both live on one model because everything around them is shared -- "
             "the observations, the evidence file, the two-phase split -- and "
             "only what the map says in the middle differs."
+        ),
+    )
+    leads: list[Lead] = Field(
+        default_factory=list,
+        description=(
+            "Where the answer goes next, and where it stops.  An investigation "
+            "is a path through the map rather than one lookup, and this is the "
+            "one hop this derivation can license -- filtered to the surviving "
+            "candidates once the evidence is in."
         ),
     )
     findings: list[str] = Field(

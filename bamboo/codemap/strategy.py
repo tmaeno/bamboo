@@ -54,6 +54,7 @@ eliminator reads as evidence.
 
 from __future__ import annotations
 
+import ast
 import logging
 import math
 import re
@@ -70,10 +71,14 @@ from bamboo.codemap.models import (
     ANSWER_NOT_ASKED,
     ANSWER_SEEN,
     ELIMINATED,
+    PASSTHROUGH_OUTCOME,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
+    STOP_AMBIGUOUS,
+    STOP_NO_WRITER,
+    STOP_SHARED_TABLE,
     SYMPTOM_DISTRIBUTION,
     UNASKABLE,
     UNSETTLED,
@@ -82,6 +87,7 @@ from bamboo.codemap.models import (
     FollowUp,
     FunnelStep,
     JunctionNode,
+    Lead,
     Localization,
     MapTerm,
     Match,
@@ -790,8 +796,8 @@ async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
     chains = await code_map.chains()
     if not chains:
         raise LookupError("this map holds no filter chains, so it has no distribution to localize")
-    leads = _leading(symptom.focus, chains)
-    owners = [leads, *sorted(set(chains) - {leads})]
+    leading = _leading(symptom.focus, chains)
+    owners = [leading, *sorted(set(chains) - {leading})]
     stages = [stage for owner in owners for stage in chains[owner]]
     files = sorted({f for stage in stages for f in stage.log_files})
 
@@ -822,16 +828,29 @@ async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
         for owner, count in sorted(unreadable.items())
     ]
 
+    # Resolved here rather than when the rejection lines arrive: the value that
+    # completes the next question comes from production, and by then the subject
+    # list is not open any more.  The map's half is which field was tested; the
+    # evidence's half is what it held.
+    by_attr, by_class = _declared_by(await code_map.subjects())
+    cuts = sorted((_cut(stage) for stage in stages), key=lambda c: (c.owner, c.order))
+    ambiguous: list[Lead] = []
+    for owner in owners:
+        named, unsettled = _chain_reads(
+            [c for stage in chains[owner] for c in stage.conditions], by_attr, by_class
+        )
+        ambiguous += unsettled
+        for cut in cuts:
+            if cut.owner == owner:
+                cut.reads = named
+
     return Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
         derived_from=next(iter(stages)).derived_from if stages else "",
         observations=_brokerage_observations(files, owners, symptom.task_id),
-        localization=Localization(
-            chain=leads,
-            log_files=files,
-            cuts=sorted((_cut(stage) for stage in stages), key=lambda c: (c.owner, c.order)),
-        ),
+        localization=Localization(chain=leading, log_files=files, cuts=cuts),
+        leads=_deduped(ambiguous),
         findings=findings,
         gaps=gaps,
     )
@@ -861,7 +880,8 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
 
     writers = await code_map.writers_of(symptom.subject)
     producers = await code_map.producers_of(symptom.subject, symptom.observed)
-    carried = sorted(await code_map.carried_from(symptom.subject))
+    upstream = await code_map.carried_from(symptom.subject)
+    carried = sorted(upstream)
 
     candidates = [_candidate(j, symptom.observed) for j in producers]
     pattern = _pattern(symptom.subject, symptom.observed, symptom.task_id, producers)
@@ -924,6 +944,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             writers,
             carried,
         ),
+        leads=_leads(symptom, candidates, upstream, subject.selection_gates),
         findings=_findings(candidates, producers),
         gaps=gaps,
     )
@@ -1100,6 +1121,277 @@ def _by_tag(
     return grouped
 
 
+# ---------------------------------------------------------------------------
+# Leads -- the one hop this derivation can license
+# ---------------------------------------------------------------------------
+
+
+def _reads(conditions: list[str]) -> dict[str, set[str]]:
+    """Receiver -> the attributes *conditions* read off it.
+
+    Parsed rather than matched, and the receiver kept.  The recognizer records
+    a stage's inputs as bare leaf names, which is enough to say a backward walk
+    continues and not enough to say where: ``status`` is declared by a dozen
+    specs and ``tmpSiteSpec`` is the half that settles it.  Measured on the
+    stored map, 77 receivers are dropped that way.
+
+    Not shared with ``selection._identifiers`` despite doing similar work.
+    That one lives in the PanDA recognizer plugin, and the read side is
+    map-generic -- importing a plugin here would make every map's lookup depend
+    on one map's extractor.  The duplication is the layer boundary, and it is
+    the smaller cost.
+    """
+    found: dict[str, set[str]] = {}
+    for condition in conditions:
+        try:
+            tree = ast.parse(condition.split("  [")[0], mode="eval")
+        except SyntaxError:
+            continue
+        called = {node.func for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node in called:
+                continue
+            receiver = node.value.id if isinstance(node.value, ast.Name) else ""
+            found.setdefault(receiver, set()).add(node.attr)
+    return found
+
+
+def _declared_by(subjects: list) -> tuple[dict[str, list[str]], dict[str, set[str]]]:
+    """Two indexes over the subject list: by attribute name, and by spec class."""
+    by_attr: dict[str, list[str]] = {}
+    by_class: dict[str, set[str]] = {}
+    for subject in subjects:
+        by_attr.setdefault(subject.attribute, []).append(subject.name)
+        by_class.setdefault(subject.spec_class, set()).add(subject.attribute)
+    return {a: sorted(n) for a, n in by_attr.items()}, by_class
+
+
+def _read_names(
+    receiver: str,
+    attribute: str,
+    reads: dict[str, set[str]],
+    by_attr: dict[str, list[str]],
+    by_class: dict[str, set[str]],
+) -> tuple[str, list[str]]:
+    """Which subject a read names, and the candidates when it cannot be said.
+
+    The disambiguation is the map's own strongest idiom, turned around: a write
+    site is attributed by the set of attributes touched on the receiver, because
+    what a name is called says who called it while what is asked of it says what
+    the code requires it to be.  The same holds for a read -- ``tmpSiteSpec`` is
+    asked for ``maxwdir`` as well as ``status``, and only ``SiteSpec`` declares
+    both.
+
+    Where the subject list cannot separate the candidates the answer is the
+    ambiguity, not a pick.  Choosing one would be the retrieval failure this
+    design removes, reintroduced one hop further out and with no way for the
+    reader to see it happened.
+    """
+    declaring = by_attr.get(attribute, [])
+    if len(declaring) <= 1:
+        return (declaring[0] if declaring else ""), declaring
+    # Only attributes some subject declares can discriminate; the rest are
+    # fields the promotion did not keep and say nothing about the class.
+    asked = {name for name in reads.get(receiver, set()) if name in by_attr}
+    fits = [name for name in declaring if asked <= by_class.get(name.rpartition(".")[0], set())]
+    return (fits[0] if len(fits) == 1 else ""), declaring
+
+
+#: ``due to status=offline (31x)`` -> ``status``, ``offline``.  The rejection
+#: line carries the value that made the condition true, which is the only place
+#: the next question's value can come from: the map knows the field and
+#: production knows what it held.
+_MEASURED = re.compile(r"\b(?P<name>[A-Za-z_]\w*)=(?P<value>[^\s,()]+)")
+
+
+def _chain_reads(conditions: list[str], by_attr, by_class) -> tuple[dict[str, str], list[Lead]]:
+    """What a chain's reads name, and a lead for each name it cannot settle.
+
+    **Scoped to the whole chain, not to one stage, and measured that way.**  A
+    stage's recorded conditions are the guards that dominate it rather than the
+    test that names the field -- production's ``-status`` cut carries
+    ``not sitePreAssigned``, which says nothing about a status.  Per stage there
+    is one attribute per receiver, the structural test has nothing to work with
+    and every shared name comes back ambiguous; over the function, ``taskSpec``
+    is asked for ``cpuTimeUnit`` and ``walltimeUnit`` as well, which only
+    ``JediTaskSpec`` declares.
+
+    The function is the right scope for the same reason it is at build time:
+    it is where a local name means one thing.  A chain reading ``.status`` off
+    two receivers that resolve differently comes back ambiguous, which is the
+    honest answer and the case the guard exists for.
+    """
+    reads = _reads(conditions)
+    named: dict[str, str] = {}
+    unsettled: list[Lead] = []
+    for receiver, attributes in sorted(reads.items()):
+        for attribute in sorted(attributes):
+            subject, declaring = _read_names(receiver, attribute, reads, by_attr, by_class)
+            if subject and named.get(attribute, subject) != subject:
+                # Two receivers, two subjects, one name: nothing here can say
+                # which of them a line mentioning that name was about.
+                named.pop(attribute)
+                unsettled.append(
+                    Lead(
+                        field=attribute,
+                        stop=STOP_AMBIGUOUS,
+                        why="this chain reads it off more than one kind of record",
+                    )
+                )
+            elif subject:
+                named[attribute] = subject
+            elif len(declaring) > 1:
+                unsettled.append(
+                    Lead(
+                        field=attribute,
+                        stop=STOP_AMBIGUOUS,
+                        why=f"{', '.join(declaring)} all declare it",
+                    )
+                )
+    return named, unsettled
+
+
+def _measured_leads(cut: StageCut) -> tuple[list[Lead], set[str]]:
+    """The next question a rejection line already answered the value of.
+
+    The strongest hop the system has, and the map alone could never make it:
+    the map says the stage tested a field and production says what that field
+    held.  Scoped to nothing -- the entity the task id names is a task and this
+    question is about a site, so carrying it over would build a pattern that
+    cannot match, which the eliminator would then read as silence.
+
+    Also returns the names it could not tie to a subject, because that set is a
+    measurement of the extraction rather than of the question.  Production
+    reports ``status=test`` from a chain whose recorded conditions never read a
+    status: the test is written into a flag and the message is emitted under
+    the flag, so the predicate that names the field is not in the path
+    condition.  Counted and reported instead of being reached for across
+    chains, which would paper over a gap in the build with a guess in the read.
+    """
+    leads: list[Lead] = []
+    unnamed: set[str] = set()
+    for reason in cut.reasons:
+        for found in _MEASURED.finditer(reason):
+            subject = cut.reads.get(found.group("name"))
+            if not subject:
+                unnamed.add(found.group("name"))
+                continue
+            if any(lead.field == subject for lead in leads):
+                continue
+            leads.append(
+                Lead(
+                    field=subject,
+                    symptom=Symptom(subject=subject, observed=found.group("value")),
+                    why=f"{cut.tag or cut.funnel_label} said {found.group(0)}",
+                    opened_by=cut.tag or cut.funnel_label,
+                )
+            )
+    return leads, unnamed
+
+
+def _leads(
+    symptom: Symptom,
+    candidates: list[Candidate],
+    carried: dict[str, list[JunctionNode]],
+    gates: list[str],
+) -> list[Lead]:
+    """Where a value symptom's answer continues, and where it stops.
+
+    Only from what the map can say without observing anything new, which is two
+    things.  A ``passthrough`` outcome says the value arrived unchanged, so the
+    observed value is also the next question's -- a whole symptom, ready to ask.
+    And a selection gate is a table the map only ever reads, which is a terminal
+    of the walk and the one that mattered: a task sat in ``finishing`` because
+    the watermark table bounding the rescue query had stopped being updated.
+
+    A field that carries to itself is not a lead.  ``JediTaskSpec.status`` and
+    ``oldStatus`` copy from each other and ``JobSpec.jobStatus`` from itself, so
+    emitting those would hand back a loop dressed as progress -- and the caller
+    cannot tell one from a real hop without already knowing the map.
+    """
+    leads: list[Lead] = []
+    for candidate in candidates:
+        opened: set[str] = set()
+        for branch in candidate.branches:
+            found = PASSTHROUGH_OUTCOME.match(branch.outcome or "")
+            if not found:
+                continue
+            field = found.group("field")
+            if field == symptom.subject or field in opened:
+                continue
+            opened.add(field)
+            upstream = carried.get(field) or []
+            leads.append(
+                Lead(
+                    field=field,
+                    symptom=(
+                        Symptom(
+                            subject=field,
+                            observed=symptom.observed,
+                            task_id=symptom.task_id,
+                        )
+                        if upstream
+                        else None
+                    ),
+                    stop="" if upstream else STOP_NO_WRITER,
+                    why=(
+                        f"{short_owner(candidate.owner)} copies the value from it, so it "
+                        f"held {symptom.observed!r} too"
+                    ),
+                    opened_by=candidate.owner,
+                )
+            )
+    leads += [
+        Lead(
+            field=gate,
+            stop=STOP_SHARED_TABLE,
+            why="it bounds which rows the queries selecting this value can see",
+        )
+        for gate in gates
+    ]
+    return leads
+
+
+def _deduped(leads: list[Lead]) -> list[Lead]:
+    """One lead per field, keeping the first that named it.
+
+    Several stages of one chain test the same field, and a reader asked to hold
+    twenty copies of "go and find out about ``status``" stops reading.
+
+    **Always after the surviving-candidate filter, never before.**  Five writers
+    of ``JediTaskSpec.oldStatus`` copy it from ``status``; folding them first
+    keeps one, and if the evidence then rules that one out the field disappears
+    although four surviving candidates still open it.  Collapsing before
+    filtering makes a lead's presence depend on which candidate happened to be
+    listed first, which is not a fact about the system.
+    """
+    seen: set[str] = set()
+    kept: list[Lead] = []
+    for lead in leads:
+        if lead.field in seen:
+            continue
+        seen.add(lead.field)
+        kept.append(lead)
+    return kept
+
+
+def _surviving_leads(strategy: Strategy) -> list[Lead]:
+    """The leads whose opener the evidence has not ruled out.
+
+    A walk that keeps descending from a branch production says did not fire is
+    following a path the system did not take, and it would do so with all the
+    confidence of the ones that did.
+    """
+    alive = {c.owner for c in strategy.candidates if c.verdict != ELIMINATED}
+    if strategy.localization is not None:
+        alive |= {
+            cut.tag or cut.funnel_label
+            for cut in strategy.localization.cuts
+            if cut.verdict != ELIMINATED
+        }
+    return [lead for lead in strategy.leads if not lead.opened_by or lead.opened_by in alive]
+
+
 def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localization:
     """Fill in how much of the list each step actually took.
 
@@ -1253,6 +1545,20 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     settled.candidates = [_settle(c, probes, controls) for c in settled.candidates]
     if settled.localization is not None:
         settled.localization = _settle_localization(settled, ev)
+        # Only now can a cut's read become a whole question: the map said which
+        # field the stage tested and the line says what it held.
+        unnamed: set[str] = set()
+        for cut in settled.localization.cuts:
+            found, missed = _measured_leads(cut)
+            settled.leads += found
+            unnamed |= missed
+        if unnamed:
+            settled.gaps.append(
+                f"{len(unnamed)} name(s) the rejection lines report a value for are not read "
+                "by any condition this chain records, so the walk cannot say what they are "
+                f"about: {', '.join(sorted(unnamed)[:8])}"
+            )
+    settled.leads = _deduped(_surviving_leads(settled))
     diag = _recorded_message(ev, strategy.symptom)
     return name_the_arm(settled, diag) if diag else settled
 

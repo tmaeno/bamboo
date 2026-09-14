@@ -278,6 +278,46 @@ def _report_observations(strategy: Strategy, top: int, full: bool, evaluated: bo
         click.echo(f"  … {len(probes) - len(shown)} more (--full)")
 
 
+def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
+    """Where this answer goes next, and where it stops.
+
+    Printed as something to run, not as prose.  A lead that continues is a whole
+    question, so it is shown as the command that asks it -- that the next hop
+    can be taken by hand is the contract the loop runs on, and a report that
+    only described it would leave nobody able to check that.
+    """
+    if not strategy.leads:
+        return
+    # Continuing leads first: one is a question that can be asked now and the
+    # other is a place the walk ran out, and a reader deciding what to do next
+    # wants them in that order.
+    ordered = sorted(strategy.leads, key=lambda lead: (lead.symptom is None, lead.field))
+    # Folded for reading only.  Several candidates open the same field and the
+    # strategy keeps every one of them, because which of them survives the
+    # evidence is not decided until later -- see ``_deduped``.
+    ordered = [
+        lead
+        for index, lead in enumerate(ordered)
+        if lead.field not in {earlier.field for earlier in ordered[:index]}
+    ]
+    click.echo("\nwhere this goes next")
+    shown = ordered if full else ordered[:top]
+    for lead in shown:
+        if lead.symptom is not None:
+            ask = f"--subject {lead.symptom.subject} --observed {lead.symptom.observed}"
+            if lead.symptom.task_id:
+                ask += f" --task {lead.symptom.task_id}"
+            click.echo(f"  ask   {ask}")
+        else:
+            click.echo(f"  stops {lead.field}  -- {lead.stop}")
+        for line in click.wrap_text(
+            lead.why, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
+        ).splitlines():
+            click.echo(line)
+    if len(ordered) > len(shown):
+        click.echo(f"  … {len(ordered) - len(shown)} more (--full)")
+
+
 def _report_findings(strategy: Strategy, top: int, full: bool) -> None:
     for title, rows in (("findings", strategy.findings), ("gaps", strategy.gaps)):
         if not rows:
@@ -552,6 +592,7 @@ def main(
         _report_follow_up(strategy)
         _report_candidates(strategy, top, full, ev is not None or named)
     _report_observations(strategy, top, full, ev is not None)
+    _report_leads(strategy, top, full)
     _report_findings(strategy, top, full)
 
 
