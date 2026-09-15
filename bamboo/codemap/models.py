@@ -468,6 +468,16 @@ class JunctionNode(BaseNode):
         ),
     )
     anchor: Optional[Anchor] = None
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Hash of the enclosing function's text -- the key of the reading "
+            "that explains it.  Computed at build time so the input a reader "
+            "would be given is chosen by the map and not by whoever asks; the "
+            "reading itself is filled in lazily.  Empty when the function "
+            "could not be located in the snapshot."
+        ),
+    )
 
     def observable_log_files(self) -> list[str]:
         """Files where a line *about this junction firing* can appear.
@@ -968,10 +978,82 @@ class FilterStageNode(BaseNode):
         ),
     )
     anchor: Optional[Anchor] = None
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Hash of the enclosing function's text -- the key of the reading "
+            "that explains it.  Computed at build time so the input a reader "
+            "would be given is chosen by the map and not by whoever asks; the "
+            "reading itself is filled in lazily.  Empty when the function "
+            "could not be located in the snapshot."
+        ),
+    )
 
     @staticmethod
     def make_name(map_id: str, owner: str, signature: str) -> str:
         return f"{map_id}:{owner}:{signature}"
+
+
+class GlossNode(BaseNode):
+    """A reading of one function, and the exact text that reading was given.
+
+    The unit is a function because that is what a reader needs, measured
+    rather than assumed.  An arm's own guard is a median of eight lines, but
+    only 35 of 927 arms refer to nothing outside it: 96% load names they do not
+    bind, a median of four each, and 52% sit in a loop whose header is outside
+    their guard.  Following those references -- the backward slice the map
+    already names as its method -- reaches a median of 37% of the enclosing
+    function and, at the ninetieth percentile, 96% of it.  Slicing would build
+    a mechanism to arrive at very nearly the function.
+
+    Sharing is why it is a node at all rather than a field on each junction:
+    497 junctions sit in 213 functions, 376 of them share one with another
+    junction, and the 109 filter stages sit in five.  Read once per function
+    and every arm in it is explained together -- 213 readings rather than 1046.
+
+    ``shown`` is the text that was actually handed over, kept for the same
+    reason grep output is written to an evidence file: when a reading is wrong,
+    it separates *the input was insufficient* from *the reader misread it*, and
+    those want opposite fixes.  It is evidence, never the record -- the source
+    tree stays canonical.  Storing the mapped functions instead would not even
+    save space: the whole corpus is 5.6 MB of Python, the owner functions alone
+    are 1.65 MB of it, and adding the callers a reader might ask for next takes
+    that to 63% and then 90%.  The closure does not converge on a subset.  It
+    would also cost the oracle, since ``check-map`` rebuilds the fragment from
+    source on every run and the offline gates work by comparing two statements
+    the *code* makes.
+
+    Identity is ``gloss_key``, the hash of the text.  A reading is only about
+    the text it was given, so a changed function is a different node rather
+    than a stale field -- which is also why this does not share
+    :meth:`JunctionNode.content_hash`: that one hashes a junction's *meaning*
+    and deliberately ignores the surrounding source, which is the right key for
+    an artefact derived from the branch table and the wrong one for an artefact
+    derived from the file.
+    """
+
+    node_type: NodeType = NodeType.GLOSS
+    map_id: str
+    derived_from: str
+    gloss_key: str = Field(..., description="Hash of `shown`; the node's identity.")
+    owner: str = Field(..., description="module::qualname of the function read.")
+    anchor: Optional[Anchor] = None
+    shown: str = Field(
+        default="",
+        description="The exact text the reader was given.  Evidence, not the record.",
+    )
+    explanation: str = Field(
+        default="",
+        description=(
+            "What the reader made of it.  Empty until something reads it: the "
+            "map is built eagerly and this is filled in lazily, when an "
+            "investigation actually touches this function."
+        ),
+    )
+
+    @staticmethod
+    def make_name(map_id: str, gloss_key: str) -> str:
+        return f"{map_id}:gloss:{gloss_key}"
 
 
 # ---------------------------------------------------------------------------
@@ -1205,6 +1287,24 @@ class Candidate(BaseModel):
     """
 
     owner: str
+    file: str = Field(default="", description="Where the junction is, for a reader.")
+    blob_sha: str = Field(
+        default="",
+        description=(
+            "Hash of the file the map read.  Carried so that reading the code "
+            "against a different snapshot is noticed: line drift is one of the "
+            "two skew symptoms no gate catches."
+        ),
+    )
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Key of the reading of its enclosing function.  Carried on the "
+            "candidate because eliminating a candidate has to take its reading "
+            "with it: the point of the enumeration is that what the evidence "
+            "rules out stops being offered."
+        ),
+    )
     tier: int = Field(
         default=1,
         description=(
@@ -1571,6 +1671,51 @@ class Lead(BaseModel):
     )
 
 
+class Reading(BaseModel):
+    """One function to read, the arms it covers, and the line to read it against.
+
+    Per function rather than per arm because that is where the sharing is: the
+    arms that survive a question routinely sit together -- one function holds
+    up to eleven junctions -- and asking about each separately reads the same
+    text over again and invites two answers about one piece of code.
+
+    ``log_pattern`` is empty for an arm the map records no line for.  That is
+    not a defect to be papered over: of 1046 branches, 988 can be pointed at in
+    the source and 484 carry a line that production would print, so 43% can be
+    put side by side and the rest are honestly *read this, there is nothing to
+    match it against*.  Filling the gap with a guessed pattern would turn a
+    known silence into an empty query, and an empty query is what this design
+    reads as evidence.
+    """
+
+    owner: str
+    file: str = Field(default="", description="Where the function is.")
+    blob_sha: str = Field(
+        default="", description="Hash of the file the map read it from."
+    )
+    gloss_key: str = Field(
+        default="",
+        description="Key of the reading of this function, from the map.",
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description="The arms' own lines -- what to mark in the text handed over.",
+    )
+    outcomes: list[str] = Field(
+        default_factory=list, description="The values those arms write."
+    )
+    log_files: list[str] = Field(default_factory=list)
+    log_pattern: str = Field(
+        default="",
+        description="What production would print for these arms.  Empty means silent.",
+    )
+
+    @property
+    def silent(self) -> bool:
+        """True when the map records no production line for any of these arms."""
+        return not self.log_pattern
+
+
 class Strategy(BaseModel):
     """What the map has to say about one symptom.
 
@@ -1604,6 +1749,14 @@ class Strategy(BaseModel):
             "is a path through the map rather than one lookup, and this is the "
             "one hop this derivation can license -- filtered to the surviving "
             "candidates once the evidence is in."
+        ),
+    )
+    readings: list[Reading] = Field(
+        default_factory=list,
+        description=(
+            "The code to read, one entry per function, filtered to the "
+            "surviving candidates once the evidence is in.  The map chooses "
+            "the input; what reads it is not this module's business."
         ),
     )
     findings: list[str] = Field(

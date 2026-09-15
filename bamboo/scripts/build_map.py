@@ -208,6 +208,28 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             if len(blind) > top:
                 click.echo(f"    … {len(blind) - top} more")
 
+    readable = [n for n in list(fragment.junctions) + list(fragment.filter_stages) if n.gloss_key]
+    unreadable = [
+        n for n in list(fragment.junctions) + list(fragment.filter_stages) if not n.gloss_key
+    ]
+    if readable:
+        shared = Counter(n.gloss_key for n in readable)
+        click.echo(
+            f"\ncode to read: {len(readable)} node(s) in {len(shared)} function(s)"
+        )
+        click.echo(
+            f"  most shared: {shared.most_common(1)[0][1]} node(s) in one function "
+            "-- read once, every arm in it is explained together"
+        )
+        if unreadable:
+            # Not a failure to fix: a write at module scope has no enclosing
+            # function, so there is nothing to hand a reader.  Said out loud
+            # because a silent zero is how "not read" hides inside "no key".
+            where = Counter(n.owner for n in unreadable)
+            click.echo(f"  no enclosing function ({len(unreadable)}):")
+            for owner, count in where.most_common(top):
+                click.echo(f"    {count:>3}  {owner}")
+
     if fragment.diagnostics:
         fields = Counter(d.field for d in fragment.diagnostics)
         distinct = {d.template for d in fragment.diagnostics}

@@ -77,6 +77,7 @@ def _junction(
     owns_logger: bool = True,
     triggers: tuple[str, ...] = (),
     subject: str = SUBJECT,
+    gloss_key: str | None = None,
 ) -> JunctionNode:
     return JunctionNode(
         map_id=MAP_ID,
@@ -91,6 +92,7 @@ def _junction(
         entry_points=[
             EntryPoint(trigger=trigger, entry=owner.split("::")[0]) for trigger in triggers
         ],
+        gloss_key=gloss_key if gloss_key is not None else f"key-{owner}",
         anchor=Anchor(package="pandajedi", file=owner.split("::")[0], line_start=1),
     )
 
@@ -1663,3 +1665,97 @@ def test_a_continuing_lead_is_printed_as_the_command_that_asks_it():
     assert (
         "--subject JediTaskSpec.oldStatus --observed finishing --task 7" in output
     ), output
+
+
+# ---------------------------------------------------------------------------
+# What code the answer says to read
+# ---------------------------------------------------------------------------
+
+
+async def test_the_reading_is_per_function_not_per_arm():
+    """One entry however many arms it holds.
+
+    The sharing is not incidental: 497 junctions sit in 213 functions and one
+    of them holds twenty.  Asking about each arm separately reads the same text
+    over again and invites two answers about one piece of code.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction("jediorder/A.py::run", Branch(outcome="pending", line=10), gloss_key="same"),
+            _junction("jediorder/A.py::run2", Branch(outcome="pending", line=40), gloss_key="same"),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="7")
+    )
+
+    assert len(strategy.candidates) == 2
+    assert len(strategy.readings) == 1
+    assert strategy.readings[0].lines == [10, 40]
+
+
+async def test_an_arm_with_no_line_of_its_own_is_shown_as_silent():
+    """Said rather than left out.
+
+    Of 1046 branches the map can point at 988 in the source and 484 carry a
+    line production prints, so 43% can be put side by side.  Inventing a
+    pattern for the rest would turn a known silence into an empty query, and an
+    empty query is what this design reads as evidence.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "jedipprocess/PostProcessorBase.py::doPreCheck",
+                Branch(outcome="pending", line=272),
+                owns_logger=False,
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="7")
+    )
+
+    assert [r.silent for r in strategy.readings] == [True]
+
+
+async def test_the_reading_follows_the_arm_the_record_names():
+    """A match is proof that this arm decided, so the others stop being offered.
+
+    The other direction is not available: a record naming none proves nothing,
+    because the field holds the last message written to it.
+    """
+    strategy = await _six_arms(
+        diag="#ATM #KV action=set_exhausted reason=scout_cpuTime measured 900"
+    )
+
+    assert len(strategy.candidates) == 2
+    assert len(strategy.readings) == 1
+    assert strategy.readings[0].owner == _SCOUT
+    assert strategy.readings[0].lines == [1239]
+
+
+async def test_a_ruled_out_candidate_takes_its_reading_with_it():
+    """Reading code the evidence ruled out sends a reader down a path the system
+    did not take, which is worse than offering nothing."""
+    strategy = await _two_candidates()
+    before = len(strategy.readings)
+
+    def decide(role, filename, service):
+        if role == strategy_mod.CONTROL:
+            return {"matched": 5}
+        if filename == KNIGHT_LOG:
+            return {"matched": 1, "lines": ["set task_status=pending"]}
+        return {"matched": 0}
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, decide))
+    verdicts = {c.owner: c.verdict for c in settled.candidates}
+
+    assert before == 2
+    assert verdicts["jediorder/TaskCommando.py::run"] == ELIMINATED
+    assert [r.owner for r in settled.readings] == ["jediorder/ContentsFeeder.py::feed"]

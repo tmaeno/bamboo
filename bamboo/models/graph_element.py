@@ -68,6 +68,7 @@ class NodeType(str, Enum):
     SUBJECT = "Subject"
     VALUE_ENUM = "ValueEnum"
     FILTER_STAGE = "FilterStage"
+    GLOSS = "Gloss"
 
 
 #: The labels that make up the Code Map namespace.
@@ -87,6 +88,7 @@ CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
         NodeType.SUBJECT,
         NodeType.VALUE_ENUM,
         NodeType.FILTER_STAGE,
+        NodeType.GLOSS,
     }
 )
 

@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from bamboo.codemap import reading
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
@@ -116,6 +117,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     def __init__(self) -> None:
         self._emits = 0
+        self._glossed = 0
         self._flush_guards = 0
         self._roots: dict[str, Path] = {}
         self._version: str = ""
@@ -375,6 +377,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 self._emits,
             )
 
+        # Last, because it keys on the anchor every other pass has finished
+        # placing.  Chooses the text a reader would be given; reading it is
+        # nobody's business at build time.
+        self._glossed = reading.attach(fragment, self._modules)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -389,6 +396,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def emits(self) -> int:
         """Branches given the log line the code writes when they fire."""
         return self._emits
+
+    @property
+    def glossed(self) -> int:
+        """Nodes whose enclosing function the map could locate and key."""
+        return self._glossed
 
     @property
     def flush_guards(self) -> int:

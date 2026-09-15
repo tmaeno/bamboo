@@ -37,6 +37,7 @@ from typing import Optional
 import click
 
 from bamboo.codemap import evidence as evidence_mod
+from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
@@ -47,6 +48,7 @@ from bamboo.codemap.models import (
     Strategy,
     Symptom,
 )
+from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +320,71 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
         click.echo(f"  … {len(ordered) - len(shown)} more (--full)")
 
 
+def _report_reading(
+    strategy: Strategy, roots: Optional[dict], top: int, full: bool
+) -> None:
+    """The code to read, and the production line to read it against.
+
+    One entry per function, not per arm: the surviving arms routinely sit
+    together and reading the same text twice invites two answers about one
+    piece of code.  Whether the pair can be made is stated either way -- an arm
+    the map records no line for is shown as silent rather than left out, since
+    a query invented to fill the gap would come back empty and an empty query
+    is what this design reads as evidence.
+
+    Without a source tree only the coordinates are printed.  The map names the
+    text; fetching it is a separate step, for the same reason deriving and
+    asking production are: the plan can be checked before anything is read.
+    """
+    if not strategy.readings:
+        return
+    click.echo("\ncode to read")
+    shown = strategy.readings if full else strategy.readings[:top]
+    for entry in shown:
+        outcomes = ", ".join(entry.outcomes[:3]) or "-"
+        click.echo(f"  {strategy_mod.short_owner(entry.owner):<52} {outcomes}")
+        marks = ",".join(str(line) for line in entry.lines[:6]) or "-"
+        region = (
+            reading_mod.region_for(
+                roots,
+                file=entry.file,
+                owner=entry.owner,
+                line=entry.lines[0],
+                expected_sha=entry.blob_sha,
+            )
+            if roots and entry.lines
+            else None
+        )
+        where = f"{entry.file}"
+        if region is not None:
+            where += (
+                f"  {region.line_start}-{region.line_end} "
+                f"({region.line_end - region.line_start + 1} lines)"
+            )
+        click.echo(f"        {where}   arms at {marks}")
+        if region is not None and region.off_version:
+            # Said before anything is read from it.  The map's lines address the
+            # snapshot it was built from, and a different one puts the mark on
+            # plausible code that is not the code -- which reads as an answer.
+            click.echo(
+                "        the tree given is not the one this map was built from: "
+                "the lines above are this tree's, not the map's"
+            )
+        if entry.silent:
+            click.echo(
+                "        silent -- the map records no line production prints for this arm"
+            )
+        else:
+            click.echo(
+                f"        match against  {entry.log_pattern}"
+                f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
+            )
+        if full and region is not None:
+            click.echo(region.marked(entry.lines))
+    if len(strategy.readings) > len(shown):
+        click.echo(f"  … {len(strategy.readings) - len(shown)} more (--full)")
+
+
 def _report_findings(strategy: Strategy, top: int, full: bool) -> None:
     for title, rows in (("findings", strategy.findings), ("gaps", strategy.gaps)):
         if not rows:
@@ -509,6 +576,15 @@ async def _derive(
     show_default=True,
     help="Seconds to wait for each grep to come back.",
 )
+@click.option(
+    "--source-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Read the code the map points at from this tree.  Without it only the "
+        "coordinates are printed; the map names the text either way."
+    ),
+)
 @click.option("--full", is_flag=True, help="Print every folded row, with conditions and anchors.")
 @click.option("--top", default=10, show_default=True, help="Rows per listing.")
 @click.option("-v", "--verbose", is_flag=True, help="DEBUG logging.")
@@ -523,6 +599,7 @@ def main(
     evidence_path: Path,
     fetch: bool,
     timeout: float,
+    source_root: Optional[Path],
     full: bool,
     top: int,
     verbose: bool,
@@ -593,6 +670,12 @@ def main(
         _report_candidates(strategy, top, full, ev is not None or named)
     _report_observations(strategy, top, full, ev is not None)
     _report_leads(strategy, top, full)
+    _report_reading(
+        strategy,
+        PandaCodeMapPlugin._resolve_roots(source_root) if source_root else None,
+        top,
+        full,
+    )
     _report_findings(strategy, top, full)
 
 

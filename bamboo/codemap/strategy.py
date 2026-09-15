@@ -92,6 +92,7 @@ from bamboo.codemap.models import (
     MapTerm,
     Match,
     Observation,
+    Reading,
     StageCut,
     Strategy,
     Symptom,
@@ -342,6 +343,9 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
     stated = any(b.outcome == observed for b in junction.branches)
     return Candidate(
         owner=junction.owner,
+        file=junction.anchor.file if junction.anchor else "",
+        blob_sha=(junction.anchor.blob_sha or "") if junction.anchor else "",
+        gloss_key=junction.gloss_key,
         tier=1 if stated else 2,
         log_files=junction.observable_log_files(),
         branches=[
@@ -432,6 +436,10 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
         if candidate.named:
             candidate.verdict = SEEN
             candidate.because = "the record's own message names this branch"
+    # The reading follows the naming.  A match is proof that this arm decided,
+    # so offering the other seventeen functions after saying which one wrote the
+    # value would hand a reader the question the record already answered.
+    settled.readings = _readings(settled.candidates, settled.observations)
     return settled
 
 
@@ -945,6 +953,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             carried,
         ),
         leads=_leads(symptom, candidates, upstream, subject.selection_gates),
+        readings=_readings(candidates, asked),
         findings=_findings(candidates, producers),
         gaps=gaps,
     )
@@ -1559,8 +1568,69 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
                 f"about: {', '.join(sorted(unnamed)[:8])}"
             )
     settled.leads = _deduped(_surviving_leads(settled))
+    # Narrowed for the same reason the leads are: offering a reading of code the
+    # evidence has ruled out sends a reader to look at a path the system did not
+    # take, which is worse than offering nothing.
+    settled.readings = _readings(survivors(settled), settled.observations)
     diag = _recorded_message(ev, strategy.symptom)
     return name_the_arm(settled, diag) if diag else settled
+
+
+def _readings(candidates: list[Candidate], observations: list[Observation]) -> list[Reading]:
+    """The code to read, one entry per function rather than per candidate.
+
+    Grouped because the sharing is real and asking twice about one function
+    invites two answers about one piece of code: 497 junctions sit in 213
+    functions, and one of them holds twenty.  The key is the map's, computed at
+    build time, so the same question always selects the same text.
+
+    A candidate the map cannot locate a function for is left out here and said
+    out loud by the caller.  Five exist, all writes at module scope, where
+    there is no enclosing function to hand over -- a fact about the code, not a
+    hole in the reading.
+    """
+    # A record that names an arm has settled which one decided -- the message
+    # and the branch were written in the same block -- so the reading narrows
+    # to it.  The other direction is not available: naming none proves nothing,
+    # and then every candidate is still worth reading.
+    named = [c for c in candidates if c.named]
+    if named:
+        candidates = named
+
+    scoped: dict[str, tuple[str, list[str]]] = {}
+    for observation in observations:
+        if observation.role != PROBE:
+            continue
+        for owner in observation.settles:
+            pattern, files = scoped.setdefault(owner, (observation.pattern, []))
+            if observation.log_file not in files:
+                files.append(observation.log_file)
+
+    grouped: dict[str, Reading] = {}
+    for candidate in candidates:
+        if not candidate.gloss_key:
+            continue
+        reading = grouped.get(candidate.gloss_key)
+        if reading is None:
+            pattern, files = scoped.get(candidate.owner, ("", []))
+            reading = Reading(
+                owner=candidate.owner,
+                file=candidate.file,
+                blob_sha=candidate.blob_sha,
+                gloss_key=candidate.gloss_key,
+                log_files=list(files),
+                log_pattern=pattern,
+            )
+            grouped[candidate.gloss_key] = reading
+        arms = candidate.named or candidate.branches
+        for branch in arms:
+            if branch.line is not None and branch.line not in reading.lines:
+                reading.lines.append(branch.line)
+            if branch.outcome and branch.outcome not in reading.outcomes:
+                reading.outcomes.append(branch.outcome)
+    for reading in grouped.values():
+        reading.lines.sort()
+    return sorted(grouped.values(), key=lambda r: r.owner)
 
 
 def survivors(strategy: Strategy) -> list[Candidate]:
