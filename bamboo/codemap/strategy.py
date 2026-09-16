@@ -1428,6 +1428,45 @@ def _leads(
     return leads
 
 
+def visit_key(symptom: Symptom) -> str:
+    """How a question is spelled when asking whether it has been asked before.
+
+    The whole question, not the field.  ``JediTaskSpec.status`` is reached
+    twice in most walks -- once as the symptom and once as what ``oldStatus``
+    was copied from -- and those are the same question only if the value is
+    the same too.  Keying on the field alone would cut a live path on the
+    grounds that a different question about that field had already been asked.
+    """
+    if symptom.kind == SYMPTOM_DISTRIBUTION:
+        return f"{SYMPTOM_DISTRIBUTION}:{symptom.focus}"
+    return f"{symptom.subject}={symptom.observed}"
+
+
+def next_question(strategy: Strategy, visited: set[str]) -> tuple[Optional[Lead], list[str]]:
+    """The first lead worth taking, and the questions that came round again.
+
+    Surviving leads only, and in the order the derivation put them: the map's
+    own edges come before anything assembled here, so a deterministic hop is
+    never passed over for a proposed one.
+
+    Returns the repeats as well as the choice because they are an answer.
+    ``status`` and ``oldStatus`` copy from each other, so a walk that merely
+    skipped the repeat would stop looking like it had found a loop and start
+    looking like it had run out of map -- and those call for opposite things
+    from whoever reads the trace.
+    """
+    repeats: list[str] = []
+    for lead in _deduped(_surviving_leads(strategy)):
+        if lead.symptom is None:
+            continue
+        key = visit_key(lead.symptom)
+        if key in visited:
+            repeats.append(key)
+            continue
+        return lead, repeats
+    return None, repeats
+
+
 def _deduped(leads: list[Lead]) -> list[Lead]:
     """One lead per field, keeping the first that named it.
 

@@ -1902,6 +1902,160 @@ async def test_the_map_leads_say_they_came_from_the_map():
     assert {lead.source for lead in strategy.leads} == {models.LEAD_MAP}
 
 
+# ---------------------------------------------------------------------------
+# The walk: one derivation per hop, driven from outside
+# ---------------------------------------------------------------------------
+
+
+async def _two_field_map(loops_back: bool = False) -> CodeMap:
+    """``status`` carries from ``oldStatus``, which has a writer of its own."""
+    # The real shape: ``JediTaskSpec.recordOldStatus`` does ``self.oldStatus =
+    # self.status``, a junction of its own rather than another arm of the one
+    # that writes a literal.
+    back = (
+        [
+            _junction(
+                "taskbuffer/JediTaskSpec.py::recordOldStatus",
+                Branch(outcome="passthrough(JediTaskSpec.status)", tier=2),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            )
+        ]
+        if loops_back
+        else []
+    )
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(), _subject(name="JediTaskSpec.oldStatus")],
+        junctions=[
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::doActionForReassign",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+            *back,
+        ],
+    )
+    return await _map(fragment)
+
+
+async def test_the_walk_takes_the_second_hop_without_being_asked_again():
+    """The point of the whole round.  A symptom is a path, not a lookup: the map
+    named ``oldStatus`` as where ``finishing`` came from, and until now a person
+    had to retype that as the next question.  The evidence chooses the next hop;
+    the description only ever chose the first."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+    )
+
+    assert [hop.symptom.subject for hop in investigation.hops] == [
+        SUBJECT,
+        "JediTaskSpec.oldStatus",
+    ]
+    assert investigation.hops[1].symptom.observed == "finishing"
+    assert investigation.hops[1].symptom.task_id == "7"
+    assert investigation.hops[1].opened == "JediTaskSpec.oldStatus"
+    assert investigation.hops[1].source == models.LEAD_MAP
+
+
+async def test_a_question_already_asked_stops_the_walk_and_is_named():
+    """``status`` and ``oldStatus`` copy from each other, so the walk comes back
+    to where it started.  That is a property of the system and not a failure, so
+    it is reported as one -- a walk without the set would go round for ever, and
+    one that silently dropped the repeat would look like a dead end."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(loops_back=True),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=5,
+    )
+
+    assert len(investigation.hops) == 2
+    assert investigation.stopped == models.WALK_ASKED
+    assert investigation.cycles == [f"{SUBJECT}=finishing"]
+
+
+async def test_the_budget_is_what_stops_a_walk_nobody_is_watching():
+    """An unattended run reaches production once per hop, so the hop count is
+    the only thing standing in for the person who would otherwise stop it."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(loops_back=True),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=1,
+    )
+
+    assert len(investigation.hops) == 1
+    assert investigation.stopped == models.WALK_BUDGET
+
+
+async def test_a_walk_whose_leads_all_stop_says_which_terminal_it_reached():
+    """Reaching the edge of the map is the answer.  Naming the category it
+    stopped in is what makes it one, rather than an absence of one."""
+    from bamboo.scripts.derive_strategy import walk
+
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(gates=["JEDI_AUX_Status_MinTaskID"])],
+        junctions=[
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+            )
+        ],
+    )
+    investigation = await walk(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+    )
+
+    assert len(investigation.hops) == 1
+    assert investigation.stopped == models.WALK_TERMINAL
+    assert [lead.stop for lead in investigation.hops[0].strategy.leads] == [
+        models.STOP_SHARED_TABLE
+    ]
+
+
+async def test_the_walk_settles_each_hop_before_choosing_the_next():
+    """Evidence goes between the hops, not around them.  A walk that derived
+    every hop first would follow leads opened by arms production had already
+    ruled out -- which is the bug the surviving-candidate filter exists for, one
+    level up."""
+    from bamboo.scripts.derive_strategy import walk
+
+    seen: list[str] = []
+
+    def settle(strategy):
+        seen.append(strategy.symptom.subject)
+        return strategy
+
+    investigation = await walk(
+        await _two_field_map(),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+        settle=settle,
+    )
+
+    assert seen == [SUBJECT, "JediTaskSpec.oldStatus"]
+    assert len(investigation.hops) == 2
+
+
 async def test_a_recorded_edge_is_listed_before_an_assembled_one():
     """``_deduped`` keeps the first lead naming a field, so the order the
     derivation builds them in decides which supplier wins when both name one.

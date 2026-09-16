@@ -1807,4 +1807,70 @@ class Strategy(BaseModel):
             "to build instead of being absorbed as a weaker conclusion."
         ),
     )
+#: Why a walk stopped.  Each is a fact about the investigation rather than an
+#: error: a walk that ran out of map, one that came back to a question it had
+#: already asked, and one that spent its budget are three different answers and
+#: the reader has to be able to tell them apart.
+WALK_TERMINAL = "every lead is a terminal -- the map has nothing further to open"
+WALK_ASKED = "every question left had already been asked"
+WALK_BUDGET = "the hop budget was spent"
 
+
+class Hop(BaseModel):
+    """One question asked of the map, and what opened it.
+
+    The unit of a path.  Keeping the whole strategy rather than a summary is
+    deliberate: a trace exists so the reasoning can be checked afterwards, and
+    checking it means seeing which candidates were live at each step, not only
+    which field the walk moved to.
+    """
+
+    number: int = Field(..., description="0 for the question that was asked, then 1, 2 …")
+    symptom: Symptom
+    opened: str = Field(
+        default="",
+        description="The lead's field.  Empty at hop 0, which nothing opened.",
+    )
+    source: str = Field(
+        default=LEAD_MAP,
+        description=(
+            "Which supplier proposed the lead that opened this hop.  What makes "
+            "the trace auditable: a path that went three hops on hypotheses is "
+            "not the same claim as one that went three hops on recorded edges."
+        ),
+    )
+    strategy: Strategy
+
+
+class Investigation(BaseModel):
+    """A path through the map, and why it ended.
+
+    The product of an investigation is not the last hop but the path, the
+    terminal it reached and which category that terminal is in.  A single
+    :class:`Strategy` cannot hold that: it is one hop's worth by construction,
+    because evidence has to be collected between hops and collecting it is a
+    separate cadence.  So the history lives here and the loop lives in whoever
+    owns this object -- the map enumerates, the evidence selects, and neither of
+    those is a thing to be done from inside a derivation.
+
+    Not a node.  It is the product of one investigation, not part of the
+    vocabulary the map is written in, and storing it would make a question
+    somebody asked once look like a fact about the code.
+    """
+
+    hops: list[Hop] = Field(default_factory=list)
+    visited: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Questions already asked, as ``subject=value``.  ``status`` and "
+            "``oldStatus`` copy from each other and ``jobStatus`` copies from "
+            "itself, so a walk without this goes round for ever -- and one that "
+            "dropped the repeat silently would report a loop as a dead end."
+        ),
+    )
+    cycles: list[str] = Field(
+        default_factory=list,
+        description="Questions that came round again.  A property of the system, so it is reported.",
+    )
+    budget: int = Field(default=0, description="Hops allowed.")
+    stopped: str = Field(default="", description="One of the WALK_* reasons.")
