@@ -78,6 +78,7 @@ def _junction(
     triggers: tuple[str, ...] = (),
     subject: str = SUBJECT,
     gloss_key: str | None = None,
+    calls: list[str] | None = None,
 ) -> JunctionNode:
     return JunctionNode(
         map_id=MAP_ID,
@@ -93,6 +94,7 @@ def _junction(
             EntryPoint(trigger=trigger, entry=owner.split("::")[0]) for trigger in triggers
         ],
         gloss_key=gloss_key if gloss_key is not None else f"key-{owner}",
+        calls=calls or [],
         anchor=Anchor(package="pandajedi", file=owner.split("::")[0], line_start=1),
     )
 
@@ -130,13 +132,15 @@ def _evidence(strategy, decide) -> Evidence:
     fixture that invented its own pattern would pass while the code asked
     something else entirely, which is the failure this whole layer is about.
     """
+    # The role comes off the strategy's own observations rather than being
+    # guessed from the pattern: an arm's control is not the transition pattern,
+    # so guessing called it a probe and a fixture could never make it speak.
+    roles = {
+        (o.log_file, o.pattern): o.role for o in strategy.observations
+    }
     results = []
     for query in strategy_mod.queries(strategy):
-        role = (
-            strategy_mod.CONTROL
-            if query.pattern == evidence_mod.TRANSITION_PATTERN
-            else strategy_mod.PROBE
-        )
+        role = roles.get((query.log_filename, query.pattern), strategy_mod.PROBE)
         results.append(_result(query, **decide(role, query.log_filename, query.service)))
     return Evidence(fetched_at="2026-09-05T00:00:00+00:00", results=results)
 
@@ -1759,3 +1763,211 @@ async def test_a_ruled_out_candidate_takes_its_reading_with_it():
     assert before == 2
     assert verdicts["jediorder/TaskCommando.py::run"] == ELIMINATED
     assert [r.owner for r in settled.readings] == ["jediorder/ContentsFeeder.py::feed"]
+
+
+# ---------------------------------------------------------------------------
+# Lead source 2: the helper a junction calls
+# ---------------------------------------------------------------------------
+
+_GETTER = "taskbuffer/db_proxy_mods/task_utils_module.py::getScoutJobData_JEDI"
+_JOB_STATUS = "JobSpec.jobStatus"
+
+
+async def _scout_calling(
+    calls: list[str] | None = None,
+    reader: str = _GETTER,
+    read_subject: str = _JOB_STATUS,
+):
+    """The scout junction, and a helper of the same module that reads jobs."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(selected=["exhausted"]),
+            _subject(
+                name=read_subject,
+                selected=["finished"],
+                selected_by={"finished": [reader]},
+            ),
+        ],
+        junctions=[
+            _junction(
+                _SCOUT,
+                _arm("scout_cpuTime", "scoutData['cpuTime'] > thr", 1239),
+                owns_logger=False,
+                caller_log_files=[KNIGHT_LOG],
+                calls=["getScoutJobData_JEDI"] if calls is None else calls,
+            )
+        ],
+    )
+    return await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="exhausted", task_id="7"),
+    )
+
+
+async def test_a_helper_the_junction_calls_opens_the_row_it_selects_on():
+    """The scout arm reads an aggregate over jobs, and the map has no edge for
+    it: ``setScoutJobData_JEDI`` writes ``exhausted`` and
+    ``getScoutJobData_JEDI`` selects ``JobSpec.jobStatus='finished'``, with only
+    the call between them.  One hop along ``self.<method>()`` is what turns the
+    question into one about jobs, and nothing else in the map does."""
+    strategy = await _scout_calling()
+
+    lead = next(lead for lead in strategy.leads if lead.field == _JOB_STATUS)
+    assert lead.source == models.LEAD_CALLEE
+    assert lead.stop == models.STOP_DESCENT
+    assert "getScoutJobData_JEDI" in lead.why
+    assert lead.opened_by == _SCOUT
+
+
+async def test_sharing_an_owner_with_a_reader_is_not_a_call():
+    """The unsound join this corpus has already punished twice.
+
+    ``selected_by`` records the function, not the statement, so a 300-line
+    method that handles several commands reads jobs in one arm and writes the
+    task status in another -- and joining the two facts through their shared
+    owner calls that a relation.  Only a call edge counts."""
+    strategy = await _scout_calling(calls=[], reader=_SCOUT)
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_helper_in_another_module_opens_nothing():
+    """``self.<name>()`` is an edge only inside one module.  Matching the bare
+    name across the tree is the rule that gave one junction fourteen entry
+    points, thirteen of them wrong."""
+    strategy = await _scout_calling(
+        reader="jedirefine/TaskRefinerBase.py::getScoutJobData_JEDI"
+    )
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_helper_reading_the_same_entity_is_not_a_descent():
+    """Reading another field of the same spec is a lateral read, not a step down
+    to the rows underneath -- and calling it one would put a population question
+    where a value question belongs."""
+    strategy = await _scout_calling(read_subject="JediTaskSpec.oldStatus")
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_ruled_out_candidate_takes_its_callee_lead_with_it():
+    """Same rule as the map's own leads: a walk that keeps descending from an
+    arm production says did not fire follows a path the system did not take."""
+    strategy = await _scout_calling()
+
+    def decide(role, filename, service):
+        if role == strategy_mod.CONTROL:
+            return {"matched": 5}
+        return {"matched": 0}
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, decide))
+
+    assert [c.verdict for c in settled.candidates] == [ELIMINATED]
+    assert [lead.field for lead in settled.leads] == []
+
+
+async def test_the_map_leads_say_they_came_from_the_map():
+    """Provenance is on every lead, not only the proposed ones.  Without it a
+    trace cannot tell a deterministic edge from a hypothesis, and the map's
+    coverage reads better than it is."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(gates=["JEDI_AUX_Status_MinTaskID"]),
+            _subject(name="JediTaskSpec.oldStatus"),
+        ],
+        junctions=[
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::doActionForReassign",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert len(strategy.leads) == 2
+    assert {lead.source for lead in strategy.leads} == {models.LEAD_MAP}
+
+
+async def test_a_recorded_edge_is_listed_before_an_assembled_one():
+    """``_deduped`` keeps the first lead naming a field, so the order the
+    derivation builds them in decides which supplier wins when both name one.
+    A hypothesis taken in place of an edge the extraction actually recorded is
+    the map reporting less than it knows."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(),
+            _subject(name="JediTaskSpec.oldStatus"),
+            _subject(
+                name=_JOB_STATUS,
+                selected=["finished"],
+                selected_by={"finished": [_GETTER]},
+            ),
+        ],
+        junctions=[
+            _junction(
+                _SCOUT,
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                calls=["getScoutJobData_JEDI"],
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert [lead.source for lead in strategy.leads] == [
+        models.LEAD_MAP,
+        models.LEAD_CALLEE,
+    ]
+
+
+async def test_the_report_says_which_leads_were_not_recorded_edges():
+    """Provenance has to reach the page.  A reader who cannot tell an edge the
+    extraction found from one assembled out of a call reads the map's coverage
+    as better than it is, which is the measurement P3 depends on."""
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_leads
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="exhausted"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        leads=[
+            models.Lead(field="JediTaskSpec.oldStatus", why="copied", source=models.LEAD_MAP),
+            models.Lead(
+                field=_JOB_STATUS,
+                stop=models.STOP_DESCENT,
+                why="asks getScoutJobData_JEDI()",
+                source=models.LEAD_CALLEE,
+            ),
+        ],
+    )
+    command = click.Command("x", callback=lambda: _report_leads(strategy, 5, False))
+    out = click.testing.CliRunner().invoke(command).output
+
+    assert "[callee]" in out
+    assert "[map]" not in out  # the default supplier is not worth a badge on every line

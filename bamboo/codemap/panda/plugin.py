@@ -360,6 +360,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._modules,
             {b.interface.split(".")[-1] for b in channels},
         )
+        # What each junction consults, as opposed to what starts it.  The one
+        # edge out of a junction that a reader can follow without resolving a
+        # name, and the only route from an arm to the aggregate it decided on.
+        self._consults = trigger.attach_calls(fragment.junctions, self._modules)
 
         # Which file each node's diagnostics land in.  After promotion for the
         # same reason as the trigger reach: it describes the map that is kept.
@@ -426,6 +430,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def trigger_reach(self) -> tuple[int, int]:
         """``(junctions with an entry point, total)``."""
         return getattr(self, "_reached", (0, 0))
+
+    @property
+    def consulting(self) -> int:
+        """Junctions whose owner calls something on ``self``."""
+        return getattr(self, "_consults", 0)
 
     @property
     def log_file_reach(self) -> tuple[int, int]:

@@ -317,6 +317,16 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
     return all_passed
 
 
+def _readers(fragment: MapFragment) -> set[str]:
+    """Functions the map records as selecting rows on some subject."""
+    return {
+        owner
+        for subject in fragment.subjects
+        for owners in (subject.selected_by or {}).values()
+        for owner in owners
+    }
+
+
 def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     """Print how junctions are reached, and what follows from it.
 
@@ -333,6 +343,23 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         f"\nentry points: {reached}/{total} junction(s) reached  ("
         + ", ".join(f"{k}={v}" for k, v in kinds.most_common())
         + ")"
+    )
+
+    # What each junction consults, which is the edge outward rather than the
+    # edges inward.  Reported because an empty ``calls`` has to be readable as
+    # "this owner calls nothing on itself" and not as "nobody looked" -- a
+    # label absorbing the second meaning is how 27 writes once sat unexamined
+    # under ``unresolved``.
+    consulting = getattr(plugin, "consulting", 0)
+    readers = _readers(fragment)
+    reaching = sum(
+        1
+        for j in fragment.junctions
+        if any(f"{j.owner.partition('::')[0]}::{m}" in readers for m in j.calls)
+    )
+    click.echo(
+        f"self-calls: {consulting}/{total} junction(s) call something on self, "
+        f"{reaching} of them reaching a function that selects rows"
     )
 
     # Where to look, which is a different question from what starts it: the

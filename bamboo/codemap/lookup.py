@@ -279,6 +279,30 @@ class CodeMap:
                     upstream[field] = await self.writers_of(field)
         return upstream
 
+    async def selections_by_owner(self) -> dict[str, list[tuple[str, str]]]:
+        """``{owner: [(subject, value), …]}`` -- which function selects on what.
+
+        The map records selections on the subject, keyed by value and then by
+        the function that reads them; this turns that inside out so a caller
+        holding a function can ask what it consults.  Needed by the one hop out
+        of a junction: ``setScoutJobData_JEDI`` writes ``exhausted`` on an
+        aggregate it never reads itself, and the only way to the rows behind
+        that aggregate is the helper it calls.
+
+        Deliberately keyed by the whole ``module::method``, not the bare name.
+        A bare name is not an identity in this corpus -- ``run`` is defined in
+        every daemon script, and matching on it once gave a single junction
+        fourteen entry points of which thirteen were wrong.  The caller's edge
+        is a ``self.<method>()`` call, which is within one module by
+        construction, so the qualified key is both stricter and free.
+        """
+        by_owner: dict[str, list[tuple[str, str]]] = {}
+        for subject in await self.subjects():
+            for value, owners in (subject.selected_by or {}).items():
+                for owner in owners:
+                    by_owner.setdefault(owner, []).append((subject.name, value))
+        return by_owner
+
     async def chain(self, owner: str) -> list[FilterStageNode]:
         """One brokerage chain's stages, in the order the source runs them.
 

@@ -71,12 +71,14 @@ from bamboo.codemap.models import (
     ANSWER_NOT_ASKED,
     ANSWER_SEEN,
     ELIMINATED,
+    LEAD_CALLEE,
     PASSTHROUGH_OUTCOME,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     STOP_AMBIGUOUS,
+    STOP_DESCENT,
     STOP_NO_WRITER,
     STOP_SHARED_TABLE,
     SYMPTOM_DISTRIBUTION,
@@ -952,7 +954,14 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             writers,
             carried,
         ),
-        leads=_leads(symptom, candidates, upstream, subject.selection_gates),
+        # Map edges first, so that when both suppliers name one field the fold
+        # in ``evaluate`` keeps the deterministic one.  Not folded here: doing
+        # that before the surviving-candidate filter makes a lead's presence
+        # depend on which candidate happened to be listed first.
+        leads=(
+            _leads(symptom, candidates, upstream, subject.selection_gates)
+            + _consulted(symptom, producers, await code_map.selections_by_owner())
+        ),
         readings=_readings(candidates, asked),
         findings=_findings(candidates, producers),
         gaps=gaps,
@@ -1296,6 +1305,64 @@ def _measured_leads(cut: StageCut) -> tuple[list[Lead], set[str]]:
                 )
             )
     return leads, unnamed
+
+
+def _consulted(
+    symptom: Symptom,
+    producers: list[JunctionNode],
+    selections: dict[str, list[tuple[str, str]]],
+) -> list[Lead]:
+    """Leads from one hop along a ``self.<method>()`` call.
+
+    The map's own edges reach the fields a value was *copied* from.  They do not
+    reach the rows a value was *decided on*: an arm sends a task to
+    ``exhausted`` because an aggregate over its jobs came out a certain way, and
+    the write and the read of that aggregate are two methods of one module with
+    a call between them and no edge at all.  Measured over the task-side
+    junctions: the map alone opens the descent for none of them soundly, one hop
+    opens it for three, and the whole thing is carried by two helpers.  Small,
+    and kept for what it reaches rather than how often -- the scout case is the
+    symptom class this was built for.
+
+    **Not the owner.**  The tempting version asks whether the junction's own
+    function also selects on another entity, and it is unsound:
+    ``selected_by`` records the function, not the statement, so a method
+    dispatching several commands reads jobs in one arm and writes the task
+    status in another.  Joining those through their shared owner is the same
+    mistake that gave one junction fourteen entry points, and that let a funnel
+    gate call a 4836-to-9669 split a majority.  A call is a real edge; sharing
+    an enclosing function is not.
+
+    Stops rather than continues.  The next question is about a population, not
+    a row, and asking one is not something this derivation does -- naming it is
+    a complete answer and a work item, which is how every other edge of the map
+    is treated.
+    """
+    leads: list[Lead] = []
+    here = symptom.subject.rpartition(".")[0]
+    for junction in producers:
+        module = junction.owner.partition("::")[0]
+        for method in junction.calls:
+            for subject, value in selections.get(f"{module}::{method}", ()):
+                # Another field of the same spec is a lateral read: the row is
+                # the one already being asked about, so there is nothing to
+                # descend to and calling it a descent would put a population
+                # question where a value question belongs.
+                if subject.rpartition(".")[0] == here:
+                    continue
+                leads.append(
+                    Lead(
+                        field=subject,
+                        stop=STOP_DESCENT,
+                        why=(
+                            f"{short_owner(junction.owner)} asks {method}(), which "
+                            f"selects {subject}={value}"
+                        ),
+                        opened_by=junction.owner,
+                        source=LEAD_CALLEE,
+                    )
+                )
+    return leads
 
 
 def _leads(

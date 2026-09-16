@@ -468,6 +468,22 @@ class JunctionNode(BaseNode):
         ),
     )
     anchor: Optional[Anchor] = None
+    calls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Methods the owner calls on ``self``, by bare name.  The one edge "
+            "out of a junction that needs no resolution -- inside a module "
+            "``self.<name>()`` is unambiguous -- and the only one that reaches "
+            "the aggregate an arm decided on: ``setScoutJobData_JEDI`` writes "
+            "``exhausted`` and ``getScoutJobData_JEDI`` selects on finished "
+            "jobs, with nothing but the call between them.  Recorded rather "
+            "than joined at read time through the shared owner, because "
+            "``selected_by`` is per function and a method handling several "
+            "commands reads one thing in one arm and writes another in "
+            "another; treating that as a relation is the mistake this corpus "
+            "has already charged for twice."
+        ),
+    )
     gloss_key: str = Field(
         default="",
         description=(
@@ -1623,6 +1639,18 @@ STOP_NO_WRITER = "nothing in the map writes that field"
 STOP_SHARED_TABLE = "a table the map only ever reads"
 STOP_NEEDS_VALUE = "read by the condition, but its value was not observed"
 STOP_AMBIGUOUS = "several subjects declare that name and the map cannot say which"
+STOP_DESCENT = "another entity's rows, which this derivation does not census"
+
+
+#: Where a lead came from, kept because the three are not equally trustworthy
+#: and a trace that cannot tell them apart makes the map's coverage read better
+#: than it is.  ``map`` is an edge the extraction recorded; ``callee`` is one
+#: hop along a ``self.<method>()`` call, deterministic but assembled here;
+#: ``gloss`` is a reading's proposal, a hypothesis the next hop's evidence
+#: checks.  Only the first two exist today.
+LEAD_MAP = "map"
+LEAD_CALLEE = "callee"
+LEAD_GLOSS = "gloss"
 
 
 class Lead(BaseModel):
@@ -1667,6 +1695,14 @@ class Lead(BaseModel):
             "candidate takes its leads with it: a walk that keeps descending "
             "from a branch the evidence ruled out is following a path the "
             "system did not take."
+        ),
+    )
+    source: str = Field(
+        default=LEAD_MAP,
+        description=(
+            "Which of the LEAD_* suppliers proposed it.  Separate from "
+            "``opened_by``, which names *whose* survival it depends on and is "
+            "what the eliminator filters by; this names *how sure* it is."
         ),
     )
 
@@ -1771,3 +1807,4 @@ class Strategy(BaseModel):
             "to build instead of being absorbed as a weaker conclusion."
         ),
     )
+

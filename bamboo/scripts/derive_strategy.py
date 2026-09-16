@@ -42,6 +42,7 @@ from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
     ELIMINATED,
+    LEAD_MAP,
     SEEN,
     UNASKABLE,
     UNSETTLED,
@@ -305,13 +306,17 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
     click.echo("\nwhere this goes next")
     shown = ordered if full else ordered[:top]
     for lead in shown:
+        # The supplier, on every line.  A lead the extraction recorded and one
+        # assembled from a call are not the same claim, and a reader who cannot
+        # tell them apart reads the map's coverage as better than it is.
+        via = "" if lead.source == LEAD_MAP else f"  [{lead.source}]"
         if lead.symptom is not None:
             ask = f"--subject {lead.symptom.subject} --observed {lead.symptom.observed}"
             if lead.symptom.task_id:
                 ask += f" --task {lead.symptom.task_id}"
-            click.echo(f"  ask   {ask}")
+            click.echo(f"  ask   {ask}{via}")
         else:
-            click.echo(f"  stops {lead.field}  -- {lead.stop}")
+            click.echo(f"  stops {lead.field}  -- {lead.stop}{via}")
         for line in click.wrap_text(
             lead.why, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
         ).splitlines():

@@ -466,6 +466,33 @@ def attach(
     return reached, len(junctions)
 
 
+def attach_calls(junctions: list[JunctionNode], modules: list[SourceModule]) -> int:
+    """Record what each junction's owner calls on ``self``.  Returns how many got any.
+
+    Separate from :func:`attach` although both walk the same edges, because the
+    two questions they answer are different and one field answering both is how
+    ``log_files`` came to mean two things.  ``attach`` asks what *starts* this
+    junction and so follows the edges inward and transitively; this asks what
+    this junction *consults* and so follows them outward and exactly one hop.
+
+    One hop, not the closure, because the hop is what is being claimed.  The
+    arm that sends a task to ``exhausted`` decided on an aggregate over its
+    jobs, and the map has no edge for that aggregate -- the write and the read
+    sit in two methods of one module with a call between them.  Following
+    further would stop being "this junction asks that question" and start being
+    "these two things are in the same neighbourhood", which is the shape of
+    join this corpus keeps punishing.
+    """
+    per_module = {module.rel_path: _self_calls(module) for module in modules}
+    found = 0
+    for junction in junctions:
+        owner_module, _, method = junction.owner.partition("::")
+        junction.calls = sorted(per_module.get(owner_module, {}).get(method, ()))
+        if junction.calls:
+            found += 1
+    return found
+
+
 def self_repairing(junctions: list[JunctionNode]) -> dict[str, set[str]]:
     """Return ``{subject: triggers}`` pooled over every junction writing it.
 
