@@ -572,6 +572,20 @@ def main(
         if write_only:
             click.echo("  written but never read here:  " + ", ".join(sorted(write_only)))
 
+    unreadable = getattr(plugin, "unreadable_tables", {})
+    if unreadable:
+        # Separate from the list below, which is about tables that hold no spec.
+        # These are statements whose table nobody could name, and the two read
+        # as one finding when they share a line -- only this one is a gap.
+        click.echo(
+            f"\ntable name supplied at run time and not resolved "
+            f"({sum(unreadable.values())} statement(s) in {len(unreadable)} function(s)):"
+        )
+        for owner, count in sorted(unreadable.items(), key=lambda row: (-row[1], row[0]))[:top]:
+            click.echo(f"  {owner:<70} {count}")
+        if len(unreadable) > top:
+            click.echo(f"  … {len(unreadable) - top} more")
+
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:
         # Not a gap in extraction: these are written by the code and hold no

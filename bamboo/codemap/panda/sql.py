@@ -264,7 +264,135 @@ def _exclusive_groups(
     return [members for members in grouped.values() if len(members) > 1]
 
 
-def _run_variants(parts: list[tuple[int, str, str, ast.stmt]], name: str) -> list[str]:
+#: A hole standing where a whole table reference goes.  The keyword settles it
+#: from the left and the character after the hole settles it from the right:
+#: ``FROM {schemaJEDI}.JEDI_Tasks`` interpolates the *schema* and is followed by
+#: a dot, which is why reassembly blanks interpolations in the first place.
+_BEFORE_TABLE = re.compile(r"\b(?:FROM|UPDATE|INTO|JOIN)\s+$", re.IGNORECASE)
+
+
+def _table_holes(text: str) -> set[int]:
+    """Which of *text*'s ``{}`` holes stand for a whole table name."""
+    found: set[int] = set()
+    position = index = 0
+    while (hole := text.find(_BARE_FIELD, position)) >= 0:
+        if text[hole + 2 : hole + 3] != "." and _BEFORE_TABLE.search(text[:hole]):
+            found.add(index)
+        position, index = hole + 2, index + 1
+    return found
+
+
+def _hole_expressions(node: ast.expr) -> Optional[list[ast.expr]]:
+    """The expressions behind each ``{}`` :func:`rendered_text` left, in order.
+
+    ``None`` when the alignment is not assured -- a ``.format`` call renders
+    its own field markers as holes too, and a hole filled with the wrong
+    expression's value would put an invented table name in the statement with
+    the same confidence as one the code wrote.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return []
+    if isinstance(node, ast.JoinedStr):
+        found: list[ast.expr] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                continue
+            if not isinstance(value, ast.FormattedValue):
+                return None
+            found.append(value.value)
+        return found
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _hole_expressions(node.left), _hole_expressions(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _fill(text: str, values: dict[int, str]) -> str:
+    """Replace the numbered holes of *text*, leaving the rest as they are."""
+    out: list[str] = []
+    position = index = 0
+    while (hole := text.find(_BARE_FIELD, position)) >= 0:
+        out.append(text[position:hole])
+        # A filled name carries its own schema hole -- ``{}.jobsActive4`` -- so
+        # the scan continues past the original hole rather than over what
+        # replaced it.
+        out.append(values.get(index, _BARE_FIELD))
+        position, index = hole + 2, index + 1
+    out.append(text[position:])
+    return "".join(out)
+
+
+def _table_choices(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    parts: list[tuple[int, str, str, ast.stmt]],
+) -> tuple[list[tuple[list[ast.expr], set[int]]], dict[str, list[str]]]:
+    """Return each fragment's table holes, and the names each one can hold.
+
+    Keyed by the expression rather than by the hole, because one loop variable
+    interpolated into two fragments of a statement takes *one* value per pass;
+    treating the holes independently would cross them and read a union of two
+    tables as a single statement over both.
+    """
+    per_part: list[tuple[list[ast.expr], set[int]]] = []
+    choices: dict[str, list[str]] = {}
+    for _line, _operator, text, node in parts:
+        value = node.value if isinstance(node, (ast.Assign, ast.AugAssign)) else None
+        expressions = _hole_expressions(value) if value is not None else None
+        if expressions is None or len(expressions) != text.count(_BARE_FIELD):
+            per_part.append(([], set()))
+            continue
+        holes = {
+            hole for hole in _table_holes(text) if _literal_values(func, expressions[hole])
+        }
+        per_part.append((expressions, holes))
+        for hole in holes:
+            choices.setdefault(
+                ast.unparse(expressions[hole]), _literal_values(func, expressions[hole])
+            )
+    return per_part, choices
+
+
+def _assignments(choices: dict[str, list[str]]) -> list[dict[str, str]]:
+    """One mapping of expression to table name per combination the code allows."""
+    if not choices:
+        return [{}]
+    names = sorted(choices)
+    return [
+        dict(zip(names, combination, strict=True))
+        for combination in itertools.product(*(choices[name] for name in names))
+    ]
+
+
+def _fold_filled(
+    parts: list[tuple[int, str, str, ast.stmt]],
+    per_part: list[tuple[list[ast.expr], set[int]]],
+    assignment: dict[str, str],
+    dropped: set[int],
+) -> str:
+    """:func:`_fold`, with each fragment's table holes filled from *assignment*."""
+    assembled = ""
+    for index, (_line, operator, text, _node) in enumerate(parts):
+        if index in dropped:
+            continue
+        expressions, holes = per_part[index]
+        if holes and assignment:
+            text = _fill(
+                text,
+                {
+                    hole: assignment[ast.unparse(expressions[hole])]
+                    for hole in holes
+                    if ast.unparse(expressions[hole]) in assignment
+                },
+            )
+        assembled = text if operator == "=" else assembled + text
+    return assembled
+
+
+def _run_variants(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    parts: list[tuple[int, str, str, ast.stmt]],
+    name: str,
+) -> list[str]:
     """Return the statements one ``=``-started run of fragments can produce.
 
     Fragments appended under mutually exclusive branches are *alternatives*, not
@@ -284,20 +412,28 @@ def _run_variants(parts: list[tuple[int, str, str, ast.stmt]], name: str) -> lis
 
     The head of the run is never dropped.  It is what the statement *is*; the
     alternatives are among the fragments appended to it.
+
+    **A table name the loop supplies splits the run the same way.**  A hole
+    standing for a whole table reference is not the schema -- ``FROM
+    {tableName}`` where ``tableName`` comes from a local list of names the
+    source writes out is four statements, one per table, and read as one it is
+    a statement about a table called ``{}``.  That is what hid the helper
+    fetching a task's jobs: the rows it selects belong to a table the map had
+    no name for.
     """
     start = 1 if parts and parts[0][1] == "=" else 0
     groups = _exclusive_groups(parts, start)
-    if not groups:
-        return [_fold(parts)]
-    total = math.prod(len(members) for members in groups)
+    per_part, choices = _table_choices(func, parts)
+    assignments = _assignments(choices)
+    total = math.prod(len(members) for members in groups) * len(assignments)
     if total > _MAX_BRANCH_VARIANTS:
         # Folded as before rather than split into an arbitrary subset: a
         # truncated list of statements reads as the complete one.  Said out
         # loud, because a silent cap is indistinguishable from full coverage.
         logger.warning(
-            "%s at line %d is built across %d branch combinations, over the cap "
-            "of %d: read as one folded statement, so a conditionally assembled "
-            "column may be misread here",
+            "%s at line %d is built across %d combinations of branch and table, over "
+            "the cap of %d: read as one folded statement, so a conditionally assembled "
+            "column or an interpolated table name may be misread here",
             name,
             parts[0][0],
             total,
@@ -308,12 +444,11 @@ def _run_variants(parts: list[tuple[int, str, str, ast.stmt]], name: str) -> lis
     alternatives = {index for members in groups for index in members}
     texts: list[str] = []
     for combination in itertools.product(*groups):
-        keep = set(combination)
-        text = _fold(
-            [part for index, part in enumerate(parts) if index not in alternatives or index in keep]
-        )
-        if text and text not in texts:
-            texts.append(text)
+        dropped = alternatives - set(combination)
+        for assignment in assignments:
+            text = _fold_filled(parts, per_part, assignment, dropped)
+            if text and text not in texts:
+                texts.append(text)
     return texts
 
 
@@ -342,7 +477,7 @@ def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[st
         if part[1] == "=" or not runs:
             runs.append([])
         runs[-1].append(part)
-    return [text for run in runs for text in _run_variants(run, name) if text]
+    return [text for run in runs for text in _run_variants(func, run, name) if text]
 
 
 def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
@@ -445,14 +580,72 @@ def _braces_are_literal(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str)
     return not any(_interpolates(node.value) for _line, _op, _text, node in _parts(func, name))
 
 
+def _elements(node: ast.expr) -> Optional[list[str]]:
+    """The strings a literal sequence holds, or ``None`` if one is not written out.
+
+    Rendered rather than required to be constant: the corpus spells a table
+    name ``f"{panda_config.schemaPANDA}.jobsActive4"``, and the schema half is
+    exactly the part no reader here needs -- :func:`_table_of` drops it.  One
+    element nobody can read sinks the whole sequence, because half a list of
+    tables read as the list is a statement about tables the code never names.
+    """
+    if not isinstance(node, (ast.Tuple, ast.List)):
+        return None
+    rendered = [rendered_text(element) for element in node.elts]
+    return None if any(text is None for text in rendered) else [str(t) for t in rendered]
+
+
+def _sequence_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> Optional[list[str]]:
+    """The strings local list *name* holds, across ``=`` and ``+=``.
+
+    ``None`` rather than a partial answer wherever the list is built some other
+    way -- an ``append``, or a sequence that is not a literal.  A missing
+    element is not a smaller answer here: it is a statement the map says the
+    code runs over a set of tables it does not.
+    """
+    found: list[str] = []
+    assigned = False
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            elements = _elements(node.value)
+            if elements is None:
+                return None
+            found.extend(elements)
+            assigned = True
+        elif (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+        ):
+            elements = _elements(node.value) if isinstance(node.op, ast.Add) else None
+            if elements is None:
+                return None
+            found.extend(elements)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"append", "extend", "insert"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            return None
+    return found if assigned else None
+
+
 def _literal_values(
     func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
 ) -> list[str]:
     """Return the strings *expression* can hold, where the source writes them out.
 
-    Two forms, both of which put the names in plain sight: the argument is a
-    literal, or it is the target of a ``for`` over a literal sequence --
-    ``for table in ("ATLAS_PANDA.jobsDefined4", "ATLAS_PANDA.jobsActive4")``.
+    Three forms, all of which put the names in plain sight: the argument is a
+    literal; it is the target of a ``for`` over a literal sequence --
+    ``for table in ("ATLAS_PANDA.jobsDefined4", "ATLAS_PANDA.jobsActive4")``;
+    or over a local list assembled from literals, which is how the same loop is
+    written when a flag decides whether the archive tables are in it.
     Anything else returns nothing, and the placeholder is left as written: a
     table name invented here would be attributed to a spec class with the same
     confidence as one the code states.
@@ -467,15 +660,14 @@ def _literal_values(
             isinstance(node, ast.For)
             and isinstance(node.target, ast.Name)
             and node.target.id == expression.id
-            and isinstance(node.iter, (ast.Tuple, ast.List))
         ):
-            values = [
-                element.value
-                for element in node.iter.elts
-                if isinstance(element, ast.Constant) and isinstance(element.value, str)
-            ]
-            if len(values) == len(node.iter.elts):
-                found.extend(values)
+            elements = (
+                _sequence_values(func, node.iter.id)
+                if isinstance(node.iter, ast.Name)
+                else _elements(node.iter)
+            )
+            if elements is not None:
+                found.extend(elements)
         elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
             if isinstance(node.value.value, str) and any(
                 isinstance(target, ast.Name) and target.id == expression.id

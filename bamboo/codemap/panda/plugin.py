@@ -317,6 +317,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.entities.extend(
             sqlwrite.entity_nodes(side.entities, self.map_id, self._version)
         )
+        self._unreadable_tables = side.unreadable
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             readers = selected.get(subject.name, {})
@@ -466,6 +467,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def uncovered_tables(self) -> set[str]:
         """Tables written by the code that hold no spec class."""
         return getattr(self, "_uncovered_tables", set())
+
+    @property
+    def unreadable_tables(self) -> dict[str, int]:
+        """``{owner: statements whose table name the reassembly could not read}``.
+
+        Apart from :attr:`uncovered_tables`, which is about tables that hold no
+        spec: this is about statements whose table nobody could name at all.
+        Pooled into that list they read as one finding, and only one of the two
+        is a gap in the extraction.
+        """
+        return getattr(self, "_unreadable_tables", {})
 
     @property
     def table_conflicts(self) -> dict[str, set[str]]:

@@ -1633,6 +1633,93 @@ def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
     ] == ["JEDI_Tasks"]
 
 
+def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
+    """A hole standing for a whole table is not the schema.
+
+    ``getPandaIDsWithTask_JEDI`` fetches a task's jobs by looping over a list of
+    tables and interpolating each one, so the statement read as a query against
+    a table named ``{}`` -- which is to say the map had no name for the rows the
+    helper selects, and read it as consulting nothing at all.
+    """
+    source = (
+        "def f(self, jediTaskID, onlyActive):\n"
+        "    tables = [f'{schemaPANDA}.jobsDefined4', f'{schemaPANDA}.jobsActive4']\n"
+        "    if not onlyActive:\n"
+        "        tables += [f'{schemaARCH}.jobsArchived']\n"
+        "    sqlP = ''\n"
+        "    for tableName in tables:\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    tables = [
+        table for run in sql.executions(func) for table, _columns in sql.reads(run.sql)
+    ]
+
+    assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
+
+
+def test_an_interpolated_schema_is_still_left_blank():
+    """The reason reassembly blanks interpolations in the first place.
+
+    ``FROM {schemaJEDI}.JEDI_Tasks`` names its table outright and interpolates
+    only where the rows live.  The dot after the hole says which is which, and
+    filling this one would put a deployment's schema into the map as though it
+    were part of the statement.
+    """
+    source = (
+        "def f(self):\n"
+        "    schema = 'ATLAS_PANDA'\n"
+        "    sqlT = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+        "    self.cur.execute(sqlT + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT jediTaskID FROM {}.JEDI_Tasks WHERE status=:status "
+    ]
+
+
+def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
+    """Half a list of tables read as the list is a statement about tables the
+    code never runs over, which is worse than the hole it replaces."""
+    source = (
+        "def f(self):\n"
+        "    tables = [f'{schemaPANDA}.jobsActive4']\n"
+        "    tables.append(pick_one())\n"
+        "    sqlP = ''\n"
+        "    for tableName in tables:\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {} WHERE x=:x "
+    ]
+
+
+def test_one_loop_variable_in_two_fragments_takes_one_value_at_a_time():
+    """The holes are keyed on the expression, not counted separately.
+
+    Treating them independently crosses them, and a union of two tables read as
+    one statement is a query the code never runs.
+    """
+    source = (
+        "def f(self):\n"
+        "    for tableName in ('ATLAS_PANDA.jobsActive4', 'ATLAS_PANDA.jobsDefined4'):\n"
+        "        sqlP = f'SELECT PandaID FROM {tableName} '\n"
+        "        sqlP += f'WHERE x IN (SELECT x FROM {tableName}) '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 "
+        "WHERE x IN (SELECT x FROM ATLAS_PANDA.jobsActive4) ",
+        "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 "
+        "WHERE x IN (SELECT x FROM ATLAS_PANDA.jobsDefined4) ",
+    ]
+
+
 def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
     """A run-time filler is not guessed at; the statement stays as written."""
     source = (

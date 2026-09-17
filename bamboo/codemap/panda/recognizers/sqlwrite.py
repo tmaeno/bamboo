@@ -48,6 +48,7 @@ map holds rather than one it has no room for.
 from __future__ import annotations
 
 import ast
+import re
 from typing import NamedTuple, Optional
 
 from bamboo.codemap.models import (
@@ -183,7 +184,11 @@ def extract(
                 seen.add((run.variable, run.sql, run.varmap))
                 for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
-                    if spec_class is None:
+                    # A name nobody could read is not a table that holds no
+                    # spec.  Listed together they read as one finding, and only
+                    # one of the two is a gap in the extraction -- see
+                    # ``ReadSide.unreadable``, which counts these instead.
+                    if spec_class is None and not _UNREAD_TABLE.fullmatch(statement.table):
                         uncovered.add(statement.table)
                     for column, supplied in statement.columns.items():
                         candidates += 1
@@ -485,6 +490,11 @@ class ReadSide(NamedTuple):
     values: dict[str, dict[str, set[str]]]
     #: ``{spec class: EntityUse}``
     entities: dict[str, EntityUse]
+    #: ``{owner: statements whose table reference is still a placeholder}``.
+    #: Counted rather than left out: a statement whose table nobody could read
+    #: is one whose rows belong to nothing, and an unreadable name looks
+    #: exactly like a table that holds no spec once both end up in one list.
+    unreadable: dict[str, int]
 
 
 def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSide:
@@ -544,6 +554,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     settle = values.resolver(values.declared_mappings(modules))
     found: dict[str, dict[str, set[str]]] = {}
     rows: dict[str, EntityUse] = {}
+    unreadable: dict[str, int] = {}
 
     def record(subject: str, value: str, owner: str) -> None:
         found.setdefault(subject, {}).setdefault(value, set()).add(owner)
@@ -562,6 +573,9 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     continue
                 seen.add(run.sql)
                 for verb, table in _rows_touched(run.sql):
+                    if _UNREAD_TABLE.fullmatch(table):
+                        unreadable[owner] = unreadable.get(owner, 0) + 1
+                        continue
                     spec_class = attributor.class_for_table(table)
                     if spec_class is not None:
                         touch(spec_class, table, owner, verb)
@@ -580,7 +594,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             attributor, spec_class, table, column
                         )
                         record(SubjectNode.make_name(qualifier, attribute), value, owner)
-    return ReadSide(values=found, entities=rows)
+    return ReadSide(values=found, entities=rows, unreadable=unreadable)
 
 
 def entity_nodes(
@@ -647,6 +661,11 @@ def selection_gates(
                             SubjectNode.make_name(qualifier, attribute), set()
                         ).update(gates)
     return found
+
+
+#: A table reference that is nothing but holes -- ``{}`` or ``{0}``.  What is
+#: left when a name the source supplies at run time could not be resolved.
+_UNREAD_TABLE = re.compile(r"(?:\{\d*\})+")
 
 
 def _rows_touched(statement: str) -> list[tuple[str, str]]:
