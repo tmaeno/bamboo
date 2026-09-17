@@ -1698,6 +1698,27 @@ def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     ]
 
 
+def test_more_tables_than_the_cap_allows_are_not_split_at_all():
+    """A silent cap reads exactly like full coverage.
+
+    Over the cap the statement is read as written, holes and all, and the
+    warning says so -- rather than an arbitrary subset of the tables, which a
+    reader would take for the whole list.
+    """
+    names = ", ".join(f"'ATLAS_PANDA.t{index}'" for index in range(40))
+    source = (
+        "def f(self):\n"
+        "    sqlP = ''\n"
+        f"    for tableName in ({names}):\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {} WHERE x=:x "
+    ]
+
+
 def test_one_loop_variable_in_two_fragments_takes_one_value_at_a_time():
     """The holes are keyed on the expression, not counted separately.
 
