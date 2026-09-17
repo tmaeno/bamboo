@@ -557,6 +557,20 @@ class JunctionNode(BaseNode):
             "mistake this corpus has already charged for twice."
         ),
     )
+    joined_entities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Kinds of row one of this owner's queries reads *in the same "
+            "statement* as the rows it decides about.  The sound form of the "
+            "join that is unsound at owner granularity: sharing a function "
+            "proves nothing, but a single ``FROM`` list is the corpus stating "
+            "the relation itself, so ``prepareTasksToBeFinished_JEDI`` "
+            "selecting tasks against their datasets really does say which "
+            "datasets that task waits on.  The difference is the whole point "
+            "-- 113 junctions would gain an entity from co-residence in the "
+            "function and 31 do from a shared statement."
+        ),
+    )
     gloss_key: str = Field(
         default="",
         description=(

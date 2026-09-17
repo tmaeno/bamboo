@@ -72,6 +72,7 @@ from bamboo.codemap.models import (
     ANSWER_SEEN,
     ELIMINATED,
     LEAD_CALLEE,
+    LEAD_MAP,
     PASSTHROUGH_OUTCOME,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
@@ -976,6 +977,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         # depend on which candidate happened to be listed first.
         leads=(
             _leads(symptom, candidates, upstream, subject.selection_gates)
+            + _joined(symptom, producers)
             + _consulted(
                 symptom,
                 producers,
@@ -1403,6 +1405,45 @@ def _consulted(
                     )
                 )
     return leads
+
+
+def _joined(symptom: Symptom, producers: list[JunctionNode]) -> list[Lead]:
+    """Leads from a query that asks for two kinds of row at once.
+
+    The owner's *own* statement, which is the one place its reads can be used
+    without the join this corpus keeps punishing.  Two facts about a function
+    are not a relation between them -- that is what gave a junction fourteen
+    entry points and a funnel gate a 4836-to-9669 "majority" -- but two tables
+    in one ``FROM`` list are the corpus stating the relation itself.  Measured:
+    reading the owner's statements together would open 113 junctions, and
+    reading each statement on its own opens 31.
+
+    What the six say is the question the map could not previously reach.
+    ``prepareTasksToBeFinished_JEDI`` selects tasks against their datasets in a
+    single statement, so asked why a task sits in ``finishing`` it can say
+    *which datasets it is waiting on* rather than only that some helper it
+    calls reads datasets somewhere.
+
+    Reads only.  An update joining two tables states the same relation, but a
+    descent follows the rows a decision was taken *from*, and following a write
+    would walk forwards while claiming to step down.
+    """
+    here = symptom.subject.rpartition(".")[0]
+    return [
+        Lead(
+            field=entity,
+            stop=STOP_DESCENT,
+            why=(
+                f"{short_owner(junction.owner)} asks for {entity} rows in the "
+                "same query as the rows it decides about"
+            ),
+            opened_by=junction.owner,
+            source=LEAD_MAP,
+        )
+        for junction in producers
+        for entity in junction.joined_entities
+        if entity != here
+    ]
 
 
 def _leads(

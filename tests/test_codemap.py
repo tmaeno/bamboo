@@ -5872,6 +5872,17 @@ _JOB_TABLE_WRITER = (
     "        self.cur.execute(sqlA + comment, varMap)\n"
 )
 
+#: The same for ``JEDI_Tasks``.  Needed wherever a test turns on two kinds of
+#: row being attributable at once: without it the second table resolves to no
+#: class and the assertion passes because nothing was read, not because the
+#: reading was withheld.
+_TASK_TABLE_WRITER = (
+    "class TaskTableModule:\n"
+    "    def touch(self):\n"
+    "        sqlT = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+    "        self.cur.execute(sqlT + comment, varMap)\n"
+)
+
 
 def test_a_query_naming_no_promoted_column_still_says_whose_rows_it_read():
     """The half a pair of class and attribute cannot carry.
@@ -5999,6 +6010,120 @@ def test_a_value_only_an_update_acts_on_is_still_not_a_sink():
     assert set(values) == {"pending"}
     assert values["pending"].updated_by == {"x.py::release"}
     assert not values["pending"].selected_by
+
+
+def test_one_query_naming_two_kinds_of_row_records_the_join():
+    """A single FROM list is the corpus stating the relation itself.
+
+    Which datasets a task is waiting on cannot be read off two separate facts
+    about the same function -- that is the join this corpus has charged for
+    twice -- but it can be read off one statement that asks for both.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def finish(self):\n"
+        "        sqlF = f'SELECT tabT.jediTaskID FROM {schema}.JEDI_Tasks tabT,'\n"
+        "        sqlF += '{schema}.JEDI_Datasets tabD '\n"
+        "        sqlF += \"WHERE tabT.status=:status AND tabD.proc_status='ready' \"\n"
+        "        self.cur.execute(sqlF + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        # Both tables have to be attributable, and a class is only ever learned
+        # from what is written to a table.
+        _module(
+            "class W:\n"
+            "    def w(self):\n"
+            "        s1 = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+            "        self.cur.execute(s1 + comment, varMap)\n"
+            "        s2 = f'UPDATE {schema}.JEDI_Datasets SET proc_status=:proc '\n"
+            "        self.cur.execute(s2 + comment, varMap)\n",
+            "teacher.py",
+        ),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    joins = sqlwrite.read_side(modules, attributor).joins
+
+    assert joins["x.py::finish"] == {frozenset({"JediTaskSpec", "JediFileSpec"})}
+
+
+def test_two_kinds_of_row_read_by_two_statements_are_not_joined():
+    """Co-residence in a function is not a relation, and saying so is the point.
+
+    The tempting reading -- this function reads tasks and it reads jobs, so the
+    task's jobs are where this goes next -- opens 113 junctions against the 31 a
+    shared statement opens, and a method dispatching several commands reads one
+    kind of row in one arm and decides about another somewhere else entirely.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def dispatch(self):\n"
+        "        sqlT = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlT += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlT + comment, varMap)\n"
+        "        sqlJ = f'SELECT PandaID FROM {schema}.jobsActive4 '\n"
+        "        sqlJ += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(_TASK_TABLE_WRITER, "teacher2.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    # Both kinds of row really are attributable here -- what is withheld is the
+    # relation between them, not the reading of either.
+    assert side.entities["JobSpec"].read_by == {"x.py::dispatch"}
+    assert "x.py::dispatch" in side.entities["JediTaskSpec"].read_by
+    assert side.joins == {}
+
+
+def test_a_statement_that_writes_one_kind_of_row_and_reads_another_is_not_a_join():
+    """A join is between rows one query *asked for*, and only that.
+
+    ``UPDATE JEDI_Tasks ... WHERE jediTaskID IN (SELECT ... FROM jobsActive4)``
+    names two kinds of row, but it reads one and writes the other, and a
+    descent follows the rows a decision was taken *from* -- pooling the verbs
+    here is the same conflation ``read_by`` and ``written_by`` were split for.
+    Held to the tightest claim the statement supports: one query asked for
+    both.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+        "        sqlU += 'WHERE jediTaskID IN '\n"
+        "        sqlU += f'(SELECT PandaID FROM {schema}.jobsActive4) '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    # Both kinds of row are seen, under the verb that names them.
+    assert side.entities["JobSpec"].read_by == {"x.py::sweep"}
+    assert side.entities["JediTaskSpec"].written_by == {"x.py::sweep"}
+    assert side.joins == {}
 
 
 def test_a_table_holding_no_spec_is_not_an_entity():

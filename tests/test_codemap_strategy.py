@@ -82,6 +82,7 @@ def _junction(
     subject: str = SUBJECT,
     gloss_key: str | None = None,
     calls: list[str] | None = None,
+    joined_entities: list[str] | None = None,
 ) -> JunctionNode:
     return JunctionNode(
         map_id=MAP_ID,
@@ -98,6 +99,7 @@ def _junction(
         ],
         gloss_key=gloss_key if gloss_key is not None else f"key-{owner}",
         calls=calls or [],
+        joined_entities=joined_entities or [],
         anchor=Anchor(package="pandajedi", file=owner.split("::")[0], line_start=1),
     )
 
@@ -1887,6 +1889,62 @@ async def _scout_calling(
         await _map(fragment),
         Symptom(subject=SUBJECT, observed="exhausted", task_id="7"),
     )
+
+
+async def test_a_query_asking_for_two_kinds_of_row_opens_the_second():
+    """The one place a junction's own reads can be used without the bad join.
+
+    Sharing a function proves nothing -- that mistake gave a junction fourteen
+    entry points -- but a single ``FROM`` list is the corpus stating the
+    relation.  ``prepareTasksToBeFinished_JEDI`` selects tasks against their
+    datasets in one statement, so it can say which datasets the task waits on.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["finishing"])],
+        junctions=[
+            _junction(
+                "taskbuffer/db_proxy_mods/task_complex_module.py"
+                "::prepareTasksToBeFinished_JEDI",
+                Branch(outcome="finishing"),
+                joined_entities=["JediDatasetSpec"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    lead = next(lead for lead in strategy.leads if lead.field == "JediDatasetSpec")
+    assert lead.stop == models.STOP_DESCENT
+    # Deterministic: the map holds the statement, so this is not a hypothesis
+    # the way a hop along a call is.
+    assert lead.source == models.LEAD_MAP
+    assert "same query as the rows it decides about" in lead.why
+
+
+async def test_the_junctions_own_entity_is_not_a_descent_from_itself():
+    """A statement reading two tables of the same kind of row says nothing
+    about where to go next -- the rows are the ones already being asked about,
+    and calling that a descent puts a population question in a value's place."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["finishing"])],
+        junctions=[
+            _junction(
+                "taskbuffer/db_proxy_mods/task_complex_module.py::rescue",
+                Branch(outcome="finishing"),
+                joined_entities=["JediTaskSpec"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert not [lead for lead in strategy.leads if lead.field == "JediTaskSpec"]
 
 
 async def test_a_helper_the_junction_calls_opens_the_row_it_selects_on():

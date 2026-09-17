@@ -511,6 +511,12 @@ class ReadSide(NamedTuple):
     values: dict[str, dict[str, ValueUse]]
     #: ``{spec class: EntityUse}``
     entities: dict[str, EntityUse]
+    #: ``{owner: sets of kinds of row one of its queries reads together}``.
+    #: The sound form of a join between two entities: co-residence in a
+    #: function is not a relation -- 112 functions read more than one kind
+    #: of row somewhere, and 51 read two in one statement -- but a single
+    #: ``FROM`` list is the corpus stating the relation itself.
+    joins: dict[str, set[frozenset[str]]]
     #: ``{owner: statements whose table reference is still a placeholder}``.
     #: Counted rather than left out: a statement whose table nobody could read
     #: is one whose rows belong to nothing, and an unreadable name looks
@@ -576,6 +582,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     found: dict[str, dict[str, ValueUse]] = {}
     rows: dict[str, EntityUse] = {}
     unreadable: dict[str, int] = {}
+    joins: dict[str, set[frozenset[str]]] = {}
 
     def record(subject: str, value: str, owner: str, verb: str) -> None:
         use = found.setdefault(subject, {}).setdefault(value, ValueUse(set(), set()))
@@ -594,6 +601,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                 if run.sql in seen:
                     continue
                 seen.add(run.sql)
+                together: set[str] = set()
                 for verb, table in _rows_touched(run.sql):
                     if _UNREAD_TABLE.fullmatch(table):
                         unreadable[owner] = unreadable.get(owner, 0) + 1
@@ -601,6 +609,10 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     spec_class = attributor.class_for_table(table)
                     if spec_class is not None:
                         touch(spec_class, table, owner, verb)
+                        if verb == "read":
+                            together.add(spec_class)
+                if len(together) > 1:
+                    joins.setdefault(owner, set()).add(frozenset(together))
                 for verb, table in _table_verbs(run.sql):
                     spec_class = attributor.class_for_table(table)
                     for column, key in sql.predicates(run.sql):
@@ -621,7 +633,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             owner,
                             verb,
                         )
-    return ReadSide(values=found, entities=rows, unreadable=unreadable)
+    return ReadSide(values=found, entities=rows, unreadable=unreadable, joins=joins)
 
 
 def entity_nodes(
@@ -708,6 +720,13 @@ def _rows_touched(statement: str) -> list[tuple[str, str]]:
     touched: list[tuple[str, str]] = [
         ("read", table) for table, _columns in sql.reads(statement)
     ]
+    # The rest of the ``FROM`` list too.  :func:`sql.reads` keeps naming the
+    # leading table because it answers *where the row came from*; the question
+    # here is which kinds of row the statement touches at all, and a join
+    # partner's rows are read as surely as the first table's.  Sixty-one
+    # (function, entity) readings were missing for the difference, sixteen of
+    # them on datasets and sixteen on files -- the two a task waits for.
+    touched.extend(("read", table) for table in sql.joins(statement))
     touched.extend(("written", write.table) for write in sql.writes(statement))
     touched.extend(("written", table) for table in sql.deletes(statement))
     return touched

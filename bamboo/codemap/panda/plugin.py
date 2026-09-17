@@ -340,6 +340,23 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
 
+        # Which other kind of row one of the owner's queries asks for in the
+        # same statement as the rows it decides about.  After the merge because
+        # it reads the junction's subject, and restricted to the statement
+        # because the owner-wide version is the join this corpus has twice
+        # charged for: it would open 113 junctions where the statement opens 31.
+        for junction in fragment.junctions:
+            here = junction.subject.rpartition(".")[0]
+            junction.joined_entities = sorted(
+                {
+                    entity
+                    for group in side.joins.get(junction.owner, ())
+                    if here in group
+                    for entity in group
+                }
+                - {here}
+            )
+
         # After the merge, because it annotates branches rather than making
         # them: the decision a knight makes in memory is already a junction,
         # and what this adds is the row its flush needed to land.  Reads the
