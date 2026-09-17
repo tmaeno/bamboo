@@ -5824,7 +5824,7 @@ def test_the_query_that_selects_a_value_is_named_and_not_only_the_value():
 
     selected = sqlwrite.read_side(modules, attributor).values
 
-    assert selected["JediTaskSpec.status"] == {"pending": {"x.py::rescue"}}
+    assert selected["JediTaskSpec.status"]["pending"].selected_by == {"x.py::rescue"}
 
 
 def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
@@ -5937,6 +5937,68 @@ def test_the_predicate_of_an_update_does_not_make_the_function_a_reader():
 
     assert side.entities["JobSpec"].written_by == {"x.py::kill"}
     assert not side.entities["JobSpec"].read_by
+
+
+def test_an_update_predicate_does_not_name_a_query_that_selects_the_value():
+    """Who *asks for* a value and who *acts on rows already holding it* differ.
+
+    ``UPDATE jobsActive4 SET ... WHERE jobStatus=:jobStatus`` says which rows
+    the statement was willing to change; it is not a query anything could have
+    failed to pick the row up in.  Reported as a selection it sends a reader to
+    a function that never asked, and one hop out of a junction it opens a
+    descent on the strength of a write.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def reassign(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':jobStatus'] = 'activated'\n"
+        "        sqlU = f'UPDATE {schema}.jobsActive4 SET PandaID=:PandaID '\n"
+        "        sqlU += 'WHERE jobStatus=:jobStatus '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    use = sqlwrite.read_side(modules, attributor).values["JobSpec.jobStatus"]["activated"]
+
+    assert use.updated_by == {"x.py::reassign"}
+    assert not use.selected_by
+
+
+def test_a_value_only_an_update_acts_on_is_still_not_a_sink():
+    """The two readings of a ``WHERE`` part company here, and both are right.
+
+    "Does anything move a task out of this status?" is answered by an
+    ``UPDATE ... WHERE status=:old`` as squarely as by a query -- so the value
+    stays in ``selected_values`` and the sink report keeps its meaning.  "Who
+    has to pick this row up, so who to ask why they did not?" is not, and that
+    is the reading that must not be told a writer is a reader.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def release(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':oldStatus'] = 'pending'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "        sqlU += 'SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE status=:oldStatus '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    values = sqlwrite.read_side(modules, attributor).values["JediTaskSpec.status"]
+
+    assert set(values) == {"pending"}
+    assert values["pending"].updated_by == {"x.py::release"}
+    assert not values["pending"].selected_by
 
 
 def test_a_table_holding_no_spec_is_not_an_entity():

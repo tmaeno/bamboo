@@ -147,16 +147,24 @@ def _report_follow_up(strategy: Strategy) -> None:
     click.echo("\nwill anything move it on")
     selects = "yes" if follow.selected else "no"
     repair = "yes" if follow.self_repairing else "no"
-    click.echo(f"  a query selects on this value   {selects}")
+    click.echo(f"  anything acts on this value     {selects}")
     click.echo(
         f"  a re-evaluating trigger reaches  {repair}"
         + (f"  ({', '.join(follow.triggers)})" if follow.triggers else "")
     )
-    if follow.selected_by:
-        # The reader, not the writers: this is the query that has to pick the
-        # row up, so it is the one an investigation goes and reads.
-        for index, owner in enumerate(follow.selected_by):
-            label = "  which query selects it        " if index == 0 else " " * 33
+    # A query where there is one: it is the statement that could have missed the
+    # row, which is the question.  An update acts on the row by the same value
+    # but is the picking up rather than a chance to have failed at it, so it is
+    # named as itself and only when nothing queries.
+    actors = follow.selected_by or follow.updated_by
+    heading = (
+        "  which query selects it        "
+        if follow.selected_by
+        else "  which update acts on it       "
+    )
+    if actors:
+        for index, owner in enumerate(actors):
+            label = heading if index == 0 else " " * 33
             click.echo(f"{label} {strategy_mod.short_owner(owner)}")
         click.echo(
             "                                   "

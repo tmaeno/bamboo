@@ -494,6 +494,7 @@ def _follow_up(
     observed: str,
     selected_values: list[str],
     selected_by: list[str],
+    updated_by: list[str],
     selection_gates: list[str],
     writers: list[JunctionNode],
     carried_from: list[str],
@@ -514,25 +515,38 @@ def _follow_up(
     query that has to pick this row up.  Kept as the fallback, because an empty
     trigger set reads as "nothing reaches it", which is a stronger claim than
     "the map cannot say".
+
+    **A query where there is one, an update otherwise.**  Both act on rows by
+    the value and only the first is somewhere the row could have been missed,
+    so a query names the place to look wherever one exists.  Where none does --
+    nine values in the corpus are reached by nothing but an update's predicate
+    -- the update is still the actor, and dropping it would turn "this is the
+    statement that has to match" into the much stronger "nothing acts on this
+    at all".
     """
     selected = observed in selected_values
     by_owner = {j.owner: j for j in writers}
     readers = [by_owner[o] for o in selected_by if o in by_owner]
-    reader_files = sorted({f for r in readers for f in r.observable_log_files()})
-    # The reader's own triggers where it has any.  Most readers are proxy
+    actors = readers or [by_owner[o] for o in updated_by if o in by_owner]
+    reader_files = sorted({f for r in actors for f in r.observable_log_files()})
+    # The actor's own triggers where it has any.  Most readers are proxy
     # methods the trigger slice reaches through a knight rather than directly,
     # so their entry points are empty -- and reading that as the answer says
     # "nothing reaches this subject", which is a stronger claim than the map
     # can make and, for ``pending``, the opposite of true.
-    triggers = sorted({entry.trigger for j in readers for entry in j.entry_points}) or sorted(
+    triggers = sorted({entry.trigger for j in actors for entry in j.entry_points}) or sorted(
         {entry.trigger for j in writers for entry in j.entry_points}
     )
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
-    asks = (
-        f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
-        if selected_by
-        else f"a query selects on {observed!r}"
-    )
+    if selected_by:
+        asks = f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
+    elif updated_by:
+        asks = (
+            f"no query selects on {observed!r}, but "
+            f"{_readers_phrase(updated_by, reader_files)} updates rows holding it"
+        )
+    else:
+        asks = f"a query selects on {observed!r}"
     if selected and repairing:
         bounded = (
             "bounded by " + ", ".join(selection_gates)
@@ -559,6 +573,7 @@ def _follow_up(
     return FollowUp(
         selected=selected,
         selected_by=list(selected_by),
+        updated_by=list(updated_by),
         reader_log_files=reader_files,
         selection_gates=list(selection_gates),
         triggers=triggers,
@@ -950,6 +965,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             symptom.observed,
             subject.selected_values,
             subject.selected_by.get(symptom.observed, []),
+            subject.updated_by.get(symptom.observed, []),
             subject.selection_gates,
             writers,
             carried,

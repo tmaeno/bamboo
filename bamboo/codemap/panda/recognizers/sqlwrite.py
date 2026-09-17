@@ -477,6 +477,26 @@ class EntityUse(NamedTuple):
     written_by: set[str]
 
 
+class ValueUse(NamedTuple):
+    """Who asks for a value, and who acts on rows that already hold it.
+
+    One ``WHERE`` clause, two questions, and they part company here.  *Does
+    anything move a row out of this state?* is answered by ``UPDATE ... SET
+    status=:new WHERE status=:old`` as squarely as by a query, so both verbs
+    count towards it.  *Who has to pick this row up, so who to ask why they did
+    not?* is not: an update is the picking up, not a chance to have missed it.
+
+    Pooling them said an update was a query for a fifth of the corpus -- 99 of
+    524 ``(function, subject, value)`` claims came from nothing but a write's
+    predicate.  The cost was not only wording: one hop out of a junction opens
+    a descent on whatever the called helper selects, so a writer counted as a
+    reader sent the walk forward while it said it was stepping down.
+    """
+
+    selected_by: set[str]
+    updated_by: set[str]
+
+
 class ReadSide(NamedTuple):
     """What the predicates and the row sources of the corpus's statements say.
 
@@ -486,8 +506,9 @@ class ReadSide(NamedTuple):
     have written the table-to-class join twice.
     """
 
-    #: ``{subject: {value: the functions whose query selects on it}}``
-    values: dict[str, dict[str, set[str]]]
+    #: ``{subject: {value: ValueUse}}`` -- the values a predicate names, with
+    #: the verb that brought the table in kept beside each function.
+    values: dict[str, dict[str, ValueUse]]
     #: ``{spec class: EntityUse}``
     entities: dict[str, EntityUse]
     #: ``{owner: statements whose table reference is still a placeholder}``.
@@ -552,12 +573,13 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     for this subject, so nothing is hidden by it.
     """
     settle = values.resolver(values.declared_mappings(modules))
-    found: dict[str, dict[str, set[str]]] = {}
+    found: dict[str, dict[str, ValueUse]] = {}
     rows: dict[str, EntityUse] = {}
     unreadable: dict[str, int] = {}
 
-    def record(subject: str, value: str, owner: str) -> None:
-        found.setdefault(subject, {}).setdefault(value, set()).add(owner)
+    def record(subject: str, value: str, owner: str, verb: str) -> None:
+        use = found.setdefault(subject, {}).setdefault(value, ValueUse(set(), set()))
+        (use.selected_by if verb == "read" else use.updated_by).add(owner)
 
     def touch(spec_class: str, table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(spec_class, EntityUse(set(), set(), set()))
@@ -579,7 +601,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     spec_class = attributor.class_for_table(table)
                     if spec_class is not None:
                         touch(spec_class, table, owner, verb)
-                for table in _tables_of(run.sql):
+                for verb, table in _table_verbs(run.sql):
                     spec_class = attributor.class_for_table(table)
                     for column, key in sql.predicates(run.sql):
                         qualifier, attribute, _kind = _subject_of(
@@ -588,12 +610,17 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                         subject = SubjectNode.make_name(qualifier, attribute)
                         for bind in sql.bound_values(func, run.varmap or "", key):
                             for value in settle(bind.value, func):
-                                record(subject, value, owner)
+                                record(subject, value, owner, verb)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
-                        record(SubjectNode.make_name(qualifier, attribute), value, owner)
+                        record(
+                            SubjectNode.make_name(qualifier, attribute),
+                            value,
+                            owner,
+                            verb,
+                        )
     return ReadSide(values=found, entities=rows, unreadable=unreadable)
 
 
@@ -684,6 +711,16 @@ def _rows_touched(statement: str) -> list[tuple[str, str]]:
     touched.extend(("written", write.table) for write in sql.writes(statement))
     touched.extend(("written", table) for table in sql.deletes(statement))
     return touched
+
+
+def _table_verbs(statement: str) -> list[tuple[str, str]]:
+    """``(verb, table)`` for each way *statement* touches a table, deduplicated.
+
+    :func:`_tables_of` with the verb kept, for the reading that needs it.  A
+    statement naming one table under both verbs -- ``INSERT INTO a SELECT FROM
+    a`` -- yields both, which is what it does.
+    """
+    return sorted(set(_rows_touched(statement)))
 
 
 def _tables_of(statement: str) -> list[str]:

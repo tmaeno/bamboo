@@ -126,21 +126,37 @@ class SubjectNode(BaseNode):
     selected_values: list[str] = Field(
         default_factory=list,
         description=(
-            "Values some query selects rows on.  The counterpart of the "
-            "outcomes the junctions write: together they make a state machine "
-            "out of a pile of writes, since a value nothing selects on is one "
-            "nothing ever moves away from."
+            "Values something acts on rows by -- a query's ``WHERE`` or an "
+            "update's.  The counterpart of the outcomes the junctions write: "
+            "together they make a state machine out of a pile of writes, since "
+            "a value nothing acts on is one nothing ever moves away from.  Both "
+            "verbs count here, because an ``UPDATE ... WHERE status=:old`` "
+            "moves a task out of that status as squarely as a query does."
         ),
     )
     selected_by: dict[str, list[str]] = Field(
         default_factory=dict,
         description=(
-            "``{value: the functions whose query selects rows on it}``.  Kept "
+            "``{value: the functions whose *query* selects rows on it}``.  Kept "
             "per value rather than per subject because the two answer different "
             "questions: ``JediTaskSpec.status`` is selected on thirty-one values "
             "by dozens of functions, and pooling them says only that the subject "
             "is read.  Per value it says who to ask -- ``finishing`` is selected "
-            "by exactly one query in the whole corpus."
+            "by exactly one query in the whole corpus.  Queries only; see "
+            "``updated_by`` for the other verb and why the two are apart."
+        ),
+    )
+    updated_by: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "``{value: the functions whose UPDATE or DELETE acts on rows "
+            "already holding it}``.  A different claim from ``selected_by``, "
+            "and folding them said an update was a query for a fifth of the "
+            "corpus.  The distinction is what the reading is for: asked why a "
+            "row was not picked up, a query is somewhere that could have "
+            "missed it, while an update is the picking up itself -- so the "
+            "first names a place to look and the second names what already "
+            "happened."
         ),
     )
     selection_gates: list[str] = Field(
@@ -1519,7 +1535,11 @@ class FollowUp(BaseModel):
 
     selected: bool = Field(
         ...,
-        description="Whether any query in the map selects rows on this value.",
+        description=(
+            "Whether anything in the map acts on rows by this value -- a "
+            "query's predicate or an update's.  Both answer 'will the row be "
+            "moved on at all'; ``selected_by`` and ``updated_by`` say which."
+        ),
     )
     selection_gates: list[str] = Field(
         default_factory=list,
@@ -1534,6 +1554,15 @@ class FollowUp(BaseModel):
         description=(
             "The functions whose query selects rows on the observed value.  "
             "Where the row has to be picked up, so where to ask why it was not."
+        ),
+    )
+    updated_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions whose update or delete acts on rows already holding "
+            "the observed value.  Not a place the row could have been missed --"
+            " an update is the picking up -- so it is named separately and only "
+            "answers 'what will move this row' where no query does."
         ),
     )
     reader_log_files: list[str] = Field(

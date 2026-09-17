@@ -323,7 +323,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             readers = selected.get(subject.name, {})
             subject.selected_values = sorted(readers)
             subject.selected_by = {
-                value: sorted(owners) for value, owners in sorted(readers.items())
+                value: sorted(use.selected_by)
+                for value, use in sorted(readers.items())
+                if use.selected_by
+            }
+            subject.updated_by = {
+                value: sorted(use.updated_by)
+                for value, use in sorted(readers.items())
+                if use.updated_by
             }
             subject.selection_gates = sorted(gated.get(subject.name, ()))
 

@@ -56,6 +56,7 @@ def _subject(
     gates: list[str] | None = None,
     name: str = SUBJECT,
     selected_by: dict[str, list[str]] | None = None,
+    updated_by: dict[str, list[str]] | None = None,
 ) -> SubjectNode:
     spec_class, _, attribute = name.rpartition(".")
     return SubjectNode(
@@ -66,6 +67,7 @@ def _subject(
         attribute=attribute,
         selected_values=selected or [],
         selected_by=selected_by or {},
+        updated_by=updated_by or {},
         selection_gates=gates or [],
     )
 
@@ -453,6 +455,79 @@ async def test_the_query_that_selects_the_value_is_named_with_the_log_it_writes_
     assert strategy.follow_up.selected_by == ["jediorder/TaskCommando.py::run"]
     assert strategy.follow_up.reader_log_files == [OTHER_LOG]
     assert "TaskCommando" in strategy.follow_up.question
+
+
+async def test_a_value_only_an_update_acts_on_names_the_update_and_not_a_query():
+    """The nine values in the corpus no query ever asks for.
+
+    Dropping the update once the verbs came apart would turn "this statement
+    has to match" into "nothing acts on this at all" -- the strongest claim the
+    follow-up can make, and here a false one.  Named as an update, because a
+    query is somewhere the row could have been missed and an update is not.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                updated_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.selected == 1
+    assert strategy.follow_up.selected_by == []
+    assert strategy.follow_up.updated_by == ["jediorder/TaskCommando.py::run"]
+    assert strategy.follow_up.reader_log_files == [OTHER_LOG]
+    assert "no query selects" in strategy.follow_up.question
+    assert "updates rows holding it" in strategy.follow_up.question
+
+
+async def test_a_query_wins_over_an_update_that_acts_on_the_same_value():
+    """Both act on the row; only one is a place it could have been missed."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                selected_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+                updated_by={"finishing": ["jedidog/AtlasProdWatchDog.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::run",
+                Branch(outcome="finishing"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.reader_log_files == [OTHER_LOG]
+    assert "is selected by" in strategy.follow_up.question
 
 
 async def test_a_reader_the_map_holds_no_log_for_is_named_without_one():
