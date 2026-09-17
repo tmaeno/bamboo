@@ -2216,3 +2216,42 @@ async def test_the_report_says_which_leads_were_not_recorded_edges():
 
     assert "[callee]" in out
     assert "[map]" not in out  # the default supplier is not worth a badge on every line
+
+
+async def test_two_helpers_reaching_one_entity_are_both_named():
+    """Folding the destination is for reading; folding the openers hides the answer.
+
+    Several helpers reach one kind of row and which one did is all that tells
+    them apart: ``runImpl`` asks ``reassignShare`` in one arm and
+    ``getPandaIDsWithTask_JEDI`` in another, and keeping only the first says
+    the task is reassigning when it is waiting on its jobs.
+    """
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_leads
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        leads=[
+            models.Lead(
+                field=_JOB,
+                stop=models.STOP_DESCENT,
+                why="runImpl asks reassignShare(), which selects JobSpec.jobStatus=activated",
+                source=models.LEAD_CALLEE,
+            ),
+            models.Lead(
+                field=_JOB,
+                stop=models.STOP_DESCENT,
+                why="runImpl asks getPandaIDsWithTask_JEDI(), which reads JobSpec rows",
+                source=models.LEAD_CALLEE,
+            ),
+        ],
+    )
+    command = click.Command("x", callback=lambda: _report_leads(strategy, 5, False))
+    out = click.testing.CliRunner().invoke(command).output
+
+    assert out.count("stops JobSpec") == 1
+    assert "reassignShare" in out
+    assert "getPandaIDsWithTask_JEDI" in out

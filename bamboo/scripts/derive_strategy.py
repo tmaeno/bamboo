@@ -51,6 +51,7 @@ from bamboo.codemap.models import (
     WALK_TERMINAL,
     Hop,
     Investigation,
+    Lead,
     Strategy,
     Symptom,
 )
@@ -72,6 +73,12 @@ DEFAULT_HOPS = 3
 # leave a gate reading a sample collected for something else.
 
 _WIDTH = 96
+
+#: Openers listed under one folded destination before the rest are counted.
+#: Enough to show that a descent was reached by more than one helper -- which
+#: is what says whether a task is reassigning or waiting on its jobs -- without
+#: turning four destinations into thirty lines.
+_REASONS_SHOWN = 3
 
 _VERDICT_ORDER = (SEEN, UNSETTLED, UNASKABLE, ELIMINATED)
 
@@ -307,17 +314,23 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
     # other is a place the walk ran out, and a reader deciding what to do next
     # wants them in that order.
     ordered = sorted(strategy.leads, key=lambda lead: (lead.symptom is None, lead.field))
-    # Folded for reading only.  Several candidates open the same field and the
-    # strategy keeps every one of them, because which of them survives the
-    # evidence is not decided until later -- see ``_deduped``.
-    ordered = [
-        lead
-        for index, lead in enumerate(ordered)
-        if lead.field not in {earlier.field for earlier in ordered[:index]}
-    ]
+    # Folded by destination for reading only.  The strategy keeps every lead,
+    # because which of their openers survives the evidence is not decided until
+    # later -- see ``_deduped``.
+    #
+    # **The reasons are not folded with them.**  Since a descent is named by the
+    # entity, several helpers reach one kind of row and which helper did it is
+    # the whole of what distinguishes them: ``runImpl`` asks ``reassignShare``
+    # in one arm and ``getPandaIDsWithTask_JEDI`` in another, and keeping the
+    # first says the task is reassigning when it is waiting on its jobs.
+    grouped: dict[str, list[Lead]] = {}
+    for lead in ordered:
+        grouped.setdefault(lead.field, []).append(lead)
     click.echo("\nwhere this goes next")
-    shown = ordered if full else ordered[:top]
-    for lead in shown:
+    fields = list(grouped) if full else list(grouped)[:top]
+    for field in fields:
+        leads = grouped[field]
+        lead = leads[0]
         # The supplier, on every line.  A lead the extraction recorded and one
         # assembled from a call are not the same claim, and a reader who cannot
         # tell them apart reads the map's coverage as better than it is.
@@ -328,13 +341,18 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
                 ask += f" --task {lead.symptom.task_id}"
             click.echo(f"  ask   {ask}{via}")
         else:
-            click.echo(f"  stops {lead.field}  -- {lead.stop}{via}")
-        for line in click.wrap_text(
-            lead.why, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
-        ).splitlines():
-            click.echo(line)
-    if len(ordered) > len(shown):
-        click.echo(f"  … {len(ordered) - len(shown)} more (--full)")
+            click.echo(f"  stops {field}  -- {lead.stop}{via}")
+        reasons = list(dict.fromkeys(one.why for one in leads if one.why))
+        said = reasons if full else reasons[:_REASONS_SHOWN]
+        for reason in said:
+            for line in click.wrap_text(
+                reason, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
+            ).splitlines():
+                click.echo(line)
+        if len(reasons) > len(said):
+            click.echo(f"        … {len(reasons) - len(said)} more opener(s) (--full)")
+    if len(grouped) > len(fields):
+        click.echo(f"  … {len(grouped) - len(fields)} more (--full)")
 
 
 def _report_reading(
