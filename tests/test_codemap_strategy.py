@@ -1796,7 +1796,7 @@ async def _scout_calling(
                 _arm("scout_cpuTime", "scoutData['cpuTime'] > thr", 1239),
                 owns_logger=False,
                 caller_log_files=[KNIGHT_LOG],
-                calls=["getScoutJobData_JEDI"] if calls is None else calls,
+                calls=[_GETTER] if calls is None else calls,
             )
         ],
     )
@@ -1833,10 +1833,14 @@ async def test_sharing_an_owner_with_a_reader_is_not_a_call():
     assert [lead.field for lead in strategy.leads] == []
 
 
-async def test_a_helper_in_another_module_opens_nothing():
-    """``self.<name>()`` is an edge only inside one module.  Matching the bare
-    name across the tree is the rule that gave one junction fourteen entry
-    points, thirteen of them wrong."""
+async def test_a_helper_of_the_same_name_elsewhere_opens_nothing():
+    """The join is on the whole target, never the bare name.
+
+    A call may cross a module boundary, but which module it lands in was
+    settled when the map was built and is spelt out in the target.  Matching
+    the name instead is the rule that gave one junction fourteen entry points,
+    thirteen of them wrong.
+    """
     strategy = await _scout_calling(
         reader="jedirefine/TaskRefinerBase.py::getScoutJobData_JEDI"
     )
@@ -2077,7 +2081,7 @@ async def test_a_recorded_edge_is_listed_before_an_assembled_one():
             _junction(
                 _SCOUT,
                 Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
-                calls=["getScoutJobData_JEDI"],
+                calls=[_GETTER],
                 log_files=[KNIGHT_LOG],
             ),
             _junction(

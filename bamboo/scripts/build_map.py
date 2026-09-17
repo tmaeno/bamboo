@@ -353,13 +353,19 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     consulting = getattr(plugin, "consulting", 0)
     readers = _readers(fragment)
     reaching = sum(
+        1 for j in fragment.junctions if any(target in readers for target in j.calls)
+    )
+    crossing = sum(
         1
         for j in fragment.junctions
-        if any(f"{j.owner.partition('::')[0]}::{m}" in readers for m in j.calls)
+        if any(
+            not target.startswith(j.owner.partition("::")[0] + "::") for target in j.calls
+        )
     )
     click.echo(
-        f"self-calls: {consulting}/{total} junction(s) call something on self, "
-        f"{reaching} of them reaching a function that selects rows"
+        f"consults: {consulting}/{total} junction(s) call something, "
+        f"{crossing} of them into another module, "
+        f"{reaching} reaching a function that selects rows"
     )
 
     # Where to look, which is a different question from what starts it: the

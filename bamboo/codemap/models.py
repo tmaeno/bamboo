@@ -471,17 +471,19 @@ class JunctionNode(BaseNode):
     calls: list[str] = Field(
         default_factory=list,
         description=(
-            "Methods the owner calls on ``self``, by bare name.  The one edge "
-            "out of a junction that needs no resolution -- inside a module "
-            "``self.<name>()`` is unambiguous -- and the only one that reaches "
-            "the aggregate an arm decided on: ``setScoutJobData_JEDI`` writes "
-            "``exhausted`` and ``getScoutJobData_JEDI`` selects on finished "
-            "jobs, with nothing but the call between them.  Recorded rather "
-            "than joined at read time through the shared owner, because "
-            "``selected_by`` is per function and a method handling several "
-            "commands reads one thing in one arm and writes another in "
-            "another; treating that as a relation is the mistake this corpus "
-            "has already charged for twice."
+            "What the owner consults, as ``module::method`` targets.  The one "
+            "edge out of a junction that reaches the rows an arm decided on: "
+            "``setScoutJobData_JEDI`` writes ``exhausted`` and "
+            "``getScoutJobData_JEDI`` selects on finished jobs, with nothing "
+            "but the call between them.  Qualified because a bare name is not "
+            "an identity here and the reader joins on this -- which module a "
+            "call lands in is settled at build time, where a name is followed "
+            "only if it means one thing or the caller imports the module it "
+            "names.  Recorded rather than joined at read time through the "
+            "shared owner, because ``selected_by`` is per function and a "
+            "method handling several commands reads one thing in one arm and "
+            "writes another in another; treating that as a relation is the "
+            "mistake this corpus has already charged for twice."
         ),
     )
     gloss_key: str = Field(

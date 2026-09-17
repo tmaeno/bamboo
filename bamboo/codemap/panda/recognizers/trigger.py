@@ -175,18 +175,29 @@ def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
     return frozenset(bound)
 
 
-def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
-    """Return ``{method name: first call}`` for the calls *module* really makes.
+def _outward_call_sites(
+    module: SourceModule,
+) -> list[tuple[tuple[str, ...], str, ast.Call]]:
+    """Return ``[(enclosing functions, method, call)]`` for *module*'s real calls.
 
-    :func:`_calls_by_name` with the facade hop removed.  ``TaskBuffer`` and
-    ``JediTaskBuffer`` borrow a connection from ``self.proxyPool`` and call the
-    implementation through it, so a call on a borrowed proxy is the same handoff
-    :func:`_forwards_to_itself` already refuses to count as a *definition*,
-    refused here as a *call*.
+    The primitive :func:`_outward_calls` and :func:`attach_calls` share, so the
+    facade rule below is read once rather than written twice.  Which of them
+    needs the enclosing function is the whole difference between the two
+    questions: *what does this module call* is right for the door, because the
+    door is where an entry hands over its arguments, and wrong for what a
+    junction consults -- a knight's two methods consult different things, and
+    pooling them under the file is the shared-owner join by another name.
 
-    **The receiver is what identifies it, not the name.**  A facade method may
-    forward under a different name --
-    ``JediTaskBuffer.checkWaitingTaskPrio_JEDI`` calls
+    A tuple of names, not one, because a call inside a nested function is made
+    by the outer function too; :func:`_self_calls` walks whole function bodies
+    and says the same.  Module-level calls carry the empty tuple.
+
+    **The receiver is what identifies a facade hop, not the name.**  ``TaskBuffer``
+    and ``JediTaskBuffer`` borrow a connection from ``self.proxyPool`` and call
+    the implementation through it, so a call on a borrowed proxy is the same
+    handoff :func:`_forwards_to_itself` already refuses to count as a
+    *definition*, refused here as a *call*.  A facade method may forward under a
+    different name -- ``JediTaskBuffer.checkWaitingTaskPrio_JEDI`` calls
     ``proxy.getTasksToBeProcessed_JEDI`` -- and conversely a call matching the
     enclosing function's name is usually not a handoff at all:
     ``datasetManager.run`` constructs a ``Closer`` and calls
@@ -201,23 +212,39 @@ def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
     empty answer there reads as "this code never ran".  It sat on 71 junctions
     before the receiver rule removed it.
     """
-    calls: dict[str, ast.Call] = {}
-    # Breadth-first over the tree, matching ``_calls_by_name``: which call a
-    # name resolves to decides the ``arg_binding`` reported for that entry.
-    queue: list[tuple[ast.AST, frozenset[str]]] = [(module.tree, frozenset())]
+    sites: list[tuple[tuple[str, ...], str, ast.Call]] = []
+    # Breadth-first, because which call a name resolves to decides the
+    # ``arg_binding`` reported for that entry and that answer must not move.
+    queue: list[tuple[ast.AST, tuple[str, ...], frozenset[str]]] = [
+        (module.tree, (), frozenset())
+    ]
     while queue:
-        node, pooled = queue.pop(0)
+        node, enclosing, pooled = queue.pop(0)
         for child in ast.iter_child_nodes(node):
-            inner = (
-                _pool_bindings(child)
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-                else pooled
-            )
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner_names = enclosing + (child.name,)
+                inner_pooled = _pool_bindings(child)
+            else:
+                inner_names, inner_pooled = enclosing, pooled
             if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
                 receiver = child.func.value
                 if not (isinstance(receiver, ast.Name) and receiver.id in pooled):
-                    calls.setdefault(child.func.attr, child)
-            queue.append((child, inner))
+                    sites.append((enclosing, child.func.attr, child))
+            queue.append((child, inner_names, inner_pooled))
+    return sites
+
+
+def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
+    """Return ``{method name: first call}`` for the calls *module* really makes.
+
+    :func:`_calls_by_name` with the facade hop removed -- see
+    :func:`_outward_call_sites`, which does the reading.  What the door needs is
+    the module's whole surface and the *first* call under each name, because
+    that is the call whose keyword arguments distinguish one entry from another.
+    """
+    calls: dict[str, ast.Call] = {}
+    for _enclosing, method, call in _outward_call_sites(module):
+        calls.setdefault(method, call)
     return calls
 
 
@@ -248,6 +275,24 @@ def _forwards_to_itself(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
+def definitions(modules: list[SourceModule]) -> dict[str, set[str]]:
+    """Return ``{method name: the modules that implement it}``, doors removed.
+
+    The primitive behind :func:`sole_definitions`.  Both restrictions a
+    cross-module hop is allowed to rest on need it -- "the name means one thing"
+    reads the singletons, "the caller says which module it means" needs the
+    rivals as well -- and computing it twice would be two readings of the same
+    fact that could drift apart.
+    """
+    defined: dict[str, set[str]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            if _forwards_to_itself(func):
+                continue
+            defined.setdefault(func.name, set()).add(module.rel_path)
+    return defined
+
+
 def sole_definitions(modules: list[SourceModule]) -> dict[str, str]:
     """Return ``{method name: the one module that implements it}``.
 
@@ -259,13 +304,11 @@ def sole_definitions(modules: list[SourceModule]) -> dict[str, str]:
     the same "only one declaration" argument the attribute and alias slices
     already turn on, one level up.
     """
-    defined: dict[str, set[str]] = {}
-    for module in modules:
-        for func, _owner in functions_with_owner(module.tree):
-            if _forwards_to_itself(func):
-                continue
-            defined.setdefault(func.name, set()).add(module.rel_path)
-    return {name: next(iter(where)) for name, where in defined.items() if len(where) == 1}
+    return {
+        name: next(iter(where))
+        for name, where in definitions(modules).items()
+        if len(where) == 1
+    }
 
 
 def imported_modules(module: SourceModule) -> set[str]:
@@ -466,8 +509,90 @@ def attach(
     return reached, len(junctions)
 
 
+def _reaches_from_self(receiver: ast.expr) -> bool:
+    """True when *receiver* is this object or a collaborator it holds.
+
+    The same "the receiver is what identifies it" rule
+    :func:`_outward_call_sites` turns on for the facade, deciding here which
+    calls are *consultations*.  A junction consults what its object holds --
+    ``self.taskBufferIF.<method>()`` -- while ``newScanSiteList.append(x)`` and
+    ``tmpLog.debug(msg)`` are data and output passing through the function.
+    Without the distinction a name match resolves ``append`` to
+    ``SQLManager.append`` on 241 junctions, every one of them a list; it is the
+    generic reference edge failing in a new place, which this corpus has
+    charged for before.
+
+    Two spellings, because the proxy is assembled from mixins and reaches its
+    siblings through an accessor rather than an attribute:
+    ``get_task_event_module(self).updateInputStatusJedi(...)`` is the same claim
+    as ``self.taskBufferIF.<method>()``, and refusing it costs 33 junctions
+    their only route to another entity's rows.
+
+    A module-level ``taskBuffer`` global -- the spelling three daemon scripts
+    use -- is not accepted: it is a bare name with nothing tying it to this
+    object, and taking it would mean trusting a name again.  Measured cost:
+    three junctions, reported rather than guessed at.
+    """
+    while True:
+        if isinstance(receiver, ast.Attribute):
+            receiver = receiver.value
+        elif isinstance(receiver, ast.Call):
+            if any(isinstance(a, ast.Name) and a.id == "self" for a in receiver.args):
+                return True
+            receiver = receiver.func
+        else:
+            return isinstance(receiver, ast.Name) and receiver.id == "self"
+
+
+def _consulted_targets(
+    modules: list[SourceModule],
+) -> dict[str, dict[str, set[str]]]:
+    """Return ``{module: {function: qualified targets}}`` -- what each one consults.
+
+    Qualified, because a bare name is not an identity in this corpus and the
+    reader of this field joins on it.  Two restrictions decide whether a name
+    resolves at all, and they are the ones :func:`reaching_modules` already
+    turns on, applied in the other direction: the name means one thing across
+    the tree, or the caller imports the module it names.  Without them ``run``
+    would make every daemon consult every other.
+
+    A call inside the module itself stays inside it -- ``self.<name>()`` needs
+    no resolution, which is why it is recorded even where the name is defined
+    nowhere the map can see (proxy mixins inherit plenty).  A key that resolves
+    to nothing costs a lookup and claims nothing.
+
+    Which calls count at all is :func:`_reaches_from_self`; the sites come from
+    :func:`_outward_call_sites`, which only ever records a call whose ``func``
+    is an attribute, so the receiver is always there to ask about.
+    """
+    defined = definitions(modules)
+    sole = sole_definitions(modules)
+    imports = {module.rel_path: imported_modules(module) for module in modules}
+
+    targets: dict[str, dict[str, set[str]]] = {}
+    for module in modules:
+        here = module.rel_path
+        for method, callees in _self_calls(module).items():
+            targets.setdefault(here, {}).setdefault(method, set()).update(
+                f"{here}::{callee}" for callee in callees
+            )
+        for enclosing, method, call in _outward_call_sites(module):
+            if not enclosing or not _reaches_from_self(call.func.value):
+                continue
+            for home in defined.get(method, ()):
+                if home == here:
+                    continue
+                if sole.get(method) != home and home not in imports[here]:
+                    continue
+                for name in enclosing:
+                    targets.setdefault(here, {}).setdefault(name, set()).add(
+                        f"{home}::{method}"
+                    )
+    return targets
+
+
 def attach_calls(junctions: list[JunctionNode], modules: list[SourceModule]) -> int:
-    """Record what each junction's owner calls on ``self``.  Returns how many got any.
+    """Record what each junction's owner consults.  Returns how many got any.
 
     Separate from :func:`attach` although both walk the same edges, because the
     two questions they answer are different and one field answering both is how
@@ -478,16 +603,22 @@ def attach_calls(junctions: list[JunctionNode], modules: list[SourceModule]) -> 
     One hop, not the closure, because the hop is what is being claimed.  The
     arm that sends a task to ``exhausted`` decided on an aggregate over its
     jobs, and the map has no edge for that aggregate -- the write and the read
-    sit in two methods of one module with a call between them.  Following
-    further would stop being "this junction asks that question" and start being
-    "these two things are in the same neighbourhood", which is the shape of
-    join this corpus keeps punishing.
+    sit in two methods with a call between them.  Following further would stop
+    being "this junction asks that question" and start being "these two things
+    are in the same neighbourhood", which is the shape of join this corpus keeps
+    punishing.  Measured: a second hop reaches two junctions the first does not.
+
+    Across modules as well as within one.  Keeping it inside a file was not a
+    principle but the shape of :func:`_self_calls`, and it cost the common case:
+    a knight decides a task's status and asks the task buffer about that task's
+    rows, which is ``self.taskBufferIF.<method>()`` and lands in another
+    package every time.
     """
-    per_module = {module.rel_path: _self_calls(module) for module in modules}
+    targets = _consulted_targets(modules)
     found = 0
     for junction in junctions:
         owner_module, _, method = junction.owner.partition("::")
-        junction.calls = sorted(per_module.get(owner_module, {}).get(method, ()))
+        junction.calls = sorted(targets.get(owner_module, {}).get(method, ()))
         if junction.calls:
             found += 1
     return found

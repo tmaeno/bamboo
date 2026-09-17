@@ -1317,12 +1317,10 @@ def _consulted(
     The map's own edges reach the fields a value was *copied* from.  They do not
     reach the rows a value was *decided on*: an arm sends a task to
     ``exhausted`` because an aggregate over its jobs came out a certain way, and
-    the write and the read of that aggregate are two methods of one module with
-    a call between them and no edge at all.  Measured over the task-side
-    junctions: the map alone opens the descent for none of them soundly, one hop
-    opens it for three, and the whole thing is carried by two helpers.  Small,
-    and kept for what it reaches rather than how often -- the scout case is the
-    symptom class this was built for.
+    the write and the read of that aggregate are two methods with a call between
+    them and no edge at all.  Measured over the junctions whose subject has a
+    spec class, one hop opens a read of another entity for 138 of them; keeping
+    that hop inside one file, as the first version did, opened 47.
 
     **Not the owner.**  The tempting version asks whether the junction's own
     function also selects on another entity, and it is unsound:
@@ -1341,9 +1339,8 @@ def _consulted(
     leads: list[Lead] = []
     here = symptom.subject.rpartition(".")[0]
     for junction in producers:
-        module = junction.owner.partition("::")[0]
-        for method in junction.calls:
-            for subject, value in selections.get(f"{module}::{method}", ()):
+        for target in junction.calls:
+            for subject, value in selections.get(target, ()):
                 # Another field of the same spec is a lateral read: the row is
                 # the one already being asked about, so there is nothing to
                 # descend to and calling it a descent would put a population
@@ -1355,7 +1352,8 @@ def _consulted(
                         field=subject,
                         stop=STOP_DESCENT,
                         why=(
-                            f"{short_owner(junction.owner)} asks {method}(), which "
+                            f"{short_owner(junction.owner)} asks "
+                            f"{target.rpartition('::')[2]}(), which "
                             f"selects {subject}={value}"
                         ),
                         opened_by=junction.owner,

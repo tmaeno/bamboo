@@ -3832,6 +3832,178 @@ def test_a_facade_that_forwards_is_not_a_second_implementation():
     )
 
 
+_KNIGHT_CONSULTING = """
+class TaskCommando:
+    def runImpl(self):
+        while True:
+            tasks = self.taskBufferIF.getTasksToExecCommand_JEDI(vo, label)
+            ids = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)
+            self.report(ids)
+
+    def report(self, ids):
+        pass
+"""
+
+_JOB_PROXY = """
+class JobModule:
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        self.cur.execute(sqlP + comment, varMap)
+"""
+
+
+def test_a_call_into_another_module_is_recorded_as_a_qualified_target():
+    """What a junction consults is rarely in its own file.
+
+    ``TaskCommando.runImpl`` decides a task's status and asks
+    ``getPandaIDsWithTask_JEDI`` for that task's jobs, and the two sit in
+    different packages with a ``self.taskBufferIF`` call between them.  Keeping
+    the edge inside one module left every such question looking as though the
+    map had nothing to say.
+    """
+    junction = _junction("pandajedi/jediorder/TaskCommando.py::runImpl")
+    modules = [
+        _module(_KNIGHT_CONSULTING, "pandajedi/jediorder/TaskCommando.py"),
+        _module(_JOB_PROXY, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == [
+        "pandajedi/jediorder/TaskCommando.py::report",
+        "pandaserver/taskbuffer/db_proxy_mods/job_module.py::getPandaIDsWithTask_JEDI",
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py::getTasksToExecCommand_JEDI",
+    ]
+
+
+def test_the_call_belongs_to_the_function_that_makes_it():
+    """Keying the outward calls by name alone pooled a file's whole surface.
+
+    ``_outward_calls`` answers "does this module call X", which is the right
+    question for the door but the wrong one here: two methods of one knight
+    consult different things, and attributing both to both is the shared-owner
+    join by another name.
+    """
+    source = (
+        "class K:\n"
+        "    def finish(self):\n"
+        "        self.taskBufferIF.getPandaIDsWithTask_JEDI(i, True)\n"
+        "    def refine(self):\n"
+        "        self.taskBufferIF.markTask()\n"
+    )
+    modules = [
+        _module(source, "pandajedi/jediorder/K.py"),
+        _module(_JOB_PROXY, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    finish = _junction("pandajedi/jediorder/K.py::finish")
+    refine = _junction("pandajedi/jediorder/K.py::refine")
+    trigger.attach_calls([finish, refine], modules)
+
+    assert finish.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/job_module.py::getPandaIDsWithTask_JEDI"
+    ]
+    assert refine.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py::markTask"
+    ]
+
+
+def test_a_shared_name_the_caller_does_not_import_carries_no_call():
+    """The same restriction the door hop turns on, one direction over.
+
+    ``run`` is defined by every daemon; following it by name gave one junction
+    fourteen entry points of which thirteen were wrong.  A call resolves only
+    where the name means one thing, or where the caller says which module it
+    means.
+    """
+    knight = "class K:\n    def act(self):\n        self.helper.run()\n"
+    modules = [
+        _module(knight, "pandajedi/jediorder/K.py"),
+        _module("class A:\n    def run(self):\n        pass\n", "pandaserver/a.py"),
+        _module("class B:\n    def run(self):\n        pass\n", "pandaserver/b.py"),
+    ]
+    junction = _junction("pandajedi/jediorder/K.py::act")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
+def test_a_method_on_data_passing_through_is_not_a_consultation():
+    """``newScanSiteList.append(x)`` is a list, whatever else defines ``append``.
+
+    Resolving by name alone put ``SQLManager.append`` on 241 junctions, every
+    one of them a list.  What a junction consults is what its object holds, and
+    the receiver is what says so.
+    """
+    broker = (
+        "class B:\n"
+        "    def choose(self):\n"
+        "        newScanSiteList = []\n"
+        "        newScanSiteList.append(site)\n"
+    )
+    modules = [
+        _module(broker, "pandajedi/jedibrokerage/B.py"),
+        _module(
+            "class SQLManager:\n    def append(self, sql):\n        pass\n",
+            "pandaserver/taskbuffer/SQLManager.py",
+        ),
+    ]
+    junction = _junction("pandajedi/jedibrokerage/B.py::choose")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
+def test_the_accessor_a_mixin_reaches_its_siblings_through_is_a_consultation():
+    """``get_task_event_module(self).updateInputStatusJedi(...)``.
+
+    The proxy is assembled from mixins and reaches a sibling through an
+    accessor taking ``self``, which is the same claim as
+    ``self.taskBufferIF.<method>()`` spelled the way the composite forces.
+    Refusing it costs 33 junctions their only route to another entity's rows.
+    """
+    caller = (
+        "from pandaserver.taskbuffer.db_proxy_mods.event_module import get_event_module\n"
+        "class JobModule:\n"
+        "    def insertNewJob(self):\n"
+        "        get_event_module(self).updateInputStatusJedi(i, p, s)\n"
+    )
+    sibling = (
+        "class EventModule:\n"
+        "    def updateInputStatusJedi(self, jediTaskID, pandaID, status):\n"
+        "        pass\n"
+    )
+    modules = [
+        _module(caller, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(sibling, "pandaserver/taskbuffer/db_proxy_mods/event_module.py"),
+    ]
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/job_module.py::insertNewJob")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/event_module.py::updateInputStatusJedi"
+    ]
+
+
+def test_the_facade_hop_is_not_a_call_here_either():
+    """A method reached through a borrowed proxy is the same handoff
+    :func:`_outward_calls` already refuses, and naming ``TaskBuffer`` as what a
+    junction consults would point every descent at a door."""
+    facade = (
+        "class JediTaskBuffer:\n"
+        "    def door(self):\n"
+        "        with self.proxyPool.get() as proxy:\n"
+        "            return proxy.markTask()\n"
+    )
+    modules = [
+        _module(facade, "pandaserver/taskbuffer/JediTaskBuffer.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    junction = _junction("pandaserver/taskbuffer/JediTaskBuffer.py::door")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
 def test_entries_that_hand_over_different_arguments_are_reported():
     """An argument one entry omits is a guard that cannot fire on that path."""
     junction = _junction("x.py::f")
