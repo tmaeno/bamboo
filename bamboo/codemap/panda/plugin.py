@@ -307,10 +307,16 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(sql_coverage)
         fragment.diagnostics.extend(bound_text)
 
-        # The predicate side of the same statements: which values something
-        # selects rows on.  Attached to the subject rather than kept apart, so
-        # the invariants can compare it with what the junctions write.
-        selected = sqlwrite.selected_values(self._modules, attributor)
+        # The read side of the same statements: which values something selects
+        # rows on, and whose rows it selects at all.  The values are attached to
+        # the subject rather than kept apart, so the invariants can compare them
+        # with what the junctions write; the rows become their own nodes,
+        # because a pair of class and attribute can only describe a column.
+        side = sqlwrite.read_side(self._modules, attributor)
+        selected = side.values
+        fragment.entities.extend(
+            sqlwrite.entity_nodes(side.entities, self.map_id, self._version)
+        )
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             readers = selected.get(subject.name, {})

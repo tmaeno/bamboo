@@ -40,6 +40,7 @@ async def store_fragment(
     written = {
         "value_enums": 0,
         "subjects": 0,
+        "entities": 0,
         "junctions": 0,
         "boundaries": 0,
         "filter_stages": 0,
@@ -58,6 +59,9 @@ async def store_fragment(
     for subject in fragment.subjects:
         await graph_db.merge_map_node(subject)
         written["subjects"] += 1
+    for entity in fragment.entities:
+        await graph_db.merge_map_node(entity)
+        written["entities"] += 1
     for junction in fragment.junctions:
         await graph_db.merge_map_node(junction)
         written["junctions"] += 1

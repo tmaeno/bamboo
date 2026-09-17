@@ -63,7 +63,7 @@ what keep them apart.
 |---|---|---|
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
-| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `JunctionPoint`, `FilterStage`, `Boundary`, `ValueEnum`, `Gloss` |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `Boundary`, `ValueEnum`, `Gloss` |
 
 That separation is not tidiness: `clear_all()` drops everything in the database, so
 rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
@@ -97,11 +97,11 @@ materialised when the backward walk needs variable-length paths, and not before.
 
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **24 node types** and
+The model defines a larger set of node and relationship types — **25 node types** and
 **23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (24)
+### Node types (25)
 
 ```
 - Symptom: Symptom messages and failures
@@ -125,6 +125,7 @@ incident-analysis pipeline.
 
 Code Map types (machine-derived from source, separate namespace):
 - Subject: An attribute worth asking "why is it this value?" about
+- Entity: A kind of row, with the functions that read it and the functions that write it
 - JunctionPoint: A place the code settles a subject's value, with one branch per outcome
 - FilterStage: One reason a candidate was dropped on the way to a selection
 - Boundary: Where causation crosses into a system this map does not cover

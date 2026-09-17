@@ -5683,7 +5683,7 @@ def test_a_where_clause_says_which_values_something_acts_on():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
     assert set(selected["JediTaskSpec.status"]) == {"pending"}
     assert set(selected["JEDI_Tasks.vo"]) == {"atlas", "test"}
 
@@ -5714,7 +5714,7 @@ def test_the_query_that_selects_a_value_is_named_and_not_only_the_value():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
 
     assert selected["JediTaskSpec.status"] == {"pending": {"x.py::rescue"}}
 
@@ -5750,9 +5750,106 @@ def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
 
     assert set(selected["JediTaskSpec.status"]) == {"aborting", "finishing", "paused"}
+
+
+#: What teaches the attributor that ``jobsActive4`` holds a ``JobSpec``:
+#: ``jobStatus`` is declared by that class and no other.
+_JOB_TABLE_WRITER = (
+    "class JobModule:\n"
+    "    def archive(self):\n"
+    "        sqlA = f'UPDATE {schema}.jobsActive4 SET jobStatus=:jobStatus '\n"
+    "        self.cur.execute(sqlA + comment, varMap)\n"
+)
+
+
+def test_a_query_naming_no_promoted_column_still_says_whose_rows_it_read():
+    """The half a pair of class and attribute cannot carry.
+
+    ``SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:jediTaskID`` selects a
+    task's jobs on the join key alone.  No promoted attribute appears, so the
+    value reading is empty and the map read the helper as observing nothing --
+    when it observes jobs, and the class was already in hand here.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def rows(self, jediTaskID):\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        sqlP = f'SELECT PandaID FROM {schema}.jobsActive4 '\n"
+        "        sqlP += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        # A table's class is learned from what is written to it, never from a
+        # SELECT -- a query's column list belongs as often to a joined table as
+        # to the one after FROM.  So the corpus has to state it somewhere for
+        # the read to be attributable at all.
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    assert side.entities["JobSpec"].read_by == {"x.py::rows"}
+    assert side.entities["JobSpec"].tables == {"jobsActive4"}
+
+
+def test_the_predicate_of_an_update_does_not_make_the_function_a_reader():
+    """Selecting a task's jobs and updating them are different claims.
+
+    Pooling the verbs is the conflation that lets an ``UPDATE ... WHERE`` be
+    reported as a query that selects on a value -- and a descent follows the
+    rows a decision was read *from*, so a writer counted as a reader sends the
+    walk forwards while it says it is stepping down.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def kill(self, jediTaskID):\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        sqlU = f'UPDATE {schema}.jobsActive4 SET jobStatus=:jobStatus '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    assert side.entities["JobSpec"].written_by == {"x.py::kill"}
+    assert not side.entities["JobSpec"].read_by
+
+
+def test_a_table_holding_no_spec_is_not_an_entity():
+    """An entity is a kind of row the corpus has a name for.  A table whose
+    class was never learned has no signature to merge on, and inventing one
+    from the table would split ``JobSpec`` into three -- one per lifetime
+    table -- which is the reason the class is canonical in the first place."""
+    source = (
+        "class TaskModule:\n"
+        "    def rows(self):\n"
+        "        sqlP = f'SELECT COMM_CMD FROM {schema}.PRODSYS_COMM '\n"
+        "        sqlP += 'WHERE COMM_TASK=:COMM_TASK '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    assert sqlwrite.read_side(modules, attributor).entities == {}
 
 
 def test_a_subject_carries_what_bounds_the_queries_that_select_it():

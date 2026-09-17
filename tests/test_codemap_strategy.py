@@ -30,6 +30,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     Emit,
+    EntityNode,
     EntryPoint,
     FilterStageNode,
     JunctionNode,
@@ -1771,18 +1772,25 @@ async def test_a_ruled_out_candidate_takes_its_reading_with_it():
 
 _GETTER = "taskbuffer/db_proxy_mods/task_utils_module.py::getScoutJobData_JEDI"
 _JOB_STATUS = "JobSpec.jobStatus"
+_JOB = "JobSpec"
+_JOB_FETCH = "taskbuffer/db_proxy_mods/task_standalone_module.py::getPandaIDsWithTask_JEDI"
 
 
 async def _scout_calling(
     calls: list[str] | None = None,
     reader: str = _GETTER,
     read_subject: str = _JOB_STATUS,
+    entities: list[EntityNode] | None = None,
+    subjects: list | None = None,
 ):
     """The scout junction, and a helper of the same module that reads jobs."""
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
-        subjects=[
+        entities=entities or [],
+        subjects=subjects
+        if subjects is not None
+        else [
             _subject(selected=["exhausted"]),
             _subject(
                 name=read_subject,
@@ -1814,11 +1822,90 @@ async def test_a_helper_the_junction_calls_opens_the_row_it_selects_on():
     question into one about jobs, and nothing else in the map does."""
     strategy = await _scout_calling()
 
-    lead = next(lead for lead in strategy.leads if lead.field == _JOB_STATUS)
+    lead = next(lead for lead in strategy.leads if lead.field == _JOB)
     assert lead.source == models.LEAD_CALLEE
     assert lead.stop == models.STOP_DESCENT
     assert "getScoutJobData_JEDI" in lead.why
+    # Named by the entity, said by the column: the descent is to a population
+    # either way, and which column was asked about is what says why.
+    assert f"selects {_JOB_STATUS}=finished" in lead.why
     assert lead.opened_by == _SCOUT
+
+
+async def test_a_helper_that_names_no_promoted_value_still_opens_its_rows():
+    """The half a pair of class and attribute cannot carry.
+
+    ``getPandaIDsWithTask_JEDI`` selects a task's jobs on the join key alone, so
+    no promoted attribute appears in its predicates and the map read it as
+    consulting nothing -- when fetching those rows is the whole of what "the
+    finish is waiting on jobs" means.
+    """
+    strategy = await _scout_calling(
+        calls=[_JOB_FETCH],
+        subjects=[_subject(selected=["exhausted"])],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                read_by=[_JOB_FETCH],
+            )
+        ],
+    )
+
+    lead = next(lead for lead in strategy.leads if lead.field == _JOB)
+    assert lead.stop == models.STOP_DESCENT
+    assert "getPandaIDsWithTask_JEDI(), which reads JobSpec rows" in lead.why
+
+
+async def test_two_columns_of_one_entity_open_one_descent():
+    """The descent is to a population, so naming it once per column reads as
+    several descents where the map is making one claim."""
+    strategy = await _scout_calling(
+        subjects=[
+            _subject(selected=["exhausted"]),
+            _subject(
+                name=_JOB_STATUS, selected=["finished"], selected_by={"finished": [_GETTER]}
+            ),
+            _subject(
+                name="JobSpec.jobSubStatus",
+                selected=["es_discard"],
+                selected_by={"es_discard": [_GETTER]},
+            ),
+        ],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                read_by=[_GETTER],
+            )
+        ],
+    )
+
+    assert [lead.field for lead in strategy.leads] == [_JOB]
+
+
+async def test_a_function_that_only_writes_an_entity_opens_nothing():
+    """A descent asks about the rows a decision was read *from*.  Following a
+    writer instead walks forwards while calling itself a step down."""
+    strategy = await _scout_calling(
+        calls=[_JOB_FETCH],
+        subjects=[_subject(selected=["exhausted"])],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                written_by=[_JOB_FETCH],
+            )
+        ],
+    )
+
+    assert [lead.field for lead in strategy.leads] == []
 
 
 async def test_sharing_an_owner_with_a_reader_is_not_a_call():

@@ -318,13 +318,20 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
 
 
 def _readers(fragment: MapFragment) -> set[str]:
-    """Functions the map records as selecting rows on some subject."""
+    """Functions the map records as selecting rows of anything.
+
+    Both resolutions, because both are a read: a predicate on a promoted
+    attribute says which rows and what was asked of them, and an entity read
+    says only which rows.  Counting the first alone made the helper that
+    fetches a task's jobs on the join key look like a function that consults
+    nothing.
+    """
     return {
         owner
         for subject in fragment.subjects
         for owners in (subject.selected_by or {}).values()
         for owner in owners
-    }
+    } | {owner for entity in fragment.entities for owner in entity.read_by}
 
 
 def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
@@ -547,6 +554,23 @@ def main(
             click.echo(f"  {row}")
         if len(dispatched) > top:
             click.echo(f"  … {len(dispatched) - top} more")
+
+    if fragment.entities:
+        # The row-level vocabulary, alongside the column-level one.  Read-only
+        # and write-only are both worth saying out loud: the first is a kind of
+        # row this map can be asked about but never explain the state of, and
+        # the second is one nothing here ever consults.
+        read_only = [e.name for e in fragment.entities if not e.written_by]
+        write_only = [e.name for e in fragment.entities if not e.read_by]
+        click.echo(
+            f"\nentities: {len(fragment.entities)} kind(s) of row, "
+            f"{sum(len(e.read_by) for e in fragment.entities)} function(s) reading, "
+            f"{sum(len(e.written_by) for e in fragment.entities)} writing"
+        )
+        if read_only:
+            click.echo("  read but never written here:  " + ", ".join(sorted(read_only)))
+        if write_only:
+            click.echo("  written but never read here:  " + ", ".join(sorted(write_only)))
 
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:

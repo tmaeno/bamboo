@@ -51,6 +51,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "vocabulary",
         "selected_values",
     ),
+    NodeType.ENTITY.value: ("tables", "read_by", "written_by"),
     _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
     NodeType.BOUNDARY.value: (
         "system",
@@ -163,6 +164,7 @@ def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
     for group in (
         fragment.value_enums,
         fragment.subjects,
+        fragment.entities,
         fragment.junctions,
         fragment.boundaries,
         fragment.filter_stages,

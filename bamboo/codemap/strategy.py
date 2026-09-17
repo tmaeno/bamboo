@@ -960,7 +960,12 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
         # depend on which candidate happened to be listed first.
         leads=(
             _leads(symptom, candidates, upstream, subject.selection_gates)
-            + _consulted(symptom, producers, await code_map.selections_by_owner())
+            + _consulted(
+                symptom,
+                producers,
+                await code_map.selections_by_owner(),
+                await code_map.entity_reads_by_owner(),
+            )
         ),
         readings=_readings(candidates, asked),
         findings=_findings(candidates, producers),
@@ -1311,6 +1316,7 @@ def _consulted(
     symptom: Symptom,
     producers: list[JunctionNode],
     selections: dict[str, list[tuple[str, str]]],
+    entity_reads: dict[str, list[str]],
 ) -> list[Lead]:
     """Leads from one hop along a ``self.<method>()`` call.
 
@@ -1321,6 +1327,16 @@ def _consulted(
     them and no edge at all.  Measured over the junctions whose subject has a
     spec class, one hop opens a read of another entity for 138 of them; keeping
     that hop inside one file, as the first version did, opened 47.
+
+    **Named by the entity, not by one of its columns.**  Two suppliers answer
+    the same question at different resolutions: a predicate on a promoted
+    attribute says which rows *and* what was asked of them, while an entity
+    read says only which rows.  The second is the one that reaches
+    ``getPandaIDsWithTask_JEDI``, whose only predicate is the join key, and
+    which is exactly the helper that makes "waiting on jobs" true.  Keyed on
+    the entity so the two fold into one lead per kind of row rather than one
+    per column -- the hop is down to a population either way, and a reader
+    given four names for one descent reads four descents.
 
     **Not the owner.**  The tempting version asks whether the junction's own
     function also selects on another entity, and it is unsound:
@@ -1340,21 +1356,31 @@ def _consulted(
     here = symptom.subject.rpartition(".")[0]
     for junction in producers:
         for target in junction.calls:
+            asked = target.rpartition("::")[2]
+            # The column reading first, so that where one exists it is the
+            # clause a reader gets: it says what the helper wanted to know,
+            # which the entity alone cannot.
+            detail: dict[str, str] = {}
             for subject, value in selections.get(target, ()):
+                detail.setdefault(
+                    subject.rpartition(".")[0], f"selects {subject}={value}"
+                )
+            for entity in entity_reads.get(target, ()):
+                detail.setdefault(entity, f"reads {entity} rows")
+            for entity, said in detail.items():
                 # Another field of the same spec is a lateral read: the row is
                 # the one already being asked about, so there is nothing to
                 # descend to and calling it a descent would put a population
                 # question where a value question belongs.
-                if subject.rpartition(".")[0] == here:
+                if entity == here:
                     continue
                 leads.append(
                     Lead(
-                        field=subject,
+                        field=entity,
                         stop=STOP_DESCENT,
                         why=(
                             f"{short_owner(junction.owner)} asks "
-                            f"{target.rpartition('::')[2]}(), which "
-                            f"selects {subject}={value}"
+                            f"{asked}(), which {said}"
                         ),
                         opened_by=junction.owner,
                         source=LEAD_CALLEE,

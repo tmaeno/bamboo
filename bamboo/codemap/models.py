@@ -162,6 +162,61 @@ class SubjectNode(BaseNode):
         return f"{spec_class}.{attribute}"
 
 
+class EntityNode(BaseNode):
+    """A kind of row, and which functions read it and which write it.
+
+    The map's vocabulary was pairs -- ``(spec class, attribute)`` -- and a pair
+    can only say something about a *column*.  ``getPandaIDsWithTask_JEDI``
+    selects a task's jobs on nothing but the join key, so it named no promoted
+    subject and the map read that as observing nothing.  It observes jobs.  The
+    fact had nowhere to go: ``class_for_table`` was already computed beside the
+    predicate loop and thrown away when no predicate landed on a promoted
+    attribute.
+
+    **Not folded into** :class:`SubjectNode`.  That model is load-bearing for
+    promotion and for three gates -- ``declared-status-is-written``, the
+    written-but-never-selected report and ``structural-attribution-agrees`` --
+    all of which read ``attribute``.  Rows with no attribute would flow into
+    every one of them, which is the "one field answering two questions" shape
+    this map has already paid for twice (``log_files`` and ``opened_by``).
+
+    **Stored, not merely reported.**  ``DiagnosticTemplate`` and
+    ``EnumerationWrite`` are indexes kept on the fragment with no label, and
+    nothing in an investigation can reach them -- the database holds none of
+    their rows.  An entity is read by ``derive-strategy``, so it is a node.
+
+    **The verbs stay apart.**  Selecting a task's jobs and updating them are
+    different claims, and pooling them is exactly the conflation that let a
+    function's ``UPDATE ... WHERE`` be reported as a query that selects on a
+    value.  A descent follows ``read_by``; ``written_by`` comes free from the
+    same walk and is recorded rather than guessed at later.
+    """
+
+    node_type: NodeType = NodeType.ENTITY
+    map_id: str
+    derived_from: str
+    tables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tables learned to hold this entity's rows.  Several per entity is "
+            "normal and is why the class is the signature rather than the "
+            "table: ``jobsDefined4``, ``jobsActive4`` and ``jobsArchived4`` are "
+            "one ``JobSpec`` split across a job's lifetime."
+        ),
+    )
+    read_by: list[str] = Field(
+        default_factory=list,
+        description="``module::method`` of every function whose SELECT names one of the tables.",
+    )
+    written_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The same for UPDATE and DELETE.  Kept separate from ``read_by`` "
+            "because a descent is about the rows a decision was *read from*."
+        ),
+    )
+
+
 #: What a line is about.  A junction leaves two kinds and they are not
 #: interchangeable: one carries the value, so a probe can be built from it by
 #: substituting the value observed; the other carries the row count the write
@@ -723,6 +778,7 @@ class MapFragment(BaseModel):
     map_id: str
     derived_from: str
     subjects: list[SubjectNode] = Field(default_factory=list)
+    entities: list[EntityNode] = Field(default_factory=list)
     junctions: list[JunctionNode] = Field(default_factory=list)
     boundaries: list[BoundaryNode] = Field(default_factory=list)
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
@@ -767,6 +823,7 @@ class MapFragment(BaseModel):
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place."""
         self.subjects.extend(other.subjects)
+        self.entities.extend(other.entities)
         self.junctions.extend(other.junctions)
         self.boundaries.extend(other.boundaries)
         self.value_enums.extend(other.value_enums)

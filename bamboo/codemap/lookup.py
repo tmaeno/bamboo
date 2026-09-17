@@ -39,6 +39,7 @@ from bamboo.codemap.models import (
     TERM_STEP,
     TERM_VALUE,
     BoundaryNode,
+    EntityNode,
     FilterStageNode,
     JunctionNode,
     MapTerm,
@@ -55,6 +56,7 @@ NodeT = TypeVar("NodeT", bound=BaseNode)
 
 _MODELS: dict[Type[BaseNode], NodeType] = {
     SubjectNode: NodeType.SUBJECT,
+    EntityNode: NodeType.ENTITY,
     JunctionNode: NodeType.JUNCTION_POINT,
     FilterStageNode: NodeType.FILTER_STAGE,
     BoundaryNode: NodeType.BOUNDARY,
@@ -302,6 +304,26 @@ class CodeMap:
                 for owner in owners:
                     by_owner.setdefault(owner, []).append((subject.name, value))
         return by_owner
+
+    async def entity_reads_by_owner(self) -> dict[str, list[str]]:
+        """``{owner: [the entities whose rows it selects]}``.
+
+        The same shape as :meth:`selections_by_owner` and used at the same
+        place, for the half of the answer a value cannot carry.  A helper that
+        selects a task's jobs on the join key alone names no value at all --
+        ``SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:jediTaskID`` -- and
+        was read as consulting nothing, when it is the whole of what "waiting
+        on jobs" means.
+
+        Reads only ``read_by``.  A descent asks about the rows a decision was
+        taken *from*; a function that updates those rows is a different claim
+        and following it would walk forwards while claiming to walk down.
+        """
+        by_owner: dict[str, list[str]] = {}
+        for entity in await self._find(EntityNode):
+            for owner in entity.read_by:
+                by_owner.setdefault(owner, []).append(entity.name)
+        return {owner: sorted(names) for owner, names in by_owner.items()}
 
     async def chain(self, owner: str) -> list[FilterStageNode]:
         """One brokerage chain's stages, in the order the source runs them.

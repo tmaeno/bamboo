@@ -66,6 +66,7 @@ class NodeType(str, Enum):
     JUNCTION_POINT = "JunctionPoint"
     BOUNDARY = "Boundary"
     SUBJECT = "Subject"
+    ENTITY = "Entity"
     VALUE_ENUM = "ValueEnum"
     FILTER_STAGE = "FilterStage"
     GLOSS = "Gloss"
@@ -86,6 +87,7 @@ CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
         NodeType.JUNCTION_POINT,
         NodeType.BOUNDARY,
         NodeType.SUBJECT,
+        NodeType.ENTITY,
         NodeType.VALUE_ENUM,
         NodeType.FILTER_STAGE,
         NodeType.GLOSS,
