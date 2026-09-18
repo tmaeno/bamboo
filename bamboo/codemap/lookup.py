@@ -39,8 +39,10 @@ from bamboo.codemap.models import (
     TERM_STEP,
     TERM_VALUE,
     BoundaryNode,
+    EntityNode,
     FilterStageNode,
     JunctionNode,
+    LoopCutNode,
     MapTerm,
     SubjectNode,
     Symptom,
@@ -55,8 +57,10 @@ NodeT = TypeVar("NodeT", bound=BaseNode)
 
 _MODELS: dict[Type[BaseNode], NodeType] = {
     SubjectNode: NodeType.SUBJECT,
+    EntityNode: NodeType.ENTITY,
     JunctionNode: NodeType.JUNCTION_POINT,
     FilterStageNode: NodeType.FILTER_STAGE,
+    LoopCutNode: NodeType.LOOP_CUT,
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
 }
@@ -278,6 +282,50 @@ class CodeMap:
                 if field not in upstream:
                     upstream[field] = await self.writers_of(field)
         return upstream
+
+    async def selections_by_owner(self) -> dict[str, list[tuple[str, str]]]:
+        """``{owner: [(subject, value), …]}`` -- which function selects on what.
+
+        The map records selections on the subject, keyed by value and then by
+        the function that reads them; this turns that inside out so a caller
+        holding a function can ask what it consults.  Needed by the one hop out
+        of a junction: ``setScoutJobData_JEDI`` writes ``exhausted`` on an
+        aggregate it never reads itself, and the only way to the rows behind
+        that aggregate is the helper it calls.
+
+        Deliberately keyed by the whole ``module::method``, not the bare name.
+        A bare name is not an identity in this corpus -- ``run`` is defined in
+        every daemon script, and matching on it once gave a single junction
+        fourteen entry points of which thirteen were wrong.  The caller's edge
+        is a ``self.<method>()`` call, which is within one module by
+        construction, so the qualified key is both stricter and free.
+        """
+        by_owner: dict[str, list[tuple[str, str]]] = {}
+        for subject in await self.subjects():
+            for value, owners in (subject.selected_by or {}).items():
+                for owner in owners:
+                    by_owner.setdefault(owner, []).append((subject.name, value))
+        return by_owner
+
+    async def entity_reads_by_owner(self) -> dict[str, list[str]]:
+        """``{owner: [the entities whose rows it selects]}``.
+
+        The same shape as :meth:`selections_by_owner` and used at the same
+        place, for the half of the answer a value cannot carry.  A helper that
+        selects a task's jobs on the join key alone names no value at all --
+        ``SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:jediTaskID`` -- and
+        was read as consulting nothing, when it is the whole of what "waiting
+        on jobs" means.
+
+        Reads only ``read_by``.  A descent asks about the rows a decision was
+        taken *from*; a function that updates those rows is a different claim
+        and following it would walk forwards while claiming to walk down.
+        """
+        by_owner: dict[str, list[str]] = {}
+        for entity in await self._find(EntityNode):
+            for owner in entity.read_by:
+                by_owner.setdefault(owner, []).append(entity.name)
+        return {owner: sorted(names) for owner, names in by_owner.items()}
 
     async def chain(self, owner: str) -> list[FilterStageNode]:
         """One brokerage chain's stages, in the order the source runs them.

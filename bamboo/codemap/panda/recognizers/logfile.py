@@ -169,10 +169,10 @@ def files_of(
 def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     """Record each node's candidate log files.  Returns ``(resolved, total)``.
 
-    Junctions and filter stages both carry it because both are things an
-    investigation is pointed at: a stage says why candidates were dropped, a
-    junction says why a value was settled, and neither can be checked without
-    knowing which file to read.
+    Junctions, filter stages and loop cuts all carry it because each is a thing
+    an investigation is pointed at: a stage or a cut says why candidates were
+    dropped, a junction says why a value was settled, and none of them can be
+    checked without knowing which file to read.
 
     Junctions additionally get ``caller_log_files``, because for the largest
     group in the map the module that holds the code is not the one that logs
@@ -200,7 +200,9 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     inherited = inherited_files(modules, declared)
     inward = trigger.reaching_modules(modules)
     resolved = total = 0
-    for node in list(fragment.filter_stages) + list(fragment.junctions):
+    for node in (
+        list(fragment.filter_stages) + list(fragment.loop_cuts) + list(fragment.junctions)
+    ):
         total += 1
         node.log_files = files_of(node.owner.split("::")[0], declared, inherited)
         if node.log_files:

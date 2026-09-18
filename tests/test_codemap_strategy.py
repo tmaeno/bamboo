@@ -30,6 +30,7 @@ from bamboo.codemap.models import (
     Anchor,
     Branch,
     Emit,
+    EntityNode,
     EntryPoint,
     FilterStageNode,
     JunctionNode,
@@ -55,6 +56,7 @@ def _subject(
     gates: list[str] | None = None,
     name: str = SUBJECT,
     selected_by: dict[str, list[str]] | None = None,
+    updated_by: dict[str, list[str]] | None = None,
 ) -> SubjectNode:
     spec_class, _, attribute = name.rpartition(".")
     return SubjectNode(
@@ -65,6 +67,7 @@ def _subject(
         attribute=attribute,
         selected_values=selected or [],
         selected_by=selected_by or {},
+        updated_by=updated_by or {},
         selection_gates=gates or [],
     )
 
@@ -77,6 +80,9 @@ def _junction(
     owns_logger: bool = True,
     triggers: tuple[str, ...] = (),
     subject: str = SUBJECT,
+    gloss_key: str | None = None,
+    calls: list[str] | None = None,
+    joined_entities: list[str] | None = None,
 ) -> JunctionNode:
     return JunctionNode(
         map_id=MAP_ID,
@@ -91,6 +97,9 @@ def _junction(
         entry_points=[
             EntryPoint(trigger=trigger, entry=owner.split("::")[0]) for trigger in triggers
         ],
+        gloss_key=gloss_key if gloss_key is not None else f"key-{owner}",
+        calls=calls or [],
+        joined_entities=joined_entities or [],
         anchor=Anchor(package="pandajedi", file=owner.split("::")[0], line_start=1),
     )
 
@@ -128,13 +137,15 @@ def _evidence(strategy, decide) -> Evidence:
     fixture that invented its own pattern would pass while the code asked
     something else entirely, which is the failure this whole layer is about.
     """
+    # The role comes off the strategy's own observations rather than being
+    # guessed from the pattern: an arm's control is not the transition pattern,
+    # so guessing called it a probe and a fixture could never make it speak.
+    roles = {
+        (o.log_file, o.pattern): o.role for o in strategy.observations
+    }
     results = []
     for query in strategy_mod.queries(strategy):
-        role = (
-            strategy_mod.CONTROL
-            if query.pattern == evidence_mod.TRANSITION_PATTERN
-            else strategy_mod.PROBE
-        )
+        role = roles.get((query.log_filename, query.pattern), strategy_mod.PROBE)
         results.append(_result(query, **decide(role, query.log_filename, query.service)))
     return Evidence(fetched_at="2026-09-05T00:00:00+00:00", results=results)
 
@@ -446,6 +457,79 @@ async def test_the_query_that_selects_the_value_is_named_with_the_log_it_writes_
     assert strategy.follow_up.selected_by == ["jediorder/TaskCommando.py::run"]
     assert strategy.follow_up.reader_log_files == [OTHER_LOG]
     assert "TaskCommando" in strategy.follow_up.question
+
+
+async def test_a_value_only_an_update_acts_on_names_the_update_and_not_a_query():
+    """The nine values in the corpus no query ever asks for.
+
+    Dropping the update once the verbs came apart would turn "this statement
+    has to match" into "nothing acts on this at all" -- the strongest claim the
+    follow-up can make, and here a false one.  Named as an update, because a
+    query is somewhere the row could have been missed and an update is not.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                updated_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.selected == 1
+    assert strategy.follow_up.selected_by == []
+    assert strategy.follow_up.updated_by == ["jediorder/TaskCommando.py::run"]
+    assert strategy.follow_up.reader_log_files == [OTHER_LOG]
+    assert "no query selects" in strategy.follow_up.question
+    assert "updates rows holding it" in strategy.follow_up.question
+
+
+async def test_a_query_wins_over_an_update_that_acts_on_the_same_value():
+    """Both act on the row; only one is a place it could have been missed."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                selected_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+                updated_by={"finishing": ["jedidog/AtlasProdWatchDog.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::run",
+                Branch(outcome="finishing"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.reader_log_files == [OTHER_LOG]
+    assert "is selected by" in strategy.follow_up.question
 
 
 async def test_a_reader_the_map_holds_no_log_for_is_named_without_one():
@@ -1663,3 +1747,644 @@ def test_a_continuing_lead_is_printed_as_the_command_that_asks_it():
     assert (
         "--subject JediTaskSpec.oldStatus --observed finishing --task 7" in output
     ), output
+
+
+# ---------------------------------------------------------------------------
+# What code the answer says to read
+# ---------------------------------------------------------------------------
+
+
+async def test_the_reading_is_per_function_not_per_arm():
+    """One entry however many arms it holds.
+
+    The sharing is not incidental: 497 junctions sit in 213 functions and one
+    of them holds twenty.  Asking about each arm separately reads the same text
+    over again and invites two answers about one piece of code.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction("jediorder/A.py::run", Branch(outcome="pending", line=10), gloss_key="same"),
+            _junction("jediorder/A.py::run2", Branch(outcome="pending", line=40), gloss_key="same"),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="7")
+    )
+
+    assert len(strategy.candidates) == 2
+    assert len(strategy.readings) == 1
+    assert strategy.readings[0].lines == [10, 40]
+
+
+async def test_an_arm_with_no_line_of_its_own_is_shown_as_silent():
+    """Said rather than left out.
+
+    Of 1046 branches the map can point at 988 in the source and 484 carry a
+    line production prints, so 43% can be put side by side.  Inventing a
+    pattern for the rest would turn a known silence into an empty query, and an
+    empty query is what this design reads as evidence.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "jedipprocess/PostProcessorBase.py::doPreCheck",
+                Branch(outcome="pending", line=272),
+                owns_logger=False,
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="7")
+    )
+
+    assert [r.silent for r in strategy.readings] == [True]
+
+
+async def test_the_reading_follows_the_arm_the_record_names():
+    """A match is proof that this arm decided, so the others stop being offered.
+
+    The other direction is not available: a record naming none proves nothing,
+    because the field holds the last message written to it.
+    """
+    strategy = await _six_arms(
+        diag="#ATM #KV action=set_exhausted reason=scout_cpuTime measured 900"
+    )
+
+    assert len(strategy.candidates) == 2
+    assert len(strategy.readings) == 1
+    assert strategy.readings[0].owner == _SCOUT
+    assert strategy.readings[0].lines == [1239]
+
+
+async def test_a_ruled_out_candidate_takes_its_reading_with_it():
+    """Reading code the evidence ruled out sends a reader down a path the system
+    did not take, which is worse than offering nothing."""
+    strategy = await _two_candidates()
+    before = len(strategy.readings)
+
+    def decide(role, filename, service):
+        if role == strategy_mod.CONTROL:
+            return {"matched": 5}
+        if filename == KNIGHT_LOG:
+            return {"matched": 1, "lines": ["set task_status=pending"]}
+        return {"matched": 0}
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, decide))
+    verdicts = {c.owner: c.verdict for c in settled.candidates}
+
+    assert before == 2
+    assert verdicts["jediorder/TaskCommando.py::run"] == ELIMINATED
+    assert [r.owner for r in settled.readings] == ["jediorder/ContentsFeeder.py::feed"]
+
+
+# ---------------------------------------------------------------------------
+# Lead source 2: the helper a junction calls
+# ---------------------------------------------------------------------------
+
+_GETTER = "taskbuffer/db_proxy_mods/task_utils_module.py::getScoutJobData_JEDI"
+_JOB_STATUS = "JobSpec.jobStatus"
+_JOB = "JobSpec"
+_JOB_FETCH = "taskbuffer/db_proxy_mods/task_standalone_module.py::getPandaIDsWithTask_JEDI"
+
+
+async def _scout_calling(
+    calls: list[str] | None = None,
+    reader: str = _GETTER,
+    read_subject: str = _JOB_STATUS,
+    entities: list[EntityNode] | None = None,
+    subjects: list | None = None,
+):
+    """The scout junction, and a helper of the same module that reads jobs."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        entities=entities or [],
+        subjects=subjects
+        if subjects is not None
+        else [
+            _subject(selected=["exhausted"]),
+            _subject(
+                name=read_subject,
+                selected=["finished"],
+                selected_by={"finished": [reader]},
+            ),
+        ],
+        junctions=[
+            _junction(
+                _SCOUT,
+                _arm("scout_cpuTime", "scoutData['cpuTime'] > thr", 1239),
+                owns_logger=False,
+                caller_log_files=[KNIGHT_LOG],
+                calls=[_GETTER] if calls is None else calls,
+            )
+        ],
+    )
+    return await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="exhausted", task_id="7"),
+    )
+
+
+async def test_a_query_asking_for_two_kinds_of_row_opens_the_second():
+    """The one place a junction's own reads can be used without the bad join.
+
+    Sharing a function proves nothing -- that mistake gave a junction fourteen
+    entry points -- but a single ``FROM`` list is the corpus stating the
+    relation.  ``prepareTasksToBeFinished_JEDI`` selects tasks against their
+    datasets in one statement, so it can say which datasets the task waits on.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["finishing"])],
+        junctions=[
+            _junction(
+                "taskbuffer/db_proxy_mods/task_complex_module.py"
+                "::prepareTasksToBeFinished_JEDI",
+                Branch(outcome="finishing"),
+                joined_entities=["JediDatasetSpec"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    lead = next(lead for lead in strategy.leads if lead.field == "JediDatasetSpec")
+    assert lead.stop == models.STOP_DESCENT
+    # Deterministic: the map holds the statement, so this is not a hypothesis
+    # the way a hop along a call is.
+    assert lead.source == models.LEAD_MAP
+    assert "same query as the rows it decides about" in lead.why
+
+
+async def test_the_junctions_own_entity_is_not_a_descent_from_itself():
+    """A statement reading two tables of the same kind of row says nothing
+    about where to go next -- the rows are the ones already being asked about,
+    and calling that a descent puts a population question in a value's place."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["finishing"])],
+        junctions=[
+            _junction(
+                "taskbuffer/db_proxy_mods/task_complex_module.py::rescue",
+                Branch(outcome="finishing"),
+                joined_entities=["JediTaskSpec"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert not [lead for lead in strategy.leads if lead.field == "JediTaskSpec"]
+
+
+async def test_a_helper_the_junction_calls_opens_the_row_it_selects_on():
+    """The scout arm reads an aggregate over jobs, and the map has no edge for
+    it: ``setScoutJobData_JEDI`` writes ``exhausted`` and
+    ``getScoutJobData_JEDI`` selects ``JobSpec.jobStatus='finished'``, with only
+    the call between them.  One hop along ``self.<method>()`` is what turns the
+    question into one about jobs, and nothing else in the map does."""
+    strategy = await _scout_calling()
+
+    lead = next(lead for lead in strategy.leads if lead.field == _JOB)
+    assert lead.source == models.LEAD_CALLEE
+    assert lead.stop == models.STOP_DESCENT
+    assert "getScoutJobData_JEDI" in lead.why
+    # Named by the entity, said by the column: the descent is to a population
+    # either way, and which column was asked about is what says why.
+    assert f"selects {_JOB_STATUS}=finished" in lead.why
+    assert lead.opened_by == _SCOUT
+
+
+async def test_a_helper_that_names_no_promoted_value_still_opens_its_rows():
+    """The half a pair of class and attribute cannot carry.
+
+    ``getPandaIDsWithTask_JEDI`` selects a task's jobs on the join key alone, so
+    no promoted attribute appears in its predicates and the map read it as
+    consulting nothing -- when fetching those rows is the whole of what "the
+    finish is waiting on jobs" means.
+    """
+    strategy = await _scout_calling(
+        calls=[_JOB_FETCH],
+        subjects=[_subject(selected=["exhausted"])],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                read_by=[_JOB_FETCH],
+            )
+        ],
+    )
+
+    lead = next(lead for lead in strategy.leads if lead.field == _JOB)
+    assert lead.stop == models.STOP_DESCENT
+    assert "getPandaIDsWithTask_JEDI(), which reads JobSpec rows" in lead.why
+
+
+async def test_two_columns_of_one_entity_open_one_descent():
+    """The descent is to a population, so naming it once per column reads as
+    several descents where the map is making one claim."""
+    strategy = await _scout_calling(
+        subjects=[
+            _subject(selected=["exhausted"]),
+            _subject(
+                name=_JOB_STATUS, selected=["finished"], selected_by={"finished": [_GETTER]}
+            ),
+            _subject(
+                name="JobSpec.jobSubStatus",
+                selected=["es_discard"],
+                selected_by={"es_discard": [_GETTER]},
+            ),
+        ],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                read_by=[_GETTER],
+            )
+        ],
+    )
+
+    assert [lead.field for lead in strategy.leads] == [_JOB]
+
+
+async def test_a_function_that_only_writes_an_entity_opens_nothing():
+    """A descent asks about the rows a decision was read *from*.  Following a
+    writer instead walks forwards while calling itself a step down."""
+    strategy = await _scout_calling(
+        calls=[_JOB_FETCH],
+        subjects=[_subject(selected=["exhausted"])],
+        entities=[
+            EntityNode(
+                name="JobSpec",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                written_by=[_JOB_FETCH],
+            )
+        ],
+    )
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_sharing_an_owner_with_a_reader_is_not_a_call():
+    """The unsound join this corpus has already punished twice.
+
+    ``selected_by`` records the function, not the statement, so a 300-line
+    method that handles several commands reads jobs in one arm and writes the
+    task status in another -- and joining the two facts through their shared
+    owner calls that a relation.  Only a call edge counts."""
+    strategy = await _scout_calling(calls=[], reader=_SCOUT)
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_helper_of_the_same_name_elsewhere_opens_nothing():
+    """The join is on the whole target, never the bare name.
+
+    A call may cross a module boundary, but which module it lands in was
+    settled when the map was built and is spelt out in the target.  Matching
+    the name instead is the rule that gave one junction fourteen entry points,
+    thirteen of them wrong.
+    """
+    strategy = await _scout_calling(
+        reader="jedirefine/TaskRefinerBase.py::getScoutJobData_JEDI"
+    )
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_helper_reading_the_same_entity_is_not_a_descent():
+    """Reading another field of the same spec is a lateral read, not a step down
+    to the rows underneath -- and calling it one would put a population question
+    where a value question belongs."""
+    strategy = await _scout_calling(read_subject="JediTaskSpec.oldStatus")
+
+    assert [lead.field for lead in strategy.leads] == []
+
+
+async def test_a_ruled_out_candidate_takes_its_callee_lead_with_it():
+    """Same rule as the map's own leads: a walk that keeps descending from an
+    arm production says did not fire follows a path the system did not take."""
+    strategy = await _scout_calling()
+
+    def decide(role, filename, service):
+        if role == strategy_mod.CONTROL:
+            return {"matched": 5}
+        return {"matched": 0}
+
+    settled = strategy_mod.evaluate(strategy, _evidence(strategy, decide))
+
+    assert [c.verdict for c in settled.candidates] == [ELIMINATED]
+    assert [lead.field for lead in settled.leads] == []
+
+
+async def test_the_map_leads_say_they_came_from_the_map():
+    """Provenance is on every lead, not only the proposed ones.  Without it a
+    trace cannot tell a deterministic edge from a hypothesis, and the map's
+    coverage reads better than it is."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(gates=["JEDI_AUX_Status_MinTaskID"]),
+            _subject(name="JediTaskSpec.oldStatus"),
+        ],
+        junctions=[
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::doActionForReassign",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert len(strategy.leads) == 2
+    assert {lead.source for lead in strategy.leads} == {models.LEAD_MAP}
+
+
+# ---------------------------------------------------------------------------
+# The walk: one derivation per hop, driven from outside
+# ---------------------------------------------------------------------------
+
+
+async def _two_field_map(loops_back: bool = False) -> CodeMap:
+    """``status`` carries from ``oldStatus``, which has a writer of its own."""
+    # The real shape: ``JediTaskSpec.recordOldStatus`` does ``self.oldStatus =
+    # self.status``, a junction of its own rather than another arm of the one
+    # that writes a literal.
+    back = (
+        [
+            _junction(
+                "taskbuffer/JediTaskSpec.py::recordOldStatus",
+                Branch(outcome="passthrough(JediTaskSpec.status)", tier=2),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            )
+        ]
+        if loops_back
+        else []
+    )
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(), _subject(name="JediTaskSpec.oldStatus")],
+        junctions=[
+            _junction(
+                "jedidog/AtlasProdWatchDog.py::doActionForReassign",
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+            *back,
+        ],
+    )
+    return await _map(fragment)
+
+
+async def test_the_walk_takes_the_second_hop_without_being_asked_again():
+    """The point of the whole round.  A symptom is a path, not a lookup: the map
+    named ``oldStatus`` as where ``finishing`` came from, and until now a person
+    had to retype that as the next question.  The evidence chooses the next hop;
+    the description only ever chose the first."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+    )
+
+    assert [hop.symptom.subject for hop in investigation.hops] == [
+        SUBJECT,
+        "JediTaskSpec.oldStatus",
+    ]
+    assert investigation.hops[1].symptom.observed == "finishing"
+    assert investigation.hops[1].symptom.task_id == "7"
+    assert investigation.hops[1].opened == "JediTaskSpec.oldStatus"
+    assert investigation.hops[1].source == models.LEAD_MAP
+
+
+async def test_a_question_already_asked_stops_the_walk_and_is_named():
+    """``status`` and ``oldStatus`` copy from each other, so the walk comes back
+    to where it started.  That is a property of the system and not a failure, so
+    it is reported as one -- a walk without the set would go round for ever, and
+    one that silently dropped the repeat would look like a dead end."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(loops_back=True),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=5,
+    )
+
+    assert len(investigation.hops) == 2
+    assert investigation.stopped == models.WALK_ASKED
+    assert investigation.cycles == [f"{SUBJECT}=finishing"]
+
+
+async def test_the_budget_is_what_stops_a_walk_nobody_is_watching():
+    """An unattended run reaches production once per hop, so the hop count is
+    the only thing standing in for the person who would otherwise stop it."""
+    from bamboo.scripts.derive_strategy import walk
+
+    investigation = await walk(
+        await _two_field_map(loops_back=True),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=1,
+    )
+
+    assert len(investigation.hops) == 1
+    assert investigation.stopped == models.WALK_BUDGET
+
+
+async def test_a_walk_whose_leads_all_stop_says_which_terminal_it_reached():
+    """Reaching the edge of the map is the answer.  Naming the category it
+    stopped in is what makes it one, rather than an absence of one."""
+    from bamboo.scripts.derive_strategy import walk
+
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(gates=["JEDI_AUX_Status_MinTaskID"])],
+        junctions=[
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+            )
+        ],
+    )
+    investigation = await walk(
+        await _map(fragment),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+    )
+
+    assert len(investigation.hops) == 1
+    assert investigation.stopped == models.WALK_TERMINAL
+    assert [lead.stop for lead in investigation.hops[0].strategy.leads] == [
+        models.STOP_SHARED_TABLE
+    ]
+
+
+async def test_the_walk_settles_each_hop_before_choosing_the_next():
+    """Evidence goes between the hops, not around them.  A walk that derived
+    every hop first would follow leads opened by arms production had already
+    ruled out -- which is the bug the surviving-candidate filter exists for, one
+    level up."""
+    from bamboo.scripts.derive_strategy import walk
+
+    seen: list[str] = []
+
+    def settle(strategy):
+        seen.append(strategy.symptom.subject)
+        return strategy
+
+    investigation = await walk(
+        await _two_field_map(),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="7"),
+        budget=3,
+        settle=settle,
+    )
+
+    assert seen == [SUBJECT, "JediTaskSpec.oldStatus"]
+    assert len(investigation.hops) == 2
+
+
+async def test_a_recorded_edge_is_listed_before_an_assembled_one():
+    """``_deduped`` keeps the first lead naming a field, so the order the
+    derivation builds them in decides which supplier wins when both name one.
+    A hypothesis taken in place of an edge the extraction actually recorded is
+    the map reporting less than it knows."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(),
+            _subject(name="JediTaskSpec.oldStatus"),
+            _subject(
+                name=_JOB_STATUS,
+                selected=["finished"],
+                selected_by={"finished": [_GETTER]},
+            ),
+        ],
+        junctions=[
+            _junction(
+                _SCOUT,
+                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                calls=[_GETTER],
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction(
+                "jediorder/TaskRefiner.py::runImpl",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                subject="JediTaskSpec.oldStatus",
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="7")
+    )
+
+    assert [lead.source for lead in strategy.leads] == [
+        models.LEAD_MAP,
+        models.LEAD_CALLEE,
+    ]
+
+
+async def test_the_report_says_which_leads_were_not_recorded_edges():
+    """Provenance has to reach the page.  A reader who cannot tell an edge the
+    extraction found from one assembled out of a call reads the map's coverage
+    as better than it is, which is the measurement P3 depends on."""
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_leads
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="exhausted"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        leads=[
+            models.Lead(field="JediTaskSpec.oldStatus", why="copied", source=models.LEAD_MAP),
+            models.Lead(
+                field=_JOB_STATUS,
+                stop=models.STOP_DESCENT,
+                why="asks getScoutJobData_JEDI()",
+                source=models.LEAD_CALLEE,
+            ),
+        ],
+    )
+    command = click.Command("x", callback=lambda: _report_leads(strategy, 5, False))
+    out = click.testing.CliRunner().invoke(command).output
+
+    assert "[callee]" in out
+    assert "[map]" not in out  # the default supplier is not worth a badge on every line
+
+
+async def test_two_helpers_reaching_one_entity_are_both_named():
+    """Folding the destination is for reading; folding the openers hides the answer.
+
+    Several helpers reach one kind of row and which one did is all that tells
+    them apart: ``runImpl`` asks ``reassignShare`` in one arm and
+    ``getPandaIDsWithTask_JEDI`` in another, and keeping only the first says
+    the task is reassigning when it is waiting on its jobs.
+    """
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_leads
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        leads=[
+            models.Lead(
+                field=_JOB,
+                stop=models.STOP_DESCENT,
+                why="runImpl asks reassignShare(), which selects JobSpec.jobStatus=activated",
+                source=models.LEAD_CALLEE,
+            ),
+            models.Lead(
+                field=_JOB,
+                stop=models.STOP_DESCENT,
+                why="runImpl asks getPandaIDsWithTask_JEDI(), which reads JobSpec rows",
+                source=models.LEAD_CALLEE,
+            ),
+        ],
+    )
+    command = click.Command("x", callback=lambda: _report_leads(strategy, 5, False))
+    out = click.testing.CliRunner().invoke(command).output
+
+    assert out.count("stops JobSpec") == 1
+    assert "reassignShare" in out
+    assert "getPandaIDsWithTask_JEDI" in out

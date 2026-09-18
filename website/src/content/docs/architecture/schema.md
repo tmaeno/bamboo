@@ -63,7 +63,7 @@ what keep them apart.
 |---|---|---|
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
-| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `JunctionPoint`, `FilterStage`, `Boundary`, `ValueEnum` |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss` |
 
 That separation is not tidiness: `clear_all()` drops everything in the database, so
 rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
@@ -75,7 +75,7 @@ for. See the [Code Map overview](/bamboo/architecture/code-map/) for what the Co
 node kinds mean.
 
 :::caution[The Code Map is stored as nodes only — no relationships yet]
-`build-map` writes the five node kinds and no edges at all, so the Code Map relationship
+`build-map` writes seven node kinds and no edges at all, so the Code Map relationship
 types below are declared and not yet produced by anything. Do not write a query that
 expects them.
 
@@ -97,11 +97,11 @@ materialised when the backward walk needs variable-length paths, and not before.
 
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **23 node types** and
+The model defines a larger set of node and relationship types — **26 node types** and
 **23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (23)
+### Node types (26)
 
 ```
 - Symptom: Symptom messages and failures
@@ -125,10 +125,13 @@ incident-analysis pipeline.
 
 Code Map types (machine-derived from source, separate namespace):
 - Subject: An attribute worth asking "why is it this value?" about
+- Entity: A kind of row, with the functions that read it and the functions that write it
 - JunctionPoint: A place the code settles a subject's value, with one branch per outcome
 - FilterStage: One reason a candidate was dropped on the way to a selection
+- LoopCut: A guard inside a loop that drops the candidate and says why in prose
 - Boundary: Where causation crosses into a system this map does not cover
 - ValueEnum: One `NAME = value` constant, so a code seen in a record can be decoded
+- Gloss: A reading of one function, with the exact text that reading was given
 ```
 
 ### Relationship types (23)

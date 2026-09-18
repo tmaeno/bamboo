@@ -40,9 +40,11 @@ async def store_fragment(
     written = {
         "value_enums": 0,
         "subjects": 0,
+        "entities": 0,
         "junctions": 0,
         "boundaries": 0,
         "filter_stages": 0,
+        "loop_cuts": 0,
     }
 
     if replace_version:
@@ -58,6 +60,9 @@ async def store_fragment(
     for subject in fragment.subjects:
         await graph_db.merge_map_node(subject)
         written["subjects"] += 1
+    for entity in fragment.entities:
+        await graph_db.merge_map_node(entity)
+        written["entities"] += 1
     for junction in fragment.junctions:
         await graph_db.merge_map_node(junction)
         written["junctions"] += 1
@@ -67,6 +72,9 @@ async def store_fragment(
     for stage in fragment.filter_stages:
         await graph_db.merge_map_node(stage)
         written["filter_stages"] += 1
+    for cut in fragment.loop_cuts:
+        await graph_db.merge_map_node(cut)
+        written["loop_cuts"] += 1
 
     logger.info("store_fragment: wrote %r", written)
     return written

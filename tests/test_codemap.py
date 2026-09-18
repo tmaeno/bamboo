@@ -31,6 +31,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     FilterStageNode,
     JunctionNode,
+    LoopCutNode,
     MapFragment,
     SourceModule,
     SubjectNode,
@@ -44,6 +45,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     flush,
     logfile,
+    loopcut,
     progress,
     selection,
     sqlwrite,
@@ -1631,6 +1633,114 @@ def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
     assert [
         w.table for run in sql.executions(_func(interpolated)) for w in sql.writes(run.sql)
     ] == ["JEDI_Tasks"]
+
+
+def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
+    """A hole standing for a whole table is not the schema.
+
+    ``getPandaIDsWithTask_JEDI`` fetches a task's jobs by looping over a list of
+    tables and interpolating each one, so the statement read as a query against
+    a table named ``{}`` -- which is to say the map had no name for the rows the
+    helper selects, and read it as consulting nothing at all.
+    """
+    source = (
+        "def f(self, jediTaskID, onlyActive):\n"
+        "    tables = [f'{schemaPANDA}.jobsDefined4', f'{schemaPANDA}.jobsActive4']\n"
+        "    if not onlyActive:\n"
+        "        tables += [f'{schemaARCH}.jobsArchived']\n"
+        "    sqlP = ''\n"
+        "    for tableName in tables:\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE jediTaskID=:jediTaskID '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    tables = [
+        table for run in sql.executions(func) for table, _columns in sql.reads(run.sql)
+    ]
+
+    assert tables == ["jobsDefined4", "jobsActive4", "jobsArchived"]
+
+
+def test_an_interpolated_schema_is_still_left_blank():
+    """The reason reassembly blanks interpolations in the first place.
+
+    ``FROM {schemaJEDI}.JEDI_Tasks`` names its table outright and interpolates
+    only where the rows live.  The dot after the hole says which is which, and
+    filling this one would put a deployment's schema into the map as though it
+    were part of the statement.
+    """
+    source = (
+        "def f(self):\n"
+        "    schema = 'ATLAS_PANDA'\n"
+        "    sqlT = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+        "    self.cur.execute(sqlT + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT jediTaskID FROM {}.JEDI_Tasks WHERE status=:status "
+    ]
+
+
+def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
+    """Half a list of tables read as the list is a statement about tables the
+    code never runs over, which is worse than the hole it replaces."""
+    source = (
+        "def f(self):\n"
+        "    tables = [f'{schemaPANDA}.jobsActive4']\n"
+        "    tables.append(pick_one())\n"
+        "    sqlP = ''\n"
+        "    for tableName in tables:\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {} WHERE x=:x "
+    ]
+
+
+def test_more_tables_than_the_cap_allows_are_not_split_at_all():
+    """A silent cap reads exactly like full coverage.
+
+    Over the cap the statement is read as written, holes and all, and the
+    warning says so -- rather than an arbitrary subset of the tables, which a
+    reader would take for the whole list.
+    """
+    names = ", ".join(f"'ATLAS_PANDA.t{index}'" for index in range(40))
+    source = (
+        "def f(self):\n"
+        "    sqlP = ''\n"
+        f"    for tableName in ({names}):\n"
+        "        sqlP += f'SELECT PandaID FROM {tableName} WHERE x=:x '\n"
+        "    self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {} WHERE x=:x "
+    ]
+
+
+def test_one_loop_variable_in_two_fragments_takes_one_value_at_a_time():
+    """The holes are keyed on the expression, not counted separately.
+
+    Treating them independently crosses them, and a union of two tables read as
+    one statement is a query the code never runs.
+    """
+    source = (
+        "def f(self):\n"
+        "    for tableName in ('ATLAS_PANDA.jobsActive4', 'ATLAS_PANDA.jobsDefined4'):\n"
+        "        sqlP = f'SELECT PandaID FROM {tableName} '\n"
+        "        sqlP += f'WHERE x IN (SELECT x FROM {tableName}) '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 "
+        "WHERE x IN (SELECT x FROM ATLAS_PANDA.jobsActive4) ",
+        "SELECT PandaID FROM ATLAS_PANDA.jobsDefined4 "
+        "WHERE x IN (SELECT x FROM ATLAS_PANDA.jobsDefined4) ",
+    ]
 
 
 def test_a_substitution_that_resolves_to_nothing_leaves_the_hole():
@@ -3832,6 +3942,178 @@ def test_a_facade_that_forwards_is_not_a_second_implementation():
     )
 
 
+_KNIGHT_CONSULTING = """
+class TaskCommando:
+    def runImpl(self):
+        while True:
+            tasks = self.taskBufferIF.getTasksToExecCommand_JEDI(vo, label)
+            ids = self.taskBufferIF.getPandaIDsWithTask_JEDI(jediTaskID, True)
+            self.report(ids)
+
+    def report(self, ids):
+        pass
+"""
+
+_JOB_PROXY = """
+class JobModule:
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        self.cur.execute(sqlP + comment, varMap)
+"""
+
+
+def test_a_call_into_another_module_is_recorded_as_a_qualified_target():
+    """What a junction consults is rarely in its own file.
+
+    ``TaskCommando.runImpl`` decides a task's status and asks
+    ``getPandaIDsWithTask_JEDI`` for that task's jobs, and the two sit in
+    different packages with a ``self.taskBufferIF`` call between them.  Keeping
+    the edge inside one module left every such question looking as though the
+    map had nothing to say.
+    """
+    junction = _junction("pandajedi/jediorder/TaskCommando.py::runImpl")
+    modules = [
+        _module(_KNIGHT_CONSULTING, "pandajedi/jediorder/TaskCommando.py"),
+        _module(_JOB_PROXY, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == [
+        "pandajedi/jediorder/TaskCommando.py::report",
+        "pandaserver/taskbuffer/db_proxy_mods/job_module.py::getPandaIDsWithTask_JEDI",
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py::getTasksToExecCommand_JEDI",
+    ]
+
+
+def test_the_call_belongs_to_the_function_that_makes_it():
+    """Keying the outward calls by name alone pooled a file's whole surface.
+
+    ``_outward_calls`` answers "does this module call X", which is the right
+    question for the door but the wrong one here: two methods of one knight
+    consult different things, and attributing both to both is the shared-owner
+    join by another name.
+    """
+    source = (
+        "class K:\n"
+        "    def finish(self):\n"
+        "        self.taskBufferIF.getPandaIDsWithTask_JEDI(i, True)\n"
+        "    def refine(self):\n"
+        "        self.taskBufferIF.markTask()\n"
+    )
+    modules = [
+        _module(source, "pandajedi/jediorder/K.py"),
+        _module(_JOB_PROXY, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    finish = _junction("pandajedi/jediorder/K.py::finish")
+    refine = _junction("pandajedi/jediorder/K.py::refine")
+    trigger.attach_calls([finish, refine], modules)
+
+    assert finish.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/job_module.py::getPandaIDsWithTask_JEDI"
+    ]
+    assert refine.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py::markTask"
+    ]
+
+
+def test_a_shared_name_the_caller_does_not_import_carries_no_call():
+    """The same restriction the door hop turns on, one direction over.
+
+    ``run`` is defined by every daemon; following it by name gave one junction
+    fourteen entry points of which thirteen were wrong.  A call resolves only
+    where the name means one thing, or where the caller says which module it
+    means.
+    """
+    knight = "class K:\n    def act(self):\n        self.helper.run()\n"
+    modules = [
+        _module(knight, "pandajedi/jediorder/K.py"),
+        _module("class A:\n    def run(self):\n        pass\n", "pandaserver/a.py"),
+        _module("class B:\n    def run(self):\n        pass\n", "pandaserver/b.py"),
+    ]
+    junction = _junction("pandajedi/jediorder/K.py::act")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
+def test_a_method_on_data_passing_through_is_not_a_consultation():
+    """``newScanSiteList.append(x)`` is a list, whatever else defines ``append``.
+
+    Resolving by name alone put ``SQLManager.append`` on 241 junctions, every
+    one of them a list.  What a junction consults is what its object holds, and
+    the receiver is what says so.
+    """
+    broker = (
+        "class B:\n"
+        "    def choose(self):\n"
+        "        newScanSiteList = []\n"
+        "        newScanSiteList.append(site)\n"
+    )
+    modules = [
+        _module(broker, "pandajedi/jedibrokerage/B.py"),
+        _module(
+            "class SQLManager:\n    def append(self, sql):\n        pass\n",
+            "pandaserver/taskbuffer/SQLManager.py",
+        ),
+    ]
+    junction = _junction("pandajedi/jedibrokerage/B.py::choose")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
+def test_the_accessor_a_mixin_reaches_its_siblings_through_is_a_consultation():
+    """``get_task_event_module(self).updateInputStatusJedi(...)``.
+
+    The proxy is assembled from mixins and reaches a sibling through an
+    accessor taking ``self``, which is the same claim as
+    ``self.taskBufferIF.<method>()`` spelled the way the composite forces.
+    Refusing it costs 33 junctions their only route to another entity's rows.
+    """
+    caller = (
+        "from pandaserver.taskbuffer.db_proxy_mods.event_module import get_event_module\n"
+        "class JobModule:\n"
+        "    def insertNewJob(self):\n"
+        "        get_event_module(self).updateInputStatusJedi(i, p, s)\n"
+    )
+    sibling = (
+        "class EventModule:\n"
+        "    def updateInputStatusJedi(self, jediTaskID, pandaID, status):\n"
+        "        pass\n"
+    )
+    modules = [
+        _module(caller, "pandaserver/taskbuffer/db_proxy_mods/job_module.py"),
+        _module(sibling, "pandaserver/taskbuffer/db_proxy_mods/event_module.py"),
+    ]
+    junction = _junction("pandaserver/taskbuffer/db_proxy_mods/job_module.py::insertNewJob")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == [
+        "pandaserver/taskbuffer/db_proxy_mods/event_module.py::updateInputStatusJedi"
+    ]
+
+
+def test_the_facade_hop_is_not_a_call_here_either():
+    """A method reached through a borrowed proxy is the same handoff
+    :func:`_outward_calls` already refuses, and naming ``TaskBuffer`` as what a
+    junction consults would point every descent at a door."""
+    facade = (
+        "class JediTaskBuffer:\n"
+        "    def door(self):\n"
+        "        with self.proxyPool.get() as proxy:\n"
+        "            return proxy.markTask()\n"
+    )
+    modules = [
+        _module(facade, "pandaserver/taskbuffer/JediTaskBuffer.py"),
+        _module(_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    junction = _junction("pandaserver/taskbuffer/JediTaskBuffer.py::door")
+    trigger.attach_calls([junction], modules)
+
+    assert junction.calls == []
+
+
 def test_entries_that_hand_over_different_arguments_are_reported():
     """An argument one entry omits is a guard that cannot fire on that path."""
     junction = _junction("x.py::f")
@@ -5511,7 +5793,7 @@ def test_a_where_clause_says_which_values_something_acts_on():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
     assert set(selected["JediTaskSpec.status"]) == {"pending"}
     assert set(selected["JEDI_Tasks.vo"]) == {"atlas", "test"}
 
@@ -5542,9 +5824,9 @@ def test_the_query_that_selects_a_value_is_named_and_not_only_the_value():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
 
-    assert selected["JediTaskSpec.status"] == {"pending": {"x.py::rescue"}}
+    assert selected["JediTaskSpec.status"]["pending"].selected_by == {"x.py::rescue"}
 
 
 def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
@@ -5578,9 +5860,293 @@ def test_a_bind_from_a_declared_mapping_is_a_value_something_selects_on():
     )
     attributor.learn_table_classes(modules)
 
-    selected = sqlwrite.selected_values(modules, attributor)
+    selected = sqlwrite.read_side(modules, attributor).values
 
     assert set(selected["JediTaskSpec.status"]) == {"aborting", "finishing", "paused"}
+
+
+#: What teaches the attributor that ``jobsActive4`` holds a ``JobSpec``:
+#: ``jobStatus`` is declared by that class and no other.
+_JOB_TABLE_WRITER = (
+    "class JobModule:\n"
+    "    def archive(self):\n"
+    "        sqlA = f'UPDATE {schema}.jobsActive4 SET jobStatus=:jobStatus '\n"
+    "        self.cur.execute(sqlA + comment, varMap)\n"
+)
+
+#: The same for ``JEDI_Tasks``.  Needed wherever a test turns on two kinds of
+#: row being attributable at once: without it the second table resolves to no
+#: class and the assertion passes because nothing was read, not because the
+#: reading was withheld.
+_TASK_TABLE_WRITER = (
+    "class TaskTableModule:\n"
+    "    def touch(self):\n"
+    "        sqlT = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+    "        self.cur.execute(sqlT + comment, varMap)\n"
+)
+
+
+def test_a_query_naming_no_promoted_column_still_says_whose_rows_it_read():
+    """The half a pair of class and attribute cannot carry.
+
+    ``SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:jediTaskID`` selects a
+    task's jobs on the join key alone.  No promoted attribute appears, so the
+    value reading is empty and the map read the helper as observing nothing --
+    when it observes jobs, and the class was already in hand here.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def rows(self, jediTaskID):\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        sqlP = f'SELECT PandaID FROM {schema}.jobsActive4 '\n"
+        "        sqlP += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        # A table's class is learned from what is written to it, never from a
+        # SELECT -- a query's column list belongs as often to a joined table as
+        # to the one after FROM.  So the corpus has to state it somewhere for
+        # the read to be attributable at all.
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    assert side.entities["JobSpec"].read_by == {"x.py::rows"}
+    assert side.entities["JobSpec"].tables == {"jobsActive4"}
+
+
+def test_the_predicate_of_an_update_does_not_make_the_function_a_reader():
+    """Selecting a task's jobs and updating them are different claims.
+
+    Pooling the verbs is the conflation that lets an ``UPDATE ... WHERE`` be
+    reported as a query that selects on a value -- and a descent follows the
+    rows a decision was read *from*, so a writer counted as a reader sends the
+    walk forwards while it says it is stepping down.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def kill(self, jediTaskID):\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        sqlU = f'UPDATE {schema}.jobsActive4 SET jobStatus=:jobStatus '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    assert side.entities["JobSpec"].written_by == {"x.py::kill"}
+    assert not side.entities["JobSpec"].read_by
+
+
+def test_an_update_predicate_does_not_name_a_query_that_selects_the_value():
+    """Who *asks for* a value and who *acts on rows already holding it* differ.
+
+    ``UPDATE jobsActive4 SET ... WHERE jobStatus=:jobStatus`` says which rows
+    the statement was willing to change; it is not a query anything could have
+    failed to pick the row up in.  Reported as a selection it sends a reader to
+    a function that never asked, and one hop out of a junction it opens a
+    descent on the strength of a write.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def reassign(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':jobStatus'] = 'activated'\n"
+        "        sqlU = f'UPDATE {schema}.jobsActive4 SET PandaID=:PandaID '\n"
+        "        sqlU += 'WHERE jobStatus=:jobStatus '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    use = sqlwrite.read_side(modules, attributor).values["JobSpec.jobStatus"]["activated"]
+
+    assert use.updated_by == {"x.py::reassign"}
+    assert not use.selected_by
+
+
+def test_a_value_only_an_update_acts_on_is_still_not_a_sink():
+    """The two readings of a ``WHERE`` part company here, and both are right.
+
+    "Does anything move a task out of this status?" is answered by an
+    ``UPDATE ... WHERE status=:old`` as squarely as by a query -- so the value
+    stays in ``selected_values`` and the sink report keeps its meaning.  "Who
+    has to pick this row up, so who to ask why they did not?" is not, and that
+    is the reading that must not be told a writer is a reader.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def release(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':oldStatus'] = 'pending'\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks '\n"
+        "        sqlU += 'SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE status=:oldStatus '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    values = sqlwrite.read_side(modules, attributor).values["JediTaskSpec.status"]
+
+    assert set(values) == {"pending"}
+    assert values["pending"].updated_by == {"x.py::release"}
+    assert not values["pending"].selected_by
+
+
+def test_one_query_naming_two_kinds_of_row_records_the_join():
+    """A single FROM list is the corpus stating the relation itself.
+
+    Which datasets a task is waiting on cannot be read off two separate facts
+    about the same function -- that is the join this corpus has charged for
+    twice -- but it can be read off one statement that asks for both.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def finish(self):\n"
+        "        sqlF = f'SELECT tabT.jediTaskID FROM {schema}.JEDI_Tasks tabT,'\n"
+        "        sqlF += '{schema}.JEDI_Datasets tabD '\n"
+        "        sqlF += \"WHERE tabT.status=:status AND tabD.proc_status='ready' \"\n"
+        "        self.cur.execute(sqlF + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        # Both tables have to be attributable, and a class is only ever learned
+        # from what is written to a table.
+        _module(
+            "class W:\n"
+            "    def w(self):\n"
+            "        s1 = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+            "        self.cur.execute(s1 + comment, varMap)\n"
+            "        s2 = f'UPDATE {schema}.JEDI_Datasets SET proc_status=:proc '\n"
+            "        self.cur.execute(s2 + comment, varMap)\n",
+            "teacher.py",
+        ),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    joins = sqlwrite.read_side(modules, attributor).joins
+
+    assert joins["x.py::finish"] == {frozenset({"JediTaskSpec", "JediFileSpec"})}
+
+
+def test_two_kinds_of_row_read_by_two_statements_are_not_joined():
+    """Co-residence in a function is not a relation, and saying so is the point.
+
+    The tempting reading -- this function reads tasks and it reads jobs, so the
+    task's jobs are where this goes next -- opens 113 junctions against the 31 a
+    shared statement opens, and a method dispatching several commands reads one
+    kind of row in one arm and decides about another somewhere else entirely.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def dispatch(self):\n"
+        "        sqlT = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlT += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlT + comment, varMap)\n"
+        "        sqlJ = f'SELECT PandaID FROM {schema}.jobsActive4 '\n"
+        "        sqlJ += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(_TASK_TABLE_WRITER, "teacher2.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    # Both kinds of row really are attributable here -- what is withheld is the
+    # relation between them, not the reading of either.
+    assert side.entities["JobSpec"].read_by == {"x.py::dispatch"}
+    assert "x.py::dispatch" in side.entities["JediTaskSpec"].read_by
+    assert side.joins == {}
+
+
+def test_a_statement_that_writes_one_kind_of_row_and_reads_another_is_not_a_join():
+    """A join is between rows one query *asked for*, and only that.
+
+    ``UPDATE JEDI_Tasks ... WHERE jediTaskID IN (SELECT ... FROM jobsActive4)``
+    names two kinds of row, but it reads one and writes the other, and a
+    descent follows the rows a decision was taken *from* -- pooling the verbs
+    here is the same conflation ``read_by`` and ``written_by`` were split for.
+    Held to the tightest claim the statement supports: one query asked for
+    both.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET oldStatus=:oldStatus '\n"
+        "        sqlU += 'WHERE jediTaskID IN '\n"
+        "        sqlU += f'(SELECT PandaID FROM {schema}.jobsActive4) '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(_JOB_TABLE_WRITER, "teacher.py"),
+        _module(source, "x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+
+    # Both kinds of row are seen, under the verb that names them.
+    assert side.entities["JobSpec"].read_by == {"x.py::sweep"}
+    assert side.entities["JediTaskSpec"].written_by == {"x.py::sweep"}
+    assert side.joins == {}
+
+
+def test_a_table_holding_no_spec_is_not_an_entity():
+    """An entity is a kind of row the corpus has a name for.  A table whose
+    class was never learned has no signature to merge on, and inventing one
+    from the table would split ``JobSpec`` into three -- one per lifetime
+    table -- which is the reason the class is canonical in the first place."""
+    source = (
+        "class TaskModule:\n"
+        "    def rows(self):\n"
+        "        sqlP = f'SELECT COMM_CMD FROM {schema}.PRODSYS_COMM '\n"
+        "        sqlP += 'WHERE COMM_TASK=:COMM_TASK '\n"
+        "        self.cur.execute(sqlP + comment, varMap)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    assert sqlwrite.read_side(modules, attributor).entities == {}
 
 
 def test_a_subject_carries_what_bounds_the_queries_that_select_it():
@@ -7642,3 +8208,273 @@ def test_a_clipped_row_keeps_the_half_that_says_what_happened():
 
     assert check_map._clip(row).startswith(f"{BROKER_LOG} is on no machine")
     assert check_map._clip("short") == "short"
+
+
+# --------------------------------------------------------------------------- #
+# loop cuts -- the fourth filter idiom, the one with no vocabulary
+# --------------------------------------------------------------------------- #
+
+_GENERATOR = '''
+class JobGenerator:
+    def start(self):
+        for workQueue in workQueueList:
+            for resource_type in resource_types:
+                cycleStr = "pid={0} vo={1} queue={2} resource_type={3}".format(
+                    self.pid, vo, workQueue.queue_name, resource_type.resource_name
+                )
+                tmpLog_inner = MsgWrapper(logger, cycleStr)
+                if active_gshare_rtypes and not active:
+                    if random.uniform(0, 1) > inactive_poll_probability:
+                        tmpLog_inner.debug(f"skipping {cycleStr} due to inactivity")
+                        continue
+                if not flagLocked:
+                    tmpLog_inner.debug("skip since locked by another process")
+                    continue
+                self.doGenerate(workQueue, resource_type)
+'''
+
+
+def _cuts(*sources: tuple[str, str], covered: set[str] | None = None):
+    modules = [_module(text, rel) for text, rel in sources]
+    return loopcut.extract(modules, MAP_ID, VERSION, covered or set())
+
+
+def test_a_guarded_continue_in_a_loop_is_a_cut_even_when_it_names_no_candidate():
+    """The structure is the proof, not the wording.
+
+    The rule first written down was "the message interpolates the loop
+    variable", and it misses both of these: one interpolates ``cycleStr``,
+    which is two hops from ``workQueue``, and the other interpolates nothing at
+    all.  They are the guards that decide whether a queue generates jobs, which
+    is the question the whole idiom was read for.
+    """
+    cuts, _silent = _cuts((_GENERATOR, "pandajedi/jediorder/JobGenerator.py"))
+
+    assert [c.message for c in cuts] == [
+        "skipping {} due to inactivity",
+        "skip since locked by another process",
+    ]
+    assert cuts[1].conditions == ["not flagLocked"]
+    assert cuts[0].order == 0 and cuts[1].order == 1
+
+
+def test_the_prefix_the_logger_stamps_is_the_key_that_narrows_the_question():
+    """Which candidate a line is about is in the prefix, not the sentence.
+
+    ``"skip since locked by another process"`` says nothing about which queue
+    was locked.  The wrapper built one line earlier says it, and it is read
+    through ``.format`` because that template is what the line is stamped with.
+    """
+    cuts, _silent = _cuts((_GENERATOR, "pandajedi/jediorder/JobGenerator.py"))
+
+    # ``{0}`` normalised to ``{}``: the rest of the map renders holes one way,
+    # and two spellings would make a consumer build the pattern twice.
+    assert cuts[1].scope_prefix == "pid={} vo={} queue={} resource_type={}"
+
+
+def test_an_unguarded_continue_is_iteration_control_and_not_a_cut():
+    source = (
+        "def run(self):\n"
+        "    for item in items:\n"
+        "        tmpLog.debug(f'done with {item}')\n"
+        "        continue\n"
+    )
+    cuts, silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts == [] and silent == 0
+
+
+def test_a_continue_in_an_except_handler_is_not_a_cut():
+    """A candidate dropped because the code raised was not tested and rejected.
+
+    Falls out rather than being excluded by hand -- a handler is not an ``if``.
+    """
+    source = (
+        "def run(self):\n"
+        "    for item in items:\n"
+        "        try:\n"
+        "            self.process(item)\n"
+        "        except Exception:\n"
+        "            tmpLog.error(f'failed to process {item}')\n"
+        "            continue\n"
+    )
+    cuts, silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts == [] and silent == 0
+
+
+def test_a_message_assembled_into_a_local_first_is_the_same_line():
+    """37% of matching emits are written this way, so the hop is not optional."""
+    source = (
+        "def run(self):\n"
+        "    for dataset in datasets:\n"
+        "        if dataset.status != 'ready':\n"
+        "            tmpMsg = f'skip {dataset.name} due to dataset status: {dataset.status}'\n"
+        "            tmpLog.debug(tmpMsg)\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/dataservice/closer.py"))
+
+    assert [c.message for c in cuts] == ["skip {} due to dataset status: {}"]
+    assert cuts[0].log_level == "debug"
+
+
+def test_two_sites_wording_a_cut_alike_are_one_node_and_pool_their_guards():
+    """Production cannot tell them apart either, so neither does the map.
+
+    The message is the signature for the reason a tag is one over in the stage
+    slice: it is what production prints and what a reader greps.
+    """
+    source = (
+        "def runImpl(self):\n"
+        "    for task in tasks:\n"
+        "        if not self.lockA(task):\n"
+        "            tmpLog.debug('skip due to lock failure')\n"
+        "            continue\n"
+        "        if not self.lockB(task):\n"
+        "            tmpLog.debug('skip due to lock failure')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandajedi/jediorder/JobGenerator.py"))
+
+    assert len(cuts) == 1
+    assert cuts[0].conditions == ["not self.lockA(task)", "not self.lockB(task)"]
+
+
+def test_a_position_is_not_the_signature():
+    """Two builds of the same cut at different lines are the same node.
+
+    A node keyed on where it sits reports a change every time anything above it
+    moves, which is the churn ``anchor`` is kept out of ``CONTENT_FIELDS`` to
+    avoid.
+    """
+    body = (
+        "    for task in tasks:\n"
+        "        if task.frozen:\n"
+        "            tmpLog.debug('skip since the task is frozen')\n"
+        "            continue\n"
+    )
+    early, _ = _cuts(("def runImpl(self):\n" + body, "pandajedi/jediorder/X.py"))
+    late, _ = _cuts(("def runImpl(self):\n    x = 1\n" + body, "pandajedi/jediorder/X.py"))
+
+    assert early[0].name == late[0].name
+    assert early[0].anchor.line_start != late[0].anchor.line_start
+
+
+def test_a_chain_the_stage_slice_reads_is_not_read_again_here():
+    """One cut, one identity.  Keyed on wording here and on the tag there."""
+    source = (
+        "def doBrokerage(self):\n"
+        "    for site in sites:\n"
+        "        if site.maxwdir < need:\n"
+        "            tmpLog.debug(f'  skip {site.name} due to small scratch disk')\n"
+        "            continue\n"
+    )
+    rel = "pandajedi/jedibrokerage/GenJobBroker.py"
+    read, _ = _cuts((source, rel))
+    skipped, _ = _cuts((source, rel), covered={f"{rel}::doBrokerage"})
+
+    assert len(read) == 1 and skipped == []
+
+
+def test_a_tagged_rejection_stays_with_the_slice_that_owns_the_tag():
+    source = (
+        "def doSomething(self):\n"
+        "    for site in sites:\n"
+        "        if site.blacklisted:\n"
+        "            tmpLog.debug(f'  skip {site.name} criteria=-blacklisted')\n"
+        "            continue\n"
+    )
+    cuts, silent = _cuts((source, "pandajedi/jedidog/X.py"))
+
+    assert cuts == []
+    # Counted as unnamed here rather than dropped: this slice did not name it.
+    assert silent == 1
+
+
+def test_the_search_key_is_the_longest_run_and_not_the_leading_one():
+    """``"  skip site={} ..."`` shares its front with half the file."""
+    source = (
+        "def run(self):\n"
+        "    for site in sites:\n"
+        "        if site.offline:\n"
+        "            tmpLog.debug(f'  skip {site.name} because the endpoint is unusable')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts[0].search_key == "because the endpoint is unusable"
+
+
+def test_a_key_that_also_matches_another_cut_in_the_file_is_reported():
+    """No length floor: what makes a key useless is that it selects more.
+
+    A hit on ``collection=`` cannot say which of the two cuts fired and a miss
+    cannot say neither did, so the silence is not about this cut at all.
+    """
+    source = (
+        "def run(self):\n"
+        "    for collection in collections:\n"
+        "        if collection.pseudo:\n"
+        "            tmpLog.debug(f'collection={collection} is pseudo input ; skipped')\n"
+        "            continue\n"
+        "        if not collection.found:\n"
+        "            tmpLog.debug(f'collection={collection} not found')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/taskbuffer/DataCarousel.py"))
+    for cut in cuts:
+        cut.log_files = ["panda-DataCarousel.log"]
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, loop_cuts=cuts)
+
+    assert gates.ambiguous_cut_keys(fragment) == [
+        "panda-DataCarousel.log: 'collection=' also matches another cut there"
+    ]
+
+
+def test_two_cuts_sharing_a_key_in_different_files_are_not_ambiguous():
+    """The unit is the file, because that is what a question is asked of."""
+    cut = LoopCutNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="a",
+        owner="a.py::run",
+        message="retry {} later",
+        search_key="retry",
+        log_files=["panda-DBProxy.log"],
+    )
+    elsewhere = cut.model_copy(
+        update={"name": "b", "owner": "b.py::run", "log_files": ["panda-JediDBProxy.log"]}
+    )
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, loop_cuts=[cut, elsewhere])
+
+    assert gates.ambiguous_cut_keys(fragment) == []
+
+
+def test_two_cuts_sharing_a_signature_fail_the_identity_gate():
+    """Storing the map keeps one per name, and nothing else compares the two."""
+    cut = LoopCutNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="panda:x.py::run:skip it",
+        owner="x.py::run",
+        message="skip it",
+    )
+    fragment = MapFragment(
+        map_id=MAP_ID, derived_from=VERSION, loop_cuts=[cut, cut.model_copy()]
+    )
+
+    result = gates.map_identities_are_distinct(fragment)
+
+    assert not result.passed
+    assert any("loop_cut" in failure for failure in result.failures)
+
+
+def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
+    """``FilterStage`` was once missing from ``clear_map``, so stages from a
+    previous source version stayed in the database forever; and a kind missing
+    from ``CONTENT_FIELDS`` compares equal to itself no matter what changed."""
+    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+
+    assert NodeType.LOOP_CUT in CODE_MAP_NODE_TYPES
+    assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS

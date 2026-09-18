@@ -32,31 +32,53 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import click
 
 from bamboo.codemap import evidence as evidence_mod
+from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
     ELIMINATED,
+    LEAD_MAP,
     SEEN,
     UNASKABLE,
     UNSETTLED,
+    WALK_ASKED,
+    WALK_BUDGET,
+    WALK_TERMINAL,
+    Hop,
+    Investigation,
+    Lead,
     Strategy,
     Symptom,
 )
+from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EVIDENCE = Path(".bamboo") / "strategy-evidence.json"
+
+#: Hops a walk takes before it stops of its own accord.  Small because the
+#: measured walks are: the passthrough chains in this corpus are at most four
+#: fields long, so anything deeper is a loop or a mistake -- and because each
+#: hop reaches production once, the count is what stands in for the person who
+#: would otherwise say "that's enough".
+DEFAULT_HOPS = 3
 
 # Kept apart from ``check-map``'s file on purpose.  The two ask different
 # questions of different files, and one overwriting the other would silently
 # leave a gate reading a sample collected for something else.
 
 _WIDTH = 96
+
+#: Openers listed under one folded destination before the rest are counted.
+#: Enough to show that a descent was reached by more than one helper -- which
+#: is what says whether a task is reassigning or waiting on its jobs -- without
+#: turning four destinations into thirty lines.
+_REASONS_SHOWN = 3
 
 _VERDICT_ORDER = (SEEN, UNSETTLED, UNASKABLE, ELIMINATED)
 
@@ -125,16 +147,24 @@ def _report_follow_up(strategy: Strategy) -> None:
     click.echo("\nwill anything move it on")
     selects = "yes" if follow.selected else "no"
     repair = "yes" if follow.self_repairing else "no"
-    click.echo(f"  a query selects on this value   {selects}")
+    click.echo(f"  anything acts on this value     {selects}")
     click.echo(
         f"  a re-evaluating trigger reaches  {repair}"
         + (f"  ({', '.join(follow.triggers)})" if follow.triggers else "")
     )
-    if follow.selected_by:
-        # The reader, not the writers: this is the query that has to pick the
-        # row up, so it is the one an investigation goes and reads.
-        for index, owner in enumerate(follow.selected_by):
-            label = "  which query selects it        " if index == 0 else " " * 33
+    # A query where there is one: it is the statement that could have missed the
+    # row, which is the question.  An update acts on the row by the same value
+    # but is the picking up rather than a chance to have failed at it, so it is
+    # named as itself and only when nothing queries.
+    actors = follow.selected_by or follow.updated_by
+    heading = (
+        "  which query selects it        "
+        if follow.selected_by
+        else "  which update acts on it       "
+    )
+    if actors:
+        for index, owner in enumerate(actors):
+            label = heading if index == 0 else " " * 33
             click.echo(f"{label} {strategy_mod.short_owner(owner)}")
         click.echo(
             "                                   "
@@ -292,30 +322,110 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
     # other is a place the walk ran out, and a reader deciding what to do next
     # wants them in that order.
     ordered = sorted(strategy.leads, key=lambda lead: (lead.symptom is None, lead.field))
-    # Folded for reading only.  Several candidates open the same field and the
-    # strategy keeps every one of them, because which of them survives the
-    # evidence is not decided until later -- see ``_deduped``.
-    ordered = [
-        lead
-        for index, lead in enumerate(ordered)
-        if lead.field not in {earlier.field for earlier in ordered[:index]}
-    ]
+    # Folded by destination for reading only.  The strategy keeps every lead,
+    # because which of their openers survives the evidence is not decided until
+    # later -- see ``_deduped``.
+    #
+    # **The reasons are not folded with them.**  Since a descent is named by the
+    # entity, several helpers reach one kind of row and which helper did it is
+    # the whole of what distinguishes them: ``runImpl`` asks ``reassignShare``
+    # in one arm and ``getPandaIDsWithTask_JEDI`` in another, and keeping the
+    # first says the task is reassigning when it is waiting on its jobs.
+    grouped: dict[str, list[Lead]] = {}
+    for lead in ordered:
+        grouped.setdefault(lead.field, []).append(lead)
     click.echo("\nwhere this goes next")
-    shown = ordered if full else ordered[:top]
-    for lead in shown:
+    fields = list(grouped) if full else list(grouped)[:top]
+    for field in fields:
+        leads = grouped[field]
+        lead = leads[0]
+        # The supplier, on every line.  A lead the extraction recorded and one
+        # assembled from a call are not the same claim, and a reader who cannot
+        # tell them apart reads the map's coverage as better than it is.
+        via = "" if lead.source == LEAD_MAP else f"  [{lead.source}]"
         if lead.symptom is not None:
             ask = f"--subject {lead.symptom.subject} --observed {lead.symptom.observed}"
             if lead.symptom.task_id:
                 ask += f" --task {lead.symptom.task_id}"
-            click.echo(f"  ask   {ask}")
+            click.echo(f"  ask   {ask}{via}")
         else:
-            click.echo(f"  stops {lead.field}  -- {lead.stop}")
-        for line in click.wrap_text(
-            lead.why, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
-        ).splitlines():
-            click.echo(line)
-    if len(ordered) > len(shown):
-        click.echo(f"  … {len(ordered) - len(shown)} more (--full)")
+            click.echo(f"  stops {field}  -- {lead.stop}{via}")
+        reasons = list(dict.fromkeys(one.why for one in leads if one.why))
+        said = reasons if full else reasons[:_REASONS_SHOWN]
+        for reason in said:
+            for line in click.wrap_text(
+                reason, width=_WIDTH, initial_indent=" " * 8, subsequent_indent=" " * 8
+            ).splitlines():
+                click.echo(line)
+        if len(reasons) > len(said):
+            click.echo(f"        … {len(reasons) - len(said)} more opener(s) (--full)")
+    if len(grouped) > len(fields):
+        click.echo(f"  … {len(grouped) - len(fields)} more (--full)")
+
+
+def _report_reading(
+    strategy: Strategy, roots: Optional[dict], top: int, full: bool
+) -> None:
+    """The code to read, and the production line to read it against.
+
+    One entry per function, not per arm: the surviving arms routinely sit
+    together and reading the same text twice invites two answers about one
+    piece of code.  Whether the pair can be made is stated either way -- an arm
+    the map records no line for is shown as silent rather than left out, since
+    a query invented to fill the gap would come back empty and an empty query
+    is what this design reads as evidence.
+
+    Without a source tree only the coordinates are printed.  The map names the
+    text; fetching it is a separate step, for the same reason deriving and
+    asking production are: the plan can be checked before anything is read.
+    """
+    if not strategy.readings:
+        return
+    click.echo("\ncode to read")
+    shown = strategy.readings if full else strategy.readings[:top]
+    for entry in shown:
+        outcomes = ", ".join(entry.outcomes[:3]) or "-"
+        click.echo(f"  {strategy_mod.short_owner(entry.owner):<52} {outcomes}")
+        marks = ",".join(str(line) for line in entry.lines[:6]) or "-"
+        region = (
+            reading_mod.region_for(
+                roots,
+                file=entry.file,
+                owner=entry.owner,
+                line=entry.lines[0],
+                expected_sha=entry.blob_sha,
+            )
+            if roots and entry.lines
+            else None
+        )
+        where = f"{entry.file}"
+        if region is not None:
+            where += (
+                f"  {region.line_start}-{region.line_end} "
+                f"({region.line_end - region.line_start + 1} lines)"
+            )
+        click.echo(f"        {where}   arms at {marks}")
+        if region is not None and region.off_version:
+            # Said before anything is read from it.  The map's lines address the
+            # snapshot it was built from, and a different one puts the mark on
+            # plausible code that is not the code -- which reads as an answer.
+            click.echo(
+                "        the tree given is not the one this map was built from: "
+                "the lines above are this tree's, not the map's"
+            )
+        if entry.silent:
+            click.echo(
+                "        silent -- the map records no line production prints for this arm"
+            )
+        else:
+            click.echo(
+                f"        match against  {entry.log_pattern}"
+                f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
+            )
+        if full and region is not None:
+            click.echo(region.marked(entry.lines))
+    if len(strategy.readings) > len(shown):
+        click.echo(f"  … {len(strategy.readings) - len(shown)} more (--full)")
 
 
 def _report_findings(strategy: Strategy, top: int, full: bool) -> None:
@@ -405,14 +515,98 @@ def _report_localization(strategy: Strategy, top: int, full: bool) -> None:
         click.echo(f"  … {len(local.funnel) - len(steps)} more (--full)")
 
 
-async def _derive(
+async def walk(
+    code_map: CodeMap,
+    symptom: Symptom,
+    budget: int = DEFAULT_HOPS,
+    settle: Optional[Callable[[Strategy], Strategy]] = None,
+) -> Investigation:
+    """Follow the map from *symptom* until it stops, one derivation per hop.
+
+    **The loop is here and not in the derivation, and that is the design.**  A
+    hop needs evidence before the next one is worth taking, and collecting
+    evidence is a separate cadence -- a ``derive`` that walked would have to
+    reach production from inside itself, which is the split the two phases
+    exist to keep.  So the map enumerates, *settle* selects, and this only
+    decides whether to go round again.  That seam is also where a reasoner can
+    sit without being able to invent anything: it may pick among the leads the
+    map opened, and it may not add one.
+
+    *settle* is what applies the evidence -- fetching it, loading it, or
+    neither.  Handed in rather than built here so this is testable against a
+    fixture and so an offline walk and a fetching one are the same code path.
+    """
+    investigation = Investigation(budget=budget)
+    asked = symptom
+    opened, source = "", LEAD_MAP
+    while True:
+        strategy = await strategy_mod.derive(code_map, asked)
+        if settle is not None:
+            strategy = settle(strategy)
+        investigation.visited.append(strategy_mod.visit_key(asked))
+        investigation.hops.append(
+            Hop(
+                number=len(investigation.hops),
+                symptom=asked,
+                opened=opened,
+                source=source,
+                strategy=strategy,
+            )
+        )
+        lead, repeats = strategy_mod.next_question(strategy, set(investigation.visited))
+        # Recorded even when a hop is available, because a walk can both find
+        # somewhere to go and have come back past somewhere it has been.
+        investigation.cycles += [r for r in repeats if r not in investigation.cycles]
+        if lead is None or lead.symptom is None:
+            investigation.stopped = WALK_ASKED if repeats else WALK_TERMINAL
+            return investigation
+        if len(investigation.hops) >= budget:
+            # Checked after choosing, so the reason is "the budget ran out"
+            # rather than "there was nothing left" -- those are opposite things
+            # to do next, and a walk that conflated them would tell a reader to
+            # stop looking when it had simply been told to stop.
+            investigation.stopped = WALK_BUDGET
+            return investigation
+        asked, opened, source = lead.symptom, lead.field, lead.source
+
+
+def _report_trace(investigation: Investigation) -> None:
+    """The path, the terminal it reached, and what opened each step.
+
+    Printed before the hops themselves because it is the product.  An
+    investigation is a path rather than a lookup, so "where it went and why it
+    stopped" is the answer and each hop's detail is the working.
+    """
+    click.echo(
+        f"\ntrace      {len(investigation.hops)} hop(s) of {investigation.budget} · "
+        f"stopped because {investigation.stopped}"
+    )
+    for hop in investigation.hops:
+        symptom = hop.symptom
+        asked = (
+            f"the distribution around {symptom.focus}"
+            if symptom.kind == "distribution"
+            else f"{symptom.subject} = {symptom.observed!r}"
+        )
+        opened = f"   ← {hop.opened} [{hop.source}]" if hop.opened else ""
+        click.echo(f"  hop {hop.number}  {asked}{opened}")
+    for repeat in investigation.cycles:
+        click.echo(
+            f"  loop     {repeat} came round again -- the fields copy from each "
+            f"other, so the way out is a terminal and not another hop"
+        )
+
+
+async def _investigate(
     map_id: str,
     version: Optional[str],
     symptom: Optional[Symptom],
     description: Optional[str],
     task_id: Optional[str],
     observed_diag: Optional[str],
-) -> tuple[Strategy, list]:
+    budget: int,
+    settle: Optional[Callable[[Strategy], Strategy]],
+) -> tuple[Investigation, list]:
     from bamboo.database.graph_database_client import GraphDatabaseClient
 
     graph_db = GraphDatabaseClient()
@@ -437,7 +631,10 @@ async def _derive(
                     "observed_diag": observed_diag,
                 }
             )
-        return await strategy_mod.derive(code_map, symptom), matches
+        # The description only ever chooses the first question.  Every hop after
+        # it is chosen by what the map opened and the evidence left standing,
+        # which is why resolution happens once and outside the walk.
+        return await walk(code_map, symptom, budget=budget, settle=settle), matches
     finally:
         await graph_db.close()
 
@@ -509,6 +706,28 @@ async def _derive(
     show_default=True,
     help="Seconds to wait for each grep to come back.",
 )
+@click.option(
+    "--source-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Read the code the map points at from this tree.  Without it only the "
+        "coordinates are printed; the map names the text either way."
+    ),
+)
+@click.option(
+    "--max-hops",
+    "max_hops",
+    default=1,
+    show_default=True,
+    help=(
+        "How far to follow the map.  A symptom is a path rather than a lookup: "
+        "the value a task sits in came from a field that came from another, and "
+        "each step is chosen by what the evidence left standing, not by the "
+        "description.  One by default because every hop puts its own questions "
+        "to production."
+    ),
+)
 @click.option("--full", is_flag=True, help="Print every folded row, with conditions and anchors.")
 @click.option("--top", default=10, show_default=True, help="Rows per listing.")
 @click.option("-v", "--verbose", is_flag=True, help="DEBUG logging.")
@@ -523,6 +742,8 @@ def main(
     evidence_path: Path,
     fetch: bool,
     timeout: float,
+    source_root: Optional[Path],
+    max_hops: int,
     full: bool,
     top: int,
     verbose: bool,
@@ -542,58 +763,99 @@ def main(
         symptom = Symptom(
             subject=subject, observed=observed, task_id=task_id, observed_diag=observed_diag
         )
-    try:
-        strategy, matches = asyncio.run(
-            _derive(map_id, version, symptom, description, task_id, observed_diag)
-        )
-    except LookupError as exc:
-        raise click.ClickException(str(exc)) from exc
+    # One evidence file for the whole walk.  A later hop asks about the same
+    # task in the same logs, so its answers belong beside the first hop's rather
+    # than in a file of their own -- and keeping one file is what lets the whole
+    # investigation be replayed offline afterwards.
+    loaded = (
+        evidence_mod.Evidence.load(evidence_path)
+        if not fetch and evidence_path.exists()
+        else None
+    )
+    fetched: list = []
 
-    ev = None
-    if fetch:
-        queries = strategy_mod.queries(strategy)
-        if not queries:
-            raise click.ClickException(
-                "The map offers no observable for this subject, so there is "
-                "nothing to ask production.  See the gaps below."
+    def settle(strategy: Strategy) -> Strategy:
+        if not fetch:
+            return strategy_mod.evaluate(strategy, loaded) if loaded else strategy
+        asked = strategy_mod.queries(strategy)
+        if not asked:
+            click.echo(
+                "           the map offers no observable here, so production is "
+                "not asked -- see the gaps below"
             )
+            return strategy
         click.echo(
-            f"asking {len(queries)} question(s) over "
-            f"{len({q.log_filename for q in queries})} log file(s) "
-            f"across {len({q.service for q in queries})} service(s)"
+            f"asking {len(asked)} question(s) over "
+            f"{len({q.log_filename for q in asked})} log file(s) "
+            f"across {len({q.service for q in asked})} service(s)"
         )
-        ev = asyncio.run(evidence_mod.collect(queries, timeout=timeout))
+        answers = asyncio.run(evidence_mod.collect(asked, timeout=timeout))
         if strategy.symptom.task_id is not None and strategy.localization is None:
             # One row, one call, no window.  Asked alongside the greps rather
             # than instead of them: the record holds the last message written
             # to the field, so it confirms an arm and never rules one out, and
             # the log line is what survives a later junction overwriting it.
-            ev.tasks = asyncio.run(
+            answers.tasks = asyncio.run(
                 evidence_mod.collect_task_records([strategy.symptom.task_id])
             )
+        fetched.append(answers)
+        return strategy_mod.evaluate(strategy, answers)
+
+    try:
+        investigation, matches = asyncio.run(
+            _investigate(
+                map_id,
+                version,
+                symptom,
+                description,
+                task_id,
+                observed_diag,
+                max_hops,
+                settle,
+            )
+        )
+    except LookupError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    ev = loaded
+    if fetched:
+        ev = fetched[0].model_copy(
+            update={
+                "results": [r for answer in fetched for r in answer.results],
+                "tasks": [t for answer in fetched for t in answer.tasks],
+            }
+        )
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
-    elif evidence_path.exists():
-        ev = evidence_mod.Evidence.load(evidence_path)
 
-    if ev is not None:
-        strategy = strategy_mod.evaluate(strategy, ev)
-
-    # A record that names an arm settles the question without a grep, so the
-    # listing is ordered by verdict even when nothing was asked of production.
-    named = any(c.named for c in strategy.candidates)
-    _report_header(strategy, evidence_path if ev else None, ev)
-    if matches:
-        _report_resolution(description or "", matches)
-    if strategy.localization is not None:
-        _report_localization(strategy, top, full)
-    else:
-        _report_verdict(strategy, ev is not None)
-        _report_follow_up(strategy)
-        _report_candidates(strategy, top, full, ev is not None or named)
-    _report_observations(strategy, top, full, ev is not None)
-    _report_leads(strategy, top, full)
-    _report_findings(strategy, top, full)
+    if len(investigation.hops) > 1 or max_hops > 1:
+        _report_trace(investigation)
+    for hop in investigation.hops:
+        strategy = hop.strategy
+        if len(investigation.hops) > 1:
+            click.echo(f"\n{'─' * 24} hop {hop.number} {'─' * 24}")
+        # A record that names an arm settles the question without a grep, so the
+        # listing is ordered by verdict even when nothing was asked of production.
+        named = any(c.named for c in strategy.candidates)
+        evaluated = ev is not None
+        _report_header(strategy, evidence_path if evaluated else None, ev)
+        if matches and hop.number == 0:
+            _report_resolution(description or "", matches)
+        if strategy.localization is not None:
+            _report_localization(strategy, top, full)
+        else:
+            _report_verdict(strategy, evaluated)
+            _report_follow_up(strategy)
+            _report_candidates(strategy, top, full, evaluated or named)
+        _report_observations(strategy, top, full, evaluated)
+        _report_leads(strategy, top, full)
+        _report_reading(
+            strategy,
+            PandaCodeMapPlugin._resolve_roots(source_root) if source_root else None,
+            top,
+            full,
+        )
+        _report_findings(strategy, top, full)
 
 
 if __name__ == "__main__":

@@ -126,21 +126,37 @@ class SubjectNode(BaseNode):
     selected_values: list[str] = Field(
         default_factory=list,
         description=(
-            "Values some query selects rows on.  The counterpart of the "
-            "outcomes the junctions write: together they make a state machine "
-            "out of a pile of writes, since a value nothing selects on is one "
-            "nothing ever moves away from."
+            "Values something acts on rows by -- a query's ``WHERE`` or an "
+            "update's.  The counterpart of the outcomes the junctions write: "
+            "together they make a state machine out of a pile of writes, since "
+            "a value nothing acts on is one nothing ever moves away from.  Both "
+            "verbs count here, because an ``UPDATE ... WHERE status=:old`` "
+            "moves a task out of that status as squarely as a query does."
         ),
     )
     selected_by: dict[str, list[str]] = Field(
         default_factory=dict,
         description=(
-            "``{value: the functions whose query selects rows on it}``.  Kept "
+            "``{value: the functions whose *query* selects rows on it}``.  Kept "
             "per value rather than per subject because the two answer different "
             "questions: ``JediTaskSpec.status`` is selected on thirty-one values "
             "by dozens of functions, and pooling them says only that the subject "
             "is read.  Per value it says who to ask -- ``finishing`` is selected "
-            "by exactly one query in the whole corpus."
+            "by exactly one query in the whole corpus.  Queries only; see "
+            "``updated_by`` for the other verb and why the two are apart."
+        ),
+    )
+    updated_by: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "``{value: the functions whose UPDATE or DELETE acts on rows "
+            "already holding it}``.  A different claim from ``selected_by``, "
+            "and folding them said an update was a query for a fifth of the "
+            "corpus.  The distinction is what the reading is for: asked why a "
+            "row was not picked up, a query is somewhere that could have "
+            "missed it, while an update is the picking up itself -- so the "
+            "first names a place to look and the second names what already "
+            "happened."
         ),
     )
     selection_gates: list[str] = Field(
@@ -160,6 +176,61 @@ class SubjectNode(BaseNode):
     @staticmethod
     def make_name(spec_class: str, attribute: str) -> str:
         return f"{spec_class}.{attribute}"
+
+
+class EntityNode(BaseNode):
+    """A kind of row, and which functions read it and which write it.
+
+    The map's vocabulary was pairs -- ``(spec class, attribute)`` -- and a pair
+    can only say something about a *column*.  ``getPandaIDsWithTask_JEDI``
+    selects a task's jobs on nothing but the join key, so it named no promoted
+    subject and the map read that as observing nothing.  It observes jobs.  The
+    fact had nowhere to go: ``class_for_table`` was already computed beside the
+    predicate loop and thrown away when no predicate landed on a promoted
+    attribute.
+
+    **Not folded into** :class:`SubjectNode`.  That model is load-bearing for
+    promotion and for three gates -- ``declared-status-is-written``, the
+    written-but-never-selected report and ``structural-attribution-agrees`` --
+    all of which read ``attribute``.  Rows with no attribute would flow into
+    every one of them, which is the "one field answering two questions" shape
+    this map has already paid for twice (``log_files`` and ``opened_by``).
+
+    **Stored, not merely reported.**  ``DiagnosticTemplate`` and
+    ``EnumerationWrite`` are indexes kept on the fragment with no label, and
+    nothing in an investigation can reach them -- the database holds none of
+    their rows.  An entity is read by ``derive-strategy``, so it is a node.
+
+    **The verbs stay apart.**  Selecting a task's jobs and updating them are
+    different claims, and pooling them is exactly the conflation that let a
+    function's ``UPDATE ... WHERE`` be reported as a query that selects on a
+    value.  A descent follows ``read_by``; ``written_by`` comes free from the
+    same walk and is recorded rather than guessed at later.
+    """
+
+    node_type: NodeType = NodeType.ENTITY
+    map_id: str
+    derived_from: str
+    tables: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tables learned to hold this entity's rows.  Several per entity is "
+            "normal and is why the class is the signature rather than the "
+            "table: ``jobsDefined4``, ``jobsActive4`` and ``jobsArchived4`` are "
+            "one ``JobSpec`` split across a job's lifetime."
+        ),
+    )
+    read_by: list[str] = Field(
+        default_factory=list,
+        description="``module::method`` of every function whose SELECT names one of the tables.",
+    )
+    written_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The same for UPDATE and DELETE.  Kept separate from ``read_by`` "
+            "because a descent is about the rows a decision was *read from*."
+        ),
+    )
 
 
 #: What a line is about.  A junction leaves two kinds and they are not
@@ -468,6 +539,48 @@ class JunctionNode(BaseNode):
         ),
     )
     anchor: Optional[Anchor] = None
+    calls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What the owner consults, as ``module::method`` targets.  The one "
+            "edge out of a junction that reaches the rows an arm decided on: "
+            "``setScoutJobData_JEDI`` writes ``exhausted`` and "
+            "``getScoutJobData_JEDI`` selects on finished jobs, with nothing "
+            "but the call between them.  Qualified because a bare name is not "
+            "an identity here and the reader joins on this -- which module a "
+            "call lands in is settled at build time, where a name is followed "
+            "only if it means one thing or the caller imports the module it "
+            "names.  Recorded rather than joined at read time through the "
+            "shared owner, because ``selected_by`` is per function and a "
+            "method handling several commands reads one thing in one arm and "
+            "writes another in another; treating that as a relation is the "
+            "mistake this corpus has already charged for twice."
+        ),
+    )
+    joined_entities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Kinds of row one of this owner's queries reads *in the same "
+            "statement* as the rows it decides about.  The sound form of the "
+            "join that is unsound at owner granularity: sharing a function "
+            "proves nothing, but a single ``FROM`` list is the corpus stating "
+            "the relation itself, so ``prepareTasksToBeFinished_JEDI`` "
+            "selecting tasks against their datasets really does say which "
+            "datasets that task waits on.  The difference is the whole point "
+            "-- 113 junctions would gain an entity from co-residence in the "
+            "function and 31 do from a shared statement."
+        ),
+    )
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Hash of the enclosing function's text -- the key of the reading "
+            "that explains it.  Computed at build time so the input a reader "
+            "would be given is chosen by the map and not by whoever asks; the "
+            "reading itself is filled in lazily.  Empty when the function "
+            "could not be located in the snapshot."
+        ),
+    )
 
     def observable_log_files(self) -> list[str]:
         """Files where a line *about this junction firing* can appear.
@@ -695,10 +808,12 @@ class MapFragment(BaseModel):
     map_id: str
     derived_from: str
     subjects: list[SubjectNode] = Field(default_factory=list)
+    entities: list[EntityNode] = Field(default_factory=list)
     junctions: list[JunctionNode] = Field(default_factory=list)
     boundaries: list[BoundaryNode] = Field(default_factory=list)
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
+    loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
@@ -739,10 +854,12 @@ class MapFragment(BaseModel):
     def extend(self, other: "MapFragment") -> None:
         """Merge *other* into this fragment in place."""
         self.subjects.extend(other.subjects)
+        self.entities.extend(other.entities)
         self.junctions.extend(other.junctions)
         self.boundaries.extend(other.boundaries)
         self.value_enums.extend(other.value_enums)
         self.filter_stages.extend(other.filter_stages)
+        self.loop_cuts.extend(other.loop_cuts)
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
@@ -968,10 +1085,177 @@ class FilterStageNode(BaseNode):
         ),
     )
     anchor: Optional[Anchor] = None
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Hash of the enclosing function's text -- the key of the reading "
+            "that explains it.  Computed at build time so the input a reader "
+            "would be given is chosen by the map and not by whoever asks; the "
+            "reading itself is filled in lazily.  Empty when the function "
+            "could not be located in the snapshot."
+        ),
+    )
 
     @staticmethod
     def make_name(map_id: str, owner: str, signature: str) -> str:
         return f"{map_id}:{owner}:{signature}"
+
+
+class LoopCutNode(BaseNode):
+    """A guard inside a loop that drops the candidate and says why in prose.
+
+    The same cut as :class:`FilterStageNode` and a different kind of node,
+    because the two are evidenced differently and every consumer of a stage
+    reads the difference.  Brokerage announces its cuts twice in machine-
+    readable form -- ``criteria=-diskIO`` per rejected site and
+    ``N candidates passed disk check`` per step -- and the whole of ``localize``
+    is built on those two.  Everywhere else in the corpus a loop drops its
+    candidate with ``continue`` under a guard and a sentence::
+
+        for workQueue in workQueueList:
+            for resource_type in resource_types:
+                ...
+                if not flagLocked:
+                    tmpLog_inner.debug("skip since locked by another process")
+                    continue
+
+    No tag, no counter, and the sentence is the only name the step has.  Poured
+    into ``FilterStageNode`` these arrive with ``criteria_tag`` and
+    ``funnel_label`` both empty, which is two fields answering a question they
+    were not asked: ``vocabulary`` would offer 75 new chains described in
+    brokerage words, ``_leading``'s fallback would open one of them, and
+    ``check-map`` would silently add 36 files to what it asks production --
+    a footprint decision that was deliberately made once and by hand.
+
+    ``message`` is the identity, for the reason ``criteria_tag`` is one over
+    there: it is the semantic signature and the log line at once, so a cut keyed
+    on it can be counted from production and survives any edit that keeps the
+    wording.  Position is not identity -- the loop moves when anything above it
+    does.
+
+    Measured over ``panda-server-source 1.0.2``: 797 of 834 ``continue``
+    statements sit inside a loop under a guard, 200 have a logged line in the
+    same block, five of those already carry a ``criteria=`` tag and 37 more are
+    inside the five brokerage functions the stage recognizer already reads.
+    The remaining 153 are this node, over 75 functions in 36 files.
+    """
+
+    node_type: NodeType = NodeType.LOOP_CUT
+    map_id: str
+    derived_from: str
+    owner: str = Field(..., description="module::function holding the loop.")
+    message: str = Field(
+        ...,
+        description=(
+            "The line logged before the candidate is dropped, with "
+            "interpolations rendered as '{}'.  The step's only name."
+        ),
+    )
+    search_key: str = Field(
+        default="",
+        description=(
+            "The longest fixed run of the message -- what to grep production "
+            "for.  Not guaranteed to select only this cut: 'skip {}' leaves "
+            "'skip'.  ``build-map`` reports the keys that also match another "
+            "cut in the same file, which is the threshold-free form of that "
+            "worry, and a capped answer says the rest."
+        ),
+    )
+    scope_prefix: str = Field(
+        default="",
+        description=(
+            "The prefix the logger this cut writes through puts on every line, "
+            "when the enclosing function builds one -- 'vo={} queue={} cloud={} "
+            "pid={} {}'.  Which candidate a line is about is in the prefix, not "
+            "the sentence, so this is the key that narrows the question to one "
+            "queue or one task.  Empty when the module logs through a bare "
+            "logger."
+        ),
+    )
+    order: int = Field(default=0, description="Position within the owner, by source order.")
+    loop_line: int = Field(
+        default=0, description="Line of the loop header whose iteration this drops."
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="Guards under which the candidate is dropped.",
+    )
+    inputs: list[str] = Field(
+        default_factory=list,
+        description="Identifiers the conditions read -- where the backward walk continues.",
+    )
+    log_level: Optional[str] = Field(default=None, description="Level the message is logged at.")
+    log_files: list[str] = Field(
+        default_factory=list,
+        description="Files the message can land in.  Empty when the module declares no logger.",
+    )
+    anchor: Optional[Anchor] = None
+
+    @staticmethod
+    def make_name(map_id: str, owner: str, signature: str) -> str:
+        return f"{map_id}:{owner}:{signature}"
+
+
+class GlossNode(BaseNode):
+    """A reading of one function, and the exact text that reading was given.
+
+    The unit is a function because that is what a reader needs, measured
+    rather than assumed.  An arm's own guard is a median of eight lines, but
+    only 35 of 927 arms refer to nothing outside it: 96% load names they do not
+    bind, a median of four each, and 52% sit in a loop whose header is outside
+    their guard.  Following those references -- the backward slice the map
+    already names as its method -- reaches a median of 37% of the enclosing
+    function and, at the ninetieth percentile, 96% of it.  Slicing would build
+    a mechanism to arrive at very nearly the function.
+
+    Sharing is why it is a node at all rather than a field on each junction:
+    497 junctions sit in 213 functions, 376 of them share one with another
+    junction, and the 109 filter stages sit in five.  Read once per function
+    and every arm in it is explained together -- 213 readings rather than 1046.
+
+    ``shown`` is the text that was actually handed over, kept for the same
+    reason grep output is written to an evidence file: when a reading is wrong,
+    it separates *the input was insufficient* from *the reader misread it*, and
+    those want opposite fixes.  It is evidence, never the record -- the source
+    tree stays canonical.  Storing the mapped functions instead would not even
+    save space: the whole corpus is 5.6 MB of Python, the owner functions alone
+    are 1.65 MB of it, and adding the callers a reader might ask for next takes
+    that to 63% and then 90%.  The closure does not converge on a subset.  It
+    would also cost the oracle, since ``check-map`` rebuilds the fragment from
+    source on every run and the offline gates work by comparing two statements
+    the *code* makes.
+
+    Identity is ``gloss_key``, the hash of the text.  A reading is only about
+    the text it was given, so a changed function is a different node rather
+    than a stale field -- which is also why this does not share
+    :meth:`JunctionNode.content_hash`: that one hashes a junction's *meaning*
+    and deliberately ignores the surrounding source, which is the right key for
+    an artefact derived from the branch table and the wrong one for an artefact
+    derived from the file.
+    """
+
+    node_type: NodeType = NodeType.GLOSS
+    map_id: str
+    derived_from: str
+    gloss_key: str = Field(..., description="Hash of `shown`; the node's identity.")
+    owner: str = Field(..., description="module::qualname of the function read.")
+    anchor: Optional[Anchor] = None
+    shown: str = Field(
+        default="",
+        description="The exact text the reader was given.  Evidence, not the record.",
+    )
+    explanation: str = Field(
+        default="",
+        description=(
+            "What the reader made of it.  Empty until something reads it: the "
+            "map is built eagerly and this is filled in lazily, when an "
+            "investigation actually touches this function."
+        ),
+    )
+
+    @staticmethod
+    def make_name(map_id: str, gloss_key: str) -> str:
+        return f"{map_id}:gloss:{gloss_key}"
 
 
 # ---------------------------------------------------------------------------
@@ -1205,6 +1489,24 @@ class Candidate(BaseModel):
     """
 
     owner: str
+    file: str = Field(default="", description="Where the junction is, for a reader.")
+    blob_sha: str = Field(
+        default="",
+        description=(
+            "Hash of the file the map read.  Carried so that reading the code "
+            "against a different snapshot is noticed: line drift is one of the "
+            "two skew symptoms no gate catches."
+        ),
+    )
+    gloss_key: str = Field(
+        default="",
+        description=(
+            "Key of the reading of its enclosing function.  Carried on the "
+            "candidate because eliminating a candidate has to take its reading "
+            "with it: the point of the enumeration is that what the evidence "
+            "rules out stops being offered."
+        ),
+    )
     tier: int = Field(
         default=1,
         description=(
@@ -1344,7 +1646,11 @@ class FollowUp(BaseModel):
 
     selected: bool = Field(
         ...,
-        description="Whether any query in the map selects rows on this value.",
+        description=(
+            "Whether anything in the map acts on rows by this value -- a "
+            "query's predicate or an update's.  Both answer 'will the row be "
+            "moved on at all'; ``selected_by`` and ``updated_by`` say which."
+        ),
     )
     selection_gates: list[str] = Field(
         default_factory=list,
@@ -1359,6 +1665,15 @@ class FollowUp(BaseModel):
         description=(
             "The functions whose query selects rows on the observed value.  "
             "Where the row has to be picked up, so where to ask why it was not."
+        ),
+    )
+    updated_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions whose update or delete acts on rows already holding "
+            "the observed value.  Not a place the row could have been missed --"
+            " an update is the picking up -- so it is named separately and only "
+            "answers 'what will move this row' where no query does."
         ),
     )
     reader_log_files: list[str] = Field(
@@ -1523,6 +1838,18 @@ STOP_NO_WRITER = "nothing in the map writes that field"
 STOP_SHARED_TABLE = "a table the map only ever reads"
 STOP_NEEDS_VALUE = "read by the condition, but its value was not observed"
 STOP_AMBIGUOUS = "several subjects declare that name and the map cannot say which"
+STOP_DESCENT = "another entity's rows, which this derivation does not census"
+
+
+#: Where a lead came from, kept because the three are not equally trustworthy
+#: and a trace that cannot tell them apart makes the map's coverage read better
+#: than it is.  ``map`` is an edge the extraction recorded; ``callee`` is one
+#: hop along a ``self.<method>()`` call, deterministic but assembled here;
+#: ``gloss`` is a reading's proposal, a hypothesis the next hop's evidence
+#: checks.  Only the first two exist today.
+LEAD_MAP = "map"
+LEAD_CALLEE = "callee"
+LEAD_GLOSS = "gloss"
 
 
 class Lead(BaseModel):
@@ -1569,6 +1896,59 @@ class Lead(BaseModel):
             "system did not take."
         ),
     )
+    source: str = Field(
+        default=LEAD_MAP,
+        description=(
+            "Which of the LEAD_* suppliers proposed it.  Separate from "
+            "``opened_by``, which names *whose* survival it depends on and is "
+            "what the eliminator filters by; this names *how sure* it is."
+        ),
+    )
+
+
+class Reading(BaseModel):
+    """One function to read, the arms it covers, and the line to read it against.
+
+    Per function rather than per arm because that is where the sharing is: the
+    arms that survive a question routinely sit together -- one function holds
+    up to eleven junctions -- and asking about each separately reads the same
+    text over again and invites two answers about one piece of code.
+
+    ``log_pattern`` is empty for an arm the map records no line for.  That is
+    not a defect to be papered over: of 1046 branches, 988 can be pointed at in
+    the source and 484 carry a line that production would print, so 43% can be
+    put side by side and the rest are honestly *read this, there is nothing to
+    match it against*.  Filling the gap with a guessed pattern would turn a
+    known silence into an empty query, and an empty query is what this design
+    reads as evidence.
+    """
+
+    owner: str
+    file: str = Field(default="", description="Where the function is.")
+    blob_sha: str = Field(
+        default="", description="Hash of the file the map read it from."
+    )
+    gloss_key: str = Field(
+        default="",
+        description="Key of the reading of this function, from the map.",
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description="The arms' own lines -- what to mark in the text handed over.",
+    )
+    outcomes: list[str] = Field(
+        default_factory=list, description="The values those arms write."
+    )
+    log_files: list[str] = Field(default_factory=list)
+    log_pattern: str = Field(
+        default="",
+        description="What production would print for these arms.  Empty means silent.",
+    )
+
+    @property
+    def silent(self) -> bool:
+        """True when the map records no production line for any of these arms."""
+        return not self.log_pattern
 
 
 class Strategy(BaseModel):
@@ -1606,6 +1986,14 @@ class Strategy(BaseModel):
             "candidates once the evidence is in."
         ),
     )
+    readings: list[Reading] = Field(
+        default_factory=list,
+        description=(
+            "The code to read, one entry per function, filtered to the "
+            "surviving candidates once the evidence is in.  The map chooses "
+            "the input; what reads it is not this module's business."
+        ),
+    )
     findings: list[str] = Field(
         default_factory=list,
         description="Facts about the map itself that this question turned up.",
@@ -1618,3 +2006,70 @@ class Strategy(BaseModel):
             "to build instead of being absorbed as a weaker conclusion."
         ),
     )
+#: Why a walk stopped.  Each is a fact about the investigation rather than an
+#: error: a walk that ran out of map, one that came back to a question it had
+#: already asked, and one that spent its budget are three different answers and
+#: the reader has to be able to tell them apart.
+WALK_TERMINAL = "every lead is a terminal -- the map has nothing further to open"
+WALK_ASKED = "every question left had already been asked"
+WALK_BUDGET = "the hop budget was spent"
+
+
+class Hop(BaseModel):
+    """One question asked of the map, and what opened it.
+
+    The unit of a path.  Keeping the whole strategy rather than a summary is
+    deliberate: a trace exists so the reasoning can be checked afterwards, and
+    checking it means seeing which candidates were live at each step, not only
+    which field the walk moved to.
+    """
+
+    number: int = Field(..., description="0 for the question that was asked, then 1, 2 …")
+    symptom: Symptom
+    opened: str = Field(
+        default="",
+        description="The lead's field.  Empty at hop 0, which nothing opened.",
+    )
+    source: str = Field(
+        default=LEAD_MAP,
+        description=(
+            "Which supplier proposed the lead that opened this hop.  What makes "
+            "the trace auditable: a path that went three hops on hypotheses is "
+            "not the same claim as one that went three hops on recorded edges."
+        ),
+    )
+    strategy: Strategy
+
+
+class Investigation(BaseModel):
+    """A path through the map, and why it ended.
+
+    The product of an investigation is not the last hop but the path, the
+    terminal it reached and which category that terminal is in.  A single
+    :class:`Strategy` cannot hold that: it is one hop's worth by construction,
+    because evidence has to be collected between hops and collecting it is a
+    separate cadence.  So the history lives here and the loop lives in whoever
+    owns this object -- the map enumerates, the evidence selects, and neither of
+    those is a thing to be done from inside a derivation.
+
+    Not a node.  It is the product of one investigation, not part of the
+    vocabulary the map is written in, and storing it would make a question
+    somebody asked once look like a fact about the code.
+    """
+
+    hops: list[Hop] = Field(default_factory=list)
+    visited: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Questions already asked, as ``subject=value``.  ``status`` and "
+            "``oldStatus`` copy from each other and ``jobStatus`` copies from "
+            "itself, so a walk without this goes round for ever -- and one that "
+            "dropped the repeat silently would report a loop as a dead end."
+        ),
+    )
+    cycles: list[str] = Field(
+        default_factory=list,
+        description="Questions that came round again.  A property of the system, so it is reported.",
+    )
+    budget: int = Field(default=0, description="Hops allowed.")
+    stopped: str = Field(default="", description="One of the WALK_* reasons.")

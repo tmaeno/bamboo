@@ -45,7 +45,12 @@ from bamboo.codemap.store import store_fragment
 logger = logging.getLogger(__name__)
 
 
-def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) -> bool:
+def _report(
+    fragment: MapFragment,
+    results: list[gates.GateResult],
+    top: int,
+    silent_cuts: int = 0,
+) -> bool:
     """Print the build summary and return True when every gate passed."""
     click.echo(f"\nmap_id       : {fragment.map_id}")
     click.echo(f"derived_from : {fragment.derived_from}")
@@ -208,6 +213,63 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
             if len(blind) > top:
                 click.echo(f"    … {len(blind) - top} more")
 
+    if fragment.loop_cuts:
+        owners = Counter(c.owner for c in fragment.loop_cuts)
+        scoped = sum(1 for c in fragment.loop_cuts if c.scope_prefix)
+        placed = sum(1 for c in fragment.loop_cuts if c.log_files)
+        click.echo(
+            f"\nloop cuts: {len(fragment.loop_cuts)} in {len(owners)} loop-holding "
+            f"function(s) · {placed} with a log file · {scoped} scoped by a logger prefix"
+        )
+        if silent_cuts:
+            # No ratio: most guarded ``continue``s in the corpus are iteration
+            # control in pure computation rather than filtering, so they are the
+            # wrong denominator.  The count still belongs on the page -- it says
+            # how much of the cutting happens with the map unable to name it.
+            click.echo(
+                f"  {silent_cuts} more drop a candidate without logging a reason"
+            )
+        for owner, count in owners.most_common(top):
+            click.echo(f"  {count:>3}  {owner}")
+        if len(owners) > top:
+            click.echo(f"    … {len(owners) - top} more")
+        ambiguous = gates.ambiguous_cut_keys(fragment)
+        if ambiguous:
+            # Not a defect: the cut and its guard are right, and only a
+            # production question built on the wording is weak.  Named because
+            # a hit on such a key cannot say which cut fired, and a miss cannot
+            # say none did -- silence that is not about this cut at all.
+            click.echo(
+                f"  search keys that also match another cut in the same file "
+                f"({len(ambiguous)}):"
+            )
+            for line in ambiguous[:top]:
+                click.echo(f"    {line}")
+            if len(ambiguous) > top:
+                click.echo(f"    … {len(ambiguous) - top} more")
+
+    readable = [n for n in list(fragment.junctions) + list(fragment.filter_stages) if n.gloss_key]
+    unreadable = [
+        n for n in list(fragment.junctions) + list(fragment.filter_stages) if not n.gloss_key
+    ]
+    if readable:
+        shared = Counter(n.gloss_key for n in readable)
+        click.echo(
+            f"\ncode to read: {len(readable)} node(s) in {len(shared)} function(s)"
+        )
+        click.echo(
+            f"  most shared: {shared.most_common(1)[0][1]} node(s) in one function "
+            "-- read once, every arm in it is explained together"
+        )
+        if unreadable:
+            # Not a failure to fix: a write at module scope has no enclosing
+            # function, so there is nothing to hand a reader.  Said out loud
+            # because a silent zero is how "not read" hides inside "no key".
+            where = Counter(n.owner for n in unreadable)
+            click.echo(f"  no enclosing function ({len(unreadable)}):")
+            for owner, count in where.most_common(top):
+                click.echo(f"    {count:>3}  {owner}")
+
     if fragment.diagnostics:
         fields = Counter(d.field for d in fragment.diagnostics)
         distinct = {d.template for d in fragment.diagnostics}
@@ -295,6 +357,23 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
     return all_passed
 
 
+def _readers(fragment: MapFragment) -> set[str]:
+    """Functions the map records as selecting rows of anything.
+
+    Both resolutions, because both are a read: a predicate on a promoted
+    attribute says which rows and what was asked of them, and an entity read
+    says only which rows.  Counting the first alone made the helper that
+    fetches a task's jobs on the join key look like a function that consults
+    nothing.
+    """
+    return {
+        owner
+        for subject in fragment.subjects
+        for owners in (subject.selected_by or {}).values()
+        for owner in owners
+    } | {owner for entity in fragment.entities for owner in entity.read_by}
+
+
 def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     """Print how junctions are reached, and what follows from it.
 
@@ -311,6 +390,29 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         f"\nentry points: {reached}/{total} junction(s) reached  ("
         + ", ".join(f"{k}={v}" for k, v in kinds.most_common())
         + ")"
+    )
+
+    # What each junction consults, which is the edge outward rather than the
+    # edges inward.  Reported because an empty ``calls`` has to be readable as
+    # "this owner calls nothing on itself" and not as "nobody looked" -- a
+    # label absorbing the second meaning is how 27 writes once sat unexamined
+    # under ``unresolved``.
+    consulting = getattr(plugin, "consulting", 0)
+    readers = _readers(fragment)
+    reaching = sum(
+        1 for j in fragment.junctions if any(target in readers for target in j.calls)
+    )
+    crossing = sum(
+        1
+        for j in fragment.junctions
+        if any(
+            not target.startswith(j.owner.partition("::")[0] + "::") for target in j.calls
+        )
+    )
+    click.echo(
+        f"consults: {consulting}/{total} junction(s) call something, "
+        f"{crossing} of them into another module, "
+        f"{reaching} reaching a function that selects rows"
     )
 
     # Where to look, which is a different question from what starts it: the
@@ -423,7 +525,7 @@ def main(
 
     fragment = plugin.run()
     results = gates.run_all(fragment)
-    all_passed = _report(fragment, results, top)
+    all_passed = _report(fragment, results, top, getattr(plugin, "silent_cuts", 0))
 
     # Plugin-specific findings.  Kept out of the fragment because they describe
     # the target system rather than the map: a table holding no spec is not a
@@ -492,6 +594,37 @@ def main(
             click.echo(f"  {row}")
         if len(dispatched) > top:
             click.echo(f"  … {len(dispatched) - top} more")
+
+    if fragment.entities:
+        # The row-level vocabulary, alongside the column-level one.  Read-only
+        # and write-only are both worth saying out loud: the first is a kind of
+        # row this map can be asked about but never explain the state of, and
+        # the second is one nothing here ever consults.
+        read_only = [e.name for e in fragment.entities if not e.written_by]
+        write_only = [e.name for e in fragment.entities if not e.read_by]
+        click.echo(
+            f"\nentities: {len(fragment.entities)} kind(s) of row, "
+            f"{sum(len(e.read_by) for e in fragment.entities)} function(s) reading, "
+            f"{sum(len(e.written_by) for e in fragment.entities)} writing"
+        )
+        if read_only:
+            click.echo("  read but never written here:  " + ", ".join(sorted(read_only)))
+        if write_only:
+            click.echo("  written but never read here:  " + ", ".join(sorted(write_only)))
+
+    unreadable = getattr(plugin, "unreadable_tables", {})
+    if unreadable:
+        # Separate from the list below, which is about tables that hold no spec.
+        # These are statements whose table nobody could name, and the two read
+        # as one finding when they share a line -- only this one is a gap.
+        click.echo(
+            f"\ntable name supplied at run time and not resolved "
+            f"({sum(unreadable.values())} statement(s) in {len(unreadable)} function(s)):"
+        )
+        for owner, count in sorted(unreadable.items(), key=lambda row: (-row[1], row[0]))[:top]:
+            click.echo(f"  {owner:<70} {count}")
+        if len(unreadable) > top:
+            click.echo(f"  … {len(unreadable) - top} more")
 
     uncovered = getattr(plugin, "uncovered_tables", set())
     if uncovered:

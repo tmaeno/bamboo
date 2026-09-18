@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from bamboo.codemap import reading
 from bamboo.codemap.base import CodeMapPlugin
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.gitsource import describe as _git_describe
@@ -47,6 +48,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     flush,
     logfile,
+    loopcut,
     progress,
     selection,
     sqlwrite,
@@ -116,6 +118,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
     def __init__(self) -> None:
         self._emits = 0
+        self._glossed = 0
         self._flush_guards = 0
         self._roots: dict[str, Path] = {}
         self._version: str = ""
@@ -184,6 +187,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         fragment.filter_stages.extend(filter_stages)
         fragment.coverage.extend(selection_coverage)
+
+        # The same cut everywhere the code does not declare a chain: a guard in
+        # a loop, a ``continue``, and a sentence.  Told which functions the
+        # stage slice already reads so that a brokerage rejection is not given a
+        # second identity keyed on its wording instead of its tag.
+        cuts, self._silent_cuts = loopcut.extract(
+            self._modules,
+            self.map_id,
+            self._version,
+            {stage.owner for stage in filter_stages},
+        )
+        fragment.loop_cuts.extend(cuts)
 
         # Which enumeration a constant belongs to, by its bare name.  A name
         # two enumerations share cannot decode anything, so it is dropped
@@ -305,16 +320,30 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(sql_coverage)
         fragment.diagnostics.extend(bound_text)
 
-        # The predicate side of the same statements: which values something
-        # selects rows on.  Attached to the subject rather than kept apart, so
-        # the invariants can compare it with what the junctions write.
-        selected = sqlwrite.selected_values(self._modules, attributor)
+        # The read side of the same statements: which values something selects
+        # rows on, and whose rows it selects at all.  The values are attached to
+        # the subject rather than kept apart, so the invariants can compare them
+        # with what the junctions write; the rows become their own nodes,
+        # because a pair of class and attribute can only describe a column.
+        side = sqlwrite.read_side(self._modules, attributor)
+        selected = side.values
+        fragment.entities.extend(
+            sqlwrite.entity_nodes(side.entities, self.map_id, self._version)
+        )
+        self._unreadable_tables = side.unreadable
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             readers = selected.get(subject.name, {})
             subject.selected_values = sorted(readers)
             subject.selected_by = {
-                value: sorted(owners) for value, owners in sorted(readers.items())
+                value: sorted(use.selected_by)
+                for value, use in sorted(readers.items())
+                if use.selected_by
+            }
+            subject.updated_by = {
+                value: sorted(use.updated_by)
+                for value, use in sorted(readers.items())
+                if use.updated_by
             }
             subject.selection_gates = sorted(gated.get(subject.name, ()))
 
@@ -323,6 +352,23 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # without this the second silently replaces the first's branches.
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
+
+        # Which other kind of row one of the owner's queries asks for in the
+        # same statement as the rows it decides about.  After the merge because
+        # it reads the junction's subject, and restricted to the statement
+        # because the owner-wide version is the join this corpus has twice
+        # charged for: it would open 113 junctions where the statement opens 31.
+        for junction in fragment.junctions:
+            here = junction.subject.rpartition(".")[0]
+            junction.joined_entities = sorted(
+                {
+                    entity
+                    for group in side.joins.get(junction.owner, ())
+                    if here in group
+                    for entity in group
+                }
+                - {here}
+            )
 
         # After the merge, because it annotates branches rather than making
         # them: the decision a knight makes in memory is already a junction,
@@ -358,6 +404,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._modules,
             {b.interface.split(".")[-1] for b in channels},
         )
+        # What each junction consults, as opposed to what starts it.  The one
+        # edge out of a junction that a reader can follow without resolving a
+        # name, and the only route from an arm to the aggregate it decided on.
+        self._consults = trigger.attach_calls(fragment.junctions, self._modules)
 
         # Which file each node's diagnostics land in.  After promotion for the
         # same reason as the trigger reach: it describes the map that is kept.
@@ -375,6 +425,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 self._emits,
             )
 
+        # Last, because it keys on the anchor every other pass has finished
+        # placing.  Chooses the text a reader would be given; reading it is
+        # nobody's business at build time.
+        self._glossed = reading.attach(fragment, self._modules)
+
         logger.info(
             "PandaCodeMapPlugin: %d enumeration(s), %d boundary/boundaries, "
             "%d subject(s), %d junction(s)",
@@ -389,6 +444,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def emits(self) -> int:
         """Branches given the log line the code writes when they fire."""
         return self._emits
+
+    @property
+    def glossed(self) -> int:
+        """Nodes whose enclosing function the map could locate and key."""
+        return self._glossed
 
     @property
     def flush_guards(self) -> int:
@@ -406,6 +466,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         return getattr(self, "_skipped_tests", 0)
 
     @property
+    def silent_cuts(self) -> int:
+        """Guarded ``continue``s in a loop that drop a candidate without saying why."""
+        return getattr(self, "_silent_cuts", 0)
+
+    @property
     def unexplained_steps(self) -> list[str]:
         """Funnel steps that count a cut the slice could not find a reason for."""
         return getattr(self, "_unexplained_steps", [])
@@ -414,6 +479,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def trigger_reach(self) -> tuple[int, int]:
         """``(junctions with an entry point, total)``."""
         return getattr(self, "_reached", (0, 0))
+
+    @property
+    def consulting(self) -> int:
+        """Junctions whose owner calls something on ``self``."""
+        return getattr(self, "_consults", 0)
 
     @property
     def log_file_reach(self) -> tuple[int, int]:
@@ -439,6 +509,17 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def uncovered_tables(self) -> set[str]:
         """Tables written by the code that hold no spec class."""
         return getattr(self, "_uncovered_tables", set())
+
+    @property
+    def unreadable_tables(self) -> dict[str, int]:
+        """``{owner: statements whose table name the reassembly could not read}``.
+
+        Apart from :attr:`uncovered_tables`, which is about tables that hold no
+        spec: this is about statements whose table nobody could name at all.
+        Pooled into that list they read as one finding, and only one of the two
+        is a gap in the extraction.
+        """
+        return getattr(self, "_unreadable_tables", {})
 
     @property
     def table_conflicts(self) -> dict[str, set[str]]:

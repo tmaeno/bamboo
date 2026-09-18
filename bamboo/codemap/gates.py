@@ -669,7 +669,14 @@ def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
     """
     failures: list[str] = []
     checked = 0
-    for kind in ("subjects", "junctions", "boundaries", "value_enums", "filter_stages"):
+    for kind in (
+        "subjects",
+        "junctions",
+        "boundaries",
+        "value_enums",
+        "filter_stages",
+        "loop_cuts",
+    ):
         nodes = getattr(fragment, kind)
         checked += len(nodes)
         for name, count in Counter(node.name for node in nodes).items():
@@ -738,6 +745,39 @@ def unreachable_values(fragment: MapFragment) -> list[tuple[str, list[str]]]:
         if subject.selected_values
     ]
     return sorted((name, sinks) for name, sinks in rows if sinks)
+
+
+def ambiguous_cut_keys(fragment: MapFragment) -> list[str]:
+    """Loop cuts whose search key also matches another cut in the same log file.
+
+    A structural answer to "is this key any use", with no number in it.  A
+    length floor was written first and measured: keys run from four characters
+    to forty-five with every length in between occupied, so any cut-off would
+    have been a number this corpus does not supply.  What actually makes a key
+    useless is that it selects more than its own cut, and that is decidable --
+    if ``skip`` is the whole fixed run of one cut in ``panda-closer.log`` and
+    four other cuts there also say ``skip``, a hit cannot say which one fired
+    and a miss cannot say none did.  The silence is not about this cut at all,
+    which is the one reading this design never allows.
+
+    Reported rather than gated: it is a fact about how PanDA words its logs,
+    not a defect in the map.  The cut and its guard are still the right answer
+    to "what does this loop drop"; only a production question built on the
+    wording is weak.  Grouped by file, because that is the unit a question is
+    asked of.
+    """
+    by_file: dict[str, list] = {}
+    for cut in fragment.loop_cuts:
+        for filename in cut.log_files or ["(no log file)"]:
+            by_file.setdefault(filename, []).append(cut)
+    found: set[str] = set()
+    for filename, group in by_file.items():
+        for cut in group:
+            if not cut.search_key:
+                continue
+            if any(other is not cut and cut.search_key in other.message for other in group):
+                found.add(f"{filename}: {cut.search_key!r} also matches another cut there")
+    return sorted(found)
 
 
 def unexplainable_rejections(fragment: MapFragment) -> list[tuple[str, list[str], str]]:

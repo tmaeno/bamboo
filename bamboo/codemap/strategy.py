@@ -71,12 +71,15 @@ from bamboo.codemap.models import (
     ANSWER_NOT_ASKED,
     ANSWER_SEEN,
     ELIMINATED,
+    LEAD_CALLEE,
+    LEAD_MAP,
     PASSTHROUGH_OUTCOME,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
     STOP_AMBIGUOUS,
+    STOP_DESCENT,
     STOP_NO_WRITER,
     STOP_SHARED_TABLE,
     SYMPTOM_DISTRIBUTION,
@@ -92,6 +95,7 @@ from bamboo.codemap.models import (
     MapTerm,
     Match,
     Observation,
+    Reading,
     StageCut,
     Strategy,
     Symptom,
@@ -342,6 +346,9 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
     stated = any(b.outcome == observed for b in junction.branches)
     return Candidate(
         owner=junction.owner,
+        file=junction.anchor.file if junction.anchor else "",
+        blob_sha=(junction.anchor.blob_sha or "") if junction.anchor else "",
+        gloss_key=junction.gloss_key,
         tier=1 if stated else 2,
         log_files=junction.observable_log_files(),
         branches=[
@@ -432,6 +439,10 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
         if candidate.named:
             candidate.verdict = SEEN
             candidate.because = "the record's own message names this branch"
+    # The reading follows the naming.  A match is proof that this arm decided,
+    # so offering the other seventeen functions after saying which one wrote the
+    # value would hand a reader the question the record already answered.
+    settled.readings = _readings(settled.candidates, settled.observations)
     return settled
 
 
@@ -484,6 +495,7 @@ def _follow_up(
     observed: str,
     selected_values: list[str],
     selected_by: list[str],
+    updated_by: list[str],
     selection_gates: list[str],
     writers: list[JunctionNode],
     carried_from: list[str],
@@ -504,25 +516,38 @@ def _follow_up(
     query that has to pick this row up.  Kept as the fallback, because an empty
     trigger set reads as "nothing reaches it", which is a stronger claim than
     "the map cannot say".
+
+    **A query where there is one, an update otherwise.**  Both act on rows by
+    the value and only the first is somewhere the row could have been missed,
+    so a query names the place to look wherever one exists.  Where none does --
+    nine values in the corpus are reached by nothing but an update's predicate
+    -- the update is still the actor, and dropping it would turn "this is the
+    statement that has to match" into the much stronger "nothing acts on this
+    at all".
     """
     selected = observed in selected_values
     by_owner = {j.owner: j for j in writers}
     readers = [by_owner[o] for o in selected_by if o in by_owner]
-    reader_files = sorted({f for r in readers for f in r.observable_log_files()})
-    # The reader's own triggers where it has any.  Most readers are proxy
+    actors = readers or [by_owner[o] for o in updated_by if o in by_owner]
+    reader_files = sorted({f for r in actors for f in r.observable_log_files()})
+    # The actor's own triggers where it has any.  Most readers are proxy
     # methods the trigger slice reaches through a knight rather than directly,
     # so their entry points are empty -- and reading that as the answer says
     # "nothing reaches this subject", which is a stronger claim than the map
     # can make and, for ``pending``, the opposite of true.
-    triggers = sorted({entry.trigger for j in readers for entry in j.entry_points}) or sorted(
+    triggers = sorted({entry.trigger for j in actors for entry in j.entry_points}) or sorted(
         {entry.trigger for j in writers for entry in j.entry_points}
     )
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
-    asks = (
-        f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
-        if selected_by
-        else f"a query selects on {observed!r}"
-    )
+    if selected_by:
+        asks = f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
+    elif updated_by:
+        asks = (
+            f"no query selects on {observed!r}, but "
+            f"{_readers_phrase(updated_by, reader_files)} updates rows holding it"
+        )
+    else:
+        asks = f"a query selects on {observed!r}"
     if selected and repairing:
         bounded = (
             "bounded by " + ", ".join(selection_gates)
@@ -549,6 +574,7 @@ def _follow_up(
     return FollowUp(
         selected=selected,
         selected_by=list(selected_by),
+        updated_by=list(updated_by),
         reader_log_files=reader_files,
         selection_gates=list(selection_gates),
         triggers=triggers,
@@ -940,11 +966,26 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             symptom.observed,
             subject.selected_values,
             subject.selected_by.get(symptom.observed, []),
+            subject.updated_by.get(symptom.observed, []),
             subject.selection_gates,
             writers,
             carried,
         ),
-        leads=_leads(symptom, candidates, upstream, subject.selection_gates),
+        # Map edges first, so that when both suppliers name one field the fold
+        # in ``evaluate`` keeps the deterministic one.  Not folded here: doing
+        # that before the surviving-candidate filter makes a lead's presence
+        # depend on which candidate happened to be listed first.
+        leads=(
+            _leads(symptom, candidates, upstream, subject.selection_gates)
+            + _joined(symptom, producers)
+            + _consulted(
+                symptom,
+                producers,
+                await code_map.selections_by_owner(),
+                await code_map.entity_reads_by_owner(),
+            )
+        ),
+        readings=_readings(candidates, asked),
         findings=_findings(candidates, producers),
         gaps=gaps,
     )
@@ -1289,6 +1330,122 @@ def _measured_leads(cut: StageCut) -> tuple[list[Lead], set[str]]:
     return leads, unnamed
 
 
+def _consulted(
+    symptom: Symptom,
+    producers: list[JunctionNode],
+    selections: dict[str, list[tuple[str, str]]],
+    entity_reads: dict[str, list[str]],
+) -> list[Lead]:
+    """Leads from one hop along a ``self.<method>()`` call.
+
+    The map's own edges reach the fields a value was *copied* from.  They do not
+    reach the rows a value was *decided on*: an arm sends a task to
+    ``exhausted`` because an aggregate over its jobs came out a certain way, and
+    the write and the read of that aggregate are two methods with a call between
+    them and no edge at all.  Measured over the junctions whose subject has a
+    spec class, one hop opens a read of another entity for 138 of them; keeping
+    that hop inside one file, as the first version did, opened 47.
+
+    **Named by the entity, not by one of its columns.**  Two suppliers answer
+    the same question at different resolutions: a predicate on a promoted
+    attribute says which rows *and* what was asked of them, while an entity
+    read says only which rows.  The second is the one that reaches
+    ``getPandaIDsWithTask_JEDI``, whose only predicate is the join key, and
+    which is exactly the helper that makes "waiting on jobs" true.  Keyed on
+    the entity so the two fold into one lead per kind of row rather than one
+    per column -- the hop is down to a population either way, and a reader
+    given four names for one descent reads four descents.
+
+    **Not the owner.**  The tempting version asks whether the junction's own
+    function also selects on another entity, and it is unsound:
+    ``selected_by`` records the function, not the statement, so a method
+    dispatching several commands reads jobs in one arm and writes the task
+    status in another.  Joining those through their shared owner is the same
+    mistake that gave one junction fourteen entry points, and that let a funnel
+    gate call a 4836-to-9669 split a majority.  A call is a real edge; sharing
+    an enclosing function is not.
+
+    Stops rather than continues.  The next question is about a population, not
+    a row, and asking one is not something this derivation does -- naming it is
+    a complete answer and a work item, which is how every other edge of the map
+    is treated.
+    """
+    leads: list[Lead] = []
+    here = symptom.subject.rpartition(".")[0]
+    for junction in producers:
+        for target in junction.calls:
+            asked = target.rpartition("::")[2]
+            # The column reading first, so that where one exists it is the
+            # clause a reader gets: it says what the helper wanted to know,
+            # which the entity alone cannot.
+            detail: dict[str, str] = {}
+            for subject, value in selections.get(target, ()):
+                detail.setdefault(
+                    subject.rpartition(".")[0], f"selects {subject}={value}"
+                )
+            for entity in entity_reads.get(target, ()):
+                detail.setdefault(entity, f"reads {entity} rows")
+            for entity, said in detail.items():
+                # Another field of the same spec is a lateral read: the row is
+                # the one already being asked about, so there is nothing to
+                # descend to and calling it a descent would put a population
+                # question where a value question belongs.
+                if entity == here:
+                    continue
+                leads.append(
+                    Lead(
+                        field=entity,
+                        stop=STOP_DESCENT,
+                        why=(
+                            f"{short_owner(junction.owner)} asks "
+                            f"{asked}(), which {said}"
+                        ),
+                        opened_by=junction.owner,
+                        source=LEAD_CALLEE,
+                    )
+                )
+    return leads
+
+
+def _joined(symptom: Symptom, producers: list[JunctionNode]) -> list[Lead]:
+    """Leads from a query that asks for two kinds of row at once.
+
+    The owner's *own* statement, which is the one place its reads can be used
+    without the join this corpus keeps punishing.  Two facts about a function
+    are not a relation between them -- that is what gave a junction fourteen
+    entry points and a funnel gate a 4836-to-9669 "majority" -- but two tables
+    in one ``FROM`` list are the corpus stating the relation itself.  Measured:
+    reading the owner's statements together would open 113 junctions, and
+    reading each statement on its own opens 31.
+
+    What the six say is the question the map could not previously reach.
+    ``prepareTasksToBeFinished_JEDI`` selects tasks against their datasets in a
+    single statement, so asked why a task sits in ``finishing`` it can say
+    *which datasets it is waiting on* rather than only that some helper it
+    calls reads datasets somewhere.
+
+    Reads only.  An update joining two tables states the same relation, but a
+    descent follows the rows a decision was taken *from*, and following a write
+    would walk forwards while claiming to step down.
+    """
+    here = symptom.subject.rpartition(".")[0]
+    return [
+        Lead(
+            field=entity,
+            stop=STOP_DESCENT,
+            why=(
+                f"{short_owner(junction.owner)} asks for {entity} rows in the "
+                "same query as the rows it decides about"
+            ),
+            opened_by=junction.owner,
+            source=LEAD_MAP,
+        )
+        for junction in producers
+        for entity in junction.joined_entities
+        if entity != here
+    ]
+
+
 def _leads(
     symptom: Symptom,
     candidates: list[Candidate],
@@ -1350,6 +1507,45 @@ def _leads(
         for gate in gates
     ]
     return leads
+
+
+def visit_key(symptom: Symptom) -> str:
+    """How a question is spelled when asking whether it has been asked before.
+
+    The whole question, not the field.  ``JediTaskSpec.status`` is reached
+    twice in most walks -- once as the symptom and once as what ``oldStatus``
+    was copied from -- and those are the same question only if the value is
+    the same too.  Keying on the field alone would cut a live path on the
+    grounds that a different question about that field had already been asked.
+    """
+    if symptom.kind == SYMPTOM_DISTRIBUTION:
+        return f"{SYMPTOM_DISTRIBUTION}:{symptom.focus}"
+    return f"{symptom.subject}={symptom.observed}"
+
+
+def next_question(strategy: Strategy, visited: set[str]) -> tuple[Optional[Lead], list[str]]:
+    """The first lead worth taking, and the questions that came round again.
+
+    Surviving leads only, and in the order the derivation put them: the map's
+    own edges come before anything assembled here, so a deterministic hop is
+    never passed over for a proposed one.
+
+    Returns the repeats as well as the choice because they are an answer.
+    ``status`` and ``oldStatus`` copy from each other, so a walk that merely
+    skipped the repeat would stop looking like it had found a loop and start
+    looking like it had run out of map -- and those call for opposite things
+    from whoever reads the trace.
+    """
+    repeats: list[str] = []
+    for lead in _deduped(_surviving_leads(strategy)):
+        if lead.symptom is None:
+            continue
+        key = visit_key(lead.symptom)
+        if key in visited:
+            repeats.append(key)
+            continue
+        return lead, repeats
+    return None, repeats
 
 
 def _deduped(leads: list[Lead]) -> list[Lead]:
@@ -1559,8 +1755,69 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
                 f"about: {', '.join(sorted(unnamed)[:8])}"
             )
     settled.leads = _deduped(_surviving_leads(settled))
+    # Narrowed for the same reason the leads are: offering a reading of code the
+    # evidence has ruled out sends a reader to look at a path the system did not
+    # take, which is worse than offering nothing.
+    settled.readings = _readings(survivors(settled), settled.observations)
     diag = _recorded_message(ev, strategy.symptom)
     return name_the_arm(settled, diag) if diag else settled
+
+
+def _readings(candidates: list[Candidate], observations: list[Observation]) -> list[Reading]:
+    """The code to read, one entry per function rather than per candidate.
+
+    Grouped because the sharing is real and asking twice about one function
+    invites two answers about one piece of code: 497 junctions sit in 213
+    functions, and one of them holds twenty.  The key is the map's, computed at
+    build time, so the same question always selects the same text.
+
+    A candidate the map cannot locate a function for is left out here and said
+    out loud by the caller.  Five exist, all writes at module scope, where
+    there is no enclosing function to hand over -- a fact about the code, not a
+    hole in the reading.
+    """
+    # A record that names an arm has settled which one decided -- the message
+    # and the branch were written in the same block -- so the reading narrows
+    # to it.  The other direction is not available: naming none proves nothing,
+    # and then every candidate is still worth reading.
+    named = [c for c in candidates if c.named]
+    if named:
+        candidates = named
+
+    scoped: dict[str, tuple[str, list[str]]] = {}
+    for observation in observations:
+        if observation.role != PROBE:
+            continue
+        for owner in observation.settles:
+            pattern, files = scoped.setdefault(owner, (observation.pattern, []))
+            if observation.log_file not in files:
+                files.append(observation.log_file)
+
+    grouped: dict[str, Reading] = {}
+    for candidate in candidates:
+        if not candidate.gloss_key:
+            continue
+        reading = grouped.get(candidate.gloss_key)
+        if reading is None:
+            pattern, files = scoped.get(candidate.owner, ("", []))
+            reading = Reading(
+                owner=candidate.owner,
+                file=candidate.file,
+                blob_sha=candidate.blob_sha,
+                gloss_key=candidate.gloss_key,
+                log_files=list(files),
+                log_pattern=pattern,
+            )
+            grouped[candidate.gloss_key] = reading
+        arms = candidate.named or candidate.branches
+        for branch in arms:
+            if branch.line is not None and branch.line not in reading.lines:
+                reading.lines.append(branch.line)
+            if branch.outcome and branch.outcome not in reading.outcomes:
+                reading.outcomes.append(branch.outcome)
+    for reading in grouped.values():
+        reading.lines.sort()
+    return sorted(grouped.values(), key=lambda r: r.owner)
 
 
 def survivors(strategy: Strategy) -> list[Candidate]:

@@ -37,21 +37,26 @@ merely lose a write: it removed "the release path never fired" from the
 candidate causes of a task stuck in ``pending``, which is one of the two
 symptoms this map exists to explain.
 
-``selected_values`` reads the same statements the other way, for the graph
-invariants: a ``WHERE`` clause says which rows were asked for, and a status
-nothing selects on is a status nothing moves a task out of.
+``read_side`` reads the same statements the other way, at two resolutions.  A
+``WHERE`` clause says which rows were asked for, and a status nothing selects
+on is a status nothing moves a task out of; the table it names says *whose*
+rows, which is the only thing a query predicated on nothing but a join key has
+to say -- and the thing that makes "the finish is waiting on jobs" a fact the
+map holds rather than one it has no room for.
 """
 
 from __future__ import annotations
 
 import ast
-from typing import Optional
+import re
+from typing import NamedTuple, Optional
 
 from bamboo.codemap.models import (
     Anchor,
     Branch,
     CoverageStat,
     DiagnosticTemplate,
+    EntityNode,
     JunctionNode,
     SourceModule,
     SubjectNode,
@@ -179,7 +184,11 @@ def extract(
                 seen.add((run.variable, run.sql, run.varmap))
                 for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
-                    if spec_class is None:
+                    # A name nobody could read is not a table that holds no
+                    # spec.  Listed together they read as one finding, and only
+                    # one of the two is a gap in the extraction -- see
+                    # ``ReadSide.unreadable``, which counts these instead.
+                    if spec_class is None and not _UNREAD_TABLE.fullmatch(statement.table):
                         uncovered.add(statement.table)
                     for column, supplied in statement.columns.items():
                         candidates += 1
@@ -460,10 +469,76 @@ def _record(
 
 
 
-def selected_values(
-    modules: list[SourceModule], attributor: SpecAttributor
-) -> dict[str, dict[str, set[str]]]:
-    """Return ``{subject: {value: the functions whose query selects on it}}``.
+class EntityUse(NamedTuple):
+    """Where one kind of row is read and where it is written."""
+
+    tables: set[str]
+    read_by: set[str]
+    written_by: set[str]
+
+
+class ValueUse(NamedTuple):
+    """Who asks for a value, and who acts on rows that already hold it.
+
+    One ``WHERE`` clause, two questions, and they part company here.  *Does
+    anything move a row out of this state?* is answered by ``UPDATE ... SET
+    status=:new WHERE status=:old`` as squarely as by a query, so both verbs
+    count towards it.  *Who has to pick this row up, so who to ask why they did
+    not?* is not: an update is the picking up, not a chance to have missed it.
+
+    Pooling them said an update was a query for a fifth of the corpus -- 99 of
+    524 ``(function, subject, value)`` claims came from nothing but a write's
+    predicate.  The cost was not only wording: one hop out of a junction opens
+    a descent on whatever the called helper selects, so a writer counted as a
+    reader sent the walk forward while it said it was stepping down.
+    """
+
+    selected_by: set[str]
+    updated_by: set[str]
+
+
+class ReadSide(NamedTuple):
+    """What the predicates and the row sources of the corpus's statements say.
+
+    Two questions about the same statements, answered in one walk because the
+    walk is the cost: which *column values* something asks for, and whose
+    *rows* it asks for at all.  Keeping them apart as two passes would also
+    have written the table-to-class join twice.
+    """
+
+    #: ``{subject: {value: ValueUse}}`` -- the values a predicate names, with
+    #: the verb that brought the table in kept beside each function.
+    values: dict[str, dict[str, ValueUse]]
+    #: ``{spec class: EntityUse}``
+    entities: dict[str, EntityUse]
+    #: ``{owner: sets of kinds of row one of its queries reads together}``.
+    #: The sound form of a join between two entities: co-residence in a
+    #: function is not a relation -- 112 functions read more than one kind
+    #: of row somewhere, and 51 read two in one statement -- but a single
+    #: ``FROM`` list is the corpus stating the relation itself.
+    joins: dict[str, set[frozenset[str]]]
+    #: ``{owner: statements whose table reference is still a placeholder}``.
+    #: Counted rather than left out: a statement whose table nobody could read
+    #: is one whose rows belong to nothing, and an unreadable name looks
+    #: exactly like a table that holds no spec once both end up in one list.
+    unreadable: dict[str, int]
+
+
+def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSide:
+    """Return what the corpus's statements ask for: which values, and whose rows.
+
+    **The rows are half of it, and the half the map had nowhere to put.**  A
+    vocabulary of ``(spec class, attribute)`` pairs can only say something
+    about a column, so a query selecting a task's jobs on the join key alone
+    -- ``SELECT PandaID FROM jobsActive4 WHERE jediTaskID=:jediTaskID`` --
+    named no promoted subject and read as observing nothing.  It observes jobs.
+    The class was already being computed here and dropped whenever no predicate
+    landed on a promoted attribute.
+
+    Verbs are kept apart.  A function that selects a task's jobs and one that
+    updates them make different claims, and pooling them is the same
+    conflation that let an ``UPDATE ... WHERE`` be reported as a query that
+    selects on a value.
 
     The same statements read the other way.  A write says what a value becomes;
     a predicate says which rows were asked for, and only both together make a
@@ -504,10 +579,19 @@ def selected_values(
     for this subject, so nothing is hidden by it.
     """
     settle = values.resolver(values.declared_mappings(modules))
-    found: dict[str, dict[str, set[str]]] = {}
+    found: dict[str, dict[str, ValueUse]] = {}
+    rows: dict[str, EntityUse] = {}
+    unreadable: dict[str, int] = {}
+    joins: dict[str, set[frozenset[str]]] = {}
 
-    def record(subject: str, value: str, owner: str) -> None:
-        found.setdefault(subject, {}).setdefault(value, set()).add(owner)
+    def record(subject: str, value: str, owner: str, verb: str) -> None:
+        use = found.setdefault(subject, {}).setdefault(value, ValueUse(set(), set()))
+        (use.selected_by if verb == "read" else use.updated_by).add(owner)
+
+    def touch(spec_class: str, table: str, owner: str, verb: str) -> None:
+        use = rows.setdefault(spec_class, EntityUse(set(), set(), set()))
+        use.tables.add(table)
+        (use.read_by if verb == "read" else use.written_by).add(owner)
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -517,7 +601,19 @@ def selected_values(
                 if run.sql in seen:
                     continue
                 seen.add(run.sql)
-                for table in _tables_of(run.sql):
+                together: set[str] = set()
+                for verb, table in _rows_touched(run.sql):
+                    if _UNREAD_TABLE.fullmatch(table):
+                        unreadable[owner] = unreadable.get(owner, 0) + 1
+                        continue
+                    spec_class = attributor.class_for_table(table)
+                    if spec_class is not None:
+                        touch(spec_class, table, owner, verb)
+                        if verb == "read":
+                            together.add(spec_class)
+                if len(together) > 1:
+                    joins.setdefault(owner, set()).add(frozenset(together))
+                for verb, table in _table_verbs(run.sql):
                     spec_class = attributor.class_for_table(table)
                     for column, key in sql.predicates(run.sql):
                         qualifier, attribute, _kind = _subject_of(
@@ -526,13 +622,43 @@ def selected_values(
                         subject = SubjectNode.make_name(qualifier, attribute)
                         for bind in sql.bound_values(func, run.varmap or "", key):
                             for value in settle(bind.value, func):
-                                record(subject, value, owner)
+                                record(subject, value, owner, verb)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
                         )
-                        record(SubjectNode.make_name(qualifier, attribute), value, owner)
-    return found
+                        record(
+                            SubjectNode.make_name(qualifier, attribute),
+                            value,
+                            owner,
+                            verb,
+                        )
+    return ReadSide(values=found, entities=rows, unreadable=unreadable, joins=joins)
+
+
+def entity_nodes(
+    uses: dict[str, EntityUse], map_id: str, derived_from: str
+) -> list[EntityNode]:
+    """Turn what :func:`read_side` saw into nodes, one per kind of row.
+
+    No promotion.  The criteria decide whether asking "why is this attribute
+    this value?" is a question worth having, which is a question about a
+    column; an entity is not a candidate for it and would be judged by rules
+    that read an attribute it does not have.  What keeps the list short is the
+    corpus: a spec class is declared, so there are a dozen of these and not a
+    table's worth.
+    """
+    return [
+        EntityNode(
+            name=spec_class,
+            map_id=map_id,
+            derived_from=derived_from,
+            tables=sorted(use.tables),
+            read_by=sorted(use.read_by),
+            written_by=sorted(use.written_by),
+        )
+        for spec_class, use in sorted(uses.items())
+    ]
 
 
 def selection_gates(
@@ -540,7 +666,7 @@ def selection_gates(
 ) -> dict[str, set[str]]:
     """Return ``{subject: tables bounding the queries that select on it}``.
 
-    Read from the same statements as :func:`selected_values` and kept beside it
+    Read from the same statements as :func:`read_side` and kept beside it
     because the two are halves of one answer.  That one says a query asks for
     this value; this one says what limits which rows the query can see, and a
     task can be invisible for the second reason while the first is satisfied.
@@ -576,6 +702,46 @@ def selection_gates(
     return found
 
 
+#: A table reference that is nothing but holes -- ``{}`` or ``{0}``.  What is
+#: left when a name the source supplies at run time could not be resolved.
+_UNREAD_TABLE = re.compile(r"(?:\{\d*\})+")
+
+
+def _rows_touched(statement: str) -> list[tuple[str, str]]:
+    """Return ``[("read" | "written", table)]`` for the rows *statement* touches.
+
+    The same three readings :func:`_tables_of` folds together, kept apart.  A
+    predicate does not care which verb brought the table in -- an ``UPDATE``'s
+    ``WHERE`` says which rows it was willing to act on as much as a query's
+    does -- but "who reads a task's jobs" cares about nothing else.  Folding
+    the verbs is how an ``UPDATE ... WHERE`` came to be reported as a query
+    that selects on a value.
+    """
+    touched: list[tuple[str, str]] = [
+        ("read", table) for table, _columns in sql.reads(statement)
+    ]
+    # The rest of the ``FROM`` list too.  :func:`sql.reads` keeps naming the
+    # leading table because it answers *where the row came from*; the question
+    # here is which kinds of row the statement touches at all, and a join
+    # partner's rows are read as surely as the first table's.  Sixty-one
+    # (function, entity) readings were missing for the difference, sixteen of
+    # them on datasets and sixteen on files -- the two a task waits for.
+    touched.extend(("read", table) for table in sql.joins(statement))
+    touched.extend(("written", write.table) for write in sql.writes(statement))
+    touched.extend(("written", table) for table in sql.deletes(statement))
+    return touched
+
+
+def _table_verbs(statement: str) -> list[tuple[str, str]]:
+    """``(verb, table)`` for each way *statement* touches a table, deduplicated.
+
+    :func:`_tables_of` with the verb kept, for the reading that needs it.  A
+    statement naming one table under both verbs -- ``INSERT INTO a SELECT FROM
+    a`` -- yields both, which is what it does.
+    """
+    return sorted(set(_rows_touched(statement)))
+
+
 def _tables_of(statement: str) -> list[str]:
     """Return the tables a statement names, so a predicate can be qualified.
 
@@ -590,7 +756,4 @@ def _tables_of(statement: str) -> list[str]:
     on a status, so one credited too widely weakens a report while a missing
     one would invent a dead end.
     """
-    tables = {table for table, _columns in sql.reads(statement)}
-    tables.update(write.table for write in sql.writes(statement))
-    tables.update(sql.deletes(statement))
-    return sorted(tables)
+    return sorted({table for _verb, table in _rows_touched(statement)})

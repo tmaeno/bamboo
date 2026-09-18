@@ -51,6 +51,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "vocabulary",
         "selected_values",
     ),
+    NodeType.ENTITY.value: ("tables", "read_by", "written_by"),
     _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
     NodeType.BOUNDARY.value: (
         "system",
@@ -74,6 +75,19 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "conditions",
         "inputs",
         "emits",
+        "log_level",
+        "log_files",
+    ),
+    # ``message`` is the signature, so it cannot differ between two nodes being
+    # compared; ``loop_line`` is a position and moves whenever anything above it
+    # does, which is the churn ``anchor`` is left out to avoid.
+    NodeType.LOOP_CUT.value: (
+        "owner",
+        "search_key",
+        "scope_prefix",
+        "order",
+        "conditions",
+        "inputs",
         "log_level",
         "log_files",
     ),
@@ -163,9 +177,11 @@ def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
     for group in (
         fragment.value_enums,
         fragment.subjects,
+        fragment.entities,
         fragment.junctions,
         fragment.boundaries,
         fragment.filter_stages,
+        fragment.loop_cuts,
     ):
         for node in group:
             nodes[_key(node)] = node
