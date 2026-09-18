@@ -50,6 +50,7 @@ move; the command is the authority.
 | [`progress`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/progress.py) | `spec.attr = <value>` — the junctions the backward walk starts from | 1461/1534 |
 | [`sqlwrite`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/sqlwrite.py) | `UPDATE … SET col=:bind` — the dominant write form; a knight decides and a proxy writes | 808/1162 |
 | [`selection`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/selection.py) | `criteria=-diskIO` and `candidates passed <step>` — the filter chain | 109/109 |
+| [`loopcut`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/loopcut.py) | A guard in a loop, a `continue`, and a sentence — the same cut where nothing is declared | 149 cuts, no ratio |
 | [`boundary`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/boundary.py) | `@request_validation` endpoints, and shared tables PanDA talks to DEFT through | 99/108 and 31/31 |
 | [`errorcode`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/errorcode.py) | `EC_Kill = 100` — the constants that decode a value seen in a record | 178/194 |
 | [`alias`](https://github.com/tmaeno/bamboo/blob/master/bamboo/codemap/panda/recognizers/alias.py) | `setOnHold()` seen from its callers, and helpers that *return* a value | 33/33 and 2/7 |
@@ -59,6 +60,14 @@ move; the command is the authority.
 A slice reporting less than 100% is reporting honestly, not failing. `return-alias` at
 2/7 is the clearest case: the other five helpers return computed values, and *"the map
 does not decide this"* is the correct answer for them.
+
+`loopcut` has no ratio at all, which is the same honesty from the other side. The only
+denominator available is "every guarded `continue` inside a loop", and most of those are
+ordinary iteration in pure computation rather than filtering — scored that way the slice
+reads 22% and buries the slices whose coverage means something. What separates a filter
+from iteration control *is* the logged reason, so the population and the reading are the
+same set. The build reports the count instead, next to how many loops drop a candidate
+and say nothing.
 
 ## Recognizers sit in three layers, and the fragile ones are not the ones you would guess
 
@@ -83,6 +92,13 @@ fragile — brokerage, where that unnamed habit appears 26, 21, 9 and **0** time
 four sibling files — turned out not to need it. Measuring first found two declarations
 that cover all four files between them, and the chain matcher the design had budgeted for
 was never written.
+
+The same measurement discipline caught the opposite error one slice later. The rule
+written down for `loopcut` was *"the message interpolates the loop variable"*, which
+scores respectably and misses every guard of the loop the slice existed to read: two
+interpolate nothing, and the third interpolates a string built from the loop variables
+two hops away. The structure — a loop, a guard, a `continue` — is the proof that a
+candidate was dropped; the sentence is only its name.
 
 ## Attribution: which class does this write belong to?
 

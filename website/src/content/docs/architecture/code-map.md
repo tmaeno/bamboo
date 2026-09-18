@@ -46,6 +46,7 @@ flowchart LR
     JP -->|bounded_by| B["boundary<br/><i>pilot, harvester, DEFT</i>"]
     JP -->|upstream_of| JP2["junction point<br/><i>where the value came from</i>"]
     FS["filter stage<br/><i>criteria=-diskIO</i>"] -.->|cuts candidates| SEL["a selection"]
+    LC["loop cut<br/><i>skip since locked by another process</i>"] -.->|cuts candidates| SEL
 ```
 
 **Subject** — an attribute worth asking *why is it this value?* about. Not every
@@ -74,6 +75,16 @@ reading a trace.
 from a junction because brokerage never *picks* a site: it starts with every site and
 narrows the list about twenty-five times, so every stage runs and each removes some. A
 junction's branches are alternatives and one wins; a chain's stages are cumulative.
+
+**Loop cut** — the same cut where the code declares no chain: a guard inside a loop, a
+`continue`, and a sentence saying why. Brokerage announces its cuts twice in
+machine-readable form — a `criteria=` tag per rejected candidate and a counter per step —
+and everywhere else in PanDA the sentence is the only name the step has. A separate kind
+rather than a tag-less filter stage, because the two are *evidenced* differently and
+every consumer reads that difference: a stage is found by its tag, a loop cut by its
+wording. Which candidate a line is about is usually not in the sentence at all but in the
+prefix its logger stamps, so a loop cut carries that prefix as the key that narrows a
+question to one queue or one task.
 
 **Boundary** — where causation crosses into a system this map does not cover: the pilot,
 Harvester, DEFT, a message broker. Modelled explicitly rather than left as an absence, so

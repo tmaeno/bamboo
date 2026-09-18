@@ -45,7 +45,12 @@ from bamboo.codemap.store import store_fragment
 logger = logging.getLogger(__name__)
 
 
-def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) -> bool:
+def _report(
+    fragment: MapFragment,
+    results: list[gates.GateResult],
+    top: int,
+    silent_cuts: int = 0,
+) -> bool:
     """Print the build summary and return True when every gate passed."""
     click.echo(f"\nmap_id       : {fragment.map_id}")
     click.echo(f"derived_from : {fragment.derived_from}")
@@ -207,6 +212,41 @@ def _report(fragment: MapFragment, results: list[gates.GateResult], top: int) ->
                 click.echo(f"    {tag:<22} tests {inputs}  ({where})")
             if len(blind) > top:
                 click.echo(f"    … {len(blind) - top} more")
+
+    if fragment.loop_cuts:
+        owners = Counter(c.owner for c in fragment.loop_cuts)
+        scoped = sum(1 for c in fragment.loop_cuts if c.scope_prefix)
+        placed = sum(1 for c in fragment.loop_cuts if c.log_files)
+        click.echo(
+            f"\nloop cuts: {len(fragment.loop_cuts)} in {len(owners)} loop-holding "
+            f"function(s) · {placed} with a log file · {scoped} scoped by a logger prefix"
+        )
+        if silent_cuts:
+            # No ratio: most guarded ``continue``s in the corpus are iteration
+            # control in pure computation rather than filtering, so they are the
+            # wrong denominator.  The count still belongs on the page -- it says
+            # how much of the cutting happens with the map unable to name it.
+            click.echo(
+                f"  {silent_cuts} more drop a candidate without logging a reason"
+            )
+        for owner, count in owners.most_common(top):
+            click.echo(f"  {count:>3}  {owner}")
+        if len(owners) > top:
+            click.echo(f"    … {len(owners) - top} more")
+        ambiguous = gates.ambiguous_cut_keys(fragment)
+        if ambiguous:
+            # Not a defect: the cut and its guard are right, and only a
+            # production question built on the wording is weak.  Named because
+            # a hit on such a key cannot say which cut fired, and a miss cannot
+            # say none did -- silence that is not about this cut at all.
+            click.echo(
+                f"  search keys that also match another cut in the same file "
+                f"({len(ambiguous)}):"
+            )
+            for line in ambiguous[:top]:
+                click.echo(f"    {line}")
+            if len(ambiguous) > top:
+                click.echo(f"    … {len(ambiguous) - top} more")
 
     readable = [n for n in list(fragment.junctions) + list(fragment.filter_stages) if n.gloss_key]
     unreadable = [
@@ -485,7 +525,7 @@ def main(
 
     fragment = plugin.run()
     results = gates.run_all(fragment)
-    all_passed = _report(fragment, results, top)
+    all_passed = _report(fragment, results, top, getattr(plugin, "silent_cuts", 0))
 
     # Plugin-specific findings.  Kept out of the fragment because they describe
     # the target system rather than the map: a table holding no spec is not a

@@ -78,6 +78,19 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "log_level",
         "log_files",
     ),
+    # ``message`` is the signature, so it cannot differ between two nodes being
+    # compared; ``loop_line`` is a position and moves whenever anything above it
+    # does, which is the churn ``anchor`` is left out to avoid.
+    NodeType.LOOP_CUT.value: (
+        "owner",
+        "search_key",
+        "scope_prefix",
+        "order",
+        "conditions",
+        "inputs",
+        "log_level",
+        "log_files",
+    ),
 }
 
 # The two fields that hold a decision's reasoning.  A change here is what no
@@ -168,6 +181,7 @@ def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
         fragment.junctions,
         fragment.boundaries,
         fragment.filter_stages,
+        fragment.loop_cuts,
     ):
         for node in group:
             nodes[_key(node)] = node

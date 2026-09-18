@@ -69,6 +69,7 @@ class NodeType(str, Enum):
     ENTITY = "Entity"
     VALUE_ENUM = "ValueEnum"
     FILTER_STAGE = "FilterStage"
+    LOOP_CUT = "LoopCut"
     GLOSS = "Gloss"
 
 
@@ -90,6 +91,7 @@ CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
         NodeType.ENTITY,
         NodeType.VALUE_ENUM,
         NodeType.FILTER_STAGE,
+        NodeType.LOOP_CUT,
         NodeType.GLOSS,
     }
 )

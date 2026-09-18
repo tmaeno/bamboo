@@ -42,6 +42,7 @@ from bamboo.codemap.models import (
     EntityNode,
     FilterStageNode,
     JunctionNode,
+    LoopCutNode,
     MapTerm,
     SubjectNode,
     Symptom,
@@ -59,6 +60,7 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     EntityNode: NodeType.ENTITY,
     JunctionNode: NodeType.JUNCTION_POINT,
     FilterStageNode: NodeType.FILTER_STAGE,
+    LoopCutNode: NodeType.LOOP_CUT,
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
 }

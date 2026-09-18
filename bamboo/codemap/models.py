@@ -813,6 +813,7 @@ class MapFragment(BaseModel):
     boundaries: list[BoundaryNode] = Field(default_factory=list)
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
+    loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
@@ -858,6 +859,7 @@ class MapFragment(BaseModel):
         self.boundaries.extend(other.boundaries)
         self.value_enums.extend(other.value_enums)
         self.filter_stages.extend(other.filter_stages)
+        self.loop_cuts.extend(other.loop_cuts)
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
@@ -1093,6 +1095,101 @@ class FilterStageNode(BaseNode):
             "could not be located in the snapshot."
         ),
     )
+
+    @staticmethod
+    def make_name(map_id: str, owner: str, signature: str) -> str:
+        return f"{map_id}:{owner}:{signature}"
+
+
+class LoopCutNode(BaseNode):
+    """A guard inside a loop that drops the candidate and says why in prose.
+
+    The same cut as :class:`FilterStageNode` and a different kind of node,
+    because the two are evidenced differently and every consumer of a stage
+    reads the difference.  Brokerage announces its cuts twice in machine-
+    readable form -- ``criteria=-diskIO`` per rejected site and
+    ``N candidates passed disk check`` per step -- and the whole of ``localize``
+    is built on those two.  Everywhere else in the corpus a loop drops its
+    candidate with ``continue`` under a guard and a sentence::
+
+        for workQueue in workQueueList:
+            for resource_type in resource_types:
+                ...
+                if not flagLocked:
+                    tmpLog_inner.debug("skip since locked by another process")
+                    continue
+
+    No tag, no counter, and the sentence is the only name the step has.  Poured
+    into ``FilterStageNode`` these arrive with ``criteria_tag`` and
+    ``funnel_label`` both empty, which is two fields answering a question they
+    were not asked: ``vocabulary`` would offer 75 new chains described in
+    brokerage words, ``_leading``'s fallback would open one of them, and
+    ``check-map`` would silently add 36 files to what it asks production --
+    a footprint decision that was deliberately made once and by hand.
+
+    ``message`` is the identity, for the reason ``criteria_tag`` is one over
+    there: it is the semantic signature and the log line at once, so a cut keyed
+    on it can be counted from production and survives any edit that keeps the
+    wording.  Position is not identity -- the loop moves when anything above it
+    does.
+
+    Measured over ``panda-server-source 1.0.2``: 797 of 834 ``continue``
+    statements sit inside a loop under a guard, 200 have a logged line in the
+    same block, five of those already carry a ``criteria=`` tag and 37 more are
+    inside the five brokerage functions the stage recognizer already reads.
+    The remaining 153 are this node, over 75 functions in 36 files.
+    """
+
+    node_type: NodeType = NodeType.LOOP_CUT
+    map_id: str
+    derived_from: str
+    owner: str = Field(..., description="module::function holding the loop.")
+    message: str = Field(
+        ...,
+        description=(
+            "The line logged before the candidate is dropped, with "
+            "interpolations rendered as '{}'.  The step's only name."
+        ),
+    )
+    search_key: str = Field(
+        default="",
+        description=(
+            "The longest fixed run of the message -- what to grep production "
+            "for.  Not guaranteed to select only this cut: 'skip {}' leaves "
+            "'skip'.  ``build-map`` reports the keys that also match another "
+            "cut in the same file, which is the threshold-free form of that "
+            "worry, and a capped answer says the rest."
+        ),
+    )
+    scope_prefix: str = Field(
+        default="",
+        description=(
+            "The prefix the logger this cut writes through puts on every line, "
+            "when the enclosing function builds one -- 'vo={} queue={} cloud={} "
+            "pid={} {}'.  Which candidate a line is about is in the prefix, not "
+            "the sentence, so this is the key that narrows the question to one "
+            "queue or one task.  Empty when the module logs through a bare "
+            "logger."
+        ),
+    )
+    order: int = Field(default=0, description="Position within the owner, by source order.")
+    loop_line: int = Field(
+        default=0, description="Line of the loop header whose iteration this drops."
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="Guards under which the candidate is dropped.",
+    )
+    inputs: list[str] = Field(
+        default_factory=list,
+        description="Identifiers the conditions read -- where the backward walk continues.",
+    )
+    log_level: Optional[str] = Field(default=None, description="Level the message is logged at.")
+    log_files: list[str] = Field(
+        default_factory=list,
+        description="Files the message can land in.  Empty when the module declares no logger.",
+    )
+    anchor: Optional[Anchor] = None
 
     @staticmethod
     def make_name(map_id: str, owner: str, signature: str) -> str:

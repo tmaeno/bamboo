@@ -48,6 +48,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     flush,
     logfile,
+    loopcut,
     progress,
     selection,
     sqlwrite,
@@ -186,6 +187,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         fragment.filter_stages.extend(filter_stages)
         fragment.coverage.extend(selection_coverage)
+
+        # The same cut everywhere the code does not declare a chain: a guard in
+        # a loop, a ``continue``, and a sentence.  Told which functions the
+        # stage slice already reads so that a brokerage rejection is not given a
+        # second identity keyed on its wording instead of its tag.
+        cuts, self._silent_cuts = loopcut.extract(
+            self._modules,
+            self.map_id,
+            self._version,
+            {stage.owner for stage in filter_stages},
+        )
+        fragment.loop_cuts.extend(cuts)
 
         # Which enumeration a constant belongs to, by its bare name.  A name
         # two enumerations share cannot decode anything, so it is dropped
@@ -451,6 +464,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def excluded_module_count(self) -> int:
         """How many test modules were left out of the analysis."""
         return getattr(self, "_skipped_tests", 0)
+
+    @property
+    def silent_cuts(self) -> int:
+        """Guarded ``continue``s in a loop that drop a candidate without saying why."""
+        return getattr(self, "_silent_cuts", 0)
 
     @property
     def unexplained_steps(self) -> list[str]:

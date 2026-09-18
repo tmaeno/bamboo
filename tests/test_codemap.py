@@ -31,6 +31,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     FilterStageNode,
     JunctionNode,
+    LoopCutNode,
     MapFragment,
     SourceModule,
     SubjectNode,
@@ -44,6 +45,7 @@ from bamboo.codemap.panda.recognizers import (
     errorcode,
     flush,
     logfile,
+    loopcut,
     progress,
     selection,
     sqlwrite,
@@ -8206,3 +8208,273 @@ def test_a_clipped_row_keeps_the_half_that_says_what_happened():
 
     assert check_map._clip(row).startswith(f"{BROKER_LOG} is on no machine")
     assert check_map._clip("short") == "short"
+
+
+# --------------------------------------------------------------------------- #
+# loop cuts -- the fourth filter idiom, the one with no vocabulary
+# --------------------------------------------------------------------------- #
+
+_GENERATOR = '''
+class JobGenerator:
+    def start(self):
+        for workQueue in workQueueList:
+            for resource_type in resource_types:
+                cycleStr = "pid={0} vo={1} queue={2} resource_type={3}".format(
+                    self.pid, vo, workQueue.queue_name, resource_type.resource_name
+                )
+                tmpLog_inner = MsgWrapper(logger, cycleStr)
+                if active_gshare_rtypes and not active:
+                    if random.uniform(0, 1) > inactive_poll_probability:
+                        tmpLog_inner.debug(f"skipping {cycleStr} due to inactivity")
+                        continue
+                if not flagLocked:
+                    tmpLog_inner.debug("skip since locked by another process")
+                    continue
+                self.doGenerate(workQueue, resource_type)
+'''
+
+
+def _cuts(*sources: tuple[str, str], covered: set[str] | None = None):
+    modules = [_module(text, rel) for text, rel in sources]
+    return loopcut.extract(modules, MAP_ID, VERSION, covered or set())
+
+
+def test_a_guarded_continue_in_a_loop_is_a_cut_even_when_it_names_no_candidate():
+    """The structure is the proof, not the wording.
+
+    The rule first written down was "the message interpolates the loop
+    variable", and it misses both of these: one interpolates ``cycleStr``,
+    which is two hops from ``workQueue``, and the other interpolates nothing at
+    all.  They are the guards that decide whether a queue generates jobs, which
+    is the question the whole idiom was read for.
+    """
+    cuts, _silent = _cuts((_GENERATOR, "pandajedi/jediorder/JobGenerator.py"))
+
+    assert [c.message for c in cuts] == [
+        "skipping {} due to inactivity",
+        "skip since locked by another process",
+    ]
+    assert cuts[1].conditions == ["not flagLocked"]
+    assert cuts[0].order == 0 and cuts[1].order == 1
+
+
+def test_the_prefix_the_logger_stamps_is_the_key_that_narrows_the_question():
+    """Which candidate a line is about is in the prefix, not the sentence.
+
+    ``"skip since locked by another process"`` says nothing about which queue
+    was locked.  The wrapper built one line earlier says it, and it is read
+    through ``.format`` because that template is what the line is stamped with.
+    """
+    cuts, _silent = _cuts((_GENERATOR, "pandajedi/jediorder/JobGenerator.py"))
+
+    # ``{0}`` normalised to ``{}``: the rest of the map renders holes one way,
+    # and two spellings would make a consumer build the pattern twice.
+    assert cuts[1].scope_prefix == "pid={} vo={} queue={} resource_type={}"
+
+
+def test_an_unguarded_continue_is_iteration_control_and_not_a_cut():
+    source = (
+        "def run(self):\n"
+        "    for item in items:\n"
+        "        tmpLog.debug(f'done with {item}')\n"
+        "        continue\n"
+    )
+    cuts, silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts == [] and silent == 0
+
+
+def test_a_continue_in_an_except_handler_is_not_a_cut():
+    """A candidate dropped because the code raised was not tested and rejected.
+
+    Falls out rather than being excluded by hand -- a handler is not an ``if``.
+    """
+    source = (
+        "def run(self):\n"
+        "    for item in items:\n"
+        "        try:\n"
+        "            self.process(item)\n"
+        "        except Exception:\n"
+        "            tmpLog.error(f'failed to process {item}')\n"
+        "            continue\n"
+    )
+    cuts, silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts == [] and silent == 0
+
+
+def test_a_message_assembled_into_a_local_first_is_the_same_line():
+    """37% of matching emits are written this way, so the hop is not optional."""
+    source = (
+        "def run(self):\n"
+        "    for dataset in datasets:\n"
+        "        if dataset.status != 'ready':\n"
+        "            tmpMsg = f'skip {dataset.name} due to dataset status: {dataset.status}'\n"
+        "            tmpLog.debug(tmpMsg)\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/dataservice/closer.py"))
+
+    assert [c.message for c in cuts] == ["skip {} due to dataset status: {}"]
+    assert cuts[0].log_level == "debug"
+
+
+def test_two_sites_wording_a_cut_alike_are_one_node_and_pool_their_guards():
+    """Production cannot tell them apart either, so neither does the map.
+
+    The message is the signature for the reason a tag is one over in the stage
+    slice: it is what production prints and what a reader greps.
+    """
+    source = (
+        "def runImpl(self):\n"
+        "    for task in tasks:\n"
+        "        if not self.lockA(task):\n"
+        "            tmpLog.debug('skip due to lock failure')\n"
+        "            continue\n"
+        "        if not self.lockB(task):\n"
+        "            tmpLog.debug('skip due to lock failure')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandajedi/jediorder/JobGenerator.py"))
+
+    assert len(cuts) == 1
+    assert cuts[0].conditions == ["not self.lockA(task)", "not self.lockB(task)"]
+
+
+def test_a_position_is_not_the_signature():
+    """Two builds of the same cut at different lines are the same node.
+
+    A node keyed on where it sits reports a change every time anything above it
+    moves, which is the churn ``anchor`` is kept out of ``CONTENT_FIELDS`` to
+    avoid.
+    """
+    body = (
+        "    for task in tasks:\n"
+        "        if task.frozen:\n"
+        "            tmpLog.debug('skip since the task is frozen')\n"
+        "            continue\n"
+    )
+    early, _ = _cuts(("def runImpl(self):\n" + body, "pandajedi/jediorder/X.py"))
+    late, _ = _cuts(("def runImpl(self):\n    x = 1\n" + body, "pandajedi/jediorder/X.py"))
+
+    assert early[0].name == late[0].name
+    assert early[0].anchor.line_start != late[0].anchor.line_start
+
+
+def test_a_chain_the_stage_slice_reads_is_not_read_again_here():
+    """One cut, one identity.  Keyed on wording here and on the tag there."""
+    source = (
+        "def doBrokerage(self):\n"
+        "    for site in sites:\n"
+        "        if site.maxwdir < need:\n"
+        "            tmpLog.debug(f'  skip {site.name} due to small scratch disk')\n"
+        "            continue\n"
+    )
+    rel = "pandajedi/jedibrokerage/GenJobBroker.py"
+    read, _ = _cuts((source, rel))
+    skipped, _ = _cuts((source, rel), covered={f"{rel}::doBrokerage"})
+
+    assert len(read) == 1 and skipped == []
+
+
+def test_a_tagged_rejection_stays_with_the_slice_that_owns_the_tag():
+    source = (
+        "def doSomething(self):\n"
+        "    for site in sites:\n"
+        "        if site.blacklisted:\n"
+        "            tmpLog.debug(f'  skip {site.name} criteria=-blacklisted')\n"
+        "            continue\n"
+    )
+    cuts, silent = _cuts((source, "pandajedi/jedidog/X.py"))
+
+    assert cuts == []
+    # Counted as unnamed here rather than dropped: this slice did not name it.
+    assert silent == 1
+
+
+def test_the_search_key_is_the_longest_run_and_not_the_leading_one():
+    """``"  skip site={} ..."`` shares its front with half the file."""
+    source = (
+        "def run(self):\n"
+        "    for site in sites:\n"
+        "        if site.offline:\n"
+        "            tmpLog.debug(f'  skip {site.name} because the endpoint is unusable')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/daemons/scripts/x.py"))
+
+    assert cuts[0].search_key == "because the endpoint is unusable"
+
+
+def test_a_key_that_also_matches_another_cut_in_the_file_is_reported():
+    """No length floor: what makes a key useless is that it selects more.
+
+    A hit on ``collection=`` cannot say which of the two cuts fired and a miss
+    cannot say neither did, so the silence is not about this cut at all.
+    """
+    source = (
+        "def run(self):\n"
+        "    for collection in collections:\n"
+        "        if collection.pseudo:\n"
+        "            tmpLog.debug(f'collection={collection} is pseudo input ; skipped')\n"
+        "            continue\n"
+        "        if not collection.found:\n"
+        "            tmpLog.debug(f'collection={collection} not found')\n"
+        "            continue\n"
+    )
+    cuts, _silent = _cuts((source, "pandaserver/taskbuffer/DataCarousel.py"))
+    for cut in cuts:
+        cut.log_files = ["panda-DataCarousel.log"]
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, loop_cuts=cuts)
+
+    assert gates.ambiguous_cut_keys(fragment) == [
+        "panda-DataCarousel.log: 'collection=' also matches another cut there"
+    ]
+
+
+def test_two_cuts_sharing_a_key_in_different_files_are_not_ambiguous():
+    """The unit is the file, because that is what a question is asked of."""
+    cut = LoopCutNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="a",
+        owner="a.py::run",
+        message="retry {} later",
+        search_key="retry",
+        log_files=["panda-DBProxy.log"],
+    )
+    elsewhere = cut.model_copy(
+        update={"name": "b", "owner": "b.py::run", "log_files": ["panda-JediDBProxy.log"]}
+    )
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, loop_cuts=[cut, elsewhere])
+
+    assert gates.ambiguous_cut_keys(fragment) == []
+
+
+def test_two_cuts_sharing_a_signature_fail_the_identity_gate():
+    """Storing the map keeps one per name, and nothing else compares the two."""
+    cut = LoopCutNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name="panda:x.py::run:skip it",
+        owner="x.py::run",
+        message="skip it",
+    )
+    fragment = MapFragment(
+        map_id=MAP_ID, derived_from=VERSION, loop_cuts=[cut, cut.model_copy()]
+    )
+
+    result = gates.map_identities_are_distinct(fragment)
+
+    assert not result.passed
+    assert any("loop_cut" in failure for failure in result.failures)
+
+
+def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
+    """``FilterStage`` was once missing from ``clear_map``, so stages from a
+    previous source version stayed in the database forever; and a kind missing
+    from ``CONTENT_FIELDS`` compares equal to itself no matter what changed."""
+    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+
+    assert NodeType.LOOP_CUT in CODE_MAP_NODE_TYPES
+    assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS
