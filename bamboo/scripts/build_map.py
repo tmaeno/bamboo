@@ -424,6 +424,31 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         f"log files: {len(own)} junction(s) from their own logger, "
         f"{len(borrowed)} from a caller's, {len(silent)} from neither"
     )
+
+    # The same question for the owners that read or write a value and settle
+    # nothing.  Two thirds of the readers the map names are these, and until
+    # they carried the fact the answer to "which log will show the query
+    # running" was silently empty for every one of them.
+    sites = fragment.log_sites
+    if sites:
+        called = [s for s in sites if s.caller_log_files]
+        alone = [s for s in sites if s.log_files and not s.caller_log_files]
+        mute = [s for s in sites if not s.observable_log_files()]
+        click.echo(
+            f"  reader log sites: {len(sites)} owner(s) that settle nothing, "
+            f"{len(called)} also named by a caller, {len(alone)} only by their own "
+            f"or inherited logger, {len(mute)} by neither"
+        )
+        if mute:
+            # The only group here that is a gap.  A reader nobody can watch is
+            # a question the map cannot be asked, and that has to be visible
+            # rather than implied by a smaller total.
+            by_module = Counter(s.owner.split("::")[0] for s in mute)
+            click.echo("    no log file named by the source:")
+            for module, count in by_module.most_common(top):
+                click.echo(f"      {module:<56} {count} owner(s)")
+            if len(by_module) > top:
+                click.echo(f"      … {len(by_module) - top} more module(s)")
     if silent:
         # Not a defect: a base class logging through a caller's MsgWrapper has
         # no file to name.  Listed because an unnamed file is an observation

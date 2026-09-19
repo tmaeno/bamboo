@@ -71,6 +71,7 @@ class NodeType(str, Enum):
     FILTER_STAGE = "FilterStage"
     LOOP_CUT = "LoopCut"
     GLOSS = "Gloss"
+    LOG_SITE = "LogSite"
 
 
 #: The labels that make up the Code Map namespace.
@@ -93,6 +94,7 @@ CODE_MAP_NODE_TYPES: frozenset["NodeType"] = frozenset(
         NodeType.FILTER_STAGE,
         NodeType.LOOP_CUT,
         NodeType.GLOSS,
+        NodeType.LOG_SITE,
     }
 )
 

@@ -8652,6 +8652,121 @@ class TaskBrokerThread(WorkerThread):
     assert [e.via for e in broker.entry_points if e.via] == []
 
 
+# ---------------------------------------------------------------------------
+# Where a reader that is not a junction logs.
+# ---------------------------------------------------------------------------
+
+
+def test_a_reader_that_is_no_junction_still_gets_a_log_site():
+    """Two thirds of the owners the map names as readers own no junction.
+
+    ``_follow_up`` looks the reader up among the *writers* and finds nothing,
+    so the answer to "which log will say the query ran" is silently empty for
+    164 of 241 owners.
+    """
+    proxy = """
+class DBProxy:
+    def getTasksToExecCommand_JEDI(self, vo, label):
+        sqlC = 'SELECT status FROM JEDI_Tasks'
+        self.cur.execute(sqlC + comment, varMap)
+"""
+    knight = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class TaskCommando(JediKnight):
+    def start(self):
+        while True:
+            self.taskBufferIF.getTasksToExecCommand_JEDI(vo, label)
+            time.sleep(60)
+"""
+    # Declares a logger, so the proxy mixin really does inherit a file.  Without
+    # it ``log_files`` is empty and the assertion below passes without ever
+    # exercising the rule it is there for.
+    jedi_proxy = (
+        'logger = PandaLogger().getLogger(__name__.split(".")[-1])\n'
+        "class DBProxy(task_module.DBProxy):\n    pass\n"
+    )
+    modules = [
+        _module(proxy, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(knight, "pandajedi/jediorder/TaskCommando.py"),
+        _module(jedi_proxy, "pandajedi/jedicore/JediDBProxy.py"),
+    ]
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.subjects.append(
+        SubjectNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="JediTaskSpec.status",
+            spec_class="JediTaskSpec",
+            attribute="status",
+            selected_by={
+                "finishing": [
+                    "pandaserver/taskbuffer/db_proxy_mods/task_module.py::"
+                    "getTasksToExecCommand_JEDI"
+                ]
+            },
+        )
+    )
+    logfile.attach(fragment, modules)
+
+    site = {s.owner: s for s in fragment.log_sites}
+    owner = (
+        "pandaserver/taskbuffer/db_proxy_mods/task_module.py::getTasksToExecCommand_JEDI"
+    )
+    assert owner in site
+    assert site[owner].log_files == ["panda-JediDBProxy.log"]
+    assert site[owner].caller_log_files == ["panda-TaskCommando.log"]
+    assert site[owner].owns_logger is False
+    # Both, unlike a junction.  The query writes its own diagnostics into the
+    # file it inherits -- measured, 51 of the 53 such owners do -- and the
+    # knight that called it writes about the call into its own.
+    assert site[owner].observable_log_files() == [
+        "panda-JediDBProxy.log",
+        "panda-TaskCommando.log",
+    ]
+
+
+def test_an_owner_that_is_already_a_junction_gets_no_second_row():
+    """One fact in two places is how ``log_files`` came to mean two things."""
+    source = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class Feeder:
+    def feed(self):
+        taskSpec.status = "finishing"
+"""
+    modules = [_module(source, "pandajedi/jediorder/ContentsFeeder.py")]
+    owner = "pandajedi/jediorder/ContentsFeeder.py::feed"
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION)
+    fragment.junctions.append(_junction(owner))
+    fragment.subjects.append(
+        SubjectNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="JediTaskSpec.status",
+            spec_class="JediTaskSpec",
+            attribute="status",
+            updated_by={"finishing": [owner]},
+        )
+    )
+    logfile.attach(fragment, modules)
+
+    assert [s.owner for s in fragment.log_sites] == []
+
+
+def test_a_log_site_is_a_stored_kind():
+    """``DiagnosticTemplate`` and ``EnumerationWrite`` are built and unreachable.
+
+    An investigation reads a log site, so it needs a label and a diff entry.
+    """
+    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+
+    assert NodeType.LOG_SITE in CODE_MAP_NODE_TYPES
+    assert NodeType.LOG_SITE.value in diff.CONTENT_FIELDS
+
+
 def test_a_call_and_a_dispatch_are_not_compared_with_each_other():
     """``ContentsFeeder`` is reached both ways, and the keys are not the same kind.
 

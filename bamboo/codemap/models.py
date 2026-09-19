@@ -661,6 +661,95 @@ class JunctionNode(BaseNode):
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+class LogSiteNode(BaseNode):
+    """Where one function's diagnostics land, for a function that decides nothing.
+
+    The map already answers this for a junction, and a junction is not who is
+    asked.  Two thirds of the owners the map names as reading a value own no
+    junction at all -- ``getPandaIDsWithTask_JEDI`` selects a task's jobs and
+    settles nothing -- so ``_follow_up`` looks the reader up among the writers,
+    misses, and says nothing about which log will show the query running.
+    Measured on the installed corpus: 279 reader and writer owners, 94 of them
+    junctions, and all 185 of the rest resolve to a file.
+
+    **Only for owners that are not junctions.**  One fact in two places is how
+    ``log_files`` came to answer both "where does this code live" and "whose
+    log mentions it"; a reader checks junctions first and these second, so
+    nothing is stored twice.
+
+    **Stored, not merely reported.**  ``DiagnosticTemplate`` and
+    ``EnumerationWrite`` are built on every run, carry no label and reach
+    nobody -- the database holds none of their rows.  An investigation reads
+    this to decide where to grep, so it is a node.
+
+    Scoped to the owners the map names.  Every function in a module with a
+    resolvable logger could have a row, but a row for a function nothing in
+    the map points at is vocabulary added before a reader asked for it.
+    """
+
+    node_type: NodeType = NodeType.LOG_SITE
+    map_id: str
+    derived_from: str
+    owner: str = Field(
+        ...,
+        description=(
+            "``module::function``, the same spelling a junction's ``owner`` "
+            "and a subject's ``selected_by`` use, because that is what the "
+            "reader joins on.  Also the node's ``name``: here the owner is the "
+            "identity, there being nothing else to be."
+        ),
+    )
+    log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files this module's own output can reach, declared first and "
+            "otherwise inherited through the classes that mix it in.  A list "
+            "because the answer is genuinely two for a proxy method: the "
+            "server's log when the server calls it and JEDI's when a knight "
+            "does."
+        ),
+    )
+    caller_log_files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files belonging to the modules that reach this function.  For a "
+            "proxy method this is where a line about the call actually appears "
+            "-- the mixin declares no logger, and the knight that called it "
+            "does."
+        ),
+    )
+    owns_logger: bool = Field(
+        default=False,
+        description=(
+            "Whether ``log_files`` is declared by this module or inherited.  A "
+            "reader that cannot tell the two apart has no way to know that "
+            "asking the proxy files for a caller's line always returns "
+            "nothing, and would read that nothing as 'it never ran'."
+        ),
+    )
+
+    def observable_log_files(self) -> list[str]:
+        """Files where a line about this function running can appear.
+
+        **Its own file counts here, and on a junction it does not.**  The two
+        rules differ because the two nodes are asked about different lines.  A
+        junction is asked where the line saying it *settled a value* appears,
+        and for a proxy method that line is the knight's -- production settles
+        it, ``set task_status=`` is in five files and neither proxy file is one
+        of them.  A reader is asked where the line saying its *query ran*
+        appears, and that one it writes itself: of the 53 owners here whose
+        only file is inherited, 51 emit into it, up to ten calls apiece
+        (``getScoutJobData_JEDI`` six, ``toEnableJumbo_JEDI`` eight).  Applying
+        the junction's rule said "nothing about this can be seen anywhere"
+        about code that logs on every line of its body.
+
+        Both inherited candidates are named.  Which of the two a line landed in
+        depends on which process ran the code, which is a run-time fact, and
+        naming both is the true answer rather than an ambiguity to resolve.
+        """
+        return sorted(set(self.log_files) | set(self.caller_log_files))
+
+
 class BoundaryNode(BaseNode):
     """Where causation crosses into a system this map does not cover.
 
@@ -840,6 +929,7 @@ class MapFragment(BaseModel):
     value_enums: list[ValueEnumNode] = Field(default_factory=list)
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
+    log_sites: list[LogSiteNode] = Field(default_factory=list)
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
@@ -886,6 +976,7 @@ class MapFragment(BaseModel):
         self.value_enums.extend(other.value_enums)
         self.filter_stages.extend(other.filter_stages)
         self.loop_cuts.extend(other.loop_cuts)
+        self.log_sites.extend(other.log_sites)
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)

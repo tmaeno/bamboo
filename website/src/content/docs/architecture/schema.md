@@ -63,7 +63,7 @@ what keep them apart.
 |---|---|---|
 | Where it comes from | LLM extraction from incidents, human-validated | Machine-derived from source by `build-map` |
 | If you lose it | Irreplaceable | Rebuild it in a minute |
-| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss` |
+| Labels | `Symptom`, `Cause`, `Resolution`, … | `Subject`, `Entity`, `JunctionPoint`, `FilterStage`, `LoopCut`, `Boundary`, `ValueEnum`, `Gloss`, `LogSite` |
 
 That separation is not tidiness: `clear_all()` drops everything in the database, so
 rebuilding a Code Map would take the incident graph with it. `clear_map(map_id)` exists
@@ -97,11 +97,11 @@ materialised when the backward walk needs variable-length paths, and not before.
 
 ## Extended catalogue
 
-The model defines a larger set of node and relationship types — **26 node types** and
+The model defines a larger set of node and relationship types — **27 node types** and
 **23 relationship types** in total — available for future extraction strategies beyond the core
 incident-analysis pipeline.
 
-### Node types (26)
+### Node types (27)
 
 ```
 - Symptom: Symptom messages and failures
@@ -132,6 +132,7 @@ Code Map types (machine-derived from source, separate namespace):
 - Boundary: Where causation crosses into a system this map does not cover
 - ValueEnum: One `NAME = value` constant, so a code seen in a record can be decoded
 - Gloss: A reading of one function, with the exact text that reading was given
+- LogSite: Where one function's diagnostics land, for a function that decides nothing
 ```
 
 ### Relationship types (23)

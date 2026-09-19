@@ -41,7 +41,7 @@ from __future__ import annotations
 import ast
 from typing import Optional
 
-from bamboo.codemap.models import SourceModule
+from bamboo.codemap.models import LogSiteNode, SourceModule
 from bamboo.codemap.panda.recognizers import trigger
 
 # PandaLogger.getLogger(name) opens "<logdir>/panda-<name>.log".
@@ -105,21 +105,15 @@ def declared_files(modules: list[SourceModule]) -> dict[str, str]:
 def _subclass_edges(modules: list[SourceModule]) -> dict[str, list[tuple[str, str]]]:
     """Return ``{base class name: [(subclass, its module), ...]}``.
 
-    Keyed by the bare name because that is how a base is written at the point
-    of inheritance, qualified or not.  Two classes share the name ``DBProxy``
-    -- the server's and JEDI's -- and that collision is load-bearing here
-    rather than a nuisance: it is the edge from one to the other.
+    The names of :func:`trigger.subclass_edges`, which does the walking.  Two
+    slices read inheritance -- this one to follow a mixin's output to the log
+    of whatever inherits it, the trigger slice to find the workers a knight
+    dispatches -- and the tree is walked once so the two cannot drift.
     """
-    edges: dict[str, list[tuple[str, str]]] = {}
-    for module in modules:
-        for node in ast.walk(module.tree):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for base in node.bases:
-                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
-                if name:
-                    edges.setdefault(name, []).append((node.name, module.rel_path))
-    return edges
+    return {
+        base: [(node.name, where) for node, where in places]
+        for base, places in trigger.subclass_edges(modules).items()
+    }
 
 
 def _classes_in(module: SourceModule) -> list[str]:
@@ -166,6 +160,28 @@ def files_of(
     return inherited.get(rel_path, [])
 
 
+def _caller_files(
+    owner: str,
+    mine: list[str],
+    declared: dict[str, str],
+    inherited: dict[str, list[str]],
+    inward,
+) -> list[str]:
+    """Files belonging to the modules that reach *owner*, minus its own.
+
+    One reading for the two nodes that carry it.  The enclosing class is part
+    of ``owner`` but not of the call graph's keys, which are bare method names
+    -- the same last-segment rule the attribution slice uses to name a
+    function.
+    """
+    where, _, method = owner.partition("::")
+    reached = inward.get(where, {}).get(method.split(".")[-1], ())
+    return sorted(
+        {file for entry, _door, _call in reached for file in files_of(entry, declared, inherited)}
+        - set(mine)
+    )
+
+
 def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     """Record each node's candidate log files.  Returns ``(resolved, total)``.
 
@@ -195,6 +211,12 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     asking the proxy files for a caller's line always returns nothing, and would
     read that nothing as "the junction did not fire" -- for every proxy
     candidate at once.
+
+    The same three facts are recorded for the owners the map names as reading
+    or writing a value and that settle nothing themselves -- see
+    :func:`_log_sites`.  Done here rather than in a pass of its own because the
+    declaration, the inheritance chain and the callers are all already in hand;
+    a second pass would be the same three readings again.
     """
     declared = declared_files(modules)
     inherited = inherited_files(modules, declared)
@@ -209,19 +231,65 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
             resolved += 1
 
     for junction in fragment.junctions:
-        where, _, method = junction.owner.partition("::")
-        junction.owns_logger = where in declared
-        mine = set(junction.log_files)
-        # The enclosing class is part of ``owner`` but not of the call graph's
-        # keys, which are bare method names -- the same last-segment rule the
-        # attribution slice uses to name a function.
-        reached = inward.get(where, {}).get(method.split(".")[-1], ())
-        junction.caller_log_files = sorted(
-            {
-                file
-                for entry, _door, _call in reached
-                for file in files_of(entry, declared, inherited)
-            }
-            - mine
+        junction.owns_logger = junction.owner.split("::")[0] in declared
+        junction.caller_log_files = _caller_files(
+            junction.owner, junction.log_files, declared, inherited, inward
         )
+    fragment.log_sites.extend(_log_sites(fragment, declared, inherited, inward))
     return resolved, total
+
+
+def _actor_owners(fragment) -> set[str]:
+    """Every ``module::function`` the map names as reading or writing a value.
+
+    Both verbs and both models.  A descent follows ``read_by``, but a question
+    about a value that only an ``UPDATE ... WHERE`` acts on still has to say
+    which log will show that update running, and the answer is found the same
+    way.
+    """
+    owners: set[str] = set()
+    for subject in fragment.subjects:
+        for names in list(subject.selected_by.values()) + list(subject.updated_by.values()):
+            owners.update(names)
+    for entity in fragment.entities:
+        owners.update(entity.read_by)
+        owners.update(entity.written_by)
+    return owners
+
+
+def _log_sites(
+    fragment,
+    declared: dict[str, str],
+    inherited: dict[str, list[str]],
+    inward,
+) -> list[LogSiteNode]:
+    """Where the readers and writers that own no junction write their diagnostics.
+
+    ``_follow_up`` looks a reader up among the *writers* of the subject, so it
+    only ever finds one that happens to settle a value too.  Measured on the
+    installed corpus: 279 such owners, 94 of them junctions, and every one of
+    the remaining 185 resolves to a file -- 53 to its own and 132 to a
+    caller's as well.  The question "which log will say the query ran" was
+    therefore unanswerable for two thirds of the readers the map names, not
+    because the fact is missing but because nowhere held it.
+
+    Owners that already own a junction are skipped.  Storing the same three
+    fields twice is how one of them comes to disagree with the other.
+    """
+    known = {junction.owner for junction in fragment.junctions}
+    sites: list[LogSiteNode] = []
+    for owner in sorted(_actor_owners(fragment) - known):
+        where = owner.split("::")[0]
+        mine = files_of(where, declared, inherited)
+        sites.append(
+            LogSiteNode(
+                map_id=fragment.map_id,
+                derived_from=fragment.derived_from,
+                name=owner,
+                owner=owner,
+                log_files=mine,
+                caller_log_files=_caller_files(owner, mine, declared, inherited, inward),
+                owns_logger=where in declared,
+            )
+        )
+    return sites

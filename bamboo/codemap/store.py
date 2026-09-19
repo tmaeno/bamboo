@@ -45,6 +45,7 @@ async def store_fragment(
         "boundaries": 0,
         "filter_stages": 0,
         "loop_cuts": 0,
+        "log_sites": 0,
     }
 
     if replace_version:
@@ -75,6 +76,9 @@ async def store_fragment(
     for cut in fragment.loop_cuts:
         await graph_db.merge_map_node(cut)
         written["loop_cuts"] += 1
+    for site in fragment.log_sites:
+        await graph_db.merge_map_node(site)
+        written["log_sites"] += 1
 
     logger.info("store_fragment: wrote %r", written)
     return written

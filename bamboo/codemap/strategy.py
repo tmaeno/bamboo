@@ -93,6 +93,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     Lead,
     Localization,
+    LogSiteNode,
     MapTerm,
     Match,
     Observation,
@@ -516,6 +517,7 @@ def _follow_up(
     selection_gates: list[str],
     writers: list[JunctionNode],
     carried_from: list[str],
+    log_sites: dict[str, LogSiteNode],
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -543,7 +545,13 @@ def _follow_up(
     at all".
     """
     selected = observed in selected_values
-    by_owner = {j.owner: j for j in writers}
+    # Junctions first, so that an owner which both settles a value and reads
+    # one is answered from the node that carries the rest of its story.  Two
+    # thirds of the readers the map names settle nothing, and looking only
+    # among the writers left those with no file at all -- the query was named
+    # and the log to check for it was not.
+    by_owner: dict[str, JunctionNode | LogSiteNode] = dict(log_sites)
+    by_owner.update({j.owner: j for j in writers})
     readers = [by_owner[o] for o in selected_by if o in by_owner]
     actors = readers or [by_owner[o] for o in updated_by if o in by_owner]
     reader_files = sorted({f for r in actors for f in r.observable_log_files()})
@@ -552,9 +560,18 @@ def _follow_up(
     # so their entry points are empty -- and reading that as the answer says
     # "nothing reaches this subject", which is a stronger claim than the map
     # can make and, for ``pending``, the opposite of true.
-    triggers = sorted({entry.trigger for j in actors for entry in j.entry_points}) or sorted(
-        {entry.trigger for j in writers for entry in j.entry_points}
-    )
+    # Junctions only.  A log site settles nothing, so it has no entry points to
+    # have -- said with a type test rather than a missing attribute, because
+    # "this kind cannot answer that" and "this one happens not to" are
+    # different facts and only the second should fall through to the writers.
+    triggers = sorted(
+        {
+            entry.trigger
+            for j in actors
+            if isinstance(j, JunctionNode)
+            for entry in j.entry_points
+        }
+    ) or sorted({entry.trigger for j in writers for entry in j.entry_points})
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
     if selected_by:
         asks = f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
@@ -987,6 +1004,10 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             subject.selection_gates,
             writers,
             carried,
+            await code_map.log_sites(
+                subject.selected_by.get(symptom.observed, [])
+                + subject.updated_by.get(symptom.observed, [])
+            ),
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing

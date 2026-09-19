@@ -52,6 +52,9 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "selected_values",
     ),
     NodeType.ENTITY.value: ("tables", "read_by", "written_by"),
+    # ``owner`` is the signature, so it cannot differ between two nodes being
+    # compared.
+    NodeType.LOG_SITE.value: ("log_files", "caller_log_files", "owns_logger"),
     _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
     NodeType.BOUNDARY.value: (
         "system",

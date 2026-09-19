@@ -34,6 +34,7 @@ from bamboo.codemap.models import (
     EntryPoint,
     FilterStageNode,
     JunctionNode,
+    LogSiteNode,
     MapFragment,
     MapTerm,
     SubjectNode,
@@ -535,10 +536,9 @@ async def test_a_query_wins_over_an_update_that_acts_on_the_same_value():
 async def test_a_reader_the_map_holds_no_log_for_is_named_without_one():
     """Being unable to say where to look is a finding, not a reason to guess.
 
-    Sixty of the corpus's readers are pure readers -- they select on a value and
-    settle nothing, so they are not junctions and no log file is attached to
-    them.  Naming one with an invented file would be worse than naming it with
-    none.
+    A reader that settles nothing carries its files on a log site rather than
+    on a junction; where the build could resolve none there is no site, and
+    naming an invented file would be worse than naming none.
     """
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -2388,6 +2388,64 @@ async def test_two_helpers_reaching_one_entity_are_both_named():
     assert out.count("stops JobSpec") == 1
     assert "reassignShare" in out
     assert "getPandaIDsWithTask_JEDI" in out
+
+
+async def test_a_reader_that_settles_nothing_is_still_told_where_it_logs():
+    """The question the follow-up exists to answer, for two thirds of readers.
+
+    ``getTasksToExecCommand_JEDI`` selects ``finishing`` every cycle and writes
+    no value, so it owns no junction; looking the reader up among the writers
+    found nothing and the follow-up named the query without naming a log.  The
+    file is a caller's, which is the same asymmetry a junction already states.
+    """
+    owner = "taskbuffer/db_proxy_mods/task_complex_module.py::getTasksToExecCommand_JEDI"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                gates=["JEDI_AUX_Status_MinTaskID"],
+                selected_by={"finishing": [owner]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="finishing"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+        log_sites=[
+            LogSiteNode(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                name=owner,
+                owner=owner,
+                log_files=["panda-DBProxy.log", "panda-JediDBProxy.log"],
+                caller_log_files=[OTHER_LOG],
+                owns_logger=False,
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.selected_by == [owner]
+    # Its own file and the caller's.  A query writes its diagnostics into the
+    # file it inherits, so leaving that out -- the rule a junction follows,
+    # where the line in question is the knight's -- would say nothing about
+    # the query can be seen anywhere.
+    assert strategy.follow_up.reader_log_files == [
+        "panda-DBProxy.log",
+        "panda-JediDBProxy.log",
+        OTHER_LOG,
+    ]
+    # A log site settles nothing and so carries no entry point.  Reading its
+    # empty set as the answer would say nothing reaches the subject.
+    assert strategy.follow_up.triggers == ["polled"]
 
 
 async def test_a_candidate_says_who_constructed_the_worker_that_holds_it():

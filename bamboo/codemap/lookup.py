@@ -42,6 +42,7 @@ from bamboo.codemap.models import (
     EntityNode,
     FilterStageNode,
     JunctionNode,
+    LogSiteNode,
     LoopCutNode,
     MapTerm,
     SubjectNode,
@@ -61,6 +62,7 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     JunctionNode: NodeType.JUNCTION_POINT,
     FilterStageNode: NodeType.FILTER_STAGE,
     LoopCutNode: NodeType.LOOP_CUT,
+    LogSiteNode: NodeType.LOG_SITE,
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
 }
@@ -453,4 +455,21 @@ class CodeMap:
         return {
             j.owner: {"own": list(j.log_files), "caller": list(j.caller_log_files)}
             for j in await self.writers_of(subject)
+        }
+
+    async def log_sites(self, owners: list[str]) -> dict[str, LogSiteNode]:
+        """The log rows for *owners* that settle nothing themselves.
+
+        Junctions are not included, and the caller should look there first:
+        an owner that decides a value carries the same three fields on its
+        junction, and returning it from both places is how one copy comes to
+        disagree with the other.
+        """
+        if not owners:
+            return {}
+        wanted = set(owners)
+        return {
+            site.owner: site
+            for site in await self._find(LogSiteNode)
+            if site.owner in wanted
         }
