@@ -89,6 +89,7 @@ from bamboo.codemap.models import (
     CandidateBranch,
     FollowUp,
     FunnelStep,
+    Handover,
     JunctionNode,
     Lead,
     Localization,
@@ -365,6 +366,22 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
         ],
         triggers=sorted({entry.trigger for entry in junction.entry_points}),
         entries=sorted({entry.entry for entry in junction.entry_points}),
+        # One row per distinct handover, not per entry point.  A module that
+        # both polls and reads a command row carries two entries for the one
+        # construction, and they hand over the same thing -- the trigger is a
+        # fact about arrival, and this is a fact about the data.
+        handovers=list(
+            {
+                (entry.entry, entry.via, entry.reached_by): Handover(
+                    entry=entry.entry,
+                    via=entry.via or "",
+                    reached_by=entry.reached_by,
+                    fields=dict(entry.arg_binding),
+                )
+                for entry in junction.entry_points
+                if entry.arg_binding
+            }.values()
+        ),
     )
 
 

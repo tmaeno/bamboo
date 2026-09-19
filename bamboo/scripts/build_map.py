@@ -443,6 +443,30 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         for subject, triggers in fragile[:top]:
             click.echo(f"    {subject:<34} only {', '.join(triggers)}")
 
+    # What a knight handed the class its work actually runs in.  Not a call, so
+    # nothing resolved by name reaches it; before this an arm in a worker could
+    # be named and what handed it its input could not.
+    uplinks = getattr(plugin, "worker_uplinks", {})
+    if not uplinks and getattr(plugin, "worker_classes", 0):
+        # The loud half of the same fact.  With no door resolved the whole
+        # uplink is off and the map goes back to naming an arm without naming
+        # what handed it its input -- which reads, from the report alone,
+        # exactly like a corpus that dispatches nothing.
+        click.echo(
+            "  worker uplinks: none -- the dispatched-worker base class is "
+            "declared but the method it enters could not be read"
+        )
+    if uplinks:
+        owners = {j.owner for j in fragment.junctions}
+        landed = {key for key in uplinks if "::".join(key) in owners}
+        sites = {
+            (entry, via) for entries in uplinks.values() for entry, via, _b, _s in entries
+        }
+        click.echo(
+            f"  worker uplinks: {len(sites)} dispatch site(s), reaching "
+            f"{len(uplinks)} worker method(s) of which {len(landed)} own a junction"
+        )
+
     differing = trigger.differing_arguments(fragment.junctions)
     if differing:
         # Structure, not trivia: an argument one entry omits is a guard that

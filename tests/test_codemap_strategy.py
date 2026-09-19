@@ -2388,3 +2388,102 @@ async def test_two_helpers_reaching_one_entity_are_both_named():
     assert out.count("stops JobSpec") == 1
     assert "reassignShare" in out
     assert "getPandaIDsWithTask_JEDI" in out
+
+
+async def test_a_candidate_says_who_constructed_the_worker_that_holds_it():
+    """The one step forward from the anchor that reading the arm cannot take.
+
+    ``runImpl`` works on ``self.taskList`` and nothing in its module says
+    where that came from -- the knight filled it through a constructor and a
+    thread, with no call in between.  Shown on the candidate rather than only
+    stored, because a fact the derivation holds and never prints is one the
+    investigation cannot use.
+    """
+    owner = "jediorder/TaskCommando.py::runImpl"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["passed"])],
+        junctions=[
+            _junction(
+                owner,
+                Branch(outcome="passed"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    fragment.junctions[0].entry_points = [
+        EntryPoint(
+            trigger="polled",
+            entry="jediorder/TaskCommando.py",
+            via="start",
+            arg_binding={"taskList": "taskList", "taskBufferIF": "self.taskBufferIF"},
+            reached_by="dispatch",
+        )
+    ]
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="passed", task_id="42")
+    )
+
+    handed = [c for c in strategy.candidates if c.owner == owner][0].handovers
+    assert [(h.via, h.reached_by) for h in handed] == [("start", "dispatch")]
+    assert handed[0].fields["taskList"] == "taskList"
+
+
+async def test_an_entry_that_hands_over_nothing_is_not_listed_as_one():
+    """Empty means two different things and neither is 'handed nothing'.
+
+    A call binding no keyword passed its arguments positionally; listing it
+    would make that look like a path that omits them.
+    """
+    owner = "jediorder/ContentsFeeder.py::feed"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["pending"])],
+        junctions=[
+            _junction(owner, Branch(outcome="pending"), log_files=[KNIGHT_LOG]),
+        ],
+    )
+    fragment.junctions[0].entry_points = [
+        EntryPoint(trigger="message", entry="jedimsgprocessor/feeder.py", via="process")
+    ]
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
+    )
+
+    assert [c for c in strategy.candidates if c.owner == owner][0].handovers == []
+
+
+async def test_two_triggers_on_one_construction_are_one_handover():
+    """``TaskCommando`` both polls and reads a command row, and built one worker.
+
+    Two entry points, one construction.  The trigger is a fact about how
+    control arrives and the handover is a fact about the data, so repeating
+    the second per trigger printed the same line twice.
+    """
+    owner = "jediorder/TaskCommando.py::runImpl"
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject(selected=["passed"])],
+        junctions=[_junction(owner, Branch(outcome="passed"), log_files=[KNIGHT_LOG])],
+    )
+    fragment.junctions[0].entry_points = [
+        EntryPoint(
+            trigger=trigger,
+            entry="jediorder/TaskCommando.py",
+            via="start",
+            arg_binding={"taskList": "taskList"},
+            reached_by="dispatch",
+        )
+        for trigger in ("command", "polled")
+    ]
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="passed", task_id="42")
+    )
+
+    candidate = [c for c in strategy.candidates if c.owner == owner][0]
+    assert len(candidate.handovers) == 1
+    assert sorted(candidate.triggers) == ["command", "polled"]

@@ -399,10 +399,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # After promotion, so the reach figure describes the map that is kept
         # rather than every candidate the slices produced.
+        self._uplinks = trigger.worker_uplinks(self._modules)
         self._reached = trigger.attach(
             fragment.junctions,
             self._modules,
             {b.interface.split(".")[-1] for b in channels},
+            self._uplinks,
         )
         # What each junction consults, as opposed to what starts it.  The one
         # edge out of a junction that a reader can follow without resolving a
@@ -489,6 +491,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def log_file_reach(self) -> tuple[int, int]:
         """``(nodes whose log file is known, total)``."""
         return getattr(self, "_log_files", (0, 0))
+
+    @property
+    def worker_uplinks(self) -> dict[tuple[str, str], list]:
+        """Which ``(module, method)`` a dispatched worker's entry reaches.
+
+        Kept from the build so the report does not walk the tree a second time
+        for a figure the attachment already had in hand.
+        """
+        return getattr(self, "_uplinks", {})
+
+    @property
+    def worker_classes(self) -> int:
+        """How many dispatched-worker classes the corpus declares.
+
+        The denominator the uplink count is silent without: no uplinks and no
+        worker classes is a corpus that dispatches nothing, and no uplinks with
+        nine of them is the reader having lost the door.
+        """
+        return len(trigger.worker_classes(self._modules)) if self._modules else 0
 
     @property
     def declared_log_files(self) -> dict[str, str]:

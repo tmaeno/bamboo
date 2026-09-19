@@ -41,6 +41,7 @@ from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    ARRIVES_BY_DISPATCH,
     ELIMINATED,
     LEAD_MAP,
     SEEN,
@@ -233,10 +234,30 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
             click.echo(f"  {'':<10} → {_arm(branch)}{_at(branch)}")
             for condition in branch.conditions:
                 click.echo(f"  {'':<10}   when: {condition}")
+        for handover in candidate.handovers:
+            if handover.reached_by != ARRIVES_BY_DISPATCH:
+                continue
+            # Always shown, not folded into ``--full``: the arm's body reads
+            # ``self.taskList`` and this is the only line that says who filled
+            # it.  There is no call between the two, so a trace that starts at
+            # the arm cannot find it by reading the arm's own module.
+            where = f"{handover.entry.rsplit('/', 1)[-1]}::{handover.via}"
+            click.echo(
+                f"  {'':<10} built by {where} with "
+                + ", ".join(f"{name}={expr}" for name, expr in sorted(handover.fields.items()))
+            )
         if full:
             click.echo(f"  {'':<10} {candidate.owner}")
             if candidate.triggers:
                 click.echo(f"  {'':<10} triggers: {', '.join(candidate.triggers)}")
+            for handover in candidate.handovers:
+                if handover.reached_by == ARRIVES_BY_DISPATCH:
+                    continue
+                where = f"{handover.entry.rsplit('/', 1)[-1]}::{handover.via}"
+                click.echo(
+                    f"  {'':<10} called from {where} with "
+                    + ", ".join(sorted(handover.fields))
+                )
             for branch in candidate.branches:
                 if branch.matched:
                     continue  # already shown above, with its reason

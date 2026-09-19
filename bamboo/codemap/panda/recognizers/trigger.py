@@ -50,6 +50,7 @@ import ast
 from typing import Optional
 
 from bamboo.codemap.models import (
+    ARRIVES_BY_DISPATCH,
     COMMAND,
     MESSAGE,
     POLLED,
@@ -332,8 +333,8 @@ def imported_modules(module: SourceModule) -> set[str]:
     return found
 
 
-def _self_calls(module: SourceModule) -> dict[str, set[str]]:
-    """Return ``{method: the methods it calls on ``self``}`` within one module.
+def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
+    """Return ``{method: the methods it calls on ``self``}`` within *tree*.
 
     Needed because the door and the write are rarely the same method.
     ``add_main`` starts ``AdderGen.run``; the ``jobStatus`` writes are in
@@ -344,9 +345,18 @@ def _self_calls(module: SourceModule) -> dict[str, set[str]]:
     Within one module ``self.<name>()`` is an unambiguous edge -- no resolution
     is involved, which is why this is followed transitively while the hop
     *between* modules, which rests on a name match, is not.
+
+    Takes a tree rather than a module so that a single class can be scoped.
+    Two readers need that: ``TaskBroker`` declares two workers and both spell
+    their entry ``runImpl``, and ``ThreadUtils`` declares ``ZombieCleaner``
+    beside ``WorkerThread`` with a ``run`` of its own, so a file-wide walk
+    would pool two classes under one method name.  **Measured, both agree
+    today** -- neither pair actually collides in what it calls on ``self`` --
+    so this is the shape being read correctly rather than a difference in the
+    answer, and the second reader would fail silently if it stopped being.
     """
     edges: dict[str, set[str]] = {}
-    for func, _owner in functions_with_owner(module.tree):
+    for func, _owner in functions_with_owner(tree):
         targets = edges.setdefault(func.name, set())
         for node in ast.walk(func):
             if (
@@ -454,7 +464,7 @@ def reaching_modules(
     imports = {module.rel_path: imported_modules(module) for module in modules}
     inward: dict[str, dict[str, list[tuple[str, str, ast.Call]]]] = {}
     for module in modules:
-        edges = _self_calls(module)
+        edges = _self_calls(module.tree)
         for door in edges:
             unambiguous = implemented.get(door) == module.rel_path
             for entry, call in callers.get(door, ()):
@@ -469,10 +479,246 @@ def reaching_modules(
     return inward
 
 
+#: The base class a JEDI knight's real work runs under.  Named here for the
+#: same reason ``_MESSAGE_BASE`` is: it is the declaration the corpus makes
+#: about which objects are dispatched rather than called.
+_WORKER_BASE = "WorkerThread"
+
+#: How a constructed worker is set going.  ``threading.Thread.start`` spawns it
+#: and ``run`` is the inline spelling two message processors use to avoid an
+#: extra thread; both reach the same method, so both count.
+_DISPATCH = frozenset({"start", "run"})
+
+
+def subclass_edges(
+    modules: list[SourceModule],
+) -> dict[str, list[tuple[ast.ClassDef, str]]]:
+    """Return ``{base class name: [(subclass node, its module), ...]}``.
+
+    Keyed by the bare name because that is how a base is written at the point
+    of inheritance, qualified or not.  Two classes share the name ``DBProxy``
+    -- the server's and JEDI's -- and that collision is load-bearing here
+    rather than a nuisance: it is the edge from one to the other.
+
+    The node and not only its name, because two readers want different halves
+    of one fact -- which log a mixin's output reaches, and which methods a
+    dispatched worker runs -- and walking the tree twice for the same reading
+    is how two answers drift apart.
+    """
+    edges: dict[str, list[tuple[ast.ClassDef, str]]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
+                if name:
+                    edges.setdefault(name, []).append((node, module.rel_path))
+    return edges
+
+
+def worker_classes(modules: list[SourceModule]) -> dict[str, tuple[str, ast.ClassDef]]:
+    """Return ``{class name: (its module, its node)}`` for the dispatched workers.
+
+    Transitive, so a worker reached through an intermediate base is included.
+    A name two modules declare is dropped rather than picked between: the
+    construction site names the class and nothing else, so an ambiguous name
+    would resolve a dispatch by guess -- the restriction
+    :func:`sole_definitions` puts on methods, applied to classes.
+    """
+    edges = subclass_edges(modules)
+    seen_bases: set[str] = set()
+    frontier = [_WORKER_BASE]
+    found: dict[str, list[tuple[str, ast.ClassDef]]] = {}
+    while frontier:
+        base = frontier.pop()
+        if base in seen_bases:
+            continue
+        seen_bases.add(base)
+        for node, where in edges.get(base, ()):
+            found.setdefault(node.name, []).append((where, node))
+            frontier.append(node.name)
+    return {name: places[0] for name, places in found.items() if len(places) == 1}
+
+
+def worker_door(modules: list[SourceModule]) -> Optional[str]:
+    """The method a dispatched worker actually runs, read from the base class.
+
+    ``WorkerThread.run`` calls ``self.runImpl()``, so the corpus states which
+    method the dispatch enters and a constant here would only restate it --
+    and would go on restating it after the base class changed.  Ambiguity is
+    refused: if the base's ``run`` calls more than one of its own methods,
+    which one carries the work is a guess.
+    """
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if isinstance(node, ast.ClassDef) and node.name == _WORKER_BASE:
+                called = _self_calls(node).get("run", set())
+                if len(called) == 1:
+                    return next(iter(called))
+    return None
+
+
+def _bound_name(node: ast.expr) -> Optional[str]:
+    """``thr`` and ``self.worker``, the two ways a construction is kept."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ):
+        return f"self.{node.attr}"
+    return None
+
+
+def _initialiser(node: ast.ClassDef) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    for statement in node.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name == "__init__"
+        ):
+            return statement
+    return None
+
+
+def _handover(
+    call: ast.Call, init: Optional[ast.FunctionDef | ast.AsyncFunctionDef]
+) -> dict[str, str]:
+    """What the construction site hands the worker, keyed as the body reads it.
+
+    Positional as well as keyword, which the call case refuses.  The reason it
+    refuses -- that binding by position means trusting a facade to forward in
+    order -- does not apply: the class is resolved, so its own signature is in
+    hand and the positions are the ones the constructor declares.
+
+    **Keyed by the field, not the parameter.**  A worker's body says
+    ``self.taskList``, and PanDA renames on the way in
+    (``self.taskBufferIF = taskbufferIF``), so keying by the parameter would
+    make every reader re-derive the constructor's own assignment.  The rule is
+    the same one the call case follows -- the name the callee's body uses --
+    and a parameter the body never stores is left out rather than reported
+    under a name nothing mentions.  ``threadPool`` is that case: it goes to the
+    base class and no arm ever asks about it.
+    """
+    if init is None:
+        return {}
+    parameters = [arg.arg for arg in (init.args.posonlyargs + init.args.args)[1:]]
+    # Not strict: a construction may pass more than the signature declares
+    # (``*args``), and the surplus has no name the body reads, so it is dropped
+    # rather than reported under a position.
+    supplied = {
+        name: ast.unparse(value)
+        for name, value in zip(parameters, call.args, strict=False)
+    }
+    supplied.update(
+        {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}
+    )
+    fields: dict[str, str] = {}
+    for node in ast.walk(init):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (
+            isinstance(target, ast.Attribute)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            and isinstance(node.value, ast.Name)
+        ):
+            fields[node.value.id] = target.attr
+    return {
+        fields[parameter]: expression
+        for parameter, expression in supplied.items()
+        if parameter in fields
+    }
+
+
+def worker_uplinks(
+    modules: list[SourceModule],
+) -> dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]]:
+    """Return ``{(worker module, method): [(entry, via, handover, class span)]}``.
+
+    The edge no name match can find.  A knight reads its rows, builds a worker
+    with them and starts a thread; the work happens in another class, reached
+    by a constructor argument and a dispatch rather than by a call, so the
+    method-name resolution the rest of this slice turns on walks straight past
+    Measured on the installed corpus: thirteen construction sites, eleven of
+    them dispatched, against 72 entry points on junctions in the worker
+    modules of which four had a ``via`` -- which is to say the map could name
+    what runs an arm but not what handed it its input.
+
+    **The dispatch is required, not assumed.**  Two message processors keep a
+    constructed worker on ``self`` and call one of its methods directly; that
+    edge *is* a call and :func:`reaching_modules` already follows it.  Claiming
+    the dispatch for them as well would put the worker's whole entry method
+    behind a caller that never runs it.
+
+    The span comes back with each entry because ``owner`` is spelled
+    ``module::method`` and says nothing about the class.  ``TaskBroker``
+    declares two workers and both call their entry ``runImpl``, so the key
+    alone would hand each one the other's callers; the arm's anchor is what
+    settles which class the line is in.
+
+    Walked with the whole function body, nested definitions included, matching
+    what :func:`_self_calls` already does.  A construction inside a nested
+    function would then be credited to the outer one as well; the corpus has
+    none, so the looser reading costs nothing and the tighter one would be
+    machinery for a case that does not exist.
+    """
+    door = worker_door(modules)
+    if door is None:
+        # Reported by the build rather than returned quietly: with no door the
+        # whole uplink is off, and an empty result looks exactly like a corpus
+        # that dispatches nothing.
+        return {}
+    workers = worker_classes(modules)
+    # Per class, not per site: three sites construct ``JobGeneratorThread`` and
+    # the methods it enters are a property of the class.
+    entered = {
+        name: (where, _downstream(_self_calls(node), door),
+               (node.lineno, node.end_lineno or node.lineno), _initialiser(node))
+        for name, (where, node) in workers.items()
+    }
+    reach: dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            built: list[tuple[Optional[str], ast.Call]] = []
+            dispatched: set[str] = set()
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in workers
+                ):
+                    built.extend((_bound_name(t), node.value) for t in node.targets)
+                elif (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _DISPATCH
+                ):
+                    name = _bound_name(node.func.value)
+                    if name:
+                        dispatched.add(name)
+            for name, call in built:
+                if name is None or name not in dispatched:
+                    continue
+                where, methods, span, init = entered[call.func.id]
+                handover = _handover(call, init)
+                for method in methods:
+                    reach.setdefault((where, method), []).append(
+                        (module.rel_path, func.name, handover, span)
+                    )
+    return reach
+
+
 def attach(
     junctions: list[JunctionNode],
     modules: list[SourceModule],
     foreign_tables: set[str],
+    uplinks: Optional[
+        dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]]
+    ] = None,
 ) -> tuple[int, int]:
     """Record each junction's entry points.  Returns ``(reached, total)``.
 
@@ -480,28 +726,55 @@ def attach(
     entry points rather than being assigned a default.  "Nothing in this map
     starts this" is a real answer and a work item; "presumably a loop" is a
     guess that would make the self-repair property unusable.
+
+    Two kinds of edge, read separately because they are found differently.  A
+    call is resolved by name (:func:`reaching_modules`); a dispatched worker is
+    not reached by a call at all (:func:`worker_uplinks`), and the second is
+    where the knights are -- the code that moves a task's status runs in a
+    class its knight constructs, so without it the map can say what starts an
+    arm but not what handed the arm its input.
     """
     triggers = classify(modules, foreign_tables)
     inward = reaching_modules(modules)
+    # Taken from the caller where there is one, so that a build which also
+    # reports on the dispatch walks for it once rather than twice.
+    if uplinks is None:
+        uplinks = worker_uplinks(modules)
 
     reached = 0
     for junction in junctions:
         owner_module, _, method = junction.owner.partition("::")
         found: dict[tuple[str, str, Optional[str]], EntryPoint] = {}
-        for trigger in triggers.get(owner_module, ()):
-            found[(trigger, owner_module, None)] = EntryPoint(
-                trigger=trigger, entry=owner_module
+        for kind in triggers.get(owner_module, ()):
+            found[(kind, owner_module, None)] = EntryPoint(
+                trigger=kind, entry=owner_module
             )
         for entry, door, call in inward.get(owner_module, {}).get(method, ()):
-            for trigger in triggers.get(entry, ()):
-                found[(trigger, entry, door)] = EntryPoint(
-                    trigger=trigger,
+            for kind in triggers.get(entry, ()):
+                found[(kind, entry, door)] = EntryPoint(
+                    trigger=kind,
                     entry=entry,
                     via=door,
                     # The binding is at the door, which is where the entries
                     # differ -- the message path omits ``minPriority`` there,
                     # not deeper in.
                     arg_binding=_arg_binding(call),
+                )
+        for entry, via, handover, span in uplinks.get((owner_module, method), ()):
+            # The anchor decides which class the line is in.  Where there is
+            # none the span cannot be checked, and a junction with no position
+            # is not one an investigation can be sent to anyway.
+            if junction.anchor and not (
+                span[0] <= junction.anchor.line_start <= span[1]
+            ):
+                continue
+            for kind in triggers.get(entry, ()):
+                found[(kind, entry, via)] = EntryPoint(
+                    trigger=kind,
+                    entry=entry,
+                    via=via,
+                    arg_binding=handover,
+                    reached_by=ARRIVES_BY_DISPATCH,
                 )
         junction.entry_points = [found[key] for key in sorted(found, key=str)]
         if junction.entry_points:
@@ -572,7 +845,7 @@ def _consulted_targets(
     targets: dict[str, dict[str, set[str]]] = {}
     for module in modules:
         here = module.rel_path
-        for method, callees in _self_calls(module).items():
+        for method, callees in _self_calls(module.tree).items():
             targets.setdefault(here, {}).setdefault(method, set()).update(
                 f"{here}::{callee}" for callee in callees
             )
@@ -655,18 +928,28 @@ def differing_arguments(
     """
     found: list[tuple[str, str, dict[str, list[str]]]] = []
     for junction in junctions:
-        supplied: dict[str, set[str]] = {}
+        # Within one way of arriving.  A call binds by keyword and a dispatch
+        # by the field the worker's body reads, so the two key sets are drawn
+        # from different namespaces: comparing across them reports a
+        # difference in spelling as a guard that cannot fire.  Measured: it
+        # took the report from 13 rows to 69, and the 56 it added were pairs
+        # like ``ContentsFeeder`` -- one entry calling a method directly and
+        # one handing the same work to a worker.
+        by_arrival: dict[str, dict[str, set[str]]] = {}
         for entry in junction.entry_points:
             if entry.via is not None:
-                supplied.setdefault(entry.entry, set()).update(entry.arg_binding)
-        if len(supplied) > 1 and len({frozenset(a) for a in supplied.values()}) > 1:
-            found.append(
-                (
-                    junction.subject,
-                    junction.owner,
-                    {entry: sorted(args) for entry, args in sorted(supplied.items())},
+                by_arrival.setdefault(entry.reached_by, {}).setdefault(
+                    entry.entry, set()
+                ).update(entry.arg_binding)
+        for supplied in by_arrival.values():
+            if len(supplied) > 1 and len({frozenset(a) for a in supplied.values()}) > 1:
+                found.append(
+                    (
+                        junction.subject,
+                        junction.owner,
+                        {entry: sorted(args) for entry, args in sorted(supplied.items())},
+                    )
                 )
-            )
     return found
 
 

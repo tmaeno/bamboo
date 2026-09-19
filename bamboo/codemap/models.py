@@ -421,6 +421,14 @@ REQUEST = "request"
 SELF_REPAIRING_TRIGGERS = frozenset({POLLED})
 
 
+#: How control got in.  Two shapes, found two ways: a call is resolved by
+#: method name, a dispatch is a constructed worker being started -- and their
+#: ``arg_binding`` keys come from different namespaces, so the pair is what
+#: makes the two comparable only with their own kind.
+ARRIVES_BY_CALL = "call"
+ARRIVES_BY_DISPATCH = "dispatch"
+
+
 class EntryPoint(BaseModel):
     """One way control reaches a junction, and what it hands over on the way.
 
@@ -446,7 +454,25 @@ class EntryPoint(BaseModel):
     )
     arg_binding: dict[str, str] = Field(
         default_factory=dict,
-        description="Keyword arguments this entry supplies at that call.",
+        description=(
+            "What this entry hands over, keyed by the name the callee's body "
+            "reads it under -- the keyword for a call, the field for a "
+            "constructed worker.  Comparable only within one ``reached_by``: "
+            "the two are different namespaces and an empty set means "
+            "'positional, not bound' on one side and 'handed nothing' on the "
+            "other."
+        ),
+    )
+    reached_by: str = Field(
+        default=ARRIVES_BY_CALL,
+        description=(
+            "``call`` or ``dispatch``.  A call is resolved by method name; a "
+            "dispatch is a knight constructing a worker and starting it, which "
+            "no name match reaches.  Recorded because the two bind their "
+            "arguments differently, and comparing one against the other "
+            "reports a difference in spelling as a difference in what the "
+            "path can do."
+        ),
     )
 
 
@@ -1479,6 +1505,32 @@ class CandidateBranch(BaseModel):
     )
 
 
+class Handover(BaseModel):
+    """What one entry passed in on its way to this candidate.
+
+    Carried on the candidate because the arm's own body is where a trace
+    starts and the body reads ``self.taskList``, not ``taskList``.  Naming the
+    function that filled it, and with what, is the one step forward from the
+    anchor that cannot be taken by reading the arm's own module: the knight
+    hands its rows to a worker through a constructor and a thread, so there is
+    no call to follow.
+    """
+
+    entry: str = Field(..., description="Module the control came from.")
+    via: str = Field(..., description="Function there that made the handover.")
+    reached_by: str = Field(
+        ...,
+        description=(
+            "``call`` or ``dispatch`` -- which tells a reader what the keys "
+            "of ``fields`` are, a parameter or a worker's own attribute."
+        ),
+    )
+    fields: dict[str, str] = Field(
+        default_factory=dict,
+        description="Name the arm's body reads it under -> the expression supplied.",
+    )
+
+
 class Candidate(BaseModel):
     """One junction that could have produced the observed value.
 
@@ -1531,6 +1583,15 @@ class Candidate(BaseModel):
     )
     triggers: list[str] = Field(default_factory=list)
     entries: list[str] = Field(default_factory=list)
+    handovers: list[Handover] = Field(
+        default_factory=list,
+        description=(
+            "Entries that passed something in, with what.  Only the ones that "
+            "did: an entry handing over nothing says nothing, and listing it "
+            "would make 'this path omits the argument' and 'this reader does "
+            "not bind positionals' look the same."
+        ),
+    )
     verdict: str = Field(
         default=UNSETTLED,
         description=f"{SEEN} | {ELIMINATED} | {UNSETTLED} | {UNASKABLE}",

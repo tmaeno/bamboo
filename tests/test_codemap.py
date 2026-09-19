@@ -8478,3 +8478,238 @@ def test_the_new_node_kind_is_on_every_list_that_has_to_know_about_it():
 
     assert NodeType.LOOP_CUT in CODE_MAP_NODE_TYPES
     assert NodeType.LOOP_CUT.value in diff.CONTENT_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# The uplink a knight uses: construct a worker, dispatch it, and the work runs
+# in another class.  Not a call, so no name resolution reaches it.
+# ---------------------------------------------------------------------------
+
+_THREAD_BASE = """
+class WorkerThread(threading.Thread):
+    def __init__(self, workerSemaphore, threadPool, logger):
+        self.threadPool = threadPool
+
+    def run(self):
+        self.runImpl()
+"""
+
+_KNIGHT_WITH_WORKER = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class TaskCommando(JediKnight):
+    def start(self):
+        while True:
+            tmpList = self.taskBufferIF.getTasksToExecCommand_JEDI(vo, prodSourceLabel)
+            taskList = ListWithLock(tmpList)
+            threadPool = ThreadPool()
+            thr = TaskCommandoThread(taskList, threadPool, self.taskBufferIF, self.pid)
+            thr.start()
+            time.sleep(60)
+
+
+class TaskCommandoThread(WorkerThread):
+    def __init__(self, taskList, threadPool, taskbufferIF, pid):
+        WorkerThread.__init__(self, None, threadPool, logger)
+        self.taskList = taskList
+        self.taskBufferIF = taskbufferIF
+        self.pid = pid
+
+    def runImpl(self):
+        self.settle()
+
+    def settle(self):
+        taskSpec.status = "passed"
+"""
+
+
+def _worker_modules(knight: str = _KNIGHT_WITH_WORKER):
+    return [
+        _module(_THREAD_BASE, "pandajedi/jedicore/ThreadUtils.py"),
+        _module(knight, "pandajedi/jediorder/TaskCommando.py"),
+    ]
+
+
+def _worker_junction(knight: str = _KNIGHT_WITH_WORKER) -> JunctionNode:
+    """An arm inside the worker class, anchored where the write really is."""
+    line = knight.splitlines().index('        taskSpec.status = "passed"') + 1
+    junction = _junction("pandajedi/jediorder/TaskCommando.py::settle")
+    junction.anchor = Anchor(
+        package="pandajedi",
+        file="pandajedi/jediorder/TaskCommando.py",
+        line_start=line,
+        line_end=line,
+    )
+    return junction
+
+
+def test_a_dispatched_worker_makes_its_construction_site_the_entry():
+    """``start`` builds the worker and hands it a list; ``runImpl`` does the work.
+
+    No call connects them -- the edge is a constructor argument and a thread
+    dispatch -- so the method-name resolution the rest of the slice turns on
+    reaches nothing.  Thirteen of the map's entry points sit on this shape and
+    every one of them had an empty ``via``.
+    """
+    junction = _worker_junction()
+    trigger.attach([junction], _worker_modules(), set())
+
+    worker = [e for e in junction.entry_points if e.via == "start"]
+    assert worker, [(e.trigger, e.entry, e.via) for e in junction.entry_points]
+    assert worker[0].entry == "pandajedi/jediorder/TaskCommando.py"
+    assert worker[0].trigger == "polled"
+
+
+def test_the_handover_is_keyed_by_the_name_the_worker_body_uses():
+    """``self.taskBufferIF = taskbufferIF`` -- the two names differ.
+
+    The body of an arm says ``self.taskList``, so that is what a trace asks
+    about; keying by the parameter would make every reader re-derive the
+    constructor's own assignment.
+    """
+    junction = _worker_junction()
+    trigger.attach([junction], _worker_modules(), set())
+
+    binding = next(e.arg_binding for e in junction.entry_points if e.via == "start")
+    assert binding == {
+        "taskList": "taskList",
+        "taskBufferIF": "self.taskBufferIF",
+        "pid": "self.pid",
+    }
+    # ``threadPool`` goes to the base class and the body never names it, so it
+    # is left out rather than reported under the parameter's name.
+    assert "threadPool" not in binding
+
+
+def test_a_worker_that_is_never_dispatched_opens_nothing():
+    """Two message processors keep a worker and call one of its methods.
+
+    That edge is a call, which the name resolution already follows.  Claiming
+    the dispatch as well would put ``runImpl`` behind an entry that never runs
+    it.
+    """
+    stored = _KNIGHT_WITH_WORKER.replace("            thr.start()\n", "")
+    junction = _worker_junction(stored)
+    trigger.attach([junction], _worker_modules(stored), set())
+
+    assert [e for e in junction.entry_points if e.via == "start"] == []
+
+
+def test_two_worker_classes_in_one_module_are_told_apart():
+    """``TaskBroker`` declares two, and the owner spells neither.
+
+    Both write ``runImpl``, so ``module::runImpl`` names both; the anchor is
+    what says which class the line is in.
+    """
+    source = """
+logger = PandaLogger().getLogger(__name__.split(".")[-1])
+
+
+class TaskBroker(JediKnight):
+    def start(self):
+        while True:
+            thr = TaskCheckerThread(taskList)
+            thr.start()
+            time.sleep(60)
+
+
+class TaskCheckerThread(WorkerThread):
+    def __init__(self, taskList):
+        self.taskList = taskList
+
+    def runImpl(self):
+        taskSpec.status = "checked"
+
+
+class TaskBrokerThread(WorkerThread):
+    def __init__(self, other):
+        self.other = other
+
+    def runImpl(self):
+        taskSpec.status = "brokered"
+"""
+    modules = [
+        _module(_THREAD_BASE, "pandajedi/jedicore/ThreadUtils.py"),
+        _module(source, "pandajedi/jediorder/TaskBroker.py"),
+    ]
+    checker_line = source.splitlines().index('        taskSpec.status = "checked"') + 1
+    broker_line = source.splitlines().index('        taskSpec.status = "brokered"') + 1
+
+    checker = _junction("pandajedi/jediorder/TaskBroker.py::runImpl")
+    checker.anchor = Anchor(
+        package="pandajedi", file="x", line_start=checker_line, line_end=checker_line
+    )
+    broker = _junction("pandajedi/jediorder/TaskBroker.py::runImpl")
+    broker.anchor = Anchor(
+        package="pandajedi", file="x", line_start=broker_line, line_end=broker_line
+    )
+    trigger.attach([checker, broker], modules, set())
+
+    assert [e.via for e in checker.entry_points if e.via] == ["start"]
+    # Nothing constructs ``TaskBrokerThread`` here, so its arm gets no uplink
+    # even though it shares a module and a method name with one that does.
+    assert [e.via for e in broker.entry_points if e.via] == []
+
+
+def test_a_call_and_a_dispatch_are_not_compared_with_each_other():
+    """``ContentsFeeder`` is reached both ways, and the keys are not the same kind.
+
+    A call binds by keyword and a dispatch by the field the worker's body
+    reads, so an empty set means "positional, not bound" on one side and
+    "handed nothing" on the other.  Comparing across them took the report from
+    13 rows to 69 and called a difference in spelling a guard that cannot fire.
+    """
+    junction = _junction("pandajedi/jediorder/ContentsFeeder.py::feed")
+    junction.entry_points = [
+        EntryPoint(
+            trigger="message",
+            entry="pandajedi/jedimsgprocessor/jedi_contents_feeder_msg_processor.py",
+            via="feed",
+        ),
+        EntryPoint(
+            trigger="polled",
+            entry="pandajedi/jediorder/ContentsFeeder.py",
+            via="start",
+            arg_binding={"taskDsList": "dsList", "pid": "self.pid"},
+            reached_by="dispatch",
+        ),
+    ]
+
+    assert trigger.differing_arguments([junction]) == []
+
+
+def test_two_dispatch_sites_handing_over_different_arguments_are_reported():
+    """The finding the uplink was built for.
+
+    ``panda_to_jedi_msg_processor`` constructs ``JobGeneratorThread`` without
+    ``resource_types`` and ``JobGenerator`` constructs it with, so the
+    candidate causes differ by which one ran -- which the branch table cannot
+    show and an empty ``arg_binding`` could not either.
+    """
+    junction = _junction("pandajedi/jediorder/JobGenerator.py::doGenerate")
+    junction.entry_points = [
+        EntryPoint(
+            trigger="polled",
+            entry="pandajedi/jediorder/JobGenerator.py",
+            via="start",
+            arg_binding={"inputList": "inputList", "resource_types": "resource_types"},
+            reached_by="dispatch",
+        ),
+        EntryPoint(
+            trigger="message",
+            entry="pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py",
+            via="process",
+            arg_binding={"inputList": "inputList"},
+            reached_by="dispatch",
+        ),
+    ]
+
+    reported = trigger.differing_arguments([junction])
+
+    assert len(reported) == 1
+    _subject, _owner, supplied = reported[0]
+    assert supplied["pandajedi/jediorder/JobGenerator.py"] == [
+        "inputList",
+        "resource_types",
+    ]
