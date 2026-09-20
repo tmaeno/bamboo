@@ -2545,3 +2545,102 @@ async def test_two_triggers_on_one_construction_are_one_handover():
     candidate = [c for c in strategy.candidates if c.owner == owner][0]
     assert len(candidate.handovers) == 1
     assert sorted(candidate.triggers) == ["command", "polled"]
+
+
+# --------------------------------------------------------------------------- #
+# the use-time walk, wired to the readings the map chose
+# --------------------------------------------------------------------------- #
+
+_WORKER = '''\
+class Commando:
+    def start(self):
+        rows = self.taskBufferIF.getTasksToExecCommand_JEDI(vo, label)
+        taskList = ListWithLock(rows)
+        thr = CommandoThread(taskList)
+
+
+class CommandoThread:
+    def runImpl(self):
+        tasks = self.taskList.get(10)
+        spec.status = tasks[0]
+'''
+
+
+def _traceable(tmp_path, *, blob_sha: str = "", handovers=None):
+    root = tmp_path / "pandajedi"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "commando.py").write_text(_WORKER)
+    candidate = models.Candidate(
+        owner="pandajedi/commando.py::runImpl",
+        file="pandajedi/commando.py",
+        blob_sha=blob_sha,
+        gloss_key="k",
+        outcome="finishing",
+        handovers=handovers or [],
+    )
+    strategy = models.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[candidate],
+        readings=[
+            models.Reading(
+                owner=candidate.owner,
+                file=candidate.file,
+                blob_sha=blob_sha,
+                gloss_key="k",
+                lines=[11],
+            )
+        ],
+    )
+    return strategy, {"pandajedi": root}
+
+
+def test_the_walk_uses_the_handover_the_candidate_carries(tmp_path):
+    # The readings group by function, so the crossing has to be looked up from
+    # the candidates -- it is a property of the junction the map recorded.
+    strategy, roots = _traceable(
+        tmp_path,
+        handovers=[
+            models.Handover(
+                entry="pandajedi/commando.py",
+                via="start",
+                reached_by="dispatch",
+                fields={"taskList": "taskList"},
+            )
+        ],
+    )
+
+    strategy_mod.attach_traces(strategy, roots)
+
+    steps = strategy.readings[0].trace
+    assert strategy.readings[0].trace_note == ""
+    assert [s.terminal for s in steps if s.terminal] == [models.STOP_UPSTREAM]
+
+
+def test_without_the_handover_the_walk_stops_at_the_worker_attribute(tmp_path):
+    strategy, roots = _traceable(tmp_path)
+
+    strategy_mod.attach_traces(strategy, roots)
+
+    assert [s.terminal for s in strategy.readings[0].trace if s.terminal] == [
+        models.STOP_PARAMETER
+    ]
+
+
+def test_a_tree_the_map_was_not_built_from_is_not_walked(tmp_path):
+    strategy, roots = _traceable(tmp_path, blob_sha="0" * 40)
+
+    strategy_mod.attach_traces(strategy, roots)
+
+    assert strategy.readings[0].trace == []
+    assert "not the one that was mapped" in strategy.readings[0].trace_note
+
+
+def test_no_source_tree_leaves_the_reading_as_coordinates(tmp_path):
+    strategy, _roots = _traceable(tmp_path)
+
+    strategy_mod.attach_traces(strategy, {})
+
+    assert strategy.readings[0].trace == []
+    assert strategy.readings[0].trace_note == ""

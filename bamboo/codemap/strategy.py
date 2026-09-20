@@ -61,7 +61,7 @@ import re
 from collections import Counter
 from typing import Optional
 
-from bamboo.codemap import evidence
+from bamboo.codemap import evidence, trace
 from bamboo.codemap.evidence import GrepQuery
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
@@ -1856,6 +1856,53 @@ def _readings(candidates: list[Candidate], observations: list[Observation]) -> l
     for reading in grouped.values():
         reading.lines.sort()
     return sorted(grouped.values(), key=lambda r: r.owner)
+
+
+def attach_traces(
+    strategy: Strategy,
+    roots: dict,
+    classify=None,
+) -> None:
+    """Walk the source for each reading and record why those arms ran.
+
+    A separate call rather than part of ``derive`` because it needs a source
+    tree, and needing one is the difference between the two phases this whole
+    design keeps apart: a derivation must be checkable before anything is
+    read, and the reading is what the source is for.
+
+    The handovers come from the candidates rather than from the readings,
+    which group by function: the crossing is a property of the junction the
+    map recorded, and two junctions in one function were reached the same way.
+
+    *classify* names the interfaces, and is PanDA's rather than the walk's.
+    Imported here rather than at the top for the layering ``factory`` already
+    uses -- the walk is about Python, and which attribute means DDM is about
+    this corpus.
+    """
+    if not roots or not strategy.readings:
+        return
+    if classify is None:
+        from bamboo.codemap.panda.provenance import classify as classify_panda
+
+        classify = classify_panda
+    handovers: dict[str, list] = {}
+    for candidate in strategy.candidates:
+        if candidate.handovers:
+            handovers.setdefault(candidate.owner, list(candidate.handovers))
+    for entry in strategy.readings:
+        if not entry.file or not entry.lines:
+            continue
+        steps, note = trace.walk(
+            roots,
+            file=entry.file,
+            owner=entry.owner,
+            lines=entry.lines,
+            expected_sha=entry.blob_sha,
+            handovers=handovers.get(entry.owner, ()),
+            classify=classify,
+        )
+        entry.trace = steps
+        entry.trace_note = note
 
 
 def survivors(strategy: Strategy) -> list[Candidate]:

@@ -37,6 +37,7 @@ from typing import Callable, Optional
 import click
 
 from bamboo.codemap import evidence as evidence_mod
+from bamboo.codemap import models as models_mod
 from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
@@ -384,6 +385,50 @@ def _report_leads(strategy: Strategy, top: int, full: bool) -> None:
         click.echo(f"  … {len(grouped) - len(fields)} more (--full)")
 
 
+def _report_walk(entry, top: int, full: bool) -> None:
+    """Why the arms of one reading ran with the value they did.
+
+    Printed under the reading rather than as its own section: the walk starts
+    at those arms, and a list of steps away from the function they belong to
+    is a list of facts about nothing in particular.
+
+    **Guards and what the guard cannot say are kept on separate lines.**  Only
+    ``ast.If`` contributes to a path condition, and 86% of the map's arms have
+    a ``try``, a handler, a loop or an early exit on the way to them, so a
+    step with nothing under ``when`` is one the walk found no test for -- not
+    one that is unconditional.  Folding the two together is how a reader comes
+    to read silence as certainty.
+    """
+    if entry.trace_note:
+        click.echo(f"        {entry.trace_note}")
+    if not entry.trace:
+        return
+    click.echo(
+        "        why it ran -- necessary conditions only; 'also' is what the "
+        "guard cannot say"
+    )
+    shown = entry.trace if full else entry.trace[:top]
+    for step in shown:
+        if step.kind == models_mod.TRACE_UNBOUND:
+            head = step.name
+        elif step.name:
+            head = f"{step.name} = {step.value}"
+        else:
+            head = step.value
+        click.echo(f"          {step.line or '':>5}  {step.kind:<11} {head}")
+        if step.guards:
+            click.echo(f"                 when   {' · '.join(step.guards)}")
+        elif step.kind != models_mod.TRACE_UNBOUND:
+            click.echo("                 when   no test above it")
+        for unsaid in step.unseen if full else step.unseen[:2]:
+            click.echo(f"                 also   {unsaid}")
+        if step.terminal:
+            detail = f" -- {step.detail}" if step.detail else ""
+            click.echo(f"                 stops  {step.terminal}{detail}")
+    if len(entry.trace) > len(shown):
+        click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
+
+
 def _report_reading(
     strategy: Strategy, roots: Optional[dict], top: int, full: bool
 ) -> None:
@@ -443,6 +488,7 @@ def _report_reading(
                 f"        match against  {entry.log_pattern}"
                 f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
             )
+        _report_walk(entry, top, full)
         if full and region is not None:
             click.echo(region.marked(entry.lines))
     if len(strategy.readings) > len(shown):
@@ -732,8 +778,10 @@ async def _investigate(
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     default=None,
     help=(
-        "Read the code the map points at from this tree.  Without it only the "
-        "coordinates are printed; the map names the text either way."
+        "Read the code the map points at from this tree.  Defaults to the "
+        "installed distribution, which is what the stored map is usually "
+        "built from; a tree that is not the map's is refused rather than "
+        "traced, since a trace is shaped like an answer."
     ),
 )
 @click.option(
@@ -849,6 +897,14 @@ def main(
         ev.save(evidence_path)
         click.echo(f"evidence written to {evidence_path}")
 
+    # The installed distribution by default: the walk computes from the source
+    # rather than merely pointing at it, so having no tree turns the reading
+    # back into coordinates, and that is a worse default than the release the
+    # map was most likely built from.
+    roots = PandaCodeMapPlugin._resolve_roots(source_root)
+    for hop in investigation.hops:
+        strategy_mod.attach_traces(hop.strategy, roots)
+
     if len(investigation.hops) > 1 or max_hops > 1:
         _report_trace(investigation)
     for hop in investigation.hops:
@@ -870,12 +926,7 @@ def main(
             _report_candidates(strategy, top, full, evaluated or named)
         _report_observations(strategy, top, full, evaluated)
         _report_leads(strategy, top, full)
-        _report_reading(
-            strategy,
-            PandaCodeMapPlugin._resolve_roots(source_root) if source_root else None,
-            top,
-            full,
-        )
+        _report_reading(strategy, roots, top, full)
         _report_findings(strategy, top, full)
 
 
