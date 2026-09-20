@@ -8993,3 +8993,130 @@ def test_a_write_with_no_if_is_not_reported_as_unconditional():
 
     assert pathcond.path_condition(node) == []
     assert kinds == [pathcond.UNSEEN_WITH, pathcond.UNSEEN_LOOP]
+
+
+_TIMED = '''\
+class TimedMethod:
+    def __init__(self, method, timeout):
+        self.method = method
+        self.timeout = timeout
+
+    def __call__(self, *var):
+        self.result = self.method(*var)
+
+    def run(self, *var):
+        thr = threading.Thread(target=self, args=var)
+        thr.start()
+'''
+
+_LOGWRAPPER = '''\
+class LogWrapper:
+    def __init__(self, log, prefix):
+        self.logger = log
+        self.prefix = prefix
+
+    def debug(self, message):
+        self.logger.debug(self.prefix + message)
+'''
+
+
+def test_a_class_that_calls_what_it_was_handed_is_read_as_a_forwarder():
+    """Read from the declaration rather than from a list of names.  Requiring
+    the class to *call* the field it kept is what separates ``TimedMethod``
+    from ``LogWrapper``, which keeps a logger and calls a method *on* it."""
+    modules = [
+        _module(_TIMED, "pandaserver/api/v1/common.py"),
+        _module(_LOGWRAPPER, "pandaserver/srvcore/LogWrapper.py"),
+    ]
+
+    assert trigger.forwarder_classes(modules) == {"TimedMethod": ("method", 0)}
+
+
+def test_a_method_passed_as_a_value_reaches_the_module_that_passed_it():
+    """``TimedMethod(gtb.updateJobStatus, timeout).run(...)`` runs
+    ``updateJobStatus``, but the method arrives as a value and no name-based
+    reading sees a call.  ``updateJobStatus`` reported that no log file named
+    it, which is the junction the pilot's ``holding`` goes through."""
+    modules = [
+        _module(_TIMED, "pandaserver/api/v1/common.py"),
+        _module(
+            "def update_job(req, job_id, status):\n"
+            "    while True:\n"
+            "        time.sleep(1)\n"
+            "    timed_method = TimedMethod(global_task_buffer.updateJobStatus, 10)\n"
+            "    timed_method.run(job_id, status)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+        _module(
+            "class DBProxy:\n"
+            "    def updateJobStatus(self, job_id, status):\n"
+            "        pass\n",
+            "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+        ),
+    ]
+
+    reaching = trigger.reaching_modules(modules)
+    entries = reaching["pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py"]
+
+    assert [entry for entry, _door, _call in entries["updateJobStatus"]] == [
+        "pandaserver/api/v1/pilot_api.py"
+    ]
+
+
+def test_the_forwarded_edge_binds_the_arguments_of_the_later_call():
+    """``TimedMethod(...)`` carries the callee and ``.run(...)`` carries its
+    arguments.  Reading them off the constructor would report the timeout as
+    what was passed to the method."""
+    modules = [
+        _module(_TIMED, "pandaserver/api/v1/common.py"),
+        _module(
+            "def update_job(req):\n"
+            "    while True:\n"
+            "        time.sleep(1)\n"
+            "    timed_method = TimedMethod(global_task_buffer.updateJobStatus, 10)\n"
+            "    timed_method.run(job_id=7, status='holding')\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+        _module(
+            "class DBProxy:\n"
+            "    def updateJobStatus(self, job_id, status):\n"
+            "        pass\n",
+            "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+        ),
+    ]
+
+    reaching = trigger.reaching_modules(modules)
+    _entry, _door, call = reaching[
+        "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py"
+    ]["updateJobStatus"][0]
+
+    assert trigger._arg_binding(call) == {"job_id": "7", "status": "'holding'"}
+
+
+def test_a_bare_attribute_passed_to_anything_else_is_not_a_forwarded_call():
+    """The weaker rule -- an attribute passed as an argument -- matches 432
+    sites in the corpus, and the receivers are ``len``, ``str``, ``int``,
+    ``hasattr`` and ``getattr``.  Requiring a declared forwarder is what keeps
+    those out without a list of exceptions."""
+    modules = [
+        _module(_LOGWRAPPER, "pandaserver/srvcore/LogWrapper.py"),
+        _module(
+            "def update_job(req):\n"
+            "    while True:\n"
+            "        time.sleep(1)\n"
+            "    n = len(global_task_buffer.updateJobStatus)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+        _module(
+            "class DBProxy:\n"
+            "    def updateJobStatus(self):\n"
+            "        pass\n",
+            "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+        ),
+    ]
+
+    reaching = trigger.reaching_modules(modules)
+
+    assert "updateJobStatus" not in reaching.get(
+        "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py", {}
+    )

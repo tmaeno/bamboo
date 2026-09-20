@@ -176,8 +176,162 @@ def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
     return frozenset(bound)
 
 
+def forwarder_classes(modules: list[SourceModule]) -> dict[str, tuple[str, int]]:
+    """Return ``{class: (parameter, its position)}`` for the call forwarders.
+
+    A class whose ``__init__`` keeps a parameter on ``self`` and whose other
+    methods *call* it is not holding data, it is holding a callee:
+    ``TimedMethod(global_task_buffer.updateJobStatus, timeout).run(...)`` runs
+    ``updateJobStatus``, and because the method arrives as a value rather than
+    a call, every name-based reading walks straight past it.  Thirteen sites
+    in ``api/v1`` cross this way, and ``updateJobStatus`` -- the junction the
+    pilot's ``holding`` goes through -- reported that no log file named it.
+
+    **Read from the declaration, not from a list of names.**  Naming
+    ``TimedMethod`` here would be a constant that stops being true, and the
+    weaker rule "a bare attribute passed as an argument" is far too wide: the
+    corpus passes one 432 times, and the receivers are ``len``, ``str``,
+    ``int``, ``hasattr``, ``getattr`` and ``LogWrapper``.  Requiring the class
+    to *call* what it stored separates them without a list -- measured over
+    the corpus, exactly two classes qualify, ``TimedMethod.method`` and
+    ``CachedObject.updateFunc``, and ``LogWrapper``'s nineteen sites do not.
+
+    A name two modules declare is dropped rather than chosen between, the same
+    restriction :func:`worker_classes` puts on a dispatched worker: the
+    construction site names the class and nothing else.
+    """
+    found: dict[str, list[tuple[str, int]]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            held = _held_callables(node)
+            if held:
+                found.setdefault(node.name, []).append(held)
+    return {name: places[0] for name, places in found.items() if len(places) == 1}
+
+
+def _held_callables(cls: ast.ClassDef) -> Optional[tuple[str, int]]:
+    """``(parameter, position)`` for the one callee *cls* stores and calls.
+
+    One, not several: two forwarded fields would make a construction site
+    ambiguous about which argument is the callee, and the corpus has none.
+    """
+    init = _initialiser(cls)
+    if init is None:
+        return None
+    parameters = [argument.arg for argument in init.args.args[1:]]
+    kept: dict[str, str] = {}
+    for node in ast.walk(init):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Attribute)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "self"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in parameters
+        ):
+            kept[node.targets[0].attr] = node.value.id
+    called = {
+        node.func.attr
+        for method in cls.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and method is not init
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr in kept
+    }
+    if len(called) != 1:
+        return None
+    field = next(iter(called))
+    parameter = kept[field]
+    return parameter, parameters.index(parameter)
+
+
+def _forwarded_call(
+    call: ast.Call, forwarders: dict[str, tuple[str, int]]
+) -> Optional[str]:
+    """The method name a construction of a forwarder hands over, if any."""
+    if not isinstance(call.func, ast.Name):
+        return None
+    held = forwarders.get(call.func.id)
+    if held is None:
+        return None
+    parameter, position = held
+    supplied: Optional[ast.expr] = None
+    for keyword in call.keywords:
+        if keyword.arg == parameter:
+            supplied = keyword.value
+    if supplied is None and position < len(call.args):
+        supplied = call.args[position]
+    if isinstance(supplied, ast.Attribute):
+        return supplied.attr
+    return None
+
+
+def _forwarded_sites(
+    module: SourceModule, forwarders: dict[str, tuple[str, int]]
+) -> list[tuple[tuple[str, ...], str, ast.Call]]:
+    """Call sites a forwarder's construction makes on someone else's behalf.
+
+    The call recorded is the one made *on the constructed object*, not the
+    construction: ``TimedMethod(...)`` carries the callee and
+    ``timed_method.run(job_id, tmp_status, ...)`` carries its arguments, so
+    reading the arguments off the constructor would report the timeout as
+    what was passed to ``updateJobStatus``.  Where the construction is not
+    bound to a name, or nothing is called on it, the construction stands in --
+    the edge is still true and only the binding is missing.
+    """
+    if not forwarders:
+        return []
+    sites: list[tuple[tuple[str, ...], str, ast.Call]] = []
+    for func, _owner in functions_with_owner(module.tree):
+        built: list[tuple[Optional[str], str, ast.Call]] = []
+        for node in ast.walk(func):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                method = _forwarded_call(node.value, forwarders)
+                if method:
+                    built.extend(
+                        (_bound_name(target), method, node.value)
+                        for target in node.targets
+                    )
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                method = _forwarded_call(node.value, forwarders)
+                if method:
+                    built.append((None, method, node.value))
+        for bound, method, construction in built:
+            sites.append(
+                (
+                    (func.name,),
+                    method,
+                    _called_on(func, bound, construction) if bound else construction,
+                )
+            )
+    return sites
+
+
+def _called_on(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, bound: str, fallback: ast.Call
+) -> ast.Call:
+    """The first call made on *bound* inside *func*, or *fallback*."""
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == bound
+        ):
+            return node
+    return fallback
+
+
 def _outward_call_sites(
     module: SourceModule,
+    forwarders: Optional[dict[str, tuple[str, int]]] = None,
 ) -> list[tuple[tuple[str, ...], str, ast.Call]]:
     """Return ``[(enclosing functions, method, call)]`` for *module*'s real calls.
 
@@ -232,10 +386,14 @@ def _outward_call_sites(
                 if not (isinstance(receiver, ast.Name) and receiver.id in pooled):
                     sites.append((enclosing, child.func.attr, child))
             queue.append((child, inner_names, inner_pooled))
+    sites.extend(_forwarded_sites(module, forwarders or {}))
     return sites
 
 
-def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
+def _outward_calls(
+    module: SourceModule,
+    forwarders: Optional[dict[str, tuple[str, int]]] = None,
+) -> dict[str, ast.Call]:
     """Return ``{method name: first call}`` for the calls *module* really makes.
 
     :func:`_calls_by_name` with the facade hop removed -- see
@@ -244,7 +402,7 @@ def _outward_calls(module: SourceModule) -> dict[str, ast.Call]:
     that is the call whose keyword arguments distinguish one entry from another.
     """
     calls: dict[str, ast.Call] = {}
-    for _enclosing, method, call in _outward_call_sites(module):
+    for _enclosing, method, call in _outward_call_sites(module, forwarders):
         calls.setdefault(method, call)
     return calls
 
@@ -455,9 +613,10 @@ def reaching_modules(
     a name is followed only where it means one thing (:func:`sole_definitions`)
     or where the entry imports the module it names.
     """
+    forwarders = forwarder_classes(modules)
     callers: dict[str, list[tuple[str, ast.Call]]] = {}
     for module in modules:
-        for name, call in _outward_calls(module).items():
+        for name, call in _outward_calls(module, forwarders).items():
             callers.setdefault(name, []).append((module.rel_path, call))
 
     implemented = sole_definitions(modules)
