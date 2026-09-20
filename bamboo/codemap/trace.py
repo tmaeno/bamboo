@@ -344,6 +344,7 @@ class _Walk:
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
         self.seen: set[tuple[str, str]] = set()
+        self._scopes: dict[tuple[str, str], str] = {}
         self.note = ""
         self.queue: deque[tuple[_Frame, str, int]] = deque()
 
@@ -428,6 +429,27 @@ class _Walk:
     def resolver(self, frame: _Frame):
         return lambda name: pathcond.single_definition(frame.func, name)
 
+    def scope_key(self, frame: _Frame) -> str:
+        """What a name asked in *frame* is unique within.
+
+        A local belongs to its function.  ``self.<field>`` belongs to the
+        object, so the class is its scope and not the method that happened to
+        read it -- and once stage three answers a field from every method of
+        the class, asking again from a sibling frame would replay the same
+        assignments under a second heading.  Keyed by the class where there is
+        one, so the two kinds of name cannot collide.
+        """
+        held = self._scopes.get((frame.file, frame.owner))
+        if held is not None:
+            return held
+        parsed = self.module(frame.file)
+        cls = None
+        if parsed is not None:
+            cls = pathcond.class_of(parsed[1], frame.func)
+        key = f"{frame.file}::{cls.name}" if cls is not None else f"{frame.file}::{frame.owner}"
+        self._scopes[(frame.file, frame.owner)] = key
+        return key
+
     def want(self, frame: _Frame, names: Sequence[str], depth: int) -> None:
         if depth > self.budget.depth:
             self._exhausted("depth")
@@ -435,7 +457,10 @@ class _Walk:
         for name in names:
             if name in frame.imports:
                 continue
-            key = (f"{frame.file}::{frame.owner}", name)
+            if name.startswith("self."):
+                key = (self.scope_key(frame), name)
+            else:
+                key = (f"{frame.file}::{frame.owner}", name)
             if key in self.seen:
                 continue
             self.seen.add(key)
@@ -566,6 +591,71 @@ class _Walk:
             )
         )
 
+    def _sibling(self, frame: _Frame, method: ast.AST) -> Optional[_Frame]:
+        """A frame for another method of the same class.
+
+        Its own frame, not the caller's, because the guards the walk reports
+        come from the statement's ancestors: recording ``__init__``'s
+        assignment inside the frame of the method that read it would print a
+        condition that never dominated the write.  Handovers travel with it --
+        they are a fact about how the object was constructed, which is as true
+        in one of its methods as in another.
+        """
+        owner = f"{frame.owner.rsplit('::', 1)[0]}::{method.name}"
+        key = (frame.file, owner)
+        held = self.frames.get(key)
+        if held is not None:
+            return held
+        if key in self.frames:
+            return None
+        if len(self.frames) >= self.budget.functions:
+            self._exhausted("functions")
+            self.frames[key] = None
+            return None
+        self.frames[key] = _Frame(
+            frame.file, owner, method, frame.handovers, frame.imports
+        )
+        return self.frames[key]
+
+    def _assigned_field(self, frame: _Frame, name: str, field: str, depth: int) -> bool:
+        """Stages two and three: ``self.<field> = ...`` in scope.
+
+        Ordered, and the order is the design.  ``classify()`` has already run
+        above this -- it has to, because ``self.cur`` is assigned in an
+        ``__init__`` like any other field and is still the database, and this
+        reading would otherwise answer a question about a row with a line
+        about a connection.
+
+        Two before three because the nearer assignment is the one whose guards
+        reached the arm, and both rather than either because the answer is a
+        set: ``self.jobs`` is written in three methods of
+        ``setupper_atlas_plugin`` and which one ran last is a fact about the
+        run, not about the text.  Nothing is folded.
+        """
+        answered = False
+        for expression in pathcond.attribute_expressions(frame.func, field):
+            self._binding(frame, name, expression, depth)
+            answered = True
+        parsed = self.module(frame.file)
+        if parsed is None:
+            return answered
+        _source, tree = parsed
+        cls = pathcond.class_of(tree, frame.func)
+        if cls is None:
+            return answered
+        for holder in [cls, *pathcond.bases_in(tree, cls)]:
+            for method in pathcond.methods_of(holder):
+                if method is frame.func:
+                    continue
+                other = None
+                for expression in pathcond.attribute_expressions(method, field):
+                    other = other or self._sibling(frame, method)
+                    if other is None:
+                        break
+                    self._binding(other, name, expression, depth)
+                    answered = True
+        return answered
+
     def _field(self, frame: _Frame, name: str, depth: int) -> None:
         field = name.split(".", 1)[1]
         try:
@@ -587,6 +677,7 @@ class _Walk:
                 )
             )
             return
+        answered = self._assigned_field(frame, name, field, depth)
         # Only a dispatch: its keys are the worker's own attributes, which is
         # what ``self.<field>`` is.  A call's keys are parameter names, and
         # letting those answer here would hand ``self.x`` whatever a caller
@@ -595,6 +686,11 @@ class _Walk:
             if handover.reached_by == ARRIVES_BY_DISPATCH and field in handover.fields:
                 self._handover(frame, name, handover, depth)
                 return
+        if answered:
+            # The assignments are the answer.  Saying "no handover names it"
+            # underneath them would report an absence as though it were the
+            # reason, which is the shape this whole change is about.
+            return
         self.record(
             TraceStep(
                 kind=TRACE_UNBOUND,

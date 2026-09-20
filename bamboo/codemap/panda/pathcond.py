@@ -119,6 +119,127 @@ def assigned_expressions(
     return found
 
 
+def attribute_expressions(
+    scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, field: str
+) -> list[ast.expr]:
+    """Every expression bound to ``self.<field>`` inside *scope*.
+
+    The ``ast.Attribute`` sibling of :func:`assigned_expressions`, and a
+    separate function rather than a widening of it.  That one is shared with
+    the build, where its targets being bare names is load-bearing: the write
+    slice reads it to find the value a bind was filled from, and an attribute
+    target there would attach a spec field's history to a local's.  Widening
+    it would move the map; this is read at use time only.
+
+    Scoped to one field rather than returning a mapping, because the caller
+    arrives with the field in hand and the classes this is asked about carry
+    hundreds of attributes between them -- ``JobSpec`` alone declares 126.
+
+    Nested functions are not entered.  A closure assigning ``self.x`` runs
+    when it is called and not where it is written, so its guards are not the
+    ones that reached the arm; the walk would report a condition that never
+    dominated the write.
+    """
+    found: list[ast.expr] = []
+    for node in _own_body(scope):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            for bound in _bound_names(target):
+                if bound == field and node.value is not None:
+                    found.append(node.value)
+    return found
+
+
+def _bound_names(target: ast.AST) -> list[str]:
+    """The ``self.<field>`` names an assignment target binds."""
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    ):
+        return [target.attr]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _bound_names(element)]
+    return []
+
+
+def _own_body(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node under *scope* that belongs to it, nested functions excluded."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _own_body(child)
+
+
+def methods_of(cls: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The methods *cls* declares, in source order."""
+    return [
+        node
+        for node in cls.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def class_of(tree: ast.AST, func: ast.AST) -> Optional[ast.ClassDef]:
+    """The class *func* is a method of, without needing parent links.
+
+    ``attribution`` answers the same question by walking ``parent`` back, which
+    it can because the recognizer attaches them.  The walk parses files of its
+    own at use time and has no such guarantee, so this descends instead -- the
+    same rule, read from the other end.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+            method is func for method in methods_of(node)
+        ):
+            return node
+    return None
+
+
+def bases_in(tree: ast.AST, cls: ast.ClassDef) -> list[ast.ClassDef]:
+    """*cls*'s bases that this module declares, nearest first.
+
+    The same order ``attribution._class_and_ancestors`` produces, cut where
+    this reading's evidence stops: it has one parsed module and no corpus
+    index, so a base declared elsewhere is not followed.  Measured before the
+    cut was made -- of 292 classes in the corpus, 8 have all their bases in
+    their own module and 141 have at least one elsewhere, and the 83 steps
+    this whole reading exists for need none of them.  The limit is real and
+    it is not in the way.
+    """
+    declared = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+    }
+    order: list[ast.ClassDef] = []
+    seen = {cls.name}
+    queue = [_base_name(base) for base in cls.bases]
+    while queue:
+        name = queue.pop(0)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        node = declared.get(name)
+        if node is None:
+            continue
+        order.append(node)
+        queue.extend(_base_name(base) for base in node.bases)
+    return order
+
+
+def _base_name(base: ast.expr) -> Optional[str]:
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return None
+
+
 def path_condition(node: ast.AST) -> list[str]:
     """Return the conjunction of tests dominating *node*, outermost first.
 

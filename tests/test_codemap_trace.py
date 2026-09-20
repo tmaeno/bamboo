@@ -401,3 +401,189 @@ class Feeder:
 
     caught = [s for s in steps if s.name == "exc"]
     assert [(s.terminal, s.detail) for s in caught] == [(STOP_EXTERNAL, "DDM / Rucio")]
+
+
+def test_a_field_assigned_in_the_same_function_is_read_there(tmp_path):
+    # The one the `holding` walkthrough turned up: the arm reads
+    # ``self.job_status`` and the assignment is eleven lines above it, and the
+    # walk handed the question to the constructor without ever looking.
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def process(self):
+        if self.job.isCancelled():
+            self.job_status = "failed"
+        spec.status = self.job_status
+''',
+    )
+
+    steps, _ = _walk(roots, file="adder", owner="process", lines=[5])
+
+    assert [(s.kind, s.line, s.value) for s in steps if s.name == "self.job_status"] == [
+        (TRACE_BINDING, 4, "'failed'")
+    ]
+
+
+def test_a_field_assigned_in_a_sibling_method_is_read_in_that_method(tmp_path):
+    # Two claims in one: the sibling is found at all, and its guard is the
+    # one that dominates *it*.  Reporting ``reset``'s ``if`` as though it had
+    # dominated ``process``'s arm would be a lie with the shape of an answer.
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def reset(self, why):
+        if why is None:
+            self.job_status = "failed"
+
+    def process(self):
+        spec.status = self.job_status
+''',
+    )
+
+    steps, _ = _walk(roots, file="adder", owner="process", lines=[7])
+
+    bound = [s for s in steps if s.name == "self.job_status"]
+    assert [(s.kind, s.line, s.value) for s in bound] == [(TRACE_BINDING, 4, "'failed'")]
+    assert bound[0].owner.endswith("::reset")
+    assert bound[0].guards == ["why is None"]
+
+
+def test_a_field_written_in_several_methods_comes_back_as_several_steps(tmp_path):
+    # ``self.jobs`` is written in three methods of ``setupper_atlas_plugin``
+    # and which of them ran last is a fact about the run.  Folding them would
+    # answer a question the text cannot settle.
+    roots = _tree(
+        tmp_path,
+        setupper='''\
+class Setupper:
+    def run(self):
+        self.jobs = fetched
+
+    def correct(self):
+        self.jobs = corrected
+
+    def emit(self):
+        spec.status = self.jobs
+''',
+    )
+
+    steps, _ = _walk(roots, file="setupper", owner="emit", lines=[9])
+
+    assert sorted(s.value for s in steps if s.name == "self.jobs") == [
+        "corrected",
+        "fetched",
+    ]
+
+
+def test_a_constructor_assignment_carries_the_question_to_the_call_site(tmp_path):
+    # Stage three's reason for existing: ``self.job_status = job_status`` is
+    # what turns a worker's attribute into a question about whoever built it.
+    roots = _tree(
+        tmp_path,
+        adder='''\
+class Adder:
+    def __init__(self, job_status):
+        self.job_status = job_status
+
+    def process(self):
+        spec.status = self.job_status
+''',
+    )
+
+    steps, _ = _walk(roots, file="adder", owner="process", lines=[6])
+
+    assert ("self.job_status", "job_status") in [(s.name, s.value) for s in steps]
+    assert ("job_status", STOP_PARAMETER) in [(s.name, s.terminal) for s in steps]
+
+
+def test_a_named_interface_is_still_the_interface_and_not_its_constructor(tmp_path):
+    # Stage one stays first, and this is the shape that makes it load-bearing.
+    # A field a *value* reads is settled by ``classify`` before the walk ever
+    # asks for it -- ``self.cur.fetchall()`` terminates where it stands.  It
+    # is a field a *guard* reads that arrives here with nothing decided, and
+    # answering that one from its ``__init__`` would replace "this came from
+    # the database" with "this came from an argument": true of the handle and
+    # false of the value.  Measured over the corpus, this reaches the field
+    # reading 13 times for ``self.cur``, twice for ``self.ddmIF`` and once for
+    # ``self.taskBufferIF``.
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class DBProxy:
+    def __init__(self, conn):
+        self.cur = conn.cursor()
+
+    def getTask(self):
+        if self.cur.rowcount > 0:
+            spec.status = "done"
+''',
+    )
+
+    steps, _ = _walk(roots, file="proxy", owner="getTask", lines=[7])
+
+    assert [(s.name, s.terminal) for s in steps if s.name == "self.cur"] == [
+        ("self.cur", STOP_UPSTREAM)
+    ]
+    assert not [s for s in steps if s.value == "conn.cursor()"]
+
+
+def test_a_field_nothing_assigns_still_stops_rather_than_guessing(tmp_path):
+    # The fallback has to survive the three stages above it, or "the map names
+    # no handover for this" becomes unreachable and a genuinely unexplained
+    # field reads as an empty answer.
+    roots = _tree(
+        tmp_path,
+        commando='''\
+class Worker:
+    def runImpl(self):
+        spec.status = self.mystery
+''',
+    )
+
+    steps, _ = _walk(roots, file="commando", owner="runImpl", lines=[3])
+
+    assert [(s.kind, s.terminal) for s in steps if s.name == "self.mystery"] == [
+        (TRACE_UNBOUND, STOP_PARAMETER)
+    ]
+
+
+def test_a_field_a_closure_assigns_is_not_read_as_the_enclosing_guard(tmp_path):
+    # A nested function runs when it is called, not where it is written, so
+    # its guards never dominated the arm.  Left out rather than reported with
+    # the wrong condition attached.
+    roots = _tree(
+        tmp_path,
+        worker='''\
+class Worker:
+    def run(self):
+        def later():
+            self.flag = "set-later"
+        self.flag = "set-here"
+        spec.status = self.flag
+''',
+    )
+
+    steps, _ = _walk(roots, file="worker", owner="run", lines=[6])
+
+    assert [s.value for s in steps if s.name == "self.flag"] == ["'set-here'"]
+
+
+def test_a_field_a_base_class_in_the_same_module_assigns_is_found(tmp_path):
+    roots = _tree(
+        tmp_path,
+        plugin='''\
+class Base:
+    def prepare(self):
+        self.mode = "scouting"
+
+class Impl(Base):
+    def run(self):
+        spec.status = self.mode
+''',
+    )
+
+    steps, _ = _walk(roots, file="plugin", owner="run", lines=[7])
+
+    assert [s.value for s in steps if s.name == "self.mode"] == ["'scouting'"]
