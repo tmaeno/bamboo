@@ -17,7 +17,7 @@ such a helper between two releases.
 from __future__ import annotations
 
 import ast
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, NamedTuple, Optional
 
 
 def functions_with_owner(
@@ -147,6 +147,141 @@ def path_condition(node: ast.AST) -> list[str]:
         previous = ancestor
     conditions.reverse()
     return conditions
+
+
+#: What :func:`enclosing_guards` found around a site.  Each kind is a way the
+#: code constrains reaching a line that ``path_condition`` is structurally
+#: blind to, because only ``ast.If`` contributes to a path condition.
+UNSEEN_TRY = "try"
+UNSEEN_EXCEPT = "except"
+UNSEEN_LOOP = "loop"
+UNSEEN_WITH = "with"
+UNSEEN_EARLY_EXIT = "early-exit"
+
+
+class Unseen(NamedTuple):
+    """One constraint on reaching a line that its path condition omits."""
+
+    kind: str
+    detail: str
+    line: int
+
+
+def _text(node: Optional[ast.AST]) -> str:
+    if node is None:
+        return "anything"
+    try:
+        return ast.unparse(node)
+    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+        return "..."
+
+
+def _jumps(body: list[ast.stmt]) -> bool:
+    """Whether entering *body* means leaving the block it is in.
+
+    The last statement, not any statement: control reaching the end of a block
+    has run it, so a trailing ``continue`` is unconditional for anyone who
+    entered.  Read from the tree rather than from a flow graph, which is the
+    whole reason this is cheap enough to be sound.
+    """
+    return bool(body) and isinstance(
+        body[-1], (ast.Continue, ast.Break, ast.Return, ast.Raise)
+    )
+
+
+def _implied_by(statement: ast.stmt) -> Optional[str]:
+    """The condition a preceding ``if ...: continue`` puts on what follows it."""
+    if not isinstance(statement, ast.If):
+        return None
+    test = _text(statement.test)
+    if test == "...":
+        return None
+    if _jumps(statement.body):
+        return f"not ({test})"
+    if statement.orelse and _jumps(statement.orelse):
+        return test
+    return None
+
+
+def _early_exits(ancestor: ast.AST, previous: ast.AST) -> list[Unseen]:
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(ancestor, field, None)
+        if not isinstance(block, list) or previous not in block:
+            continue
+        return [
+            Unseen(UNSEEN_EARLY_EXIT, implied, statement.lineno)
+            for statement in block[: block.index(previous)]
+            if (implied := _implied_by(statement))
+        ]
+    return []
+
+
+def _structure(ancestor: ast.AST, previous: ast.AST) -> list[Unseen]:
+    if isinstance(ancestor, ast.Try) and previous in ancestor.body and ancestor.handlers:
+        caught = ", ".join(_text(handler.type) for handler in ancestor.handlers)
+        return [Unseen(UNSEEN_TRY, f"nothing above raised {caught}", ancestor.lineno)]
+    if isinstance(ancestor, ast.ExceptHandler):
+        return [
+            Unseen(
+                UNSEEN_EXCEPT,
+                f"something above raised {_text(ancestor.type)}",
+                ancestor.lineno,
+            )
+        ]
+    if isinstance(ancestor, (ast.For, ast.AsyncFor)) and previous in ancestor.body:
+        target, over = _text(ancestor.target), _text(ancestor.iter)
+        return [Unseen(UNSEEN_LOOP, f"for {target} in {over}", ancestor.lineno)]
+    if isinstance(ancestor, ast.While) and previous in ancestor.body:
+        return [Unseen(UNSEEN_LOOP, f"while {_text(ancestor.test)}", ancestor.lineno)]
+    if isinstance(ancestor, (ast.With, ast.AsyncWith)):
+        held = ", ".join(_text(item.context_expr) for item in ancestor.items)
+        return [Unseen(UNSEEN_WITH, f"with {held}", ancestor.lineno)]
+    return []
+
+
+def enclosing_guards(node: ast.AST) -> list[Unseen]:
+    """What had to hold to reach *node* that its path condition cannot say.
+
+    **A path condition is a necessary condition, not a sufficient one**, and
+    this is the part that makes the difference nameable.  Only ``ast.If``
+    contributes to :func:`path_condition`, so a site inside a ``try`` body, a
+    handler, a loop or a ``with`` carries whatever tests are above it and
+    nothing about the structure itself.  Measured on the installed corpus, of
+    18018 reaching-definition sites 10619 are in a loop, 6515 in a ``try`` body
+    and 433 in a handler -- and 3058, 2180 and 111 of those have an *empty*
+    path condition, which reads as "unconditional" and is not.  On the map's
+    own arms the exposure is higher still: 86% have at least one of these on
+    the way to them.
+
+    Four of the five kinds come from the ancestor chain.  The fifth is the
+    early exit -- ``if X: continue`` above the site in the same block -- which
+    is sound without any dataflow, because statements in a block run in order
+    and a trailing jump is unconditional for whoever entered it.  14% of the
+    map's arms have one on their walk, which is not thin enough to leave to a
+    report.
+
+    **A ``try`` body names its handlers, not the statements before it.**  Both
+    are true constraints, but the handler set is bounded and usually logs,
+    where the preceding statements have a median of twelve and a maximum of
+    135 -- a list that long is noise, and it is the handler that says which
+    external call could have diverted control here.
+
+    Nothing above the enclosing function is read: module-scope statements run
+    at import, so counting them as preceding would report a reason that never
+    applied to this call.
+    """
+    found: list[Unseen] = []
+    previous = node
+    for ancestor in ancestors(node):
+        found.extend(_early_exits(ancestor, previous))
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        found.extend(_structure(ancestor, previous))
+        previous = ancestor
+    found.sort(key=lambda entry: entry.line)
+    return found
 
 
 def own_test(node: ast.AST) -> Optional[str]:

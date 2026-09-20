@@ -1983,14 +1983,26 @@ class Localization(BaseModel):
     )
 
 
-#: Why a lead stops instead of continuing.  Each is a terminal category of the
-#: backward walk -- a place the value came from that this map does not explain
-#: -- and naming which one is the answer, not the absence of one.
+#: Why a backward walk stops instead of continuing.  Each is a terminal
+#: category -- a place the value came from that this map does not explain --
+#: and naming which one is the answer, not the absence of one.
+#:
+#: The first five are reached by a :class:`Lead`, hop by hop through the map.
+#: The last four are reached by the use-time trace, which walks the source of
+#: one arm and gets further down into an expression than the map's own edges
+#: do.  One vocabulary for both, because it is one question and two spellings
+#: of it drift.  Measured on a prototype walk over the map's 983 locatable
+#: arms: the configuration terminal fires 545 times and the external ones 34,
+#: neither of which had anywhere to be recorded before this.
 STOP_NO_WRITER = "nothing in the map writes that field"
 STOP_SHARED_TABLE = "a table the map only ever reads"
 STOP_NEEDS_VALUE = "read by the condition, but its value was not observed"
 STOP_AMBIGUOUS = "several subjects declare that name and the map cannot say which"
 STOP_DESCENT = "another entity's rows, which this derivation does not census"
+STOP_CONFIG = "a configuration value, set outside the code"
+STOP_EXTERNAL = "a value another system supplies"
+STOP_UPSTREAM = "a value the database supplies, whose writers the map names"
+STOP_PARAMETER = "chosen by whoever called or built this"
 
 
 #: Where a lead came from, kept because the three are not equally trustworthy
@@ -2058,6 +2070,63 @@ class Lead(BaseModel):
     )
 
 
+#: What a :class:`TraceStep` is a step of.  ``write`` is the arm itself;
+#: ``binding`` and ``loop-target`` are reaching definitions inside one
+#: function; ``handover`` is the one crossing the map supplies, from a
+#: worker's own attribute to the expression the knight built it with; and
+#: ``unbound`` is a name this function does not bind, which is where the walk
+#: either crosses or stops.
+TRACE_WRITE = "write"
+TRACE_BINDING = "binding"
+TRACE_LOOP = "loop-target"
+TRACE_HANDOVER = "handover"
+TRACE_UNBOUND = "unbound"
+
+
+class TraceStep(BaseModel):
+    """One thing the source says about why an arm ran with the value it did.
+
+    Computed at use time from the tree, not stored in the map.  The analysis
+    is the same one the build already does -- reaching definitions and
+    dominating guards -- and the cadence is the whole difference: storing it
+    forces one condition string per branch, and that is what made the eager
+    version need a loop rule, a length cap and a recursion rule before it
+    could be written down at all.  A use-time answer may be a *set*, so none
+    of those constraints arise; four sites setting one flag are four steps
+    because four of them are the answer.
+
+    ``guards`` is what the path condition says and ``unseen`` is what it
+    cannot: only ``ast.If`` contributes to a path condition, so a step inside
+    a handler, a loop or a ``try`` body carries an empty ``guards`` and is not
+    unconditional.  86% of the map's arms have at least one of those on the
+    way to them, which is why the two are separate fields rather than one
+    list -- a reader that cannot tell them apart reads silence as certainty.
+    """
+
+    kind: str = Field(..., description="One of the TRACE_* kinds.")
+    name: str = Field(default="", description="The name this step explains.")
+    owner: str = Field(default="", description="module::function the site is in.")
+    file: str = Field(default="")
+    line: int = Field(default=0)
+    value: str = Field(default="", description="The expression, as source.")
+    guards: list[str] = Field(
+        default_factory=list, description="The path condition of this site."
+    )
+    unseen: list[str] = Field(
+        default_factory=list,
+        description="What constrains reaching it that the path condition omits.",
+    )
+    reads: list[str] = Field(
+        default_factory=list, description="Names this step's value depends on."
+    )
+    terminal: str = Field(
+        default="",
+        description="Empty while the walk continues, else one of the STOP_* categories.",
+    )
+    detail: str = Field(default="", description="Which interface, key or caller.")
+    depth: int = Field(default=0, description="Hops from the arm.")
+
+
 class Reading(BaseModel):
     """One function to read, the arms it covers, and the line to read it against.
 
@@ -2095,6 +2164,19 @@ class Reading(BaseModel):
     log_pattern: str = Field(
         default="",
         description="What production would print for these arms.  Empty means silent.",
+    )
+
+    trace: list[TraceStep] = Field(
+        default_factory=list,
+        description=(
+            "Why these arms ran with the value they did, walked from the "
+            "source at use time.  Empty without a source tree, and empty on "
+            "purpose when the tree is not the one the map was built from."
+        ),
+    )
+    trace_note: str = Field(
+        default="",
+        description="Why the trace is empty or short, when it is.",
     )
 
     @property

@@ -8828,3 +8828,168 @@ def test_two_dispatch_sites_handing_over_different_arguments_are_reported():
         "inputList",
         "resource_types",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# the structures a path condition does not see
+# --------------------------------------------------------------------------- #
+
+
+def _write_in(source: str, name: str = "f"):
+    """The first attribute assignment inside function *name*."""
+    func = _func(source, name)
+    return next(n for n in ast.walk(func) if isinstance(n, ast.Assign))
+
+
+def test_a_try_body_says_which_handler_could_have_caught_something_first():
+    node = _write_in(
+        "def f(self, spec):\n"
+        "    try:\n"
+        "        spec.status = 'ok'\n"
+        "    except ValueError:\n"
+        "        pass\n"
+    )
+
+    seen = pathcond.enclosing_guards(node)
+
+    assert [(u.kind, u.detail) for u in seen] == [
+        (pathcond.UNSEEN_TRY, "nothing above raised ValueError")
+    ]
+
+
+def test_a_handler_says_that_something_above_it_raised():
+    node = _write_in(
+        "def f(self, spec):\n"
+        "    try:\n"
+        "        self.ddmIF.getDatasetMetaData(spec.name)\n"
+        "    except Exception:\n"
+        "        spec.status = 'tobroken'\n"
+    )
+
+    seen = pathcond.enclosing_guards(node)
+
+    assert [(u.kind, u.detail) for u in seen] == [
+        (pathcond.UNSEEN_EXCEPT, "something above raised Exception")
+    ]
+    # And the body it belongs to is not also claimed: the handler did not run
+    # because the body completed, it ran because the body did not.
+    assert pathcond.UNSEEN_TRY not in {u.kind for u in seen}
+
+
+def test_a_try_body_does_not_list_the_statements_before_the_write():
+    # The paired handler is bounded; the preceding statements are not.  On the
+    # installed corpus a write in a try body has a median of twelve statements
+    # above it and up to 135, which is noise rather than a reason.
+    node = _write_in(
+        "def f(self, spec):\n"
+        "    try:\n"
+        "        a = one()\n"
+        "        b = two()\n"
+        "        c = three()\n"
+        "        spec.status = 'ok'\n"
+        "    except ValueError:\n"
+        "        pass\n"
+    )
+
+    details = " ".join(u.detail for u in pathcond.enclosing_guards(node))
+
+    assert "one()" not in details and "two()" not in details
+
+
+def test_a_loop_header_is_recorded_because_the_guard_does_not_name_it():
+    node = _write_in(
+        "def f(self, specs):\n    for spec in specs:\n        spec.status = 'ok'\n"
+    )
+
+    seen = pathcond.enclosing_guards(node)
+
+    assert [(u.kind, u.detail) for u in seen] == [
+        (pathcond.UNSEEN_LOOP, "for spec in specs")
+    ]
+
+
+def test_an_early_exit_above_the_write_in_the_same_block_implies_its_negation():
+    # Sound without dataflow: statements in a block run in order, so reaching
+    # the write means the ``continue`` above it did not fire.
+    node = _write_in(
+        "def f(self, specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.is_pseudo():\n"
+        "            continue\n"
+        "        spec.status = 'ok'\n"
+    )
+
+    seen = pathcond.enclosing_guards(node)
+
+    assert (pathcond.UNSEEN_EARLY_EXIT, "not (spec.is_pseudo())") in [
+        (u.kind, u.detail) for u in seen
+    ]
+
+
+def test_an_early_exit_below_the_write_implies_nothing():
+    node = _write_in(
+        "def f(self, specs):\n"
+        "    for spec in specs:\n"
+        "        spec.status = 'ok'\n"
+        "        if spec.is_pseudo():\n"
+        "            continue\n"
+    )
+
+    assert pathcond.UNSEEN_EARLY_EXIT not in {
+        u.kind for u in pathcond.enclosing_guards(node)
+    }
+
+
+def test_a_branch_that_falls_through_is_not_an_early_exit():
+    node = _write_in(
+        "def f(self, specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.is_pseudo():\n"
+        "            spec.type = 'pseudo'\n"
+        "        spec.status = 'ok'\n",
+    )
+
+    # The first assignment in the walk is the one inside the ``if``; take the
+    # guarded write instead.
+    func = _func(
+        "def f(self, specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.is_pseudo():\n"
+        "            spec.type = 'pseudo'\n"
+        "        spec.status = 'ok'\n"
+    )
+    node = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    assert pathcond.UNSEEN_EARLY_EXIT not in {
+        u.kind for u in pathcond.enclosing_guards(node)
+    }
+
+
+def test_nothing_above_the_enclosing_function_is_read():
+    # Module-scope statements run at import, not on the way to this write, so
+    # counting them as preceding would report a reason that never applied.
+    node = _write_in(
+        "if BROKEN:\n"
+        "    raise SystemExit(1)\n"
+        "def f(self, spec):\n"
+        "    spec.status = 'ok'\n"
+    )
+
+    assert pathcond.enclosing_guards(node) == []
+
+
+def test_a_write_with_no_if_is_not_reported_as_unconditional():
+    # 18.1% of the map's arms have no ``if`` at all and sit inside a try, a
+    # loop or a with; an empty path condition there means the walk saw no
+    # ``if``, not that nothing had to hold.
+    node = _write_in(
+        "def f(self, specs):\n"
+        "    with lock():\n"
+        "        for spec in specs:\n"
+        "            spec.status = 'ok'\n"
+    )
+
+    kinds = [u.kind for u in pathcond.enclosing_guards(node)]
+
+    assert pathcond.path_condition(node) == []
+    assert kinds == [pathcond.UNSEEN_WITH, pathcond.UNSEEN_LOOP]

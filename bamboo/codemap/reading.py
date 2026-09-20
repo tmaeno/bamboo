@@ -97,7 +97,7 @@ def key_for(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def _containing(tree: ast.Module, line: int, owner: str) -> Optional[ast.AST]:
+def containing_function(tree: ast.Module, line: int, owner: str) -> Optional[ast.AST]:
     """The function definition *line* falls in.
 
     Where definitions nest, the one whose name the map already recorded wins
@@ -132,7 +132,7 @@ def region_in(
     Split from :func:`region_for` so that a build, which has every module
     parsed already, does not read and re-parse the same file once per junction.
     """
-    holder = _containing(tree, line, owner)
+    holder = containing_function(tree, line, owner)
     if holder is None:
         return None
     start, end = holder.lineno, holder.end_lineno or holder.lineno
