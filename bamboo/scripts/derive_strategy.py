@@ -520,12 +520,26 @@ def _report_resolution(description: str, matches: list) -> None:
     """
     click.echo(f"\ndescribed  {description}")
     top, rest = matches[0], matches[1:3]
+    why = "  the name itself" if top.exact else ""
     click.echo(
         f"resolved   {top.term.kind:<6} {top.term.key}   "
-        f"({', '.join(top.words)})  {top.score:.2f}"
+        f"({', '.join(top.words)})  {top.score:.2f}{why}"
     )
     for other in rest:
         click.echo(f"  also     {other.term.kind:<6} {other.term.key}  {other.score:.2f}")
+    # Said out loud rather than left to the sort.  Where the top two score the
+    # same, which one is printed above comes from how the keys happen to be
+    # spelled, and a reader who is not told that reads a decision where there
+    # was none.  Not said when the top is exact: there the order came from the
+    # description and it is an answer.
+    if not top.exact and top.tied_with:
+        shown = {other.term.key for other in rest}
+        with_them = ", ".join(key for key in top.tied_with if key in shown)
+        if with_them:
+            click.echo(
+                f"  tied     {top.term.key} and {with_them} score the same -- "
+                "the order between them is the sort's, not an answer"
+            )
 
 
 def _report_localization(strategy: Strategy, top: int, full: bool) -> None:

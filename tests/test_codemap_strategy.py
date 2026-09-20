@@ -1182,6 +1182,83 @@ def test_a_description_saying_nothing_the_map_knows_resolves_to_nothing():
     assert strategy_mod.resolve("the cluster is on fire", terms) == []
 
 
+def test_the_key_that_was_typed_wins_over_a_near_homograph():
+    """``-t1weight`` and ``-t1_weight`` are two real stages of one chain, 618
+    lines apart in ``AtlasProdJobBroker``.  Asked for the second by name, the
+    weighting returned the first: a cut carries its step's words as well as
+    its own, so the entry that says more has the larger denominator and loses.
+    Measured over the vocabulary before this, 23 of 425 entries did not rank
+    first when asked by their own key."""
+    terms = [
+        _term("cut", "-t1weight", ["t", "1", "weight", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-t1weight")),
+        _term("cut", "-t1_weight", ["t", "1", "weight", "final", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-t1_weight")),
+        _term("step", "T1 weight check", ["t", "1", "weight", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="T1 weight check")),
+    ]
+
+    ranked = strategy_mod.resolve("-t1_weight", terms)
+
+    assert ranked[0].term.key == "-t1_weight"
+    assert ranked[0].exact
+    # The one it displaced is still offered: an exact key says which entry was
+    # meant, not that the others were not.
+    assert "-t1weight" in [m.term.key for m in ranked[1:]]
+    assert ranked[0].score < ranked[1].score
+
+
+def test_an_exact_key_does_not_disturb_a_description_that_is_not_one():
+    """The weighting is left alone.  Only a description that *is* a key is
+    treated as one, so free text ranks exactly as it did."""
+    terms = [
+        _term("cut", "-t1weight", ["t", "1", "weight", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-t1weight")),
+        _term("cut", "-t1_weight", ["t", "1", "weight", "final", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-t1_weight")),
+    ]
+
+    ranked = strategy_mod.resolve("T1 weight", terms)
+
+    assert [m.term.key for m in ranked] == ["-t1weight", "-t1_weight"]
+    assert not any(m.exact for m in ranked)
+
+
+def test_entries_that_score_the_same_say_so():
+    """The sort breaks a tie on the key, so ``-`` beating ``T`` decides which
+    of two equals is printed as the answer.  Nothing about the question said
+    so, and the vocabulary ties often enough to matter."""
+    terms = [
+        _term("cut", "-io", ["io"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-io")),
+        _term("step", "IO check", ["io"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="IO check")),
+    ]
+
+    ranked = strategy_mod.resolve("io", terms)
+
+    assert ranked[0].score == ranked[1].score
+    assert ranked[0].tied_with == [ranked[1].term.key]
+    assert ranked[1].tied_with == [ranked[0].term.key]
+
+
+def test_an_exact_key_ranked_below_the_cut_is_still_found():
+    """``-blacklist`` did not reach the top three of the real vocabulary: its
+    own entry carries its stage's words (``storage space check``) while four
+    longer entries carry three apiece, so each of them accounts for more of
+    itself than ``-blacklist`` does.  Spelled out here with the corpus's own
+    word lists, because a promotion that only reordered the rows already shown
+    would not have reached this one."""
+    terms = [
+        _term("cut", "-blacklist", ["blacklist", "storage", "space", "check"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-blacklist")),
+        _term("cut", "-read_lan_blacklist", ["read", "lan", "blacklist"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-read_lan_blacklist")),
+        _term("cut", "-read_wan_blacklist", ["read", "wan", "blacklist"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-read_wan_blacklist")),
+        _term("cut", "-write_lan_blacklist", ["write", "lan", "blacklist"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-write_lan_blacklist")),
+        _term("cut", "-write_wan_blacklist", ["write", "wan", "blacklist"], Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-write_wan_blacklist")),
+    ]
+
+    ranked = strategy_mod.resolve("-blacklist", terms, limit=2)
+
+    assert ranked[0].term.key == "-blacklist"
+    assert ranked[0].exact
+    # The claim this test is really making: without the promotion it is not
+    # merely second, it is off the end of the list the caller asked for.
+    assert ranked[0].score < ranked[1].score
+
+
 def test_the_entity_is_read_apart_from_the_question():
     """An id says which row, not which question, so it is not matched against
     the vocabulary -- where eight digits would score against every numeric

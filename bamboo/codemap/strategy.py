@@ -234,7 +234,52 @@ def resolve(description: str, terms: list[MapTerm], limit: int = 5) -> list[Matc
             Match(term=term, score=sum(weight[word] for word in hit) / against, words=hit)
         )
     matches.sort(key=lambda m: (-m.score, m.term.key))
-    return matches[:limit]
+    return _exact_first(description, _mark_ties(matches))[:limit]
+
+
+def _mark_ties(matches: list[Match]) -> list[Match]:
+    """Say which entries scored the same, rather than letting the sort decide.
+
+    The sort breaks a tie on the key, so ``-t1weight`` beats ``T1 weight check``
+    because ``-`` sorts below ``T``.  That is not a reason, and the vocabulary
+    ties often enough to matter: 15 of its 425 entries, asked by their own
+    name, come back level with the next one.  Recorded on both sides, because
+    a reader shown one of them has to know the other was its equal.
+    """
+    for index, match in enumerate(matches):
+        match.tied_with = [
+            other.term.key
+            for position, other in enumerate(matches)
+            if position != index and other.score == match.score
+        ]
+    return matches
+
+
+def _exact_first(description: str, matches: list[Match]) -> list[Match]:
+    """Put the entry the description *is* at the front of the ranking.
+
+    Not a score adjustment.  The weighting divides by everything an entry
+    carries, and a cut carries its step's words as well as its own, so the
+    entry spelled exactly as asked can be outranked by a near-homograph that
+    carries fewer words -- ``-t1weight`` (``t, 1, weight, check``) beat
+    ``-t1_weight`` (``t, 1, weight, final, check``) when ``-t1_weight`` was
+    what was typed, and the two are different stages of the same chain, 618
+    lines apart.  Measured over the vocabulary: 23 of 425 entries do not rank
+    first when asked by their own key.
+
+    The rest of the ranking is left alone and the displaced entry stays in it.
+    An exact key is a strong signal about which entry was meant; it is not
+    evidence that the others were not.
+    """
+    said = description.strip()
+    if not said:
+        return matches
+    exact = [m for m in matches if m.term.key == said]
+    if not exact:
+        return matches
+    for match in exact:
+        match.exact = True
+    return exact + [m for m in matches if m.term.key != said]
 
 
 def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:

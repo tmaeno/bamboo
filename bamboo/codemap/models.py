@@ -1549,6 +1549,27 @@ class Match(BaseModel):
     words: list[str] = Field(
         default_factory=list, description="Which of the entry's words the description said."
     )
+    exact: bool = Field(
+        default=False,
+        description=(
+            "The description was this entry's key, spelled the same way.  Kept "
+            "as a fact rather than folded into the score: the word weighting "
+            "cannot express it -- an entry that carries its step's words too "
+            "has a larger denominator and loses to a near-homograph that "
+            "carries fewer, which is how ``-t1_weight`` came third to "
+            "``-t1weight`` when ``-t1_weight`` was what was typed."
+        ),
+    )
+    tied_with: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Entries scoring exactly the same.  A tie broken by sorting is a "
+            "tie decided by how the two keys happen to be spelled -- '-' sorts "
+            "below 'T', and nothing about the question said so.  Reported so "
+            "the reader breaks it, since the resolver has nothing to break it "
+            "with."
+        ),
+    )
 
 
 class CandidateBranch(BaseModel):
