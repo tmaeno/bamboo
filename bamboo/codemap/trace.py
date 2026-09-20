@@ -682,10 +682,15 @@ class _Walk:
         # what ``self.<field>`` is.  A call's keys are parameter names, and
         # letting those answer here would hand ``self.x`` whatever a caller
         # passed for a parameter that happens to be spelled ``x``.
+        #
+        # Every one of them, not the first.  ``AdderGen`` is built in three
+        # places and the pilot's and the daemon's differ in what they pass;
+        # stopping at whichever the map listed first would answer "who chose
+        # this" with one of the callers and no sign that there were others.
         for handover in frame.handovers:
             if handover.reached_by == ARRIVES_BY_DISPATCH and field in handover.fields:
                 self._handover(frame, name, handover, depth)
-                return
+                answered = True
         if answered:
             # The assignments are the answer.  Saying "no handover names it"
             # underneath them would report an absence as though it were the

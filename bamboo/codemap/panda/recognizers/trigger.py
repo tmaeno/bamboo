@@ -47,7 +47,7 @@ matters, and going further would compound a name match into a claim.
 from __future__ import annotations
 
 import ast
-from typing import Optional
+from typing import Collection, Optional
 
 from bamboo.codemap.models import (
     ARRIVES_BY_DISPATCH,
@@ -869,6 +869,107 @@ def worker_uplinks(
                         (module.rel_path, func.name, handover, span)
                     )
     return reach
+
+
+def construction_uplinks(
+    modules: list[SourceModule],
+    junctions: list[JunctionNode],
+    spec_classes: Collection[str],
+) -> dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]]:
+    """The same edge as :func:`worker_uplinks`, keyed on the class alone.
+
+    ``AdderGen(taskBuffer, job_id, job_status, attempt_nr)`` is a crossing --
+    the arm that decides a job's status reads ``self.job_status``, and what it
+    holds was chosen two modules away, at ``pilot_api:634`` and
+    ``add_main:135``.  :func:`worker_uplinks` does not reach it: that one asks
+    for a ``WorkerThread`` subclass dispatched in the same function, and
+    ``AdderGen`` is neither.
+
+    **Both restrictions come off and one takes their place: the class owns a
+    junction.**  That is what a reverse index is for -- the edge cannot be
+    followed forwards, so it has to be built by scanning, and the question is
+    only what to scan for.  Measured on the installed corpus: pairing every
+    construction with every call gives **1627** pairs, which is the generic
+    reference edge this corpus has punished twice; classes owning a junction
+    number 49, of which 44 are not declared specs, of which 17 are constructed
+    at all -- **66 sites**, three of them ``AdderGen``.
+
+    Declared specs are left out because ``classify`` and the attribution
+    already answer for their fields, and because ``JobSpec.pack`` handing a
+    row around is data movement rather than a handover of control.
+
+    Nothing is folded here: three constructions of ``AdderGen`` are three
+    entries, and the trace returns the set.  Where two land in the same
+    function of the same module, :func:`attach` keys them together -- the key
+    is ``(trigger, entry, via)`` and that is a property of the door, not of
+    this reading.
+    """
+    wanted = _classes_owning_a_junction(modules, junctions, spec_classes)
+    if not wanted:
+        return {}
+    reach: dict[tuple[str, str], list[tuple[str, str, dict[str, str], tuple[int, int]]]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            for node in ast.walk(func):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                    continue
+                held = wanted.get(node.func.id)
+                if held is None:
+                    continue
+                where, methods, span, init = held
+                handover = _handover(node, init)
+                if not handover:
+                    continue
+                for method in methods:
+                    reach.setdefault((where, method), []).append(
+                        (module.rel_path, func.name, handover, span)
+                    )
+    return reach
+
+
+def _classes_owning_a_junction(
+    modules: list[SourceModule],
+    junctions: list[JunctionNode],
+    spec_classes: Collection[str],
+) -> dict[str, tuple[str, list[str], tuple[int, int], Optional[ast.AST]]]:
+    """``{class: (module, its methods, its span, its __init__)}``.
+
+    Every method, not the ones a dispatch door reaches: without a door there
+    is nothing to walk from, and what the constructor handed over is a fact
+    about the object rather than about one entry into it -- the same reason
+    the walk scopes ``self.<field>`` to the class.  :func:`attach` still
+    checks that the arm's line falls inside the class, which is what keeps two
+    classes in one module from answering for each other.
+
+    A name two modules declare is dropped rather than chosen between: a
+    construction site names the class and nothing else.
+    """
+    owners = {junction.owner for junction in junctions}
+    found: dict[str, list[tuple[str, list[str], tuple[int, int], Optional[ast.AST]]]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef) or node.name in spec_classes:
+                continue
+            methods = [
+                child.name
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            if not any(f"{module.rel_path}::{name}" in owners for name in methods):
+                continue
+            found.setdefault(node.name, []).append(
+                (
+                    module.rel_path,
+                    methods,
+                    (node.lineno, node.end_lineno or node.lineno),
+                    _initialiser(node),
+                )
+            )
+    return {
+        name: places[0]
+        for name, places in found.items()
+        if len(places) == 1 and places[0][3] is not None
+    }
 
 
 def attach(

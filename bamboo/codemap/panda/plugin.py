@@ -58,6 +58,22 @@ from bamboo.codemap.panda.recognizers import (
 logger = logging.getLogger(__name__)
 
 
+def _merge_uplinks(*sources: dict) -> dict:
+    """Pool the crossings, keeping every entry.
+
+    Two readings of the same kind of edge -- a dispatched worker and a plain
+    construction -- and a class can be both: ``ContentsFeederThread`` is a
+    ``WorkerThread`` subclass that is also constructed with its rows.  Pooled
+    rather than chosen between, since ``attach`` keys entries by door and will
+    fold whatever genuinely coincides.
+    """
+    merged: dict = {}
+    for source in sources:
+        for key, entries in source.items():
+            merged.setdefault(key, []).extend(entries)
+    return merged
+
+
 def _merge_junctions(junctions: list[JunctionNode]) -> list[JunctionNode]:
     """Combine junctions sharing a name, keeping every branch.
 
@@ -400,11 +416,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # After promotion, so the reach figure describes the map that is kept
         # rather than every candidate the slices produced.
         self._uplinks = trigger.worker_uplinks(self._modules)
+        # The second crossing, and it needs the junctions the first does not:
+        # a dispatched worker is recognisable from the corpus alone, while a
+        # plain construction is only worth indexing where the class it builds
+        # decides something.
+        self._built = trigger.construction_uplinks(
+            self._modules, fragment.junctions, set(declarations)
+        )
         self._reached = trigger.attach(
             fragment.junctions,
             self._modules,
             {b.interface.split(".")[-1] for b in channels},
-            self._uplinks,
+            _merge_uplinks(self._uplinks, self._built),
         )
         # What each junction consults, as opposed to what starts it.  The one
         # edge out of a junction that a reader can follow without resolving a

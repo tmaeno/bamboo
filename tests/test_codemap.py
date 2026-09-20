@@ -9120,3 +9120,137 @@ def test_a_bare_attribute_passed_to_anything_else_is_not_a_forwarded_call():
     assert "updateJobStatus" not in reaching.get(
         "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py", {}
     )
+
+
+_ADDER = '''\
+class AdderGen:
+    def __init__(self, taskBuffer, job_id, job_status, attempt_nr):
+        self.job_status = job_status
+        self.job_id = job_id
+
+    def process_job_report(self):
+        spec.status = self.job_status
+'''
+
+
+def test_a_class_that_decides_something_is_indexed_by_its_constructions():
+    """``AdderGen`` is not a ``WorkerThread`` subclass and is not dispatched,
+    so the worker uplink walks past it -- and it is where a job's status is
+    settled, from a value chosen two modules away."""
+    modules = [
+        _module(_ADDER, "pandaserver/dataservice/adder_gen.py"),
+        _module(
+            "def update_job(req):\n"
+            "    adder_gen = AdderGen(global_task_buffer, job_id, job_status, attempt_nr)\n"
+            "    adder_gen.dump_file_report(report)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+    ]
+    junctions = [_junction("pandaserver/dataservice/adder_gen.py::process_job_report")]
+
+    reach = trigger.construction_uplinks(modules, junctions, set())
+
+    entries = reach[("pandaserver/dataservice/adder_gen.py", "process_job_report")]
+    assert [(entry, via) for entry, via, _h, _s in entries] == [
+        ("pandaserver/api/v1/pilot_api.py", "update_job")
+    ]
+    assert entries[0][2]["job_status"] == "job_status"
+
+
+def test_several_constructions_are_several_entries():
+    """Three sites build ``AdderGen`` and the pilot's and the daemon's differ
+    in what they pass.  Folding them would answer "who chose this" with one of
+    the callers and no sign that there were others."""
+    modules = [
+        _module(_ADDER, "pandaserver/dataservice/adder_gen.py"),
+        _module(
+            "def update_job(req):\n"
+            "    adder_gen = AdderGen(global_task_buffer, job_id, job_status, attempt_nr)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+        _module(
+            "def main():\n"
+            "    thr = AdderGen(taskBuffer, panda_id, job_status, attempt_nr)\n",
+            "pandaserver/daemons/scripts/add_main.py",
+        ),
+    ]
+    junctions = [_junction("pandaserver/dataservice/adder_gen.py::process_job_report")]
+
+    reach = trigger.construction_uplinks(modules, junctions, set())
+
+    assert sorted(
+        entry for entry, _via, _h, _s in
+        reach[("pandaserver/dataservice/adder_gen.py", "process_job_report")]
+    ) == [
+        "pandaserver/api/v1/pilot_api.py",
+        "pandaserver/daemons/scripts/add_main.py",
+    ]
+
+
+def test_a_class_that_decides_nothing_is_not_indexed():
+    """The restriction that replaces the two this took off.  Pairing every
+    construction with every call gives 1627 pairs on the installed corpus,
+    which is the generic reference edge the map has been punished for twice."""
+    modules = [
+        _module(
+            "class Helper:\n"
+            "    def __init__(self, value):\n"
+            "        self.value = value\n"
+            "\n"
+            "    def use(self):\n"
+            "        return self.value\n",
+            "pandaserver/srvcore/Helper.py",
+        ),
+        _module(
+            "def caller():\n"
+            "    h = Helper(7)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+    ]
+
+    assert trigger.construction_uplinks(modules, [], set()) == {}
+
+
+def test_a_declared_spec_is_not_a_handover_of_control():
+    """``classify`` and the attribution answer for a spec's fields already,
+    and ``JobSpec.pack`` handing a row around is data movement."""
+    modules = [
+        _module(
+            "class JediDatasetSpec:\n"
+            "    def __init__(self, status):\n"
+            "        self.status = status\n"
+            "\n"
+            "    def setStatus(self):\n"
+            "        spec.status = self.status\n",
+            "pandajedi/jedicore/JediDatasetSpec.py",
+        ),
+        _module(
+            "def build():\n"
+            "    d = JediDatasetSpec('ready')\n",
+            "pandajedi/jediorder/TaskBroker.py",
+        ),
+    ]
+    junctions = [_junction("pandajedi/jedicore/JediDatasetSpec.py::setStatus")]
+
+    assert trigger.construction_uplinks(modules, junctions, {"JediDatasetSpec"}) == {}
+
+
+def test_a_class_two_modules_declare_is_dropped_rather_than_guessed():
+    """A construction site names the class and nothing else, so an ambiguous
+    name would resolve the crossing by guess -- the restriction
+    ``worker_classes`` already puts on a dispatched worker."""
+    modules = [
+        _module(_ADDER, "pandaserver/dataservice/adder_gen.py"),
+        _module(_ADDER, "pandaserver/dataservice/adder_other.py"),
+        _module(
+            "def update_job(req):\n"
+            "    adder_gen = AdderGen(global_task_buffer, job_id, job_status, attempt_nr)\n",
+            "pandaserver/api/v1/pilot_api.py",
+        ),
+    ]
+    junctions = [
+        _junction("pandaserver/dataservice/adder_gen.py::process_job_report"),
+        _junction("pandaserver/dataservice/adder_other.py::process_job_report"),
+    ]
+
+    assert trigger.construction_uplinks(modules, junctions, set()) == {}
