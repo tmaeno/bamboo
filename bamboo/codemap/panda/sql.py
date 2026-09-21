@@ -285,11 +285,30 @@ def _exclusive_groups(
 #: from the left and the character after the hole settles it from the right:
 #: ``FROM {schemaJEDI}.JEDI_Tasks`` interpolates the *schema* and is followed by
 #: a dot, which is why reassembly blanks interpolations in the first place.
-_BEFORE_TABLE = re.compile(r"\b(?:FROM|UPDATE|INTO|JOIN)\s+$", re.IGNORECASE)
+#:
+#: The schema may itself be a hole, so the keyword need not be the hole's
+#: immediate neighbour: ``INSERT INTO {schema}.{table}`` puts a filled-in
+#: ``{}.`` between them.  Requiring adjacency lost the two statements that
+#: create a job row -- ``INSERT INTO {}.{} (...) RETURNING PandaID`` -- and so
+#: the map could not say where the system's most-read row comes into existence.
+_BEFORE_TABLE = re.compile(
+    r"\b(?:FROM|UPDATE|INTO|JOIN)\s+(?:(?:\{\}|[A-Za-z_][\w$]*)\.)?$", re.IGNORECASE
+)
 
 
 def _table_holes(text: str) -> set[int]:
-    """Which of *text*'s ``{}`` holes stand for a whole table name."""
+    """Which of *text*'s ``{}`` holes stand for a whole table name.
+
+    Position, not resolvability, is what this decides, and it decides it
+    narrowly on purpose.  :func:`rendered_text` serves two readers that want
+    opposite things from the same ``{}``: this one wants the hole *filled*,
+    because a statement needs its table named, while ``DiagnosticTemplate``
+    wants it *kept*, because the unfilled frame is the part a line observed in
+    production can be matched against.  Filling every hole a value could be
+    recovered for fills ninety-nine more across the corpus, nearly all of them
+    in log messages and dataset names -- and a template expanded over its own
+    values no longer matches the line that carried a different one.
+    """
     found: set[int] = set()
     position = index = 0
     while (hole := text.find(_BARE_FIELD, position)) >= 0:

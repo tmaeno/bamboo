@@ -1682,6 +1682,70 @@ def test_an_interpolated_schema_is_still_left_blank():
     ]
 
 
+def test_a_schema_qualified_hole_is_still_the_table_position():
+    """Where a new PanDA job is born, and the map could not name the table.
+
+    ``INSERT INTO {schema}.{table}`` puts the schema in one hole and the table
+    in the next, so the table hole is preceded by ``{}.`` rather than by the
+    keyword.  Reading only the keyword's immediate neighbour dropped it, and
+    with it the two statements that create a job row -- the one place the
+    system's most-read row comes into existence.
+    """
+    source = (
+        "def f(self, jobSpec):\n"
+        "    if jobSpec.jobStatus in ['defined', 'assigned']:\n"
+        "        table_name = 'jobsDefined4'\n"
+        "    else:\n"
+        "        table_name = 'jobsActive4'\n"
+        "    sql1 = f'INSERT INTO {schemaPANDA}.{table_name} (PandaID) '\n"
+        "    sql1 += 'VALUES (:PandaID)'\n"
+        "    self.cur.execute(sql1 + comment, varMap)\n"
+    )
+
+    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+
+    assert sorted(created) == ["jobsActive4", "jobsDefined4"]
+
+
+def test_a_hole_in_the_column_list_is_not_a_table():
+    """The widened reading stops at the parenthesis.
+
+    ``INSERT INTO {schema}.{table} ({columns})`` has three holes and only the
+    middle one names rows.  Filling the column list would put one spec class's
+    hundred-odd attributes into a statement as though the code had written
+    them, and a reader has no way to tell that apart from a column list the
+    source really does spell out.
+    """
+    source = (
+        "def f(self):\n"
+        "    table_name = 'jobsDefined4'\n"
+        "    sql1 = f'INSERT INTO {schemaPANDA}.{table_name} ({JobSpec.columnNames()}) '\n"
+        "    sql1 += 'VALUES (:PandaID)'\n"
+        "    self.cur.execute(sql1 + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "INSERT INTO {}.jobsDefined4 ({}) VALUES (:PandaID)"
+    ]
+
+
+def test_a_bind_variable_after_into_is_not_a_table():
+    """``RETURNING PandaID INTO :newPandaID`` names where the sequence's value
+    lands, not a table, and the keyword before it is the same one an insert
+    uses.  The bind marker settles it."""
+    source = (
+        "def f(self):\n"
+        "    table_name = 'jobsDefined4'\n"
+        "    sql1 = f'INSERT INTO {schemaPANDA}.{table_name} (PandaID) '\n"
+        "    sql1 += 'VALUES (:PandaID) RETURNING PandaID INTO :newPandaID'\n"
+        "    self.cur.execute(sql1 + comment, varMap)\n"
+    )
+
+    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+
+    assert created == ["jobsDefined4"]
+
+
 def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     """Half a list of tables read as the list is a statement about tables the
     code never runs over, which is worse than the hole it replaces."""
