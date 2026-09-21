@@ -3731,12 +3731,127 @@ def test_only_a_table_nothing_here_writes_is_a_gate():
 
     never_written = boundary.tables_never_written(modules)
 
-    assert "JEDI_AUX_Status_MinTaskID" in never_written
-    assert "JEDI_Tasks" not in never_written
+    # Keyed by the folded name: SQL identifiers are case-insensitive and this
+    # corpus spells one table several ways.
+    assert never_written["jedi_aux_status_mintaskid"] == "JEDI_AUX_Status_MinTaskID"
+    assert "jedi_tasks" not in never_written
 
     found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
 
     assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
+
+
+_MIXED_CASE_SPELLING = """
+class TaskModule:
+    def readOne(self, vo):
+        sqlR = "SELECT status FROM {0}.JEDI_Tasks tabT,{0}.datasets tabD "
+        sqlR += "WHERE tabT.jediTaskID=tabD.jediTaskID AND tabT.status=:status "
+        self.cur.execute(sqlR + comment, varMap)
+
+    def readAgain(self, vo):
+        sqlA = "SELECT status FROM {0}.JEDI_Tasks tabT,{0}.filesTable_arch tabF "
+        sqlA += "WHERE tabT.jediTaskID=tabF.jediTaskID AND tabT.status=:status "
+        self.cur.execute(sqlA + comment, varMap)
+
+    def readThird(self, vo):
+        sqlT = "SELECT status FROM {0}.JEDI_Tasks tabT,{0}.filesTable_ARCH tabF "
+        sqlT += "WHERE tabT.jediTaskID=tabF.jediTaskID "
+        self.cur.execute(sqlT + comment, varMap)
+
+    def writeIt(self, vo):
+        sqlW = "UPDATE {0}.Datasets SET status=:status "
+        sqlW += "WHERE vuid=:vuid "
+        self.cur.execute(sqlW + comment, varMap)
+
+    def writeTask(self, vo):
+        sqlK = "UPDATE {0}.JEDI_Tasks SET oldStatus=:oldStatus "
+        sqlK += "WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlK + comment, varMap)
+"""
+
+
+def test_a_table_written_under_another_spelling_is_not_a_gate():
+    """SQL identifiers are case-insensitive and this corpus spells one table
+    several ways, so comparing the spellings claims PanDA does not maintain a
+    table it writes on the next line.
+
+    Measured on the installed corpus before this was folded: ten of the
+    thirty-nine were tables PanDA writes -- ``Datasets`` read as ``datasets``,
+    ``jobsArchived4`` as ``jobsarchived4`` -- and each became a boundary saying
+    something outside keeps it current.
+    """
+    modules = [_module(_MIXED_CASE_SPELLING, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    never_written = boundary.tables_never_written(modules)
+
+    # Read as ``datasets``, written as ``Datasets``: one table, and PanDA owns it.
+    assert "datasets" not in never_written
+    # The control: written under the one spelling it is read under.
+    assert "jedi_tasks" not in never_written
+    # And the table nothing here writes is still found.
+    assert "filestable_arch" in never_written
+
+
+def test_one_table_spelled_three_ways_is_one_boundary():
+    """``filesTable_arch`` and ``filesTable_ARCH`` are one dependency."""
+    modules = [_module(_MIXED_CASE_SPELLING, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    never_written = boundary.tables_never_written(modules)
+
+    assert "filestable_arch" in never_written
+
+    found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
+
+    assert [b.interface for b in found] == ["filesTable_ARCH"]
+
+
+def test_the_spelling_shown_is_the_one_the_corpus_uses_most():
+    """The name in a report has to be what a reader will find when they grep.
+
+    Folding decides *identity*; it does not get to decide how the table is
+    spelled back to a person.  Ties go to the first in sorted order so the
+    choice is reproducible rather than dependent on walk order.
+    """
+    source = _MIXED_CASE_SPELLING + """
+class OtherModule:
+    def readFourth(self, vo):
+        sqlF = "SELECT status FROM {0}.JEDI_Tasks tabT,{0}.filesTable_ARCH tabX "
+        sqlF += "WHERE tabT.jediTaskID=tabX.jediTaskID AND tabX.type=:type "
+        self.cur.execute(sqlF + comment, varMap)
+"""
+    modules = [_module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    assert boundary.tables_never_written(modules)["filestable_arch"] == "filesTable_ARCH"
+
+
+def test_a_subject_does_not_carry_a_gate_on_a_table_panda_maintains():
+    """The ablation for the fold, at the level the claim is actually shipped.
+
+    ``selection_gates`` is what a report shows as "what limits which rows this
+    query can see", and a gate on a table PanDA writes is a false statement
+    about the system's boundary -- the staleness it warns about cannot happen.
+    Measured on the installed corpus: twenty subjects carried one, among them
+    ``JobSpec.jobStatus``, ``DatasetSpec.type`` and ``FileSpec.PandaID``.
+
+    Removing the fold from :func:`boundary.tables_never_written` puts the gate
+    straight back, which is what makes this a test of the mechanism rather than
+    of the fixture.
+    """
+    modules = [_module(_MIXED_CASE_SPELLING, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    gated = sqlwrite.selection_gates(
+        modules, attributor, boundary.tables_never_written(modules)
+    )
+
+    # ``datasets`` is read here and written as ``Datasets`` two methods down.
+    assert not any("datasets" in {g.lower() for g in gates} for gates in gated.values())
+    # The table nothing here writes is still a gate, so the fold did not simply
+    # empty the answer.
+    assert any("filestable_arch" in {g.lower() for g in gates} for gates in gated.values())
 
 
 def test_a_table_that_bounds_a_query_and_nothing_writes_is_a_boundary():

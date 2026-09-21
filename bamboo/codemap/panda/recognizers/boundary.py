@@ -33,6 +33,7 @@ makes non-arrival directly checkable instead of merely absent from a log.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -299,30 +300,56 @@ class _Channel:
 UNRESOLVED_SYSTEM = "unresolved"
 
 
-def tables_never_written(modules: list[SourceModule]) -> set[str]:
-    """Tables this map only ever reads.
+def tables_never_written(modules: list[SourceModule]) -> dict[str, str]:
+    """Tables this map only ever reads: ``{folded name: spelling to show}``.
 
     A dependency the map cannot explain: whatever keeps the table current is
     outside the source being read, so its freshness is not something any branch
     table can account for.
+
+    **Compared without regard to case**, the rule
+    :meth:`SpecAttributor.class_for_table` already applies, because SQL
+    identifiers are case-insensitive and this corpus spells one table several
+    ways.  Comparing the spellings instead is not a cosmetic slip: it put ten
+    tables here that PanDA writes on the next line -- ``Datasets`` read as
+    ``datasets``, ``jobsArchived4`` as ``jobsarchived4``, ``SiteData`` as
+    ``sitedata`` -- and every one of them became a claim that something outside
+    keeps the table current.  Twenty subjects carried that claim, ``JobSpec``'s
+    own ``jobStatus`` among them.  It also split ``filesTable_arch`` into three
+    boundaries for one table.
+
+    The value is the spelling to show, not part of the identity.  Folding
+    decides which names are one table; it does not get to decide how that
+    table is spelled back to a person, and a lowercased ``JEDI_Work_Queue`` is
+    not what a reader will grep for.  The one the corpus uses most often wins,
+    ties going to the first in sorted order so the choice is reproducible
+    rather than dependent on walk order.
     """
     written: set[str] = set()
-    read: set[str] = set()
+    read: Counter[str] = Counter()
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
-                written.update(write.table for write in sql.writes(run.sql))
-                written.update(sql.deletes(run.sql))
+                written.update(write.table.lower() for write in sql.writes(run.sql))
+                written.update(table.lower() for table in sql.deletes(run.sql))
                 read.update(table for table, _columns in sql.reads(run.sql))
                 read.update(sql.joins(run.sql))
-    return {table for table in read if table not in written and table != "{}"}
+    spellings: dict[str, list[str]] = {}
+    for table in read:
+        if table.lower() in written or table == "{}":
+            continue
+        spellings.setdefault(table.lower(), []).append(table)
+    return {
+        folded: max(sorted(names), key=lambda name: read[name])
+        for folded, names in spellings.items()
+    }
 
 
 def extract_selection_gates(
     modules: list[SourceModule],
     map_id: str,
     derived_from: str,
-    never_written: set[str],
+    never_written: dict[str, str],
     already_known: set[str],
 ) -> list[BoundaryNode]:
     """A boundary per table that bounds a query's reach and nothing here writes.
@@ -346,15 +373,23 @@ def extract_selection_gates(
     says which database the table is in, not who maintains it, and inventing a
     name here would put a claim where the source is silent.
     """
+    # Folded here rather than by the caller, so that one place knows the rule.
+    # A caller that forgot would put the same crossing in twice under two
+    # spellings, which is the failure this whole comparison exists to avoid.
+    known = {table.lower() for table in already_known}
     seen: dict[str, _Channel] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
                 for table in sql.joins(run.sql):
-                    if table not in never_written or table in already_known:
+                    # Folded for the lookups and kept as written for the
+                    # columns: this statement spells the table its own way, and
+                    # that spelling is what ``joined_columns`` has to match.
+                    folded = table.lower()
+                    if folded not in never_written or folded in known:
                         continue
                     channel = _channel_for(
-                        seen, UNRESOLVED_SYSTEM, "", table, module, run.call
+                        seen, UNRESOLVED_SYSTEM, "", never_written[folded], module, run.call
                     )
                     channel.receives(sql.joined_columns(run.sql, table))
                     channel.operations.add("SELECT")

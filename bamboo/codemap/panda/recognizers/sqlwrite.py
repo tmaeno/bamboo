@@ -743,7 +743,7 @@ def entity_nodes(
 
 
 def selection_gates(
-    modules: list[SourceModule], attributor: SpecAttributor, never_written: set[str]
+    modules: list[SourceModule], attributor: SpecAttributor, never_written: dict[str, str]
 ) -> dict[str, set[str]]:
     """Return ``{subject: tables bounding the queries that select on it}``.
 
@@ -759,6 +759,11 @@ def selection_gates(
     corpus maintains is a step in a query; a join to one it only ever reads is
     a dependency on something outside, and only the second can go stale in a
     way the map cannot account for.
+
+    The membership test folds case, because :func:`tables_never_written` keys
+    on the folded name: the corpus reads ``jobs_statuslog`` and writes
+    ``jobs_StatusLog``, and comparing spellings made twenty subjects -- among
+    them ``JobSpec.jobStatus`` -- carry a gate on a table PanDA maintains.
     """
     found: dict[str, set[str]] = {}
     for module in modules:
@@ -768,7 +773,13 @@ def selection_gates(
                 if run.sql in seen:
                     continue
                 seen.add(run.sql)
-                gates = {t for t in sql.joins(run.sql) if t in never_written}
+                # Folded for the lookup and shown as ``never_written`` spells
+                # it, so one table does not reach a reader under two names.
+                gates = {
+                    never_written[t.lower()]
+                    for t in sql.joins(run.sql)
+                    if t.lower() in never_written
+                }
                 if not gates:
                     continue
                 for table in _tables_of(run.sql):
