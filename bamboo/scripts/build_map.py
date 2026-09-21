@@ -492,6 +492,28 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             f"{len(uplinks)} worker method(s) of which {len(landed)} own a junction"
         )
 
+    # A run-time class choice the source can bound but not settle.  Reported
+    # with the line that proves it, since a candidate set nobody can check is
+    # three guesses wearing a bracket.
+    fanned = [j for j in fragment.junctions if j.dispatch]
+    if fanned:
+        sets = {
+            (d.default, tuple(d.candidates), d.announced_by)
+            for j in fanned
+            for d in j.dispatch
+        }
+        silent = sum(1 for _d, _c, said in sets if not said)
+        click.echo(
+            f"  run-time dispatch: {len(sets)} fan-out(s) over {len(fanned)} junction(s)"
+            + (f", {silent} of them printing no class name" if silent else "")
+        )
+        for default, candidates, said in sorted(sets):
+            click.echo(
+                f"    {default:<24} -> {len(candidates)} candidate(s): "
+                f"{', '.join(candidates)}"
+                + (f"   ask the log for {said!r}" if said else "   nothing prints it")
+            )
+
     differing = trigger.differing_arguments(fragment.junctions)
     if differing:
         # Structure, not trivia: an argument one entry omits is a guard that

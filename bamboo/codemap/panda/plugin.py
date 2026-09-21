@@ -433,6 +433,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # edge out of a junction that a reader can follow without resolving a
         # name, and the only route from an arm to the aggregate it decided on.
         self._consults = trigger.attach_calls(fragment.junctions, self._modules)
+        # Which classes a run-time dispatch could have picked.  A candidate
+        # set, never an attribution: P1-11 refused to name the single class a
+        # run-time receiver is, and this says "one of these", which is the
+        # shape the map already trades in.
+        self._dispatching = trigger.attach_dispatch(fragment.junctions, self._modules)
 
         # Which file each node's diagnostics land in.  After promotion for the
         # same reason as the trigger reach: it describes the map that is kept.

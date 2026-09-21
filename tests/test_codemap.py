@@ -9254,3 +9254,130 @@ def test_a_class_two_modules_declare_is_dropped_rather_than_guessed():
     ]
 
     assert trigger.construction_uplinks(modules, junctions, set()) == {}
+
+
+_PLUGINS = '''\
+class AdderPluginBase:
+    def execute(self):
+        pass
+
+class AdderAtlasPlugin(AdderPluginBase):
+    pass
+
+class AdderDummyPlugin(AdderPluginBase):
+    pass
+'''
+
+
+def test_a_run_time_class_choice_comes_back_as_the_set_it_could_be():
+    """The source cannot say which class a config names, but it declares the
+    shape of the answer: a fallback to a concrete class, whose base names the
+    interface and whose siblings are the alternatives."""
+    modules = [
+        _module(_PLUGINS, "pandaserver/dataservice/adder_plugins.py"),
+        _module(
+            "class AdderGen:\n"
+            "    def get_plugin_class(self, vo, group):\n"
+            "        self.plugin_class = panda_config.getPlugin('adder_plugins', vo, group)\n"
+            "        if self.plugin_class is None:\n"
+            "            self.plugin_class = AdderAtlasPlugin\n"
+            "        self.logger.debug(f'plugin name {self.plugin_class.__name__}')\n",
+            "pandaserver/dataservice/adder_gen.py",
+        ),
+    ]
+
+    found = trigger.dispatch_fanouts(modules)
+
+    fanout = found["pandaserver/dataservice/adder_gen.py::AdderGen"][0]
+    assert fanout.default == "AdderAtlasPlugin"
+    assert fanout.base == "AdderPluginBase"
+    assert fanout.candidates == ["AdderAtlasPlugin", "AdderDummyPlugin"]
+    assert fanout.announced_by == "plugin name"
+
+
+def test_an_ordinary_default_is_not_a_dispatch():
+    """The structural shape on its own -- assign a call, then ``if x is None:
+    x = y`` -- matches 29 sites in the corpus and most are plain defaults:
+    ``maxHS06sec``, ``coreCount``, ``newScanList``.  Requiring the fallback to
+    be a class the corpus declares leaves the three that are dispatches."""
+    modules = [
+        _module(
+            "class Proxy:\n"
+            "    def setHS06sec(self, start, end):\n"
+            "        hs06sec = JobUtils.getHS06sec(start, end)\n"
+            "        if hs06sec is None:\n"
+            "            hs06sec = maxHS06sec\n",
+            "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+        ),
+    ]
+
+    assert trigger.dispatch_fanouts(modules) == {}
+
+
+def test_a_fallback_guarded_by_a_conjunction_still_counts():
+    """``closer.py`` asks ``is None and self.job.VO == 'atlas'``.  Requiring a
+    bare comparison missed it, and the extra term is a real path condition
+    rather than a reason not to read the fallback."""
+    modules = [
+        _module(_PLUGINS, "pandaserver/dataservice/adder_plugins.py"),
+        _module(
+            "class Closer:\n"
+            "    def perform_vo_actions(self):\n"
+            "        plugin_class = panda_config.getPlugin('closer_plugins', self.job.VO)\n"
+            "        if plugin_class is None and self.job.VO == 'atlas':\n"
+            "            plugin_class = AdderAtlasPlugin\n",
+            "pandaserver/dataservice/closer.py",
+        ),
+    ]
+
+    found = trigger.dispatch_fanouts(modules)
+
+    assert found["pandaserver/dataservice/closer.py::Closer"][0].default == "AdderAtlasPlugin"
+
+
+def test_a_fan_out_nothing_prints_says_so_rather_than_implying_proof():
+    """A candidate set nobody can check is three guesses wearing a bracket."""
+    modules = [
+        _module(_PLUGINS, "pandaserver/dataservice/adder_plugins.py"),
+        _module(
+            "class Setupper:\n"
+            "    def run(self):\n"
+            "        plugin_class = panda_config.getPlugin('setupper_plugins', vo)\n"
+            "        if plugin_class is None:\n"
+            "            plugin_class = AdderAtlasPlugin\n",
+            "pandaserver/dataservice/setupper.py",
+        ),
+    ]
+
+    found = trigger.dispatch_fanouts(modules)
+
+    assert found["pandaserver/dataservice/setupper.py::Setupper"][0].announced_by == ""
+
+
+def test_the_fan_out_reaches_the_arms_of_its_own_class_only():
+    """``closer.py`` declares more than one class, and a key of
+    ``module::class`` alone would hand each the other's arms."""
+    modules = [
+        _module(_PLUGINS, "pandaserver/dataservice/adder_plugins.py"),
+        _module(
+            "class Closer:\n"
+            "    def perform_vo_actions(self):\n"
+            "        plugin_class = panda_config.getPlugin('closer_plugins', vo)\n"
+            "        if plugin_class is None:\n"
+            "            plugin_class = AdderAtlasPlugin\n"
+            "\n"
+            "class CloserThread:\n"
+            "    def run(self):\n"
+            "        spec.status = 'closed'\n",
+            "pandaserver/dataservice/closer.py",
+        ),
+    ]
+    inside = _junction("pandaserver/dataservice/closer.py::perform_vo_actions")
+    inside.anchor = Anchor(package="pandaserver", file="pandaserver/dataservice/closer.py", line_start=3, line_end=3)
+    outside = _junction("pandaserver/dataservice/closer.py::run")
+    outside.anchor = Anchor(package="pandaserver", file="pandaserver/dataservice/closer.py", line_start=9, line_end=9)
+
+    trigger.attach_dispatch([inside, outside], modules)
+
+    assert [d.default for d in inside.dispatch] == ["AdderAtlasPlugin"]
+    assert outside.dispatch == []

@@ -397,6 +397,7 @@ def _candidate(junction: JunctionNode, observed: str) -> Candidate:
         blob_sha=(junction.anchor.blob_sha or "") if junction.anchor else "",
         gloss_key=junction.gloss_key,
         tier=1 if stated else 2,
+        dispatch=list(junction.dispatch),
         log_files=junction.observable_log_files(),
         branches=[
             CandidateBranch(
@@ -1888,6 +1889,7 @@ def _readings(candidates: list[Candidate], observations: list[Observation]) -> l
                 file=candidate.file,
                 blob_sha=candidate.blob_sha,
                 gloss_key=candidate.gloss_key,
+                dispatch=list(candidate.dispatch),
                 log_files=list(files),
                 log_pattern=pattern,
             )

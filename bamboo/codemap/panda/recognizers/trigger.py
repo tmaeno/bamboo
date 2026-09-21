@@ -47,7 +47,7 @@ matters, and going further would compound a name match into a claim.
 from __future__ import annotations
 
 import ast
-from typing import Collection, Optional
+from typing import Collection, Iterator, Optional
 
 from bamboo.codemap.models import (
     ARRIVES_BY_DISPATCH,
@@ -56,6 +56,7 @@ from bamboo.codemap.models import (
     POLLED,
     REQUEST,
     SELF_REPAIRING_TRIGGERS,
+    DispatchFanout,
     EntryPoint,
     JunctionNode,
     SourceModule,
@@ -970,6 +971,212 @@ def _classes_owning_a_junction(
         for name, places in found.items()
         if len(places) == 1 and places[0][3] is not None
     }
+
+
+def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFanout]]:
+    """Return ``{module::class: [fan-out]}`` for the run-time class choices.
+
+    ``panda_config.getPlugin("adder_plugins", vo, group)`` returns whatever a
+    config names, and the source cannot say which.  What the source *can* say
+    is the shape of the answer: the call is followed by a guard on ``None``
+    that imports a concrete class and uses it instead, so the corpus declares
+    both the interface (that class's base) and the alternatives (the base's
+    other subclasses).
+
+    **The class condition is what makes this a reading rather than a pattern.**
+    The structural shape on its own -- assign a call, then ``if x is None: x =
+    y`` -- matches 29 sites in this corpus, and most are ordinary defaults:
+    ``maxHS06sec``, ``coreCount``, ``newScanList``.  Requiring *y* to be a
+    class the corpus declares leaves 3, and they are the three ``getPlugin``
+    sites.  The guard may be a conjunction -- ``closer.py`` asks
+    ``is None and self.job.VO == "atlas"`` -- so a conjunction counts, which
+    is what found the third.
+
+    Keyed by class because that is the scope of the fact.  ``AdderGen`` picks
+    its plugin in ``get_plugin_class`` and runs it from
+    ``process_job_report``, which is where the arm is.
+
+    Not reachable this way: the 18 ``getImpl`` / ``instantiateImpl`` sites.
+    Their candidate set is in ``jedi_config.<x>.modConfig`` as a
+    ``module:className`` string, so the source does not hold it at all.  What
+    the source does hold is the proof: ``FactoryBase.initializeMods`` prints
+    ``getting class {className}`` and ``{cls} is ready for ...`` at INFO.
+    """
+    subclasses: dict[str, list[str]] = {}
+    declared: dict[str, list[ast.ClassDef]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            declared.setdefault(node.name, []).append(node)
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
+                if name:
+                    subclasses.setdefault(name, []).append(node.name)
+
+    found: dict[str, list[DispatchFanout]] = {}
+    for module in modules:
+        for cls in [n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)]:
+            fanouts = [
+                fanout
+                for method in cls.body
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for fanout in _fanouts_in(method, declared, subclasses)
+            ]
+            if fanouts:
+                found.setdefault(f"{module.rel_path}::{cls.name}", []).extend(fanouts)
+        # A dispatch at module level, or in a plain function, still belongs to
+        # the file even though no class holds it.
+        for func, owner in functions_with_owner(module.tree):
+            if owner is not None:
+                continue
+            fanouts = list(_fanouts_in(func, declared, subclasses))
+            if fanouts:
+                found.setdefault(f"{module.rel_path}::{func.name}", []).extend(fanouts)
+    return found
+
+
+def _fanouts_in(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    declared: dict[str, list[ast.ClassDef]],
+    subclasses: dict[str, list[str]],
+) -> Iterator[DispatchFanout]:
+    body = list(ast.walk(func))
+    seen: set[tuple[str, str]] = set()
+    for node in body:
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        name = _assigned_to(node.targets[0])
+        if name is None:
+            continue
+        for guard in body:
+            if not isinstance(guard, ast.If) or not _tests_none(guard.test, name):
+                continue
+            for statement in ast.walk(guard):
+                if not (
+                    isinstance(statement, ast.Assign)
+                    and _assigned_to(statement.targets[0]) == name
+                    and isinstance(statement.value, ast.Name)
+                ):
+                    continue
+                default = statement.value.id
+                places = declared.get(default)
+                if not places or len(places) != 1 or (name, default) in seen:
+                    continue
+                seen.add((name, default))
+                base = next(
+                    (
+                        b.id if isinstance(b, ast.Name) else getattr(b, "attr", "")
+                        for b in places[0].bases
+                        if isinstance(b, (ast.Name, ast.Attribute))
+                    ),
+                    "",
+                )
+                yield DispatchFanout(
+                    at=node.lineno,
+                    selector=_rendered(node.value),
+                    default=default,
+                    base=base,
+                    candidates=sorted({default, *subclasses.get(base, ())}),
+                    announced_by=_announces(func, name),
+                )
+
+
+def _assigned_to(target: ast.expr) -> Optional[str]:
+    """``x`` or ``self.x``, the two spellings a dispatch result is kept under."""
+    if isinstance(target, ast.Name):
+        return target.id
+    if (
+        isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "self"
+    ):
+        return f"self.{target.attr}"
+    return None
+
+
+def _tests_none(test: ast.expr, name: str) -> bool:
+    """``<name> is None``, alone or as one term of an ``and``."""
+    parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+    return any(
+        isinstance(part, ast.Compare)
+        and part.ops
+        and isinstance(part.ops[0], ast.Is)
+        and _assigned_to(part.left) == name
+        and isinstance(part.comparators[0], ast.Constant)
+        and part.comparators[0].value is None
+        for part in parts
+    )
+
+
+def _announces(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
+    """The literal part of a line that prints *name*'s chosen class.
+
+    Only the literal text, because that is what a query can match: the hole
+    is the answer and cannot be in the pattern.  ``adder_gen`` prints
+    ``plugin name {self.adder_plugin_class.__name__}``, so ``plugin name ``
+    is what to ask the log for.
+    """
+    for node in ast.walk(func):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        names = {
+            _assigned_to(part.value.value)
+            for part in node.values
+            if isinstance(part, ast.FormattedValue)
+            and isinstance(part.value, ast.Attribute)
+            and part.value.attr == "__name__"
+        }
+        if name not in names:
+            continue
+        literal = "".join(
+            part.value for part in node.values if isinstance(part, ast.Constant)
+        ).strip()
+        if literal:
+            return literal
+    return ""
+
+
+def _rendered(call: ast.Call) -> str:
+    try:
+        return ast.unparse(call)
+    except Exception:  # noqa: BLE001 -- unparse fails on synthesised nodes
+        return ""
+
+
+def attach_dispatch(junctions: list[JunctionNode], modules: list[SourceModule]) -> int:
+    """Record the run-time class choices made in each junction's class.
+
+    Returns how many junctions got one.  Scoped by the class and settled by
+    the arm's line, the same way :func:`worker_uplinks` settles which of two
+    workers in one module a line belongs to: ``closer.py`` declares more than
+    one class and a key of ``module::class`` alone would hand each the
+    other's arms.
+    """
+    fanouts = dispatch_fanouts(modules)
+    if not fanouts:
+        return 0
+    spans: dict[str, list[tuple[str, tuple[int, int], list[DispatchFanout]]]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            held = fanouts.get(f"{module.rel_path}::{node.name}")
+            if held:
+                spans.setdefault(module.rel_path, []).append(
+                    (node.name, (node.lineno, node.end_lineno or node.lineno), held)
+                )
+    found = 0
+    for junction in junctions:
+        module, _, _method = junction.owner.partition("::")
+        if junction.anchor is None:
+            continue
+        for _name, span, held in spans.get(module, ()):
+            if span[0] <= junction.anchor.line_start <= span[1]:
+                junction.dispatch = list(held)
+                found += 1
+                break
+    return found
 
 
 def attach(

@@ -479,6 +479,23 @@ def _report_reading(
                 "        the tree given is not the one this map was built from: "
                 "the lines above are this tree's, not the map's"
             )
+        for fanout in entry.dispatch:
+            # A candidate set and the line that settles it, printed together.
+            # The plan's three legs for a run-time dispatch -- candidates at
+            # build, the run-time attribute at use, the log for proof -- only
+            # hold when the third travels with the first.
+            click.echo(
+                f"        runs one of {len(fanout.candidates)}: "
+                f"{', '.join(fanout.candidates)}"
+                + (f"  (default {fanout.default})" if fanout.default else "")
+            )
+            click.echo(
+                f"          which one ran is in the log: ask for "
+                f"{fanout.announced_by!r} in "
+                f"{', '.join(entry.log_files[:2]) or 'no file the map names'}"
+                if fanout.announced_by
+                else "          nothing prints which one ran -- the set is all the map can say"
+            )
         if entry.silent:
             click.echo(
                 "        silent -- the map records no line production prints for this arm"

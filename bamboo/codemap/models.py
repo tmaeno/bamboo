@@ -476,6 +476,56 @@ class EntryPoint(BaseModel):
     )
 
 
+class DispatchFanout(BaseModel):
+    """The classes a run-time dispatch could have chosen, and how to tell.
+
+    Not an attribution and never one.  P1-11 refused to say *which* spec class
+    a run-time receiver is, because a single wrong answer invents a junction;
+    this is the other shape -- "one of these three" -- which the map already
+    trades in everywhere else.  The set is a candidate set and the run is
+    settled by the log line beside it.
+
+    Read from what the code declares rather than from a naming convention.
+    The dispatch asks a config for a class and falls back to a concrete one it
+    imports; that concrete class names the interface through its base, and the
+    base's subclasses in the corpus are the alternatives.  Measured: the
+    structural shape alone -- assign a call, then ``if x is None: x = y`` --
+    matches 29 sites and most of them are ordinary defaults
+    (``maxHS06sec``, ``coreCount``, ``newScanList``).  Requiring the fallback
+    to be a *class the corpus declares* leaves 3, which are the three
+    ``getPlugin`` sites.
+    """
+
+    at: Optional[int] = Field(default=None, description="Line of the dispatch.")
+    selector: str = Field(
+        default="", description="The call that asks for a class, as written."
+    )
+    default: str = Field(
+        default="", description="The concrete class the source falls back to."
+    )
+    base: str = Field(
+        default="",
+        description=(
+            "Its base, which is what names the interface.  Empty when the "
+            "default declares none -- the fan-out is then that one class, "
+            "which is a true answer and a narrow one."
+        ),
+    )
+    candidates: list[str] = Field(
+        default_factory=list,
+        description="The base's subclasses in this corpus, the default included.",
+    )
+    announced_by: str = Field(
+        default="",
+        description=(
+            "The literal text of the line that prints the chosen class, when "
+            "the code prints one.  This is what turns a candidate set into an "
+            "answer at use time, and it is the third leg the plan asked for: "
+            "candidates at build, run-time attribute at use, log for proof."
+        ),
+    )
+
+
 class JunctionNode(BaseNode):
     """A place where the code settles a subject's value.
 
@@ -595,6 +645,16 @@ class JunctionNode(BaseNode):
             "datasets that task waits on.  The difference is the whole point "
             "-- 113 junctions would gain an entity from co-residence in the "
             "function and 31 do from a shared statement."
+        ),
+    )
+    dispatch: list[DispatchFanout] = Field(
+        default_factory=list,
+        description=(
+            "Run-time class choices made inside this junction's class.  A "
+            "property of the class rather than of the arm, the same scope "
+            "``self.<field>`` has: ``AdderGen`` picks its plugin in "
+            "``get_plugin_class`` and runs it from ``process_job_report``, "
+            "which is where the arm is."
         ),
     )
     gloss_key: str = Field(
@@ -1680,6 +1740,15 @@ class Candidate(BaseModel):
             "could have' is the honest answer for it."
         ),
     )
+    dispatch: list[DispatchFanout] = Field(
+        default_factory=list,
+        description=(
+            "Classes a run-time choice inside this junction's class could "
+            "have picked.  Carried to the report because a candidate set "
+            "nobody can check is three guesses wearing a bracket -- the line "
+            "that prints the chosen class travels with it."
+        ),
+    )
     log_files: list[str] = Field(
         default_factory=list,
         description=(
@@ -2181,6 +2250,7 @@ class Reading(BaseModel):
     outcomes: list[str] = Field(
         default_factory=list, description="The values those arms write."
     )
+    dispatch: list[DispatchFanout] = Field(default_factory=list)
     log_files: list[str] = Field(default_factory=list)
     log_pattern: str = Field(
         default="",
