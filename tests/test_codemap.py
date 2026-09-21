@@ -9604,3 +9604,224 @@ def test_the_execute_form_keeps_reading_every_bind():
     func = _func(source)
 
     assert [r.window for r in sql.executions(func)] == [None]
+
+
+# --------------------------------------------------------------------------- #
+# where an inline value is anchored
+# --------------------------------------------------------------------------- #
+
+
+def _branches_of(source: str, subject: str):
+    """``{(outcome, path condition)}`` for one subject, from one module."""
+    _s, junctions, _c, _u, _conf, _att = _sql_extract(source)
+    return {
+        (b.outcome, tuple(b.path_condition))
+        for j in junctions
+        if j.subject == subject
+        for b in j.branches
+    }
+
+
+def test_a_statement_appended_in_four_steps_reads_like_the_same_one_written_whole():
+    """The tool used to answer differently depending on how the text was typed.
+
+    ``assigns_in`` reads one fragment at a time, which works for ``SET
+    col=value`` because that pair is adjacent, and cannot work for an
+    ``INSERT``: its columns and its values are two parenthesised runs and the
+    correspondence between them is positional, so it straddles whatever line
+    breaks the author chose.  Four ``+=`` and one implicit concatenation are
+    the same statement under the same guard, and the map has to say so.
+    """
+    appended = (
+        "class M:\n"
+        "    def insertUser(self, name):\n"
+        "        sqlAdd = 'INSERT INTO ATLAS_PANDAMETA.users '\n"
+        "        sqlAdd += '(ID,NAME,NCURRENT) '\n"
+        "        sqlAdd += \"VALUES(SEQ.nextval,:name,\"\n"
+        "        sqlAdd += '0) '\n"
+        "        self.cur.execute(sqlAdd + comment, varMap)\n"
+    )
+    whole = (
+        "class M:\n"
+        "    def insertUser(self, name):\n"
+        "        sqlAdd = ('INSERT INTO ATLAS_PANDAMETA.users '\n"
+        "                  '(ID,NAME,NCURRENT) '\n"
+        "                  \"VALUES(SEQ.nextval,:name,\"\n"
+        "                  '0) ')\n"
+        "        self.cur.execute(sqlAdd + comment, varMap)\n"
+    )
+
+    assert _branches_of(appended, "users.NCURRENT") == {("0", ())}
+    assert _branches_of(appended, "users.NCURRENT") == _branches_of(whole, "users.NCURRENT")
+
+
+def test_a_value_appended_under_a_test_carries_that_test():
+    """The anchor is the fragment the value is in, not the head of the run.
+
+    Grouping fragments that share a guard would put this value on the
+    unconditional head and drop the ``if`` -- which is the reason the anchor
+    exists at all.
+    """
+    source = (
+        "class M:\n"
+        "    def updateOne(self, wanted):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus'\n"
+        "        if wanted:\n"
+        "            sqlU += \",lockedby='jedi'\"\n"
+        "        sqlU += ' WHERE PandaID=:PandaID '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+
+    # Table-qualified: ``lockedby`` is not a declared attribute of the spec
+    # this fixture holds, which is beside the point being made here.
+    assert _branches_of(source, "jobsActive4.lockedby") == {("jedi", ("wanted",))}
+
+
+def test_an_upsert_reports_both_arms_with_their_own_reasons():
+    """One local, two arms, one column, one value -- and two different reasons.
+
+    ``assigns_in`` reads only ``SET``, so the ``INSERT`` arm found no fragment
+    of its own and matched the sibling ``UPDATE``'s.  The two then collapsed in
+    the ``(outcome, path condition)`` merge and the report stated the retry's
+    conditions as necessary for a value the fresh claim also writes.
+    """
+    source = (
+        "class M:\n"
+        "    def claim(self, row):\n"
+        "        if row is None:\n"
+        "            sql = (\"INSERT INTO ATLAS_PANDA.jobsActive4 \"\n"
+        "                   \"(PandaID,jobStatus) \"\n"
+        "                   \"VALUES (:PandaID,'running') \")\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+        "        elif row[0] == 'pending':\n"
+        "            sql = (\"UPDATE ATLAS_PANDA.jobsActive4 \"\n"
+        "                   \"SET jobStatus='running' \"\n"
+        "                   \"WHERE PandaID=:PandaID \")\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+    )
+
+    assert _branches_of(source, "JobSpec.jobStatus") == {
+        ("running", ("row is None",)),
+        ("running", ("not (row is None)", "row[0] == 'pending'")),
+    }
+
+
+def test_a_statement_written_into_the_call_is_anchored_at_the_call():
+    """The daemons hand the text straight to the task buffer, so there is no
+    local to assemble and no fragment to anchor at.
+
+    Anchoring at the call is wrong for a statement built from fragments --
+    ``getTasksToExecCommand_JEDI`` appends its two forms in two arms of one
+    ``if``, so the fragment carries the reason and the call does not -- and it
+    is the only possibility here, where the call *is* where the text is.
+    """
+    source = (
+        "class M:\n"
+        "    def sweep(self, allFinished):\n"
+        "        if allFinished:\n"
+        "            self.taskBuffer.querySQLS(\n"
+        "                \"UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus='holding' \"\n"
+        "                \"WHERE PandaID=:PandaID \", var_map)\n"
+    )
+
+    assert _branches_of(source, "JobSpec.jobStatus") == {("holding", ("allFinished",))}
+
+
+def test_a_statement_built_from_fragments_is_not_anchored_at_its_call():
+    """The control for the clause above, and the older finding it must not undo.
+
+    ``getTasksToExecCommand_JEDI`` appends its two forms of one update in the
+    two arms of an ``if``, so the fragment carries the condition and the call
+    does not.  A call-anchored answer here would report both forms as running
+    under whatever guarded the ``execute``.
+    """
+    source = (
+        "class M:\n"
+        "    def pick(self, release):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.jobsActive4 '\n"
+        "        if release:\n"
+        "            sqlU += \"SET jobStatus='activated' \"\n"
+        "        else:\n"
+        "            sqlU += \"SET jobStatus='holding' \"\n"
+        "        sqlU += ' WHERE PandaID=:PandaID '\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+
+    assert _branches_of(source, "JobSpec.jobStatus") == {
+        ("activated", ("release",)),
+        ("holding", ("not (release)",)),
+    }
+
+
+def test_the_value_is_found_after_the_table_name_is_filled_in():
+    """Offsets have to be taken on the text ``writes`` read, not before it.
+
+    ``_fold_filled`` interpolates a table name the loop supplies, which changes
+    the length of the fragment carrying it.  Offsets measured on the unfilled
+    text drift by that difference and point at the wrong column as soon as the
+    hole is wider or narrower than ``{}``.
+    """
+    source = (
+        "class M:\n"
+        "    def sweep(self, wanted):\n"
+        "        tables = ['ATLAS_PANDA.jobsActive4', 'ATLAS_PANDA.jobsDefined4']\n"
+        "        for tableName in tables:\n"
+        "            sqlU = f'UPDATE {tableName} '\n"
+        "            sqlU += \"SET jobStatus='holding',lockedby='jedi' \"\n"
+        "            sqlU += ' WHERE PandaID=:PandaID '\n"
+        "            self.cur.execute(sqlU + comment, varMap)\n"
+    )
+
+    # One statement per table the loop supplies, and the value found in both.
+    # The two fills differ in width by a character, so the second fragment
+    # starts at 31 in one variant and 32 in the other; an offset taken before
+    # filling would land outside it.
+    assert _branches_of(source, "jobsActive4.jobStatus") == {("holding", ())}
+    assert _branches_of(source, "jobsDefined4.jobStatus") == {("holding", ())}
+
+
+def test_the_reading_is_chosen_by_kind_so_an_upsert_keeps_its_two_reasons():
+    """The ablation for choosing the reading rather than trying both.
+
+    Both arms of an UPSERT spell the same column with the same value, so a
+    reading that accepted either answers for the ``INSERT`` when asked about
+    the ``UPDATE``.  Measured on the installed corpus, trying both moves six
+    anchors where choosing moves three -- the extra three being the ``UPDATE``
+    halves of the same three UPSERTs, which is the mis-anchoring this path
+    removes, arriving from the other side.
+    """
+    source = (
+        "class M:\n"
+        "    def claim(self, row):\n"
+        "        if row is None:\n"
+        "            sql = (\"INSERT INTO ATLAS_PANDA.jobsActive4 \"\n"
+        "                   \"(PandaID,jobStatus) \"\n"
+        "                   \"VALUES (:PandaID,'running') \")\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+        "        else:\n"
+        "            sql = (\"UPDATE ATLAS_PANDA.jobsActive4 \"\n"
+        "                   \"SET jobStatus='running' \"\n"
+        "                   \"WHERE PandaID=:PandaID \")\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+    ]
+    func = next(
+        n for n in ast.walk(modules[1].tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "claim"
+    )
+    pathcond.attach_parents(modules[1].tree)
+    running = sql.ColumnValue(kind="literal", text="running")
+    runs = {run.sql.split()[0].upper(): run for run in sql.executions(func)}
+
+    insert_at = sqlwrite._deciding_fragment(func, runs["INSERT"], "jobStatus", running, "insert")
+    update_at = sqlwrite._deciding_fragment(func, runs["UPDATE"], "jobStatus", running, "update")
+
+    assert insert_at.lineno != update_at.lineno
+    # Asking the UPDATE with the INSERT's reading is how the two collapse.
+    assert (
+        sqlwrite._deciding_fragment(func, runs["UPDATE"], "jobStatus", running, "insert").lineno
+        == insert_at.lineno
+    )

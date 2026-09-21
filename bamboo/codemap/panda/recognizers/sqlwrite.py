@@ -272,9 +272,10 @@ def extract(
 
 def _deciding_fragment(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
-    variable: str,
+    run: sql.Execution,
     column: str,
     supplied: sql.ColumnValue,
+    kind: str,
 ) -> Optional[ast.stmt]:
     """Return the statement fragment that put ``<column>=<value>`` into the SQL.
 
@@ -283,11 +284,35 @@ def _deciding_fragment(
     forms of ``getTasksToExecCommand_JEDI``'s update are appended in the two
     arms of one ``if``, so the fragment carries the condition and the statement
     does not.
+
+    **The match is made on the assembled variant and mapped back.**  Reading a
+    fragment at a time is what ``assigns_in`` did, and it answers only for
+    ``SET col=value``, where the pair is adjacent.  An ``INSERT`` names its
+    columns in one parenthesised run and its values in another, so the pair
+    straddles whatever line breaks the author chose -- sixty-eight columns went
+    unanchored for nothing but that, and the same reading lost three ``UPDATE``
+    values written as multi-line ``CASE`` expressions.  Two statements spelling
+    one thing two ways must not get two answers.
+
+    Grouping fragments by the guard they share does not work either.  Given a
+    head, a second fragment, and a third appended under an ``if``, a reader can
+    meet the statement with the third or without it; the group holding the
+    third alone is neither, and nothing ever runs it.  :func:`sql.variant_spans`
+    enumerates the statements that exist and says which fragment contributed
+    which stretch, so the guard falls out of the mapping rather than being the
+    thing split on.
+
+    **A statement with no local name is anchored at its call.**  The daemons
+    write the text into ``querySQLS`` directly, so there are no fragments and
+    the call is where the text is -- the opposite of the case above rather than
+    an exception to it.
     """
-    for node, text in sql.fragments(func, variable):
-        for found, value in sql.assigns_in(text):
-            if found == column and value == supplied:
-                return node
+    if not run.variable:
+        return run.call
+    for statement, spans in sql.variant_spans(func, run.variable):
+        at = sql.supplied_at(statement, kind, column, supplied)
+        if at is not None:
+            return sql.fragment_holding(spans, at)
     return None
 
 
@@ -362,7 +387,7 @@ def _outcomes(
             found.append((f"runtime({ast.unparse(value)})", 2, bind, [], bind))
         return found
 
-    node = _deciding_fragment(func, run.variable, column, supplied)
+    node = _deciding_fragment(func, run, column, supplied, statement.kind)
     if node is None:
         return []
     if supplied.kind == "literal":

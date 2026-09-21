@@ -125,6 +125,23 @@ class ColumnValue(BaseModel):
     )
 
 
+class Span(NamedTuple):
+    """Where one fragment landed in the statement it helped build.
+
+    The unit an inline value is anchored at.  A statement is assembled from
+    fragments and each fragment carries its own path condition, so the fragment
+    holding the value is the one that says *why* it was written -- but which
+    fragment that is cannot be decided fragment by fragment, because an
+    ``INSERT``'s column list and value list are two parenthesised runs and the
+    correspondence between them is positional.  Reading the assembled variant
+    and mapping the match back here answers both at once.
+    """
+
+    node: ast.stmt
+    start: int
+    end: int
+
+
 def classify(value: str) -> ColumnValue:
     """Classify the right-hand side of one SQL column assignment.
 
@@ -368,10 +385,18 @@ def _fold_filled(
     per_part: list[tuple[list[ast.expr], set[int]]],
     assignment: dict[str, str],
     dropped: set[int],
-) -> str:
-    """:func:`_fold`, with each fragment's table holes filled from *assignment*."""
+) -> tuple[str, list[Span]]:
+    """:func:`_fold`, with each fragment's table holes filled from *assignment*.
+
+    Returns the statement and where in it each fragment landed.  The spans are
+    taken here rather than recomputed because they have to describe the text
+    *after* filling: ``_fill`` changes the length of any fragment carrying a
+    hole, so offsets measured on the unfilled text point at the wrong column as
+    soon as a table name is interpolated.
+    """
     assembled = ""
-    for index, (_line, operator, text, _node) in enumerate(parts):
+    spans: list[Span] = []
+    for index, (_line, operator, text, node) in enumerate(parts):
         if index in dropped:
             continue
         expressions, holes = per_part[index]
@@ -384,16 +409,23 @@ def _fold_filled(
                     if ast.unparse(expressions[hole]) in assignment
                 },
             )
-        assembled = text if operator == "=" else assembled + text
-    return assembled
+        if operator == "=":
+            assembled = ""
+            spans = []
+        spans.append(Span(node, len(assembled), len(assembled) + len(text)))
+        assembled += text
+    return assembled, spans
 
 
 def _run_variants(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     parts: list[tuple[int, str, str, ast.stmt]],
     name: str,
-) -> list[str]:
+) -> list[tuple[str, list[Span]]]:
     """Return the statements one ``=``-started run of fragments can produce.
+
+    Each comes with the spans saying which fragment contributed which stretch
+    of it -- see :func:`variant_spans` for why that is the interesting part.
 
     Fragments appended under mutually exclusive branches are *alternatives*, not
     parts of one statement, and folding them together builds a statement that
@@ -439,17 +471,19 @@ def _run_variants(
             total,
             _MAX_BRANCH_VARIANTS,
         )
-        return [_fold(parts)]
+        return [_fold_filled(parts, per_part, {}, set())]
 
     alternatives = {index for members in groups for index in members}
-    texts: list[str] = []
+    found: list[tuple[str, list[Span]]] = []
+    seen: set[str] = set()
     for combination in itertools.product(*groups):
         dropped = alternatives - set(combination)
         for assignment in assignments:
-            text = _fold_filled(parts, per_part, assignment, dropped)
-            if text and text not in texts:
-                texts.append(text)
-    return texts
+            text, spans = _fold_filled(parts, per_part, assignment, dropped)
+            if text and text not in seen:
+                seen.add(text)
+                found.append((text, spans))
+    return found
 
 
 def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -477,7 +511,45 @@ def variants(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[st
         if part[1] == "=" or not runs:
             runs.append([])
         runs[-1].append(part)
-    return [text for run in runs for text in _run_variants(func, run, name) if text]
+    return [text for run in runs for text, _spans in _run_variants(func, run, name) if text]
+
+
+def variant_spans(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[tuple[str, list[Span]]]:
+    """:func:`variants`, with each statement's fragments and where they landed.
+
+    **The variant is the unit, not the fragment and not the whole function.**
+    A fragment is where a path condition lives, so it is tempting to read one
+    at a time; that is what ``assigns_in`` was doing, and it cannot see an
+    ``INSERT`` whose columns and values were appended on different lines.  It
+    is equally tempting to group fragments that share a guard, but::
+
+        sql  = "SELECT ... "          # no test above it
+        sql += "WHERE a=:a "          # no test above it
+        if wanted:
+            sql += "AND b=:b "        # under ``wanted``
+
+    has two statements a reader can meet -- with and without the third
+    fragment -- and the group ``["AND b=:b "]`` is neither of them.  It is not
+    a statement at all; nothing ever runs it alone.
+
+    :func:`_run_variants` already enumerates the statements properly, splitting
+    on mutual exclusion and keeping an ``if`` with no ``else`` in every variant.
+    All that was missing is which fragment contributed which stretch, so this
+    returns that rather than inventing a second decomposition.
+    """
+    runs: list[list[tuple[int, str, str, ast.stmt]]] = []
+    for part in _parts(func, name):
+        if part[1] == "=" or not runs:
+            runs.append([])
+        runs[-1].append(part)
+    return [
+        (text, spans)
+        for run in runs
+        for text, spans in _run_variants(func, run, name)
+        if text
+    ]
 
 
 def reconstruct(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
@@ -927,24 +999,82 @@ def writes(sql: str) -> list[SqlWrite]:
                 )
             )
     for match in _INSERT.finditer(sql):
-        names = [c.strip().split(".")[-1] for c in match.group(2).split(",")]
-        values = [v.strip() for v in match.group(3).split(",")]
-        columns = {}
-        for name, value in zip(names, values, strict=False):
-            if not _IDENTIFIER.fullmatch(name):
-                continue
-            supplied = classify(value)
-            if supplied.kind == "column":
-                # An INSERT has no prior row to copy from, so a bare word in
-                # its VALUES list is a sequence or a function, not a source
-                # column.  Calling it one would invent a passthrough edge.
-                supplied = ColumnValue(kind="expression", text=supplied.text)
-            columns[name] = supplied
+        columns = {name: supplied for name, supplied, _at in _insert_supplies(match)}
         if columns:
             found.append(
                 SqlWrite(kind="insert", table=_table_of(match.group(1)), columns=columns)
             )
     return found
+
+
+def _insert_supplies(match: re.Match) -> list[tuple[str, ColumnValue, tuple[int, int]]]:
+    """``(column, value, where the value sits)`` for one ``INSERT`` match.
+
+    One reading for the two questions asked of an ``INSERT``: which columns it
+    writes, and where in the statement each value was written.  Kept together
+    because pairing a column with a value here is positional -- the names are
+    in one parenthesised run and the values in another -- and a second reading
+    that paired them its own way would be free to pair them differently.
+
+    The offsets are into the same string the match was taken from, so a caller
+    that matched on an assembled variant can map a value back to the fragment
+    that contributed it.
+    """
+    names = [c.strip().split(".")[-1] for c in match.group(2).split(",")]
+    supplies: list[tuple[str, ColumnValue, tuple[int, int]]] = []
+    at = match.start(3)
+    for name, value in zip(names, match.group(3).split(","), strict=False):
+        start, end = at, at + len(value)
+        at = end + 1  # the comma the split consumed
+        name = name.strip()
+        if not _IDENTIFIER.fullmatch(name):
+            continue
+        supplied = classify(value)
+        if supplied.kind == "column":
+            # An INSERT has no prior row to copy from, so a bare word in its
+            # VALUES list is a sequence or a function, not a source column.
+            # Calling it one would invent a passthrough edge.
+            supplied = ColumnValue(kind="expression", text=supplied.text)
+        supplies.append((name, supplied, (start, end)))
+    return supplies
+
+
+def supplied_at(
+    statement: str, kind: str, column: str, supplied: ColumnValue
+) -> Optional[int]:
+    """Where *statement* writes *supplied* into *column*, as an end offset.
+
+    ``None`` when this statement does not write that value into that column.
+
+    **The reading is chosen by kind rather than tried in turn.**  An UPSERT
+    builds its ``INSERT`` and its ``UPDATE`` through one local -- seven
+    functions here do -- and both spell the same column with the same value, so
+    a reading that accepted either would answer for the ``INSERT`` when asked
+    about the ``UPDATE``.  That is the same mis-answer this whole path exists
+    to remove, arriving from the other side.
+    """
+    if kind == "insert":
+        for match in _INSERT.finditer(statement):
+            for name, value, (_start, end) in _insert_supplies(match):
+                if name == column and value == supplied:
+                    return end
+        return None
+    # Everything from the first ``WHERE`` on is a predicate, which uses the
+    # same ``column = value`` spelling as an assignment -- see ``assigns_in``.
+    where = _WHERE.search(statement)
+    head = statement[: where.start()] if where else statement
+    for match in _ASSIGNMENT.finditer(head):
+        if match.group(1) == column and classify(match.group(2)) == supplied:
+            return match.end()
+    return None
+
+
+def fragment_holding(spans: list[Span], offset: int) -> Optional[ast.stmt]:
+    """The fragment whose stretch of the statement contains *offset*."""
+    for span in spans:
+        if span.start < offset <= span.end:
+            return span.node
+    return None
 
 
 def _table_of(reference: str) -> str:
