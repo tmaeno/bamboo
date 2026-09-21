@@ -189,7 +189,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # denominator to be a fraction of -- every join either names such a
         # table or does not.
         self._never_written = boundary.tables_never_written(self._modules)
-        gates = boundary.extract_selection_gates(
+        gates = boundary.extract_read_only_tables(
             self._modules,
             self.map_id,
             self._version,

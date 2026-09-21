@@ -4049,6 +4049,101 @@ def test_a_name_the_statement_defines_for_itself_is_not_a_join_partner():
     assert sql.joins(statement) == []
 
 
+_READ_ONLY_SOURCE = """
+class TaskModule:
+    def pick(self):
+        sqlR = "SELECT retry_action FROM ATLAS_PANDA.RETRYACTIONS WHERE errorCode=:errorCode"
+        self.cur.execute(sqlR + comment, varMap)
+
+    def touch(self):
+        sqlU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE jediTaskID=:jediTaskID"
+        self.cur.execute(sqlU + comment, varMap)
+
+    def count(self):
+        sqlC = "SELECT nJobs FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID"
+        self.cur.execute(sqlC + comment, varMap)
+"""
+
+
+def test_a_table_read_without_being_joined_is_still_a_boundary():
+    """A table need not bound anything to be one.
+
+    This walked join partners only, because the name it went by was
+    ``selection_gates`` and a gate is what a partner is.  Whatever keeps the
+    table current is outside the source either way, so a value read straight
+    out of one is as unaccountable as a row hidden by one -- and twenty of the
+    corpus's twenty-two read-only tables were reached no other way, among them
+    ``RETRYACTIONS``, which decides whether a job is retried at all.
+    """
+    modules = [_module(_READ_ONLY_SOURCE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+    never_written = boundary.tables_never_written(modules)
+
+    found = boundary.extract_read_only_tables(modules, MAP_ID, VERSION, never_written, set())
+
+    # ``JEDI_Tasks`` is read here too, and written here, so it is a step in
+    # this map rather than a dependency on anything outside it.
+    assert [b.interface for b in found] == ["RETRYACTIONS"]
+    assert found[0].carried_values == ["retry_action"]
+    assert found[0].transport == "shared_table"
+    assert found[0].handed_over == []
+
+
+def test_a_table_reached_both_ways_is_one_boundary():
+    """The two readings answer for the same table, so they fold into one node.
+
+    Storing a second would be the same fact under two names, which is what
+    folding the table's spellings exists to prevent.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def joined(self):\n"
+        "        sqlJ = ('SELECT t.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks t,"
+        "ATLAS_PANDA.RETRYACTIONS r WHERE t.errorCode=r.errorCode')\n"
+        "        self.cur.execute(sqlJ + comment, varMap)\n"
+        "    def read(self):\n"
+        "        sqlR = 'SELECT retry_action FROM ATLAS_PANDA.RETRYACTIONS WHERE errorCode=:e'\n"
+        "        self.cur.execute(sqlR + comment, varMap)\n"
+        "    def touch(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:s WHERE jediTaskID=:j'\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    modules = [_module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    found = boundary.extract_read_only_tables(
+        modules, MAP_ID, VERSION, boundary.tables_never_written(modules), set()
+    )
+
+    assert [b.interface for b in found] == ["RETRYACTIONS"]
+    # Both readings' columns reach the one node: the join predicate's, found
+    # through the alias, and the projection's.
+    assert found[0].carried_values == ["errorCode", "retry_action"]
+
+
+def test_a_table_does_not_bound_itself():
+    """The gates of a statement were offered to every table in it.
+
+    A subject sitting on the gating table therefore got its own table back as
+    the thing limiting which of its rows can be seen, and the verdict that
+    produces tells a reader to go and find out who maintains a table they are
+    already looking at.  Seventeen of the fifty-eight gated subjects were that.
+    """
+    modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    gates = sqlwrite.selection_gates(
+        modules, attributor, boundary.tables_never_written(modules)
+    )
+
+    assert not [
+        subject
+        for subject, tables in gates.items()
+        if subject.rpartition(".")[0].lower() in {t.lower() for t in tables}
+    ]
+
+
 def test_only_a_table_nothing_here_writes_is_a_gate():
     """A join to a table the corpus maintains is a step in a query; a join to
     one it only ever reads is a dependency that can go stale unaccounted for."""
@@ -4061,7 +4156,7 @@ def test_only_a_table_nothing_here_writes_is_a_gate():
     assert never_written["jedi_aux_status_mintaskid"] == "JEDI_AUX_Status_MinTaskID"
     assert "jedi_tasks" not in never_written
 
-    found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
+    found = boundary.extract_read_only_tables(modules, MAP_ID, VERSION, never_written, set())
 
     assert [b.interface for b in found] == ["JEDI_AUX_Status_MinTaskID"]
 
@@ -4125,7 +4220,7 @@ def test_one_table_spelled_three_ways_is_one_boundary():
 
     assert "filestable_arch" in never_written
 
-    found = boundary.extract_selection_gates(modules, MAP_ID, VERSION, never_written, set())
+    found = boundary.extract_read_only_tables(modules, MAP_ID, VERSION, never_written, set())
 
     assert [b.interface for b in found] == ["filesTable_ARCH"]
 
@@ -4187,7 +4282,7 @@ def test_a_table_that_bounds_a_query_and_nothing_writes_is_a_boundary():
     """
     modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
 
-    found = boundary.extract_selection_gates(
+    found = boundary.extract_read_only_tables(
         modules, MAP_ID, VERSION, boundary.tables_never_written(modules), set()
     )
 
@@ -4204,7 +4299,7 @@ def test_a_table_the_schema_recognizer_already_named_is_not_repeated():
     """One crossing, found two ways, must not become two boundaries."""
     modules = [_module(_ORPHAN_RESCUE, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
 
-    found = boundary.extract_selection_gates(
+    found = boundary.extract_read_only_tables(
         modules,
         MAP_ID,
         VERSION,

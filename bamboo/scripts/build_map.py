@@ -672,7 +672,7 @@ def main(
         # row this map can be asked about but never explain the state of, and
         # the second is one nothing here ever consults.
         # A table nothing here writes is not listed: it is a boundary, and
-        # ``extract_selection_gates`` already reports it as one.
+        # ``extract_read_only_tables`` already reports it as one.
         write_only = [e.name for e in fragment.entities if not e.read_by]
         never_made = [
             e.name for e in fragment.entities if not e.created_by and e.read_by

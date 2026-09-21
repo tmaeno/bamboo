@@ -352,14 +352,14 @@ def tables_never_written(modules: list[SourceModule]) -> dict[str, str]:
     }
 
 
-def extract_selection_gates(
+def extract_read_only_tables(
     modules: list[SourceModule],
     map_id: str,
     derived_from: str,
     never_written: dict[str, str],
     already_known: set[str],
 ) -> list[BoundaryNode]:
-    """A boundary per table that bounds a query's reach and nothing here writes.
+    """A boundary per table this map reads and nothing here writes.
 
     The other extraction reads *which schema* a statement is qualified with, so
     it finds the tables another system owns by name.  This one reads a
@@ -379,6 +379,23 @@ def extract_selection_gates(
     ``system`` is left unresolved rather than guessed.  The schema qualifier
     says which database the table is in, not who maintains it, and inventing a
     name here would put a claim where the source is silent.
+
+    **A table need not bound anything to be a boundary.**  This walked only
+    join partners for a long time, because the name it went by was
+    ``selection_gates`` and a gate is what a join partner is.  That is the
+    narrower question: whatever keeps the table current is outside the source
+    either way, and a value read straight out of one is as unaccountable as a
+    row hidden by one.  Measured, the difference was twenty of twenty-two --
+    ``RETRYERRORS`` and ``RETRYACTIONS``, which decide whether a job is
+    retried; four materialized views, which are stale by construction; the
+    ATLAS_PANDAARCH tables; and the precomputed statistics caches.  Every one
+    of them had no node at all, so an investigation that reached one of those
+    values had nowhere further to go and nothing saying so.
+
+    The two readings fold into one node per table, which is what
+    :func:`_channel_for` is for.  They differ only in which columns they can
+    name: a join partner's are found through its alias, a leading table's are
+    the projection.
     """
     # Folded here rather than by the caller, so that one place knows the rule.
     # A caller that forgot would put the same crossing in twice under two
@@ -388,17 +405,22 @@ def extract_selection_gates(
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
-                for table in sql.joins(run.sql):
+                readings: list[tuple[str, list[str]]] = [
                     # Folded for the lookups and kept as written for the
                     # columns: this statement spells the table its own way, and
                     # that spelling is what ``joined_columns`` has to match.
+                    (table, sql.joined_columns(run.sql, table))
+                    for table in sql.joins(run.sql)
+                ]
+                readings += list(sql.reads(run.sql))
+                for table, columns in readings:
                     folded = table.lower()
                     if folded not in never_written or folded in known:
                         continue
                     channel = _channel_for(
                         seen, UNRESOLVED_SYSTEM, "", never_written[folded], module, run.call
                     )
-                    channel.receives(sql.joined_columns(run.sql, table))
+                    channel.receives(columns)
                     channel.operations.add("SELECT")
     return [
         BoundaryNode(

@@ -763,7 +763,7 @@ def entity_nodes(
 
     **A table this corpus only reads is left out.**  It already has a node, and
     a better-fitting one: ``tables_never_written`` finds it and
-    ``extract_selection_gates`` makes it an unbound boundary -- a dependency on
+    ``extract_read_only_tables`` makes it an unbound boundary -- a dependency on
     something outside, which is what a table nothing here maintains is.
     Recording it here as well would put one fact in two node types, the shape
     that ``log_files`` and ``opened_by`` have already cost this map twice.  The
@@ -832,6 +832,18 @@ def selection_gates(
                 if not gates:
                     continue
                 for table in _tables_of(run.sql):
+                    # A table does not bound itself.  The statement's gates are
+                    # read once and offered to every table in it, so a subject
+                    # sitting on the gating table got its own table back as the
+                    # thing limiting which of its rows can be seen --
+                    # ``JEDI_AUX_Status_MinTaskID.status`` bounded by
+                    # ``JEDI_AUX_Status_MinTaskID``.  Seventeen of the
+                    # fifty-eight gated subjects were that, and the verdict
+                    # they produce tells a reader to go and find out who
+                    # maintains a table they are already looking at.
+                    bounds = {gate for gate in gates if gate.lower() != table.lower()}
+                    if not bounds:
+                        continue
                     spec_class = attributor.class_for_table(table)
                     for column, _key in sql.predicates(run.sql):
                         qualifier, attribute, _kind = _subject_of(
@@ -839,7 +851,7 @@ def selection_gates(
                         )
                         found.setdefault(
                             SubjectNode.make_name(qualifier, attribute), set()
-                        ).update(gates)
+                        ).update(bounds)
     return found
 
 
