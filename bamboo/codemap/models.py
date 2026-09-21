@@ -201,34 +201,76 @@ class EntityNode(BaseNode):
     nothing in an investigation can reach them -- the database holds none of
     their rows.  An entity is read by ``derive-strategy``, so it is a node.
 
-    **The verbs stay apart.**  Selecting a task's jobs and updating them are
-    different claims, and pooling them is exactly the conflation that let a
+    **All four verbs stay apart.**  Selecting a task's jobs and updating them
+    are different claims, and pooling them is exactly the conflation that let a
     function's ``UPDATE ... WHERE`` be reported as a query that selects on a
-    value.  A descent follows ``read_by``; ``written_by`` comes free from the
-    same walk and is recorded rather than guessed at later.
+    value.  The same is true one level down: an ``INSERT`` is an object
+    entering the system, an ``UPDATE`` is one already here moving, and a
+    ``DELETE`` is one leaving.  Reported as one "written" they could not be
+    asked apart, so the map had no way to answer where a kind of row comes into
+    existence -- while telling a reader to go and ask whether a command
+    arrived, which is exactly a row appearing in a table.
+
+    **Keyed by the table, not by the spec class.**  Most of this corpus's
+    tables have no spec: forty-one of the forty-eight it inserts into, and they
+    are the ones where arrival means something -- ``HARVESTER_COMMANDS``,
+    ``PRODSYS_COMM``, ``SQL_QUEUE``, ``async_requests``, ``Job_Output_Report``,
+    ``users``, ``SiteData``, ``T_TASK``, ``jobs_StatusLog``.  Keying on the
+    class answered for seven.
+
+    The class would be the wrong key even where there is one.  ``SubjectNode``
+    keys on it because ``jobsActive4``, ``jobsDefined4`` and ``jobsArchived4``
+    are one ``JobSpec.jobStatus``, and splitting that would make three subjects
+    out of one fact.  A row's *creation* is the opposite: which of those tables
+    it was created in is the fact, and folding them loses it.  So the class
+    rides along as an attribute instead of being the signature.
+
+    The name is the table folded to lower case, because SQL identifiers are
+    case-insensitive and this corpus spells one table several ways.
     """
 
     node_type: NodeType = NodeType.ENTITY
     map_id: str
     derived_from: str
+    spec_class: Optional[str] = Field(
+        default=None,
+        description=(
+            "The spec class this table holds, where one was learned.  An "
+            "attribute rather than the key -- see the class docstring -- and "
+            "``None`` for the majority of tables, which declare none."
+        ),
+    )
     tables: list[str] = Field(
         default_factory=list,
         description=(
-            "Tables learned to hold this entity's rows.  Several per entity is "
-            "normal and is why the class is the signature rather than the "
-            "table: ``jobsDefined4``, ``jobsActive4`` and ``jobsArchived4`` are "
-            "one ``JobSpec`` split across a job's lifetime."
+            "The spellings the corpus uses for this table.  More than one is "
+            "ordinary: ``reassignShare`` loops over ``jobsactive4`` where "
+            "everything else writes ``jobsActive4``."
         ),
     )
     read_by: list[str] = Field(
         default_factory=list,
-        description="``module::method`` of every function whose SELECT names one of the tables.",
+        description="``module::method`` of every function whose SELECT names this table.",
     )
-    written_by: list[str] = Field(
+    created_by: list[str] = Field(
         default_factory=list,
         description=(
-            "The same for UPDATE and DELETE.  Kept separate from ``read_by`` "
-            "because a descent is about the rows a decision was *read from*."
+            "The same for INSERT: where a row of this kind comes into "
+            "existence.  The question a value's branch table cannot answer, "
+            "and the one a stalled command needs -- a command arriving is a "
+            "row appearing here."
+        ),
+    )
+    updated_by: list[str] = Field(
+        default_factory=list,
+        description="The same for UPDATE: where a row already here is moved.",
+    )
+    deleted_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The same for DELETE.  Worth its own list because of what it means "
+            "on a command table: a DELETE followed by an INSERT is a second "
+            "command silently replacing one that was never picked up."
         ),
     )
 

@@ -2110,7 +2110,7 @@ async def test_a_function_that_only_writes_an_entity_opens_nothing():
                 map_id=MAP_ID,
                 derived_from=VERSION,
                 tables=["jobsActive4"],
-                written_by=[_JOB_FETCH],
+                updated_by=[_JOB_FETCH],
             )
         ],
     )

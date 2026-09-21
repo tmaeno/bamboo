@@ -496,11 +496,13 @@ def _record(
 
 
 class EntityUse(NamedTuple):
-    """Where one kind of row is read and where it is written."""
+    """Where one kind of row is read, made, moved and removed."""
 
     tables: set[str]
     read_by: set[str]
-    written_by: set[str]
+    created_by: set[str]
+    updated_by: set[str]
+    deleted_by: set[str]
 
 
 class ValueUse(NamedTuple):
@@ -685,10 +687,10 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
         use = found.setdefault(subject, {}).setdefault(value, ValueUse(set(), set()))
         (use.selected_by if verb == "read" else use.updated_by).add(owner)
 
-    def touch(spec_class: str, table: str, owner: str, verb: str) -> None:
-        use = rows.setdefault(spec_class, EntityUse(set(), set(), set()))
+    def touch(table: str, owner: str, verb: str) -> None:
+        use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
         use.tables.add(table)
-        (use.read_by if verb == "read" else use.written_by).add(owner)
+        getattr(use, f"{verb}_by").add(owner)
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
@@ -710,10 +712,14 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                     if _UNREAD_TABLE.fullmatch(table):
                         unreadable[owner] = unreadable.get(owner, 0) + 1
                         continue
-                    spec_class = attributor.class_for_table(table)
-                    if spec_class is not None:
-                        touch(spec_class, table, owner, verb)
-                        if verb == "read":
+                    touch(table, owner, verb)
+                    if verb == "read":
+                        # Joined entities stay keyed by the spec class: that
+                        # reading asks which *other kind of thing* a decision
+                        # looked at in the same statement, and there the three
+                        # job tables really are one kind of thing.
+                        spec_class = attributor.class_for_table(table)
+                        if spec_class is not None:
                             together.add(spec_class)
                 if len(together) > 1:
                     joins.setdefault(owner, set()).add(frozenset(together))
@@ -743,27 +749,45 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
 
 
 def entity_nodes(
-    uses: dict[str, EntityUse], map_id: str, derived_from: str
+    uses: dict[str, EntityUse],
+    map_id: str,
+    derived_from: str,
+    attributor: Optional[SpecAttributor] = None,
 ) -> list[EntityNode]:
     """Turn what :func:`read_side` saw into nodes, one per kind of row.
 
     No promotion.  The criteria decide whether asking "why is this attribute
     this value?" is a question worth having, which is a question about a
     column; an entity is not a candidate for it and would be judged by rules
-    that read an attribute it does not have.  What keeps the list short is the
-    corpus: a spec class is declared, so there are a dozen of these and not a
-    table's worth.
+    that read an attribute it does not have.
+
+    **A table this corpus only reads is left out.**  It already has a node, and
+    a better-fitting one: ``tables_never_written`` finds it and
+    ``extract_selection_gates`` makes it an unbound boundary -- a dependency on
+    something outside, which is what a table nothing here maintains is.
+    Recording it here as well would put one fact in two node types, the shape
+    that ``log_files`` and ``opened_by`` have already cost this map twice.  The
+    two readings agree on the installed corpus: the tables with no writing verb
+    are exactly ``tables_never_written``'s thirty-nine.
+
+    What is left is sixty-seven kinds of row where keying on the spec class
+    gave thirteen, and the fifty-four that appear are the ones a stalled
+    command is about.
     """
     return [
         EntityNode(
-            name=spec_class,
+            name=table,
             map_id=map_id,
             derived_from=derived_from,
+            spec_class=attributor.class_for_table(table) if attributor else None,
             tables=sorted(use.tables),
             read_by=sorted(use.read_by),
-            written_by=sorted(use.written_by),
+            created_by=sorted(use.created_by),
+            updated_by=sorted(use.updated_by),
+            deleted_by=sorted(use.deleted_by),
         )
-        for spec_class, use in sorted(uses.items())
+        for table, use in sorted(uses.items())
+        if use.created_by or use.updated_by or use.deleted_by
     ]
 
 

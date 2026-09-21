@@ -265,7 +265,11 @@ def _actor_owners(fragment) -> set[str]:
             owners.update(names)
     for entity in fragment.entities:
         owners.update(entity.read_by)
-        owners.update(entity.written_by)
+        # All three writing verbs.  Which log will show the statement running
+        # is the same question whether the row was made, moved or removed.
+        owners.update(entity.created_by)
+        owners.update(entity.updated_by)
+        owners.update(entity.deleted_by)
     return owners
 
 

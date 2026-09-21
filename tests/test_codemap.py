@@ -6034,8 +6034,8 @@ def test_a_query_naming_no_promoted_column_still_says_whose_rows_it_read():
 
     side = sqlwrite.read_side(modules, attributor)
 
-    assert side.entities["JobSpec"].read_by == {"x.py::rows"}
-    assert side.entities["JobSpec"].tables == {"jobsActive4"}
+    assert side.entities["jobsactive4"].read_by == {"x.py::rows"}
+    assert side.entities["jobsactive4"].tables == {"jobsActive4"}
 
 
 def test_the_predicate_of_an_update_does_not_make_the_function_a_reader():
@@ -6063,8 +6063,8 @@ def test_the_predicate_of_an_update_does_not_make_the_function_a_reader():
 
     side = sqlwrite.read_side(modules, attributor)
 
-    assert side.entities["JobSpec"].written_by == {"x.py::kill"}
-    assert not side.entities["JobSpec"].read_by
+    assert side.entities["jobsactive4"].updated_by == {"x.py::kill"}
+    assert not side.entities["jobsactive4"].read_by
 
 
 def test_an_update_predicate_does_not_name_a_query_that_selects_the_value():
@@ -6202,8 +6202,8 @@ def test_two_kinds_of_row_read_by_two_statements_are_not_joined():
 
     # Both kinds of row really are attributable here -- what is withheld is the
     # relation between them, not the reading of either.
-    assert side.entities["JobSpec"].read_by == {"x.py::dispatch"}
-    assert "x.py::dispatch" in side.entities["JediTaskSpec"].read_by
+    assert side.entities["jobsactive4"].read_by == {"x.py::dispatch"}
+    assert "x.py::dispatch" in side.entities["jedi_tasks"].read_by
     assert side.joins == {}
 
 
@@ -6237,23 +6237,37 @@ def test_a_statement_that_writes_one_kind_of_row_and_reads_another_is_not_a_join
 
     side = sqlwrite.read_side(modules, attributor)
 
-    # Both kinds of row are seen, under the verb that names them.
-    assert side.entities["JobSpec"].read_by == {"x.py::sweep"}
-    assert side.entities["JediTaskSpec"].written_by == {"x.py::sweep"}
+    # Both kinds of row are seen, each under the verb that names it, and each
+    # under its own table rather than under a spec class covering three.
+    assert side.entities["jobsactive4"].read_by == {"x.py::sweep"}
+    assert side.entities["jedi_tasks"].updated_by == {"x.py::sweep"}
     assert side.joins == {}
 
 
-def test_a_table_holding_no_spec_is_not_an_entity():
-    """An entity is a kind of row the corpus has a name for.  A table whose
-    class was never learned has no signature to merge on, and inventing one
-    from the table would split ``JobSpec`` into three -- one per lifetime
-    table -- which is the reason the class is canonical in the first place."""
+def test_a_table_holding_no_spec_is_still_a_kind_of_row():
+    """Reversed deliberately, and here is the reason.
+
+    This used to require a spec class, on the grounds that keying by table
+    would split ``JobSpec`` into three -- one per lifetime table.  That reason
+    holds for a *subject*, where ``jobsActive4`` and ``jobsArchived4`` are one
+    ``JobSpec.jobStatus``, and it inverts for a row's lifetime: which of those
+    tables a row was created in is the fact, not an accident to fold away.
+    Requiring the class also answered for seven of the forty-eight tables this
+    corpus inserts into, and the forty-one it dropped are the ones where
+    arrival means something -- PRODSYS_COMM among them.
+
+    What is excluded now is a table nothing here writes, because that already
+    has a node: an unbound boundary saying the value comes from outside.
+    """
     source = (
         "class TaskModule:\n"
         "    def rows(self):\n"
         "        sqlP = f'SELECT COMM_CMD FROM {schema}.PRODSYS_COMM '\n"
         "        sqlP += 'WHERE COMM_TASK=:COMM_TASK '\n"
         "        self.cur.execute(sqlP + comment, varMap)\n"
+        "    def issue(self):\n"
+        "        sqlI = f'INSERT INTO {schema}.PRODSYS_COMM (COMM_TASK) VALUES (:COMM_TASK) '\n"
+        "        self.cur.execute(sqlI + comment, varMap)\n"
     )
     modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
     attributor = attribution.SpecAttributor(
@@ -6261,7 +6275,12 @@ def test_a_table_holding_no_spec_is_not_an_entity():
     )
     attributor.learn_table_classes(modules)
 
-    assert sqlwrite.read_side(modules, attributor).entities == {}
+    side = sqlwrite.read_side(modules, attributor)
+    nodes = {n.name: n for n in sqlwrite.entity_nodes(side.entities, MAP_ID, VERSION, attributor)}
+
+    assert nodes["prodsys_comm"].spec_class is None
+    assert nodes["prodsys_comm"].created_by == ["x.py::issue"]
+    assert nodes["prodsys_comm"].read_by == ["x.py::rows"]
 
 
 def test_a_subject_carries_what_bounds_the_queries_that_select_it():
@@ -9893,3 +9912,90 @@ def test_a_table_filled_by_an_insert_select_is_not_maintained_elsewhere():
     modules = [_module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
 
     assert "task_attempts" not in boundary.tables_never_written(modules)
+
+
+# --------------------------------------------------------------------------- #
+# a kind of row, keyed by the table it lives in
+# --------------------------------------------------------------------------- #
+
+_ROW_LIFETIME = """
+class M:
+    def issueCommand(self, site):
+        sqlI = "INSERT INTO ATLAS_PANDA.HARVESTER_COMMANDS "
+        sqlI += "(command_id,status) VALUES (:command_id,'new') "
+        self.cur.execute(sqlI + comment, varMap)
+
+    def pickUpCommand(self, site):
+        sqlS = "SELECT command_id FROM ATLAS_PANDA.HARVESTER_COMMANDS "
+        sqlS += "WHERE status=:status "
+        self.cur.execute(sqlS + comment, varMap)
+
+    def dropCommand(self, site):
+        sqlD = "DELETE FROM ATLAS_PANDA.harvester_commands WHERE command_id=:command_id "
+        self.cur.execute(sqlD + comment, varMap)
+
+    def readConfig(self, site):
+        sqlC = "SELECT a.name FROM ATLAS_PANDA.HARVESTER_COMMANDS c,ATLAS_PANDAMETA.schedconfig a "
+        sqlC += "WHERE c.site=a.name AND c.status=:status "
+        self.cur.execute(sqlC + comment, varMap)
+"""
+
+
+def _entities_of(source: str):
+    modules = [_module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    side = sqlwrite.read_side(modules, attributor)
+    return {node.name: node for node in sqlwrite.entity_nodes(side.entities, MAP_ID, VERSION)}
+
+
+def test_a_kind_of_row_exists_without_a_spec_class_to_name_it():
+    """Keying entities on the spec class answered for seven of the forty-eight
+    tables this corpus inserts into.
+
+    The forty-one without one are where "something arrived" means anything:
+    HARVESTER_COMMANDS, PRODSYS_COMM, SQL_QUEUE, async_requests,
+    Job_Output_Report, users, SiteData, T_TASK, jobs_StatusLog.  A command
+    reaching a harvester *is* a row appearing in a table, and the map could not
+    say where that happens.
+    """
+    entities = _entities_of(_ROW_LIFETIME)
+
+    assert "harvester_commands" in entities
+    assert entities["harvester_commands"].spec_class is None
+
+
+def test_the_three_writing_verbs_are_three_different_claims():
+    """Creating, changing and removing a row are not one fact."""
+    entity = _entities_of(_ROW_LIFETIME)["harvester_commands"]
+
+    assert [o.split("::")[-1] for o in entity.created_by] == ["issueCommand"]
+    assert [o.split("::")[-1] for o in entity.deleted_by] == ["dropCommand"]
+    assert entity.updated_by == []
+    assert sorted(o.split("::")[-1] for o in entity.read_by) == ["pickUpCommand", "readConfig"]
+
+
+def test_one_table_spelled_two_ways_is_one_kind_of_row():
+    """``HARVESTER_COMMANDS`` and ``harvester_commands`` are one table, so the
+    row created in one and removed in the other has one lifetime."""
+    entity = _entities_of(_ROW_LIFETIME)["harvester_commands"]
+
+    assert entity.created_by and entity.deleted_by
+
+
+def test_a_table_this_corpus_only_reads_is_a_boundary_and_not_a_kind_of_row():
+    """The read-only tables already have a node, and it is not this one.
+
+    ``tables_never_written`` finds them and ``extract_selection_gates`` makes
+    each an unbound boundary -- a dependency on something outside.  Recording
+    them here as well would put one fact in two node types, which is the shape
+    ``log_files`` and ``opened_by`` already cost this map twice.  Measured on
+    the installed corpus, the read-only set and ``tables_never_written`` are
+    the same set.
+    """
+    entities = _entities_of(_ROW_LIFETIME)
+
+    # Joined, never written here: a dependency, not a kind of row PanDA keeps.
+    assert "schedconfig" not in entities

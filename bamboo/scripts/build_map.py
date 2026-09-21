@@ -671,17 +671,26 @@ def main(
         # and write-only are both worth saying out loud: the first is a kind of
         # row this map can be asked about but never explain the state of, and
         # the second is one nothing here ever consults.
-        read_only = [e.name for e in fragment.entities if not e.written_by]
+        # A table nothing here writes is not listed: it is a boundary, and
+        # ``extract_selection_gates`` already reports it as one.
         write_only = [e.name for e in fragment.entities if not e.read_by]
+        never_made = [
+            e.name for e in fragment.entities if not e.created_by and e.read_by
+        ]
         click.echo(
             f"\nentities: {len(fragment.entities)} kind(s) of row, "
             f"{sum(len(e.read_by) for e in fragment.entities)} function(s) reading, "
-            f"{sum(len(e.written_by) for e in fragment.entities)} writing"
+            f"{sum(len(e.created_by) for e in fragment.entities)} creating, "
+            f"{sum(len(e.updated_by) for e in fragment.entities)} updating, "
+            f"{sum(len(e.deleted_by) for e in fragment.entities)} deleting"
         )
-        if read_only:
-            click.echo("  read but never written here:  " + ", ".join(sorted(read_only)))
         if write_only:
             click.echo("  written but never read here:  " + ", ".join(sorted(write_only)))
+        if never_made:
+            # Rows this map moves but never makes: whatever puts them there is
+            # outside what was read, so an investigation that gets this far has
+            # to leave the corpus.
+            click.echo("  changed but never created here:  " + ", ".join(sorted(never_made)))
 
     unreadable = getattr(plugin, "unreadable_tables", {})
     if unreadable:

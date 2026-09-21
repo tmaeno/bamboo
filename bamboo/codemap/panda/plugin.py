@@ -347,7 +347,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(sqlwrite.read_coverage(self._modules))
         selected = side.values
         fragment.entities.extend(
-            sqlwrite.entity_nodes(side.entities, self.map_id, self._version)
+            sqlwrite.entity_nodes(side.entities, self.map_id, self._version, attributor)
         )
         self._unreadable_tables = side.unreadable
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
