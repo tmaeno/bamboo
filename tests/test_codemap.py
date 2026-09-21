@@ -1746,6 +1746,97 @@ def test_a_bind_variable_after_into_is_not_a_table():
     assert created == ["jobsDefined4"]
 
 
+def test_a_name_the_statement_defines_for_itself_is_not_a_table_it_reads():
+    """``joins`` already knew this; ``reads`` did not.
+
+    ``copyArchive`` opens ``WITH p AS (SELECT ... FROM jobsActive4 ...)`` and
+    then selects ``FROM p``.  Reading ``p`` as a table put a table nothing
+    writes into the map, and the next step calls that a boundary -- a claim
+    that PanDA depends on state some other system maintains, about a name that
+    exists only inside one statement.
+    """
+    statement = (
+        "WITH p AS ("
+        "SELECT MIN(PandaID) PandaID,computingSite FROM ATLAS_PANDA.jobsActive4 "
+        "WHERE jobStatus=:jobStatus) "
+        "SELECT p.computingSite,s.modificationTime "
+        "FROM p, ATLAS_PANDA.jobs_statuslog s WHERE s.PandaID=p.PandaID"
+    )
+
+    # The real tables are still both there: the one inside the common table
+    # expression is its own ``SELECT``, and the outer query's partner is a
+    # join.  Only the self-defined name goes.
+    assert [table for table, _columns in sql.reads(statement)] == ["jobsActive4"]
+    assert sql.joins(statement) == ["jobs_statuslog"]
+
+
+def test_oracle_s_one_row_pseudo_table_is_not_a_table():
+    """``SELECT <seq>.nextval FROM dual`` asks the sequence for a number.
+
+    ``dual`` sits where a table goes and holds none of PanDA's rows --
+    ``WrappedCursor`` deletes ``FROM dual`` outright when the backend is not
+    Oracle.  Counted as a table it is read eleven times and written never,
+    which is the exact shape the next step turns into "maintained outside
+    PanDA".
+    """
+    statement = "SELECT ATLAS_PANDA.JOBSDEFINED4_PANDAID_SEQ.nextval FROM dual"
+
+    assert sql.reads(statement) == []
+
+
+def test_a_join_written_with_the_keyword_names_the_same_partner():
+    """Two spellings of one statement, and the map read only one of them.
+
+    A join partner bounds which rows the query can see, which is why it is a
+    gate.  That is true of ``FROM a, b`` and of ``FROM a JOIN b ON ...``
+    alike, and reading only the comma form left ``resource_types`` -- read by
+    the corpus, written by none of it -- with no node at all.
+    """
+    comma = (
+        "SELECT jss.resource_type FROM ATLAS_PANDA.JOBS_SHARE_STATS jss,"
+        "ATLAS_PANDA.resource_types rt WHERE jss.resource_type=rt.resource_name"
+    )
+    keyword = (
+        "SELECT jss.resource_type FROM ATLAS_PANDA.JOBS_SHARE_STATS jss "
+        "JOIN ATLAS_PANDA.resource_types rt ON jss.resource_type=rt.resource_name"
+    )
+
+    assert sql.joins(comma) == sql.joins(keyword) == ["resource_types"]
+
+
+def test_a_join_key_is_not_a_condition_on_a_value():
+    """``ON`` carries the equality that makes the join, not a test on a value.
+
+    The terms after ``WHERE``/``AND``/``OR`` are what ``row_precondition``
+    reads, and every one of the corpus's twenty-nine ``ON`` clauses is a plain
+    key equality -- none compares a column to a bind variable or a literal.
+    Reading them would add the join's own plumbing to the conditions a row had
+    to satisfy.
+    """
+    joined = (
+        "SELECT j.PandaID FROM ATLAS_PANDA.jobsActive4 j "
+        "JOIN ATLAS_PANDA.schedconfig_json s ON j.computingSite=s.panda_queue "
+        "WHERE j.jobStatus=:jobStatus"
+    )
+
+    assert sql.joins(joined) == ["schedconfig_json"]
+    assert sql.predicates(joined) == [("jobStatus", ":jobStatus")]
+
+
+def test_an_interpolated_table_is_still_reported_as_a_read():
+    """The hole is kept on purpose, and the difference from ``joins`` is real.
+
+    A statement whose table nobody could name is a gap, and the build report
+    says how many there are and in which functions.  ``joins`` drops the hole
+    because an unnameable partner cannot bound anything; ``reads`` keeps it
+    because dropping it would turn a counted gap into silence.
+    """
+    statement = "SELECT PandaID FROM {} WHERE jediTaskID=:jediTaskID"
+
+    assert [table for table, _columns in sql.reads(statement)] == ["{}"]
+    assert sql.joins(statement) == []
+
+
 def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     """Half a list of tables read as the list is a statement about tables the
     code never runs over, which is worse than the hole it replaces."""

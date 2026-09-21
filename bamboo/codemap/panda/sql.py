@@ -1151,6 +1151,47 @@ def declared_row_classes(
     return found
 
 
+# The whole FROM list, aliases and all: ``FROM {0}.JEDI_Tasks tabT,
+# {0}.JEDI_AUX_Status_MinTaskID tabA``.
+_FROM_LIST = re.compile(
+    r"\bFROM\s+((?:[\w{}.]+(?:\s+\w+)?\s*,\s*)*[\w{}.]+(?:\s+\w+)?)", re.IGNORECASE
+)
+
+# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself.
+_CTE = re.compile(r"\b(?:WITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+
+# ``JOIN {0}.JEDI_WORK_QUEUE jwq ON ...`` -- the other spelling of a join
+# partner, which ``_FROM_LIST`` cannot see because it is not in the comma list.
+_JOIN = re.compile(r"\bJOIN\s+([\w{}.]+)", re.IGNORECASE)
+
+#: Oracle's one-row pseudo-table.  ``SELECT <seq>.nextval FROM dual`` asks a
+#: sequence for a number; ``dual`` sits where a table goes and holds none of
+#: PanDA's rows.  ``WrappedCursor`` deletes ``FROM dual`` outright when the
+#: backend is not Oracle, which settles what it is.
+_PSEUDO_TABLES = frozenset({"dual"})
+
+
+def _names_a_table(name: str, defined: set[str]) -> bool:
+    """Whether *name*, written where a table goes, names one that stores rows.
+
+    Two ways it can fail to, and both belong wherever a table position is
+    read: the statement may have introduced the name itself in a ``WITH``
+    clause, and it may be Oracle's ``dual``.  Either one counted as a table is
+    read by the corpus and written by none of it, which is the exact shape
+    :func:`~bamboo.codemap.panda.recognizers.boundary.tables_never_written`
+    turns into a claim that some other system maintains it.
+
+    An interpolated name -- a bare ``{}`` -- is *not* decided here, because the
+    two callers want opposite things from it.  :func:`joins` drops it, since a
+    partner nobody can name cannot be said to bound anything; :func:`reads`
+    keeps it, since the reader downstream counts those and the build report
+    says how many statements and which functions.  Dropping it there would
+    turn a counted gap into silence.
+    """
+    folded = name.lower()
+    return bool(name) and folded not in defined and folded not in _PSEUDO_TABLES
+
+
 _SELECT = re.compile(r"\bSELECT\s+(?:DISTINCT\s+)?(.*?)\s+FROM\s+([\w{}.]+)", re.IGNORECASE | re.DOTALL)
 _DELETE = re.compile(r"\bDELETE\s+FROM\s+([\w{}.]+)", re.IGNORECASE)
 
@@ -1162,25 +1203,19 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
     expressions (``COUNT(1)``, ``CASE WHEN ...``) says what the query computes
     rather than what the row carries, and a boundary is about the latter.
     """
+    defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
     found: list[tuple[str, list[str]]] = []
     for match in _SELECT.finditer(sql):
+        table = _table_of(match.group(2))
+        if not _names_a_table(table, defined):
+            continue
         columns = [
             part.strip().split(".")[-1]
             for part in match.group(1).split(",")
             if _IDENTIFIER.fullmatch(part.strip().split(".")[-1] or "_")
         ]
-        found.append((_table_of(match.group(2)), columns))
+        found.append((table, columns))
     return found
-
-
-# The whole FROM list, aliases and all: ``FROM {0}.JEDI_Tasks tabT,
-# {0}.JEDI_AUX_Status_MinTaskID tabA``.
-_FROM_LIST = re.compile(
-    r"\bFROM\s+((?:[\w{}.]+(?:\s+\w+)?\s*,\s*)*[\w{}.]+(?:\s+\w+)?)", re.IGNORECASE
-)
-
-# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself.
-_CTE = re.compile(r"\b(?:WITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
 
 
 def joins(sql: str) -> list[str]:
@@ -1207,16 +1242,22 @@ def joins(sql: str) -> list[str]:
     """
     defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
     found: list[str] = []
+
+    def offer(reference: str) -> None:
+        table = _table_of(reference)
+        # ``{}`` means the name was interpolated, so the statement does not say
+        # which table this is, and a partner nobody can name bounds nothing.
+        if table == "{}" or not _names_a_table(table, defined):
+            return
+        if table not in found:
+            found.append(table)
+
     for match in _FROM_LIST.finditer(sql):
         parts = [part.strip() for part in match.group(1).split(",")]
         for part in parts[1:]:
-            table = _table_of(part.split()[0]) if part.split() else ""
-            # ``{}`` means the name was interpolated, so the statement does not
-            # say which table this is.
-            if not table or table == "{}" or table.lower() in defined:
-                continue
-            if table not in found:
-                found.append(table)
+            offer(part.split()[0] if part.split() else "")
+    for match in _JOIN.finditer(sql):
+        offer(match.group(1))
     return found
 
 
