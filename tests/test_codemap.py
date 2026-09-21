@@ -1837,6 +1837,94 @@ def test_an_interpolated_table_is_still_reported_as_a_read():
     assert sql.joins(statement) == []
 
 
+def test_an_f_string_that_only_glues_reads_as_the_concatenation_it_is():
+    """``execute(f"{sql} {comment}")`` is ``execute(sql + comment)`` respelled.
+
+    Read as one opaque expression it has no head that names a statement, so
+    the execution was dropped whole -- not truncated, dropped.  Five statements
+    went that way, and one of them is the only place ``JOBSDEFINED_SHARE_STATS``
+    is named, so the map did not know the table exists.
+    """
+    glued = (
+        "def f(self):\n"
+        "    comment = ' /* tag */'\n"
+        "    sql_get = 'SELECT data FROM ATLAS_PANDA.Job_Metrics WHERE jediTaskID=:jediTaskID'\n"
+        "    self.cur.execute(f'{sql_get} {comment}', var_map)\n"
+    )
+    added = glued.replace("f'{sql_get} {comment}'", "sql_get + comment")
+
+    spelled = [run.sql.strip() for run in sql.executions(_func(glued))]
+
+    assert spelled == [run.sql.strip() for run in sql.executions(_func(added))]
+    assert spelled == ["SELECT data FROM ATLAS_PANDA.Job_Metrics WHERE jediTaskID=:jediTaskID"]
+
+
+def test_an_f_string_carrying_its_own_text_is_not_split():
+    """A wrapper's literal parts are whitespace; a statement's are the statement.
+
+    Splitting one that carries text would keep only the piece before the first
+    hole, which is a truncation the reader cannot tell from a short statement.
+    """
+    source = (
+        "def f(self, taskBuffer):\n"
+        "    taskBuffer.querySQLS(f'UPDATE {schemaPANDA}.jobsActive4 SET jobStatus=:new', varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "UPDATE {}.jobsActive4 SET jobStatus=:new"
+    ]
+
+
+def test_one_f_string_elsewhere_does_not_disqualify_the_other_statements():
+    """Whether a ``{}`` is a placeholder is a question about *this* statement.
+
+    It was asked about every assignment to the name anywhere in the function.
+    ``copyArchive.main`` assigns ``sql`` forty-four times and one of them is an
+    f-string, so the other forty-three were treated as possibly carrying an
+    interpolation's residue -- and the query whose table the loop supplies was
+    left reading ``FROM ATLAS_PANDA.{}``, naming no table at all.
+    """
+    source = (
+        "def main(self, taskBuffer):\n"
+        "    sql = f'SELECT PandaID FROM {schemaPANDA}.jobsActive4 WHERE x=:x'\n"
+        "    taskBuffer.querySQLS(sql, {})\n"
+        "    sql = 'SELECT COMPUTINGSITE FROM ATLAS_PANDA.{} WHERE vo=:vo '\n"
+        "    for table in ['JOBS_SHARE_STATS', 'JOBSDEFINED_SHARE_STATS']:\n"
+        "        taskBuffer.querySQLS(sql.format(table), {})\n"
+    )
+
+    tables = {
+        table
+        for run in sql.executions(_func(source, name="main"))
+        for table, _columns in sql.reads(run.sql)
+    }
+
+    assert {"JOBS_SHARE_STATS", "JOBSDEFINED_SHARE_STATS"} <= tables
+
+
+def test_every_clause_of_a_multi_part_with_defines_a_name():
+    """The second ``WITH`` clause follows a parenthesis, not a word.
+
+    ``get_active_gshare_rtype_mapping`` opens two: ``WITH gshare_results AS
+    (...), wq_results AS (...)``.  A word boundary before the comma demands a
+    word character to its left, and the character there is ``)`` -- so the
+    second name was read as a table, read by the corpus and written by none of
+    it, which is the shape the next step calls a boundary.
+    """
+    statement = (
+        "WITH gshare_results AS ("
+        "SELECT gshare AS name FROM ATLAS_PANDA.JOBS_SHARE_STATS WHERE vo=:vo"
+        "), wq_results AS ("
+        "SELECT QUEUE_NAME AS name FROM ATLAS_PANDA.JEDI_WORK_QUEUE WHERE vo=:vo"
+        ") SELECT name FROM gshare_results UNION SELECT name FROM wq_results"
+    )
+
+    assert [table for table, _columns in sql.reads(statement)] == [
+        "JOBS_SHARE_STATS",
+        "JEDI_WORK_QUEUE",
+    ]
+
+
 def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     """Half a list of tables read as the list is a statement about tables the
     code never runs over, which is worse than the hole it replaces."""

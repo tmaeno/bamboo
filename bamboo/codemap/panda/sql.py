@@ -651,10 +651,50 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     return found
 
 
+def _is_literal(node: ast.expr) -> bool:
+    """Whether *node* is a plain string constant."""
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _gluing_fstring(node: ast.expr) -> Optional[list[ast.expr]]:
+    """The operands of an f-string that only joins a statement to its tag.
+
+    ``execute(f"{sql} {comment}")`` is ``execute(sql + " " + comment)`` written
+    another way.  Read as one opaque expression it has no head that names a
+    statement, so the execution was dropped whole rather than truncated -- and
+    a statement that is never read leaves nothing behind for a graph invariant
+    to catch.  Five went that way, one of them the only place
+    ``JOBSDEFINED_SHARE_STATS`` is named.
+
+    Recognised by its literal parts being nothing but whitespace.  An f-string
+    that carries text of its own *is* the statement, and splitting that one
+    would keep only the piece before the first hole -- a truncation no reader
+    could tell from a short statement.
+    """
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    if not any(isinstance(value, ast.FormattedValue) for value in node.values):
+        return None
+    if any(
+        isinstance(value, ast.Constant)
+        and isinstance(value.value, str)
+        and value.value.strip()
+        for value in node.values
+    ):
+        return None
+    return [
+        value.value if isinstance(value, ast.FormattedValue) else value
+        for value in node.values
+    ]
+
+
 def _concatenated(node: ast.expr) -> list[ast.expr]:
     """Flatten a chain of ``+`` into its operands, left to right."""
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _concatenated(node.left) + _concatenated(node.right)
+    glued = _gluing_fstring(node)
+    if glued is not None:
+        return [operand for value in glued for operand in _concatenated(value)]
     return [node]
 
 
@@ -678,15 +718,26 @@ def _interpolates(node: ast.expr) -> bool:
     )
 
 
-def _braces_are_literal(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool:
-    """Whether every ``{}`` in *name*'s text is a placeholder the source wrote.
+def _braces_are_literal(sources: list[ast.stmt]) -> bool:
+    """Whether every ``{}`` the fragments in *sources* wrote is a placeholder.
 
     Rendered text spells an f-string interpolation ``{}`` as well, so a bare
     brace is either the hole a schema went into or a field a ``.format`` at the
     call fills.  The fragments settle it without a guess: if none of them
     interpolates, every brace came from a literal.
+
+    **The fragments of this statement, not every assignment to the name.**
+    Asked across the whole function it is a different question, and a bigger
+    one than the answer can bear: ``copyArchive.main`` assigns ``sql``
+    forty-four times and exactly one of those is an f-string, which disqualified
+    the other forty-three.  Among them is the query whose table the loop
+    supplies, so ``JOBS_SHARE_STATS`` and ``JOBSDEFINED_SHARE_STATS`` were read
+    as ``FROM ATLAS_PANDA.{}`` -- naming no table at all.
     """
-    return not any(_interpolates(node.value) for _line, _op, _text, node in _parts(func, name))
+    return not any(
+        isinstance(node, (ast.Assign, ast.AugAssign)) and _interpolates(node.value)
+        for node in sources
+    )
 
 
 def _elements(node: ast.expr) -> Optional[list[str]]:
@@ -787,9 +838,8 @@ def _literal_values(
 
 
 def _substituted(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
     text: str,
-    name: str,
+    sources: list[ast.stmt],
     fillers: list[list[str]],
     percent: bool,
 ) -> list[str]:
@@ -805,7 +855,7 @@ def _substituted(
             continue
         if marker in filled[0]:
             filled = [one.replace(marker, value) for one in filled for value in values]
-        elif index == 0 and _BARE_FIELD in filled[0] and _braces_are_literal(func, name):
+        elif index == 0 and _BARE_FIELD in filled[0] and _braces_are_literal(sources):
             filled = [
                 one.replace(_BARE_FIELD, value) for one in filled for value in values
             ]
@@ -822,6 +872,21 @@ def _call_site_fill(
     of the text -- which for ``%s`` meant no statement at all, because the
     table pattern does not accept a ``%``.
     """
+    glued = _gluing_fstring(expression)
+    if glued is not None and sum(1 for value in glued if not _is_literal(value)) > 1:
+        # Same rule as the ``+`` spelling below: the last operand is the
+        # tracing tag the call appends, so the statement is everything before
+        # it.  Only when there is something to drop -- ``f"{sql}"`` carries no
+        # tag, and taking one off would leave nothing.
+        last = max(index for index, value in enumerate(glued) if not _is_literal(value))
+        expression = ast.JoinedStr(
+            values=[
+                value if _is_literal(value) else ast.FormattedValue(
+                    value=value, conversion=-1, format_spec=None
+                )
+                for value in glued[:last]
+            ]
+        )
     if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mod):
         return expression.left, [_literal_values(func, expression.right)], True
     inner = (
@@ -880,9 +945,18 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         expression = node.args[0]
         statement, fillers, percent = _call_site_fill(func, expression)
         operands = _concatenated(statement)
+        sources: dict[str, list[ast.stmt]] = {}
         if isinstance(operands[0], ast.Name):
             base = operands[0]
-            head = variants(func, base.id)
+            head = []
+            for text, spans in variant_spans(func, base.id):
+                if not text:
+                    continue
+                head.append(text)
+                # Which fragments built this variant, so that filling its holes
+                # asks about them and not about every other statement the name
+                # has held.
+                sources.setdefault(text, [span.node for span in spans])
             held = base.id
         elif forwarded:
             # The daemons write the statement into the call.  ``execute`` is
@@ -927,7 +1001,10 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             else None
         )
         for combination in itertools.product(*pieces):
-            for text in _substituted(func, "".join(combination), held, fillers, percent):
+            assembled = "".join(combination)
+            for text in _substituted(
+                assembled, sources.get(combination[0], []), fillers, percent
+            ):
                 found.append(
                     Execution(
                         sql=text,
@@ -1157,8 +1234,12 @@ _FROM_LIST = re.compile(
     r"\bFROM\s+((?:[\w{}.]+(?:\s+\w+)?\s*,\s*)*[\w{}.]+(?:\s+\w+)?)", re.IGNORECASE
 )
 
-# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself.
-_CTE = re.compile(r"\b(?:WITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+# ``WITH tmpTab AS (SELECT ...)`` -- a name the statement defines for itself,
+# and the second and later ones after a comma.  The word boundary goes before
+# ``WITH`` only: a comma is not a word character, so ``\b,`` demands one to its
+# left and ``), wq_results AS (`` -- the spelling every multi-clause WITH in
+# this corpus uses -- did not match.
+_CTE = re.compile(r"(?:\bWITH|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
 
 # ``JOIN {0}.JEDI_WORK_QUEUE jwq ON ...`` -- the other spelling of a join
 # partner, which ``_FROM_LIST`` cannot see because it is not in the comma list.
