@@ -87,6 +87,7 @@ from bamboo.codemap.models import (
     UNSETTLED,
     Candidate,
     CandidateBranch,
+    EntityNode,
     FollowUp,
     FunnelStep,
     Handover,
@@ -564,6 +565,7 @@ def _follow_up(
     writers: list[JunctionNode],
     carried_from: list[str],
     log_sites: dict[str, LogSiteNode],
+    entities: list[EntityNode],
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -633,6 +635,11 @@ def _follow_up(
         }
     ) or sorted({entry.trigger for j in writers for entry in j.entry_points})
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
+    # Kept apart from ``created_by`` being empty, which reads as "the map did
+    # not look".  Three kinds of row in the corpus are changed here and made
+    # somewhere this map has not read.
+    creates_rows = any(entity.created_by for entity in entities) if entities else False
+    created_by = sorted({owner for entity in entities for owner in entity.created_by})
     if selected_by:
         asks = f"{observed!r} is selected by {_readers_phrase(selected_by, reader_files)}"
     elif updated_by:
@@ -643,22 +650,40 @@ def _follow_up(
     else:
         asks = f"a query selects on {observed!r}"
     if selected and repairing:
+        # The clause about tables nothing writes belongs only where such a
+        # table was named.  Folding table names into the map made twenty
+        # subjects give up a gate they should never have had, and without this
+        # the sentence went on referring to "those tables" after naming none.
         bounded = (
-            "bounded by " + ", ".join(selection_gates)
+            "bounded by "
+            + ", ".join(selection_gates)
+            + ", and nothing in the map writes those tables"
             if selection_gates
             else "bounded by nothing this map can name"
         )
         question = (
             f"{asks} and a re-evaluating trigger reaches this "
-            f"subject, so ask why it did not pick the row up -- its reach is {bounded}, "
-            "and nothing in the map writes those tables"
+            f"subject, so ask why it did not pick the row up -- its reach is {bounded}"
         )
     elif selected:
+        # Where the answer is "ask whether the command arrived", say where
+        # arriving would be.  A command reaching a service is a row appearing
+        # in a table, and until the writing verbs were kept apart the map could
+        # not name the statement that puts it there.
         question = (
             f"{asks}, but only {', '.join(triggers) or 'nothing the map recognises'} "
             "reaches it, and none of those re-evaluate -- so ask whether the "
             "command or message arrived, not which condition blocked it"
         )
+        if created_by:
+            question += (
+                f"; a row of this kind is made by {', '.join(short_owner(o) for o in created_by)}"
+            )
+        elif creates_rows is False:
+            question += (
+                "; nothing in this map makes rows of this kind, so whatever does is "
+                "outside what was read"
+            )
     else:
         where = ", ".join(carried_from) if carried_from else "the writers listed above"
         question = (
@@ -669,6 +694,8 @@ def _follow_up(
         selected=selected,
         selected_by=list(selected_by),
         updated_by=list(updated_by),
+        creates_rows=creates_rows,
+        created_by=created_by,
         reader_log_files=reader_files,
         selection_gates=list(selection_gates),
         triggers=triggers,
@@ -1068,6 +1095,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 subject.selected_by.get(symptom.observed, [])
                 + subject.updated_by.get(symptom.observed, [])
             ),
+            await code_map.entities_for(subject.spec_class),
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing

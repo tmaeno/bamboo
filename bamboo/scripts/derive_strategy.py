@@ -136,6 +136,12 @@ def _report_verdict(strategy: Strategy, evaluated: bool) -> None:
         )
 
 
+#: How many creating functions to name before counting the rest.  A job row is
+#: made in twelve places, which is itself the answer to "where does one come
+#: from" -- so the count is printed rather than the list quietly cut.
+_TOP_CREATORS = 4
+
+
 def _report_follow_up(strategy: Strategy) -> None:
     """Whether the row is going anywhere, printed before who put it there.
 
@@ -179,6 +185,22 @@ def _report_follow_up(strategy: Strategy) -> None:
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")
+    # Where a row of this kind starts existing.  A branch table answers why a
+    # row holds the value it holds and cannot answer why there is a row at all,
+    # which is the question behind "did the command arrive".
+    if follow.created_by:
+        shown = follow.created_by[:_TOP_CREATORS]
+        for index, owner in enumerate(shown):
+            label = "  where a row of this kind is made" if index == 0 else " " * 33
+            click.echo(f"{label} {strategy_mod.short_owner(owner)}")
+        if len(follow.created_by) > len(shown):
+            # Said as a count rather than truncated silently: twelve functions
+            # create a job row, and a list cut to three reads like all of them.
+            click.echo(
+                " " * 33 + f" … {len(follow.created_by) - len(shown)} more place(s) make them"
+            )
+    elif follow.selected:
+        click.echo("  where a row of this kind is made  nothing in this map makes them")
     for line in click.wrap_text(
         follow.question, width=_WIDTH, initial_indent="  → ", subsequent_indent="    "
     ).splitlines():

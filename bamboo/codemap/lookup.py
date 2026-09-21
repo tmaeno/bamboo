@@ -329,6 +329,24 @@ class CodeMap:
                 by_owner.setdefault(owner, []).append(entity.name)
         return {owner: sorted(names) for owner, names in by_owner.items()}
 
+    async def entities_for(self, qualifier: str) -> list[EntityNode]:
+        """The kinds of row a subject's qualifier names.
+
+        A subject is qualified by its spec class where one was learned and by
+        its table otherwise, so both spellings have to resolve.  A class can
+        name several: ``JobSpec`` covers ``jobsDefined4``, ``jobsActive4`` and
+        ``jobsArchived4``, and for a row's *creation* that is the useful
+        answer rather than an ambiguity -- a job row is made in exactly one of
+        them, and which one is the fact.
+        """
+        folded = qualifier.lower()
+        found = [
+            entity
+            for entity in await self._find(EntityNode)
+            if entity.name == folded or (entity.spec_class or "") == qualifier
+        ]
+        return sorted(found, key=lambda entity: entity.name)
+
     async def chain(self, owner: str) -> list[FilterStageNode]:
         """One brokerage chain's stages, in the order the source runs them.
 

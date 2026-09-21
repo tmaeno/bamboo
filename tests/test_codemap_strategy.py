@@ -2721,3 +2721,126 @@ def test_no_source_tree_leaves_the_reading_as_coordinates(tmp_path):
 
     assert strategy.readings[0].trace == []
     assert strategy.readings[0].trace_note == ""
+
+
+async def test_a_value_nothing_re_evaluates_says_where_a_row_of_that_kind_is_made():
+    """The verdict told a reader to go and ask whether a command arrived, and
+    could not say where a command arriving would be.
+
+    A command arriving *is* a row appearing in a table.  The map read the verb
+    that says so and pooled it into "written", so the answer existed in the
+    source and nowhere in the map.  With the verbs apart it can name the
+    function whose INSERT brings the row into existence.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                name="async_results.status",
+                selected=["running"],
+                selected_by={"running": ["taskbuffer/async_request_module.py::recover"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "taskbuffer/async_request_module.py::recover",
+                Branch(outcome="running"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+        ],
+        entities=[
+            EntityNode(
+                name="async_results",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["async_results"],
+                created_by=["taskbuffer/async_request_module.py::claim_async_result"],
+                read_by=["taskbuffer/async_request_module.py::recover"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject="async_results.status", observed="running", task_id="42"),
+    )
+
+    assert strategy.follow_up.created_by == [
+        "taskbuffer/async_request_module.py::claim_async_result"
+    ]
+    assert "claim_async_result" in strategy.follow_up.question
+
+
+async def test_a_row_this_map_never_creates_says_so_rather_than_naming_nobody():
+    """Silence and "nothing here makes these rows" are different answers.
+
+    Three kinds of row in the corpus are changed here and created elsewhere.
+    Reporting that as an empty list reads as "the map did not look".
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                name="async_results.status",
+                selected=["running"],
+                selected_by={"running": ["taskbuffer/async_request_module.py::recover"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "taskbuffer/async_request_module.py::recover",
+                Branch(outcome="running"),
+                log_files=[OTHER_LOG],
+                triggers=("command",),
+            ),
+        ],
+        entities=[
+            EntityNode(
+                name="async_results",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["async_results"],
+                updated_by=["taskbuffer/async_request_module.py::recover"],
+                read_by=["taskbuffer/async_request_module.py::recover"],
+            )
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment),
+        Symptom(subject="async_results.status", observed="running", task_id="42"),
+    )
+
+    assert strategy.follow_up.created_by == []
+    assert strategy.follow_up.creates_rows is False
+
+
+async def test_a_reach_bounded_by_nothing_does_not_go_on_to_mention_those_tables():
+    """Folding table names dropped twenty subjects' gates, and the sentence
+    kept its trailing clause about tables it no longer named."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[
+            _subject(
+                selected=["finishing"],
+                selected_by={"finishing": ["jediorder/TaskCommando.py::run"]},
+            )
+        ],
+        junctions=[
+            _junction(
+                "jediorder/TaskCommando.py::run",
+                Branch(outcome="finishing"),
+                log_files=[OTHER_LOG],
+                triggers=("polled",),
+            ),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+    assert strategy.follow_up.self_repairing is True
+    assert "bounded by nothing this map can name" in strategy.follow_up.question
+    assert "those tables" not in strategy.follow_up.question

@@ -1973,6 +1973,24 @@ class FollowUp(BaseModel):
             "answers 'what will move this row' where no query does."
         ),
     )
+    creates_rows: bool = Field(
+        default=False,
+        description=(
+            "Whether anything in this map creates rows of the subject's kind.  "
+            "Separate from ``created_by`` being empty, which would otherwise "
+            "read as 'the map did not look': three kinds of row here are "
+            "changed by this corpus and created outside it."
+        ),
+    )
+    created_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions whose INSERT brings a row of this kind into "
+            "existence.  The question a branch table cannot answer, because a "
+            "branch is about a value a row already has.  Where the verdict is "
+            "'ask whether the command arrived', this is where arriving happens."
+        ),
+    )
     reader_log_files: list[str] = Field(
         default_factory=list,
         description=(
