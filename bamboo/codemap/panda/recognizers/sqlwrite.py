@@ -524,6 +524,77 @@ class ReadSide(NamedTuple):
     unreadable: dict[str, int]
 
 
+READ_SLICE_NAME = "sql-read"
+
+
+def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
+    """How many of the corpus's queries the read side actually reads.
+
+    The denominator that did not exist.  ``sql-write`` has one, so a write the
+    slice cannot read shows up as a ratio falling; the read side had none, and
+    508 statements could stop being read without a single number moving.  That
+    is P1-25's rule 6 -- a slice with no denominator passes silently even when
+    it is missing entirely.
+
+    **Counted by a different reading from the one it measures.**  The
+    numerator comes from :func:`sql.executions`, which recognises the call
+    forms; the denominator must not, or the measure would define its
+    population as whatever the extractor already sees and could never report
+    a form it does not know.  So candidates are found from the *statements* --
+    every local a function assembles SQL into, whatever executes it -- and a
+    query reachable only through a call form ``executions`` does not accept
+    lands in the denominator and not the numerator, which is the whole point.
+
+    Per file, like every other slice, so the build's lowest-coverage listing
+    can name where the gap is.
+    """
+    found: list[CoverageStat] = []
+    for module in modules:
+        candidates = explained = 0
+        for func, _owner in functions_with_owner(module.tree):
+            assembled = _assembled_queries(func)
+            candidates += len(assembled)
+            run = {
+                statement
+                for execution in sql.executions(func)
+                for statement in (execution.sql,)
+            }
+            explained += sum(1 for text in assembled if text in run)
+        if candidates:
+            found.append(
+                CoverageStat(
+                    slice_name=READ_SLICE_NAME,
+                    file=module.rel_path,
+                    candidates=candidates,
+                    explained=explained,
+                )
+            )
+    return found
+
+
+def _assembled_queries(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Every statement *func* builds that asks for rows, however it is run.
+
+    Read off the assignments rather than off the executions.  A name is a
+    candidate when what it holds names a table under a read verb; the call
+    that runs it is not consulted, which is what keeps this independent of the
+    reading it is the denominator for.
+    """
+    names = {
+        target.id
+        for node in ast.walk(func)
+        if isinstance(node, (ast.Assign, ast.AugAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+    return {
+        text
+        for name in names
+        for text in sql.variants(func, name)
+        if any(verb == "read" for verb, _table in _table_verbs(text))
+    }
+
+
 def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSide:
     """Return what the corpus's statements ask for: which values, and whose rows.
 

@@ -342,6 +342,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # with what the junctions write; the rows become their own nodes,
         # because a pair of class and attribute can only describe a column.
         side = sqlwrite.read_side(self._modules, attributor)
+        # The read side's denominator.  Without it a query form the slice
+        # does not recognise can go missing without a single number moving.
+        fragment.coverage.extend(sqlwrite.read_coverage(self._modules))
         selected = side.values
         fragment.entities.extend(
             sqlwrite.entity_nodes(side.entities, self.map_id, self._version)
