@@ -9825,3 +9825,71 @@ def test_the_reading_is_chosen_by_kind_so_an_upsert_keeps_its_two_reasons():
         sqlwrite._deciding_fragment(func, runs["UPDATE"], "jobStatus", running, "insert").lineno
         == insert_at.lineno
     )
+
+
+# --------------------------------------------------------------------------- #
+# the verb a statement uses on a row
+# --------------------------------------------------------------------------- #
+
+
+def test_creating_a_row_is_not_the_same_verb_as_changing_one():
+    """An INSERT is an object entering the system; an UPDATE is one moving.
+
+    Both were reported as ``written``, so nothing downstream could ask where a
+    kind of row comes into existence.  ``sql.deletes``'s own docstring already
+    said why that matters -- a DELETE followed by an INSERT on a command table
+    means a second command silently replaced one that was never picked up --
+    and the map had nowhere to put it.
+    """
+    assert sqlwrite._table_verbs("INSERT INTO ATLAS_PANDA.jobsActive4 (a) VALUES (1)") == [
+        ("created", "jobsActive4")
+    ]
+    assert sqlwrite._table_verbs("UPDATE ATLAS_PANDA.jobsActive4 SET a=1") == [
+        ("updated", "jobsActive4")
+    ]
+    assert sqlwrite._table_verbs("DELETE FROM ATLAS_PANDA.jobsActive4 WHERE a=1") == [
+        ("deleted", "jobsActive4")
+    ]
+    assert sqlwrite._table_verbs("SELECT a FROM ATLAS_PANDA.jobsActive4") == [
+        ("read", "jobsActive4")
+    ]
+
+
+def test_one_statement_can_both_create_and_read_the_same_kind_of_row():
+    """``INSERT INTO a SELECT FROM a`` does both, and says so."""
+    statement = (
+        "INSERT INTO ATLAS_PANDA.jobsArchived4 (PandaID,jobStatus) "
+        "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4"
+    )
+
+    assert sqlwrite._table_verbs(statement) == [
+        ("created", "jobsArchived4"),
+        ("read", "jobsActive4"),
+    ]
+
+
+def test_a_table_filled_by_an_insert_select_is_not_maintained_elsewhere():
+    """Whether anything here maintains a table does not depend on the column
+    list being readable.
+
+    ``writes`` needs ``(columns) VALUES (values)`` because it answers which
+    column gets which value.  ``log_task_attempt_start`` fills ``TASK_ATTEMPTS``
+    from a ``SELECT``, ``metric_collector.update`` inserts positionally with no
+    column list at all, and ``updateCache_JEDI`` interpolates its column list --
+    five statements in the corpus, and every one of them made its table look
+    like a dependency on something outside.
+    """
+    source = (
+        "class M:\n"
+        "    def logAttempt(self, taskID):\n"
+        "        sqlI = 'INSERT INTO ATLAS_PANDA.TASK_ATTEMPTS (jediTaskID,attemptNr) '\n"
+        "        sqlI += 'SELECT jediTaskID,attemptNr FROM ATLAS_PANDA.JEDI_Tasks '\n"
+        "        self.cur.execute(sqlI + comment, varMap)\n"
+        "    def readAttempt(self, taskID):\n"
+        "        sqlS = 'SELECT a.attemptNr FROM ATLAS_PANDA.JEDI_Tasks t,ATLAS_PANDA.TASK_ATTEMPTS a '\n"
+        "        sqlS += 'WHERE t.jediTaskID=a.jediTaskID AND t.status=:status '\n"
+        "        self.cur.execute(sqlS + comment, varMap)\n"
+    )
+    modules = [_module(source, "pandaserver/taskbuffer/db_proxy_mods/task_module.py")]
+
+    assert "task_attempts" not in boundary.tables_never_written(modules)

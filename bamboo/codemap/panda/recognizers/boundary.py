@@ -330,7 +330,14 @@ def tables_never_written(modules: list[SourceModule]) -> dict[str, str]:
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             for run in sql.executions(func):
-                written.update(write.table.lower() for write in sql.writes(run.sql))
+                # Read from the statement heads, not from ``writes``: what is
+                # being asked is whether anything here maintains the table, and
+                # that does not depend on the column list being readable.
+                # ``TASK_ATTEMPTS`` is filled by an ``INSERT ... SELECT`` and
+                # ``Metrics`` by a positional insert; both were claimed here as
+                # kept current by something outside PanDA.
+                written.update(table.lower() for table in sql.creates(run.sql))
+                written.update(table.lower() for table in sql.updates(run.sql))
                 written.update(table.lower() for table in sql.deletes(run.sql))
                 read.update(table for table, _columns in sql.reads(run.sql))
                 read.update(sql.joins(run.sql))

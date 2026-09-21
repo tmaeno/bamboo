@@ -1219,6 +1219,38 @@ def joined_columns(sql: str, table: str) -> list[str]:
     return sorted(found.values())
 
 
+#: ``INSERT INTO <table>`` with nothing required after it.  ``_INSERT`` wants a
+#: column list and a ``VALUES`` list because it is answering which columns get
+#: which values; this answers only which kind of row is being made, and the
+#: corpus has five statements where the first question has no answer and the
+#: second does -- two ``INSERT ... SELECT``, one positional insert with no
+#: column list, and two whose column list is interpolated.
+_INSERT_HEAD = re.compile(r"\bINSERT\s+INTO\s+([\w{}.]+)", re.IGNORECASE)
+
+
+def creates(sql: str) -> list[str]:
+    """Return the tables *sql* inserts rows into.
+
+    Separate from :func:`writes` on purpose.  *Which columns get which values*
+    and *which kind of row is being made* are two questions, and deriving the
+    second from the first made a table look externally maintained whenever the
+    first could not be answered: ``TASK_ATTEMPTS`` is filled by an
+    ``INSERT ... SELECT`` in ``log_task_attempt_start``, and the map said
+    something outside PanDA keeps it current.
+    """
+    return [_table_of(match.group(1)) for match in _INSERT_HEAD.finditer(sql)]
+
+
+def updates(sql: str) -> list[str]:
+    """Return the tables *sql* changes rows in.
+
+    Matched with :data:`_UPDATE`, which requires the ``SET``, rather than with
+    a bare ``UPDATE <name>``: ``SELECT ... FOR UPDATE NOWAIT`` otherwise reads
+    as a statement updating a table called ``nowait``.
+    """
+    return [_table_of(match.group(1)) for match in _UPDATE.finditer(sql)]
+
+
 def deletes(sql: str) -> list[str]:
     """Return the tables *sql* deletes rows from.
 

@@ -825,7 +825,7 @@ _UNREAD_TABLE = re.compile(r"(?:\{\d*\})+")
 
 
 def _rows_touched(statement: str) -> list[tuple[str, str]]:
-    """Return ``[("read" | "written", table)]`` for the rows *statement* touches.
+    """``[("read" | "created" | "updated" | "deleted", table)]`` for *statement*.
 
     The same three readings :func:`_tables_of` folds together, kept apart.  A
     predicate does not care which verb brought the table in -- an ``UPDATE``'s
@@ -844,8 +844,16 @@ def _rows_touched(statement: str) -> list[tuple[str, str]]:
     # (function, entity) readings were missing for the difference, sixteen of
     # them on datasets and sixteen on files -- the two a task waits for.
     touched.extend(("read", table) for table in sql.joins(statement))
-    touched.extend(("written", write.table) for write in sql.writes(statement))
-    touched.extend(("written", table) for table in sql.deletes(statement))
+    # The three writing verbs stay apart.  Making a row, changing one and
+    # removing one are three different claims about a kind of row, and pooling
+    # them is why nothing downstream could ask where an object enters the
+    # system.  ``sql.deletes``'s own docstring already said what that costs: a
+    # DELETE followed by an INSERT on a command table means a second command
+    # silently replaced one that was never picked up, and the map had nowhere
+    # to put it.
+    touched.extend(("created", table) for table in sql.creates(statement))
+    touched.extend(("updated", table) for table in sql.updates(statement))
+    touched.extend(("deleted", table) for table in sql.deletes(statement))
     return touched
 
 
