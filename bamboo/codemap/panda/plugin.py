@@ -418,6 +418,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # After promotion, so the reach figure describes the map that is kept
         # rather than every candidate the slices produced.
+        # Classified once and handed to both readers of it: the trigger slice
+        # builds entry points from it, and the log sites need the same fact to
+        # say whether a reader re-evaluates.
+        cadence = trigger.classify(
+            self._modules, {b.interface.split(".")[-1] for b in channels}
+        )
         self._uplinks = trigger.worker_uplinks(self._modules)
         # The second crossing, and it needs the junctions the first does not:
         # a dispatched worker is recognisable from the corpus alone, while a
@@ -444,7 +450,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # Which file each node's diagnostics land in.  After promotion for the
         # same reason as the trigger reach: it describes the map that is kept.
-        self._log_files = logfile.attach(fragment, self._modules)
+        self._log_files = logfile.attach(fragment, self._modules, cadence)
         self._declared_files = logfile.declared_files(self._modules)
 
         # After the log files, because the file an emit lands in is resolved

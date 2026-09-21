@@ -9381,3 +9381,111 @@ def test_the_fan_out_reaches_the_arms_of_its_own_class_only():
 
     assert [d.default for d in inside.dispatch] == ["AdderAtlasPlugin"]
     assert outside.dispatch == []
+
+
+def test_the_daemon_layer_speaks_through_the_task_buffer():
+    """``executions`` read ``.execute`` and ``.executemany`` only, and the
+    daemon scripts run 114 statements through ``querySQL``/``querySQLS`` -- 84
+    of them under ``daemons/scripts``.  Without this the map could not see the
+    three queries that pick a job out of ``holding``, and the verdict pointed
+    at "ask whether the command arrived"."""
+    source = (
+        "def f():\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus'\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'holding'\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+    )
+    func = _func(source)
+
+    runs = sql.executions(func)
+
+    assert [r.varmap for r in runs] == ["var_map"]
+    assert "jobsActive4" in runs[0].sql
+
+
+def test_a_statement_written_into_the_call_is_read_for_the_forwarded_form():
+    """22 of the 114 forwarded sites pass the statement as a literal rather
+    than through a name.  ``execute`` still requires a name -- widening it
+    would move the stored map and make ``diff-map`` report condition drift
+    where there is none -- so those 36 stay unread and are a stated debt."""
+    forwarded = _func(
+        "def f():\n"
+        "    status, res = taskBuffer.querySQLS("
+        "'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus', var_map)\n"
+    )
+    direct = _func(
+        "def f(self):\n"
+        "    self.cur.execute("
+        "'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus', varMap)\n"
+    )
+
+    assert len(sql.executions(forwarded)) == 1
+    assert sql.executions(direct) == []
+
+
+def test_the_binds_of_a_forwarded_run_are_the_ones_of_its_own_block():
+    """The reason a window is needed at all.  ``copyArchive.main`` binds
+    ``sql`` 23 times and ``:jobStatus`` to 11 values; pairing a statement with
+    every bind in the function would have each statement claim all 253.  The
+    boundaries are not guessed -- the same function writes ``var_map = {}``
+    31 times."""
+    source = (
+        "def f():\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus'\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'activated'\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'holding'\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+    )
+    func = _func(source)
+
+    runs = sorted(sql.executions(func), key=lambda r: r.call.lineno)
+    values = [
+        [ast.literal_eval(b.value) for b in sql.bound_values(func, r.varmap, ":jobStatus", r.window)]
+        for r in runs
+    ]
+
+    assert values == [["activated"], ["holding"]]
+
+
+def test_without_the_window_a_forwarded_run_claims_every_bind():
+    """The failure this is shaped to prevent, fixed so it cannot come back
+    silently: the unwindowed reading is still there, and it is still wrong for
+    this form."""
+    source = (
+        "def f():\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus'\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'activated'\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'holding'\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+    )
+    func = _func(source)
+
+    unwindowed = [
+        ast.literal_eval(b.value)
+        for b in sql.bound_values(func, "var_map", ":jobStatus")
+    ]
+
+    assert sorted(unwindowed) == ["activated", "holding"]
+
+
+def test_the_execute_form_keeps_reading_every_bind():
+    """Unchanged on purpose.  There the statement is not paired with a varmap,
+    so reading every bind over-reads and an over-read is safe; changing it
+    would move the map."""
+    source = (
+        "def f(self):\n"
+        "    sqlU = 'UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus '\n"
+        "    varMap = {}\n"
+        "    varMap[':jobStatus'] = 'holding'\n"
+        "    self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert [r.window for r in sql.executions(func)] == [None]

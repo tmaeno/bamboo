@@ -182,7 +182,11 @@ def _caller_files(
     )
 
 
-def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
+def attach(
+    fragment,
+    modules: list[SourceModule],
+    cadence: Optional[dict[str, set[str]]] = None,
+) -> tuple[int, int]:
     """Record each node's candidate log files.  Returns ``(resolved, total)``.
 
     Junctions, filter stages and loop cuts all carry it because each is a thing
@@ -221,6 +225,12 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
     declared = declared_files(modules)
     inherited = inherited_files(modules, declared)
     inward = trigger.reaching_modules(modules)
+    # A reader's own cadence, handed in rather than recomputed: the trigger
+    # slice has already classified every module and a second call would be the
+    # same reading twice, free to drift.  ``_follow_up`` asks whether anything
+    # will re-evaluate the row and, with nothing on the log site, answers from
+    # the *writers* -- so a value whose only self-repairing reader is a daemon
+    # script that settles nothing reads as "only command, request".
     resolved = total = 0
     for node in (
         list(fragment.filter_stages) + list(fragment.loop_cuts) + list(fragment.junctions)
@@ -235,7 +245,9 @@ def attach(fragment, modules: list[SourceModule]) -> tuple[int, int]:
         junction.caller_log_files = _caller_files(
             junction.owner, junction.log_files, declared, inherited, inward
         )
-    fragment.log_sites.extend(_log_sites(fragment, declared, inherited, inward))
+    fragment.log_sites.extend(
+        _log_sites(fragment, declared, inherited, inward, cadence)
+    )
     return resolved, total
 
 
@@ -262,6 +274,7 @@ def _log_sites(
     declared: dict[str, str],
     inherited: dict[str, list[str]],
     inward,
+    triggers: Optional[dict[str, set[str]]] = None,
 ) -> list[LogSiteNode]:
     """Where the readers and writers that own no junction write their diagnostics.
 
@@ -290,6 +303,7 @@ def _log_sites(
                 log_files=mine,
                 caller_log_files=_caller_files(owner, mine, declared, inherited, inward),
                 owns_logger=where in declared,
+                triggers=sorted((triggers or {}).get(where, ())),
             )
         )
     return sites

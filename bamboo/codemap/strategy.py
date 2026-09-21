@@ -610,12 +610,26 @@ def _follow_up(
     # have -- said with a type test rather than a missing attribute, because
     # "this kind cannot answer that" and "this one happens not to" are
     # different facts and only the second should fall through to the writers.
+    # A junction answers from its entry points and a log site from its
+    # module's cadence.  Both are the same classification; only a junction has
+    # an arm for an argument to be bound at, which is why the two are stored
+    # differently and read together here.  Without the second half, a value
+    # whose only re-evaluating reader settles nothing -- ``holding``, read by
+    # ``copyArchive.main`` on a daemon cycle -- fell through to the writers
+    # and was reported as reached by ``command, request`` alone, which sends
+    # the reader to ask whether a command arrived.
     triggers = sorted(
         {
             entry.trigger
             for j in actors
             if isinstance(j, JunctionNode)
             for entry in j.entry_points
+        }
+        | {
+            trigger
+            for j in actors
+            if isinstance(j, LogSiteNode)
+            for trigger in j.triggers
         }
     ) or sorted({entry.trigger for j in writers for entry in j.entry_points})
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)

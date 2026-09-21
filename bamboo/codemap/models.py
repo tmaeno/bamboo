@@ -759,6 +759,19 @@ class LogSiteNode(BaseNode):
             "identity, there being nothing else to be."
         ),
     )
+    triggers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "How this reader's module is started, from the same classification "
+            "a junction's entry points carry.  Without it ``_follow_up`` falls "
+            "back to the *writers'* triggers to answer whether anything will "
+            "re-evaluate the row -- and for a value whose only re-evaluating "
+            "reader is a daemon script that settles nothing, that turns "
+            "``polled`` into ``command, request`` and sends the reader to ask "
+            "whether a command arrived.  A cadence, not an entry point: a log "
+            "site has no arm for an argument to be bound at."
+        ),
+    )
     log_files: list[str] = Field(
         default_factory=list,
         description=(

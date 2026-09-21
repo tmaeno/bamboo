@@ -512,12 +512,30 @@ def fragments(
 
 
 class Execution(NamedTuple):
-    """One ``cursor.execute(<statement>, <binds>)``."""
+    """One statement run against the database, in either of the two forms.
+
+    ``cursor.execute(<statement>, <binds>)`` is the proxy's spelling.  The
+    daemon layer speaks through the task buffer instead --
+    ``taskBuffer.querySQLS(sql, var_map)`` -- and ``window`` is what the
+    second form needs that the first does not.
+    """
 
     sql: str
     varmap: Optional[str]
     variable: str
     call: ast.Call
+    window: Optional[tuple[int, int]] = None
+    """Lines within which this run's binds were filled, for the forwarded form.
+
+    ``None`` for ``execute``, and that is not an omission.  There the binds
+    reachable by key are exactly the values the write site can produce, so
+    reading them all over-reads and an over-read is safe.  Pairing a statement
+    with a varmap makes an over-read a *mis*-read: ``copyArchive.main`` binds
+    ``sql`` 23 times and ``:jobStatus`` to 11 values, and the unwindowed
+    reading would claim all 253.  The window is not guessed -- the same
+    function writes ``var_map = {}`` 31 times, so the code declares its own
+    block boundaries and this only reads them.
+    """
 
 
 def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -763,15 +781,29 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     for node in ast.walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr not in {"execute", "executemany"} or len(node.args) < 2:
+        forwarded = node.func.attr in _FORWARDED
+        if not forwarded and node.func.attr not in {"execute", "executemany"}:
+            continue
+        if len(node.args) < 2:
             continue
         expression = node.args[0]
         statement, fillers, percent = _call_site_fill(func, expression)
         operands = _concatenated(statement)
-        if not isinstance(operands[0], ast.Name):
+        if isinstance(operands[0], ast.Name):
+            base = operands[0]
+            head = variants(func, base.id)
+            held = base.id
+        elif forwarded:
+            # The daemons write the statement into the call.  ``execute`` is
+            # left requiring a name on purpose: widening it would move the
+            # stored map and make ``diff-map`` report condition drift where
+            # there is none.  Measured, that costs 36 statements on the
+            # ``execute`` side and is a deliberate debt, not an oversight.
+            rendered = rendered_text(operands[0])
+            head = [rendered] if rendered is not None else []
+            held = ""
+        else:
             continue
-        base = operands[0]
-        head = variants(func, base.id)
         if not head:
             continue
         pieces: list[list[str]] = [head]
@@ -798,12 +830,56 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             )
             pieces = [head]
         varmap = node.args[1].id if isinstance(node.args[1], ast.Name) else None
+        window = (
+            _binding_window(func, varmap, node.lineno)
+            if forwarded and varmap is not None
+            else None
+        )
         for combination in itertools.product(*pieces):
-            for text in _substituted(func, "".join(combination), base.id, fillers, percent):
+            for text in _substituted(func, "".join(combination), held, fillers, percent):
                 found.append(
-                    Execution(sql=text, varmap=varmap, variable=base.id, call=node)
+                    Execution(
+                        sql=text,
+                        varmap=varmap,
+                        variable=held,
+                        call=node,
+                        window=window,
+                    )
                 )
     return found
+
+
+#: How the daemon layer runs a statement.  A second execution form rather than
+#: a second reading: the statement, the binds and the pairing between them are
+#: the same three things, reached through the task buffer instead of a cursor.
+_FORWARDED = frozenset({"querySQL", "querySQLS"})
+
+
+def _binding_window(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, line: int
+) -> tuple[int, int]:
+    """Lines whose ``<varmap>[...]`` assignments belong to the run at *line*.
+
+    Read off the code rather than guessed.  ``var_map = {}`` restarts the map,
+    so the nearest one above the call is the block boundary the author wrote;
+    ``copyArchive.main`` writes it 31 times for 23 statements.  With no such
+    assignment the window opens at the top of the function, which is the same
+    answer the unwindowed reading gives.
+    """
+    start = func.lineno
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign) or node.lineno >= line:
+            continue
+        if not isinstance(node.value, (ast.Dict, ast.DictComp)) and not (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "dict"
+        ):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == varmap:
+                start = max(start, node.lineno)
+    return start, line
 
 
 #: A single ``WHERE``/``AND``/``OR`` term, kept whole so the guard reads as the
@@ -1071,18 +1147,31 @@ def selected_literals(sql: str) -> list[tuple[str, str]]:
 
 
 def bound_values(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, key: str
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    key: str,
+    window: Optional[tuple[int, int]] = None,
 ) -> list[ast.Assign]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
     Several are normal and correct: a method that runs the same statement twice
-    with different values has two, and both are outcomes of that write.  No
-    attempt is made to pair a bind with one particular execution -- the binds
-    reachable by key are exactly the values that write site can produce.
+    with different values has two, and both are outcomes of that write.  With
+    no *window* no attempt is made to pair a bind with one particular
+    execution -- the binds reachable by key are exactly the values that write
+    site can produce, and that over-read is safe because the statement is not
+    being paired with them.
+
+    *window* is for the forwarded form, where it is.  ``querySQLS(sql,
+    var_map)`` names both halves in one call, so reading every bind in the
+    function would have ``copyArchive.main`` claim its 23 statements each
+    select all 11 values of ``:jobStatus``.  The bounds come from the code:
+    see :func:`_binding_window`.
     """
     found: list[ast.Assign] = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Assign):
+            continue
+        if window is not None and not window[0] <= node.lineno <= window[1]:
             continue
         for target in node.targets:
             if (

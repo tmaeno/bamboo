@@ -177,11 +177,12 @@ def extract(
             # A method that runs one statement from two places yields the same
             # run twice.  Counting both would inflate the coverage denominator
             # with duplicates and make the slice look worse than it reads.
-            seen: set[tuple[str, str, Optional[str]]] = set()
+            seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
             for run in sql.executions(func):
-                if (run.variable, run.sql, run.varmap) in seen:
+                key = (run.variable, run.sql, run.varmap, run.window)
+                if key in seen:
                     continue
-                seen.add((run.variable, run.sql, run.varmap))
+                seen.add(key)
                 for statement in sql.writes(run.sql):
                     spec_class = attributor.class_for_table(statement.table)
                     # A name nobody could read is not a table that holds no
@@ -324,7 +325,7 @@ def _outcomes(
         if run.varmap is None:
             return []
         found = []
-        for bind in sql.bound_values(func, run.varmap, supplied.text):
+        for bind in sql.bound_values(func, run.varmap, supplied.text, run.window):
             value = bind.value
             settled = settle(value, func)
             if settled:
@@ -667,11 +668,18 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             owner = f"{module.rel_path}::{func.name}"
-            seen: set[str] = set()
+            # Keyed by the window as well as the text.  A statement is emitted
+            # once per call site, so deduplicating on the text alone keeps the
+            # first pairing and throws the rest away -- which is exactly the
+            # pairing the forwarded form exists to make.  ``copyArchive.main``
+            # runs one ``jobsActive4`` query from three places with
+            # ``:jobStatus`` bound to ``holding`` at each, and the text-only
+            # key reported none of them.
+            seen: set[tuple[str, Optional[tuple[int, int]]]] = set()
             for run in sql.executions(func):
-                if run.sql in seen:
+                if (run.sql, run.window) in seen:
                     continue
-                seen.add(run.sql)
+                seen.add((run.sql, run.window))
                 together: set[str] = set()
                 for verb, table in _rows_touched(run.sql):
                     if _UNREAD_TABLE.fullmatch(table):
@@ -691,7 +699,9 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             attributor, spec_class, table, column
                         )
                         subject = SubjectNode.make_name(qualifier, attribute)
-                        for bind in sql.bound_values(func, run.varmap or "", key):
+                        for bind in sql.bound_values(
+                            func, run.varmap or "", key, run.window
+                        ):
                             for value in settle(bind.value, func):
                                 record(subject, value, owner, verb)
                     for column, value in sql.selected_literals(run.sql):
