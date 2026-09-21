@@ -1925,6 +1925,88 @@ def test_every_clause_of_a_multi_part_with_defines_a_name():
     ]
 
 
+def test_a_table_name_derived_by_substitution_is_read_from_the_literals():
+    """``peekJobLog`` builds three archive table names out of one.
+
+    ``re.sub("jobsArchived", "metaTable_ARCH", table)`` states both halves and
+    the value being rewritten is already known, so the result is computed, not
+    guessed.  Without it ``metaTable_ARCH`` appeared nowhere in the map at all,
+    while its two siblings from the same loop -- ``filesTable_ARCH`` and
+    ``jobParamsTable_ARCH`` -- were both present, which is the worst shape for
+    a reader: two of three named, and nothing saying the third was missed.
+    """
+    source = (
+        "def f(self):\n"
+        "    tables = [f'{schemaPANDAARCH}.jobsArchived']\n"
+        "    for table in tables:\n"
+        "        meta = re.sub('jobsArchived', 'metaTable_ARCH', table)\n"
+        "        sql_get_meta = f'SELECT metaData FROM {meta} WHERE PandaID=:PandaID'\n"
+        "        self.cur.execute(sql_get_meta + comment, var_map)\n"
+    )
+
+    assert [table for run in sql.executions(_func(source)) for table, _c in sql.reads(run.sql)] == [
+        "metaTable_ARCH"
+    ]
+
+
+def test_a_substitution_the_source_does_not_spell_out_leaves_the_hole():
+    """All three parts have to be written down.
+
+    A pattern or a replacement the map cannot read makes the result a guess,
+    and a guessed table name is attributed with exactly the confidence of one
+    the code states.
+    """
+    source = (
+        "def f(self, wanted):\n"
+        "    tables = [f'{schemaPANDAARCH}.jobsArchived']\n"
+        "    for table in tables:\n"
+        "        meta = re.sub('jobsArchived', wanted, table)\n"
+        "        sql_get_meta = f'SELECT metaData FROM {meta} WHERE PandaID=:PandaID'\n"
+        "        self.cur.execute(sql_get_meta + comment, var_map)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT metaData FROM {} WHERE PandaID=:PandaID"
+    ]
+
+
+def test_a_default_argument_names_the_table_the_function_writes():
+    """``insertDataset(self, dataset, tablename="ATLAS_PANDA.Datasets")``.
+
+    The caller passes nothing, so the name the statement interpolates is
+    written in the signature -- by the same function, not by a caller that
+    would have to be traced.  Until it was read, the one statement that creates
+    a ``Datasets`` row named no table, and the map reported that kind of row as
+    changed here but never created here.
+    """
+    source = (
+        "def f(self, dataset, tablename='ATLAS_PANDA.Datasets'):\n"
+        "    sql1 = f'INSERT INTO {tablename} (vuid) '\n"
+        "    sql1 += 'VALUES (:vuid)'\n"
+        "    self.cur.execute(sql1 + comment, dataset.valuesMap())\n"
+    )
+
+    created = [table for run in sql.executions(_func(source)) for table in sql.creates(run.sql)]
+
+    assert created == ["Datasets"]
+
+
+def test_an_argument_with_no_default_leaves_the_hole():
+    """``lockJobsForReassign(self, tableName, ...)`` takes the table from its
+    caller, and four call sites pass four literals.  Reading them needs the
+    call graph, which this does not have, so the hole stays and the build
+    report counts the statement."""
+    source = (
+        "def f(self, tableName):\n"
+        "    sql = f'SELECT PandaID FROM {tableName} WHERE x=:x'\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {} WHERE x=:x"
+    ]
+
+
 def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     """Half a list of tables read as the list is a statement about tables the
     code never runs over, which is worse than the hole it replaces."""

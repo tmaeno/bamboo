@@ -796,25 +796,107 @@ def _sequence_values(
     return found if assigned else None
 
 
+def _rewritten_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    node: ast.expr,
+    seen: frozenset[str],
+) -> list[str]:
+    """The strings ``re.sub(<pattern>, <replacement>, <name>)`` can produce.
+
+    Computed, not inferred.  ``peekJobLog`` derives three archive table names
+    from one -- ``re.sub("jobsArchived", "metaTable_ARCH", table)`` -- and all
+    three parts are written down: the pattern, the replacement, and the values
+    the third argument already resolves to.  Running the substitution on those
+    values is the same reading the rest of this function does, not a new guess.
+
+    All three have to be readable.  A pattern or replacement the map cannot see
+    would make the result invented, and an invented table name is attributed
+    with exactly the confidence of one the code states.
+    """
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "sub"
+        and len(node.args) >= 3
+    ):
+        return []
+    pattern, replacement = node.args[0], node.args[1]
+    if not (_is_literal(pattern) and _is_literal(replacement)):
+        return []
+    try:
+        return [
+            re.sub(pattern.value, replacement.value, value)
+            for value in _literal_values(func, node.args[2], seen)
+        ]
+    except re.error:
+        # A pattern that will not compile says nothing about the name, and
+        # raising here would sink every statement in the function.
+        return []
+
+
+def _default_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[str]:
+    """The string a parameter falls back to, where the signature states it.
+
+    ``insertDataset(self, dataset, tablename="ATLAS_PANDA.Datasets")`` names
+    the table it writes, and names it in the function's own signature -- the
+    only caller passes nothing.  Reading a parameter with no default would
+    need the call graph, which this does not have; reading the default needs
+    only the function already in hand.
+    """
+    arguments = func.args.posonlyargs + func.args.args
+    paired = list(
+        zip(
+            arguments[len(arguments) - len(func.args.defaults) :],
+            func.args.defaults,
+            strict=True,
+        )
+    )
+    paired += [
+        (argument, default)
+        for argument, default in zip(
+            func.args.kwonlyargs, func.args.kw_defaults, strict=True
+        )
+        if default is not None
+    ]
+    return [
+        default.value
+        for argument, default in paired
+        if argument.arg == name and _is_literal(default)
+    ]
+
+
 def _literal_values(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, expression: ast.expr
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    expression: ast.expr,
+    seen: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Return the strings *expression* can hold, where the source writes them out.
 
-    Three forms, all of which put the names in plain sight: the argument is a
+    Five forms, all of which put the names in plain sight: the argument is a
     literal; it is the target of a ``for`` over a literal sequence --
     ``for table in ("ATLAS_PANDA.jobsDefined4", "ATLAS_PANDA.jobsActive4")``;
     or over a local list assembled from literals, which is how the same loop is
-    written when a flag decides whether the archive tables are in it.
+    written when a flag decides whether the archive tables are in it; it is
+    rewritten from such a value by :func:`_rewritten_values`; or it is a
+    parameter whose default the signature states.
     Anything else returns nothing, and the placeholder is left as written: a
     table name invented here would be attributed to a spec class with the same
     confidence as one the code states.
+
+    *seen* stops a name that is defined in terms of itself -- ``x = re.sub(p,
+    r, x)`` -- from recurring forever.
     """
     if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
         return [expression.value]
-    if not isinstance(expression, ast.Name):
+    rewritten = _rewritten_values(func, expression, seen)
+    if rewritten:
+        return rewritten
+    if not isinstance(expression, ast.Name) or expression.id in seen:
         return []
-    found: list[str] = []
+    deeper = seen | {expression.id}
+    found: list[str] = _default_values(func, expression.id)
     for node in ast.walk(func):
         if (
             isinstance(node, ast.For)
@@ -828,12 +910,14 @@ def _literal_values(
             )
             if elements is not None:
                 found.extend(elements)
-        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, str) and any(
-                isinstance(target, ast.Name) and target.id == expression.id
-                for target in node.targets
-            ):
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == expression.id
+            for target in node.targets
+        ):
+            if _is_literal(node.value):
                 found.append(node.value.value)
+            else:
+                found.extend(_rewritten_values(func, node.value, deeper))
     return found
 
 
