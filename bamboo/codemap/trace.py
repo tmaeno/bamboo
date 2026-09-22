@@ -109,10 +109,11 @@ def _nothing(_expression: ast.expr, _resolve=None) -> tuple[str, str]:
 
 
 #: Where a binding the walk reports actually lives, when that is not the
-#: function the arm is in.  A note on ``TraceStep.unseen`` rather than a new
-#: kind: the row is still a binding, and what changes is whether the reader
-#: may take it as a step on the path to the arm.
+#: function the arm is in.  Both are notes on ``TraceStep.unseen`` rather than
+#: new kinds: the row is still a binding, and what changes is whether the
+#: reader may take it as a step on the path to the arm.
 MODULE_SCOPE = "module-scope"
+NESTED_SCOPE = "nested-def"
 
 
 class _Frame(NamedTuple):
@@ -369,6 +370,29 @@ def _caught_as(func: ast.AST, name: str) -> list[ast.ExceptHandler]:
     ]
 
 
+def _nested_scope(func: ast.AST, site: ast.AST) -> Optional[ast.AST]:
+    """The inner ``def`` or ``class`` between *site* and *func*, if any.
+
+    ``pathcond.assigned_expressions`` walks the whole subtree, so a name
+    assigned inside a nested function comes back as though *func* bound it.
+    Its ``self.<field>`` sibling refuses to enter nested functions for the
+    reason this note carries -- a closure runs when it is called, not where it
+    is written -- but that one is read only at use time while this one is
+    shared with the build, where the wider reading is load-bearing.  So the
+    row stays and says where it came from instead.
+
+    Keeping it matters: a daemon whose work lives in inner functions has its
+    only answer there, and dropping the row would turn an incomplete
+    explanation into a confident wrong one.
+    """
+    held = getattr(site, "parent", None)
+    while held is not None and held is not func:
+        if isinstance(held, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return held
+        held = getattr(held, "parent", None)
+    return None
+
+
 def _is_parameter(func: ast.AST, name: str) -> bool:
     args = getattr(func, "args", None)
     if args is None:
@@ -612,6 +636,13 @@ class _Walk:
         resolve = self.resolver(frame)
         terminal, detail = self.classify(expression, resolve)
         unseen = _unseen(site)
+        inner = _nested_scope(frame.func, site)
+        if inner is not None:
+            unseen.append(
+                f"{NESTED_SCOPE} at {inner.lineno}: inside "
+                f"{getattr(inner, 'name', 'a lambda')}, which runs when it is "
+                f"called and not on the way here"
+            )
         if not terminal and any(
             entry.startswith(pathcond.UNSEEN_EXCEPT) for entry in unseen
         ):

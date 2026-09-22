@@ -662,3 +662,43 @@ class Broker:
     steps, _ = _walk(roots, file="broker", owner="schedule", lines=[3])
 
     assert [s.kind for s in steps if s.name == "mystery"] == [TRACE_UNBOUND]
+
+
+def test_a_binding_from_a_nested_function_says_it_may_not_run_here(tmp_path):
+    # ``assigned_expressions`` is shared with the build and walks into nested
+    # defs, so the row is kept -- for a daemon whose work lives in inner
+    # functions it is the only answer -- but it is not this function's own.
+    roots = _tree(
+        tmp_path,
+        daemon='''\
+class Daemon:
+    def main(self):
+        def later():
+            end_status = "deleted"
+            spec.status = end_status
+''',
+    )
+
+    steps, _ = _walk(roots, file="daemon", owner="main", lines=[5])
+
+    held = [s for s in steps if s.name == "end_status"]
+    assert [s.value for s in held] == ["'deleted'"]
+    assert any("nested-def" in entry for entry in held[0].unseen)
+
+
+def test_a_binding_from_the_functions_own_body_is_not_marked(tmp_path):
+    roots = _tree(
+        tmp_path,
+        daemon='''\
+class Daemon:
+    def main(self):
+        end_status = "deleted"
+        spec.status = end_status
+''',
+    )
+
+    steps, _ = _walk(roots, file="daemon", owner="main", lines=[4])
+
+    held = [s for s in steps if s.name == "end_status"]
+    assert [s.value for s in held] == ["'deleted'"]
+    assert not any("nested-def" in entry for entry in held[0].unseen)
