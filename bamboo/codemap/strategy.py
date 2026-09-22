@@ -65,6 +65,7 @@ from bamboo.codemap import evidence, trace
 from bamboo.codemap.evidence import GrepQuery
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    ACTS,
     ANSWER_ABSENT,
     ANSWER_INCONCLUSIVE,
     ANSWER_NO_FILE,
@@ -74,6 +75,8 @@ from bamboo.codemap.models import (
     LEAD_CALLEE,
     LEAD_MAP,
     PASSTHROUGH_OUTCOME,
+    READS_ONLY_AT_TOP,
+    READS_ONLY_FOR_A_CALLER,
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
     SEEN,
@@ -575,6 +578,7 @@ def _follow_up(
     carried_from: list[str],
     log_sites: dict[str, LogSiteNode],
     entities: list[EntityNode],
+    changing: set[str],
 ) -> FollowUp:
     """Whether anything will move the value on, and what to ask if not.
 
@@ -600,6 +604,16 @@ def _follow_up(
     -- the update is still the actor, and dropping it would turn "this is the
     statement that has to match" into the much stronger "nothing acts on this
     at all".
+
+    **Being selected is not the same as being acted on.**  Thirty of the
+    hundred and fifty-eight values something selects are selected only by
+    functions that settle no value and write no row.  Five of those are started
+    by a trigger of their own -- metrics daemons, which read a status to average
+    something and change nothing -- and sending a reader to ask one of them why
+    it had not picked their row up is the verdict line pointed at a dead end.
+    The other twenty-five are getters with no trigger, where what acts is the
+    caller, so there the map says that and no more: claiming the row will not
+    move would be the same mistake facing the other way.
     """
     selected = observed in selected_values
     # Junctions first, so that an owner which both settles a value and reads
@@ -644,6 +658,28 @@ def _follow_up(
         }
     ) or sorted({entry.trigger for j in writers for entry in j.entry_points})
     repairing = bool(set(triggers) & SELF_REPAIRING_TRIGGERS)
+    # Judged over the owners the report *names*, not over ``actors``.  Those
+    # are the ones that resolved to a node, and a reader with no log site of
+    # its own resolves to nothing -- so a claim made from ``actors`` would be
+    # about a subset while reading as though it were about the printed list.
+    # ``changing`` is asked by name for the same reason it is global: the
+    # subject's own writers are the only junctions ``by_owner`` holds, so nine
+    # functions that settle some *other* subject's value look inert here, and
+    # ``updateJobStatus`` called inert would be plainly false.
+    named = list(selected_by) or list(updated_by)
+    if not named or any(owner in changing for owner in named):
+        reader_acts = ACTS
+    elif all(
+        isinstance(by_owner.get(owner), LogSiteNode) and by_owner[owner].triggers
+        for owner in named
+    ):
+        reader_acts = READS_ONLY_AT_TOP
+    else:
+        # Every one of them inert, and at least one reached only as a callee or
+        # not resolved at all.  The weaker statement covers both: one getter in
+        # the set is enough for "the row is going nowhere" to be unsupported,
+        # and a name the map could not place is not evidence of anything.
+        reader_acts = READS_ONLY_FOR_A_CALLER
     # Kept apart from ``created_by`` being empty, which reads as "the map did
     # not look".  Three kinds of row in the corpus are changed here and made
     # somewhere this map has not read.
@@ -658,7 +694,17 @@ def _follow_up(
         )
     else:
         asks = f"a query selects on {observed!r}"
-    if selected and repairing:
+    carried_or_writers = ", ".join(carried_from) if carried_from else "the writers listed above"
+    if selected and reader_acts == READS_ONLY_AT_TOP:
+        # The value is selected and the row still goes nowhere, so the sentence
+        # has to say both -- dropping to the unselected wording would leave the
+        # "which query selects it" line above it unexplained.
+        question = (
+            f"{asks}, but that reader settles no value and writes no row, and nothing "
+            "calls it -- so being selected leads nowhere and waiting will not move the "
+            f"row: ask who wrote the step before it: {carried_or_writers}"
+        )
+    elif selected and repairing:
         # The clause about tables nothing writes belongs only where such a
         # table was named.  Folding table names into the map made twenty
         # subjects give up a gate they should never have had, and without this
@@ -694,13 +740,23 @@ def _follow_up(
                 "outside what was read"
             )
     else:
-        where = ", ".join(carried_from) if carried_from else "the writers listed above"
         question = (
             f"no query in the map selects on {observed!r}, so waiting will not move the "
-            f"row -- ask who wrote the step before it: {where}"
+            f"row -- ask who wrote the step before it: {carried_or_writers}"
+        )
+    if reader_acts == READS_ONLY_FOR_A_CALLER:
+        # Appended rather than replacing the sentence: everything it says is
+        # still true, and this only stops the named reader being read as the
+        # thing that acts.  Its caller is where that question goes, and this
+        # map resolves reach by name one hop, so naming it is not available
+        # here -- saying so is better than implying the reader is the answer.
+        question += (
+            "; that reader settles no value and writes no row, so what acts on the "
+            "row is whatever called it, which this line does not name"
         )
     return FollowUp(
         selected=selected,
+        reader_acts=reader_acts,
         selected_by=list(selected_by),
         updated_by=list(updated_by),
         creates_rows=creates_rows,
@@ -1105,6 +1161,7 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
                 + subject.updated_by.get(symptom.observed, [])
             ),
             await code_map.entities_for(subject.spec_class),
+            await code_map.changing_functions(),
         ),
         # Map edges first, so that when both suppliers name one field the fold
         # in ``evaluate`` keeps the deterministic one.  Not folded here: doing

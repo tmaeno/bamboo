@@ -347,6 +347,33 @@ class CodeMap:
                 by_owner.setdefault(owner, []).append(entity.name)
         return {owner: sorted(names) for owner, names in by_owner.items()}
 
+    async def changing_functions(self) -> set[str]:
+        """Every function this map has seen change anything.
+
+        The mirror of :meth:`entity_reads_by_owner`, and read for the one thing
+        a read cannot say: whether a function named as a *reader* of a value is
+        also somewhere the row could go on from.  A metrics daemon selects
+        ``cancelled`` jobs to average a wait time and appears in none of these
+        lists, so being selected by it leads nowhere -- which is the opposite of
+        what a verdict built from "a query selects this value" alone told a
+        reader.
+
+        Two kinds of changing, unioned, because the question is whether
+        anything happens here at all and either answers yes.  Rows: all three
+        write verbs together, unlike ``read_by`` which is kept apart -- the
+        distinction they carry, arriving and moving and leaving, is about rows
+        of one kind and not about this.  Values: every junction owner, because
+        settling a value *is* changing something and nine functions in this
+        corpus settle one without an entity recording a write -- ``updateJob``
+        and ``updateJobStatus`` among them, which called inert would be plainly
+        false.
+        """
+        return {
+            owner
+            for entity in await self._find(EntityNode)
+            for owner in (*entity.created_by, *entity.updated_by, *entity.deleted_by)
+        } | {junction.owner for junction in await self._find(JunctionNode)}
+
     async def entities_for(self, qualifier: str) -> list[EntityNode]:
         """The kinds of row a subject's qualifier names.
 

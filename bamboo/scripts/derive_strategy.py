@@ -42,6 +42,7 @@ from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
+    ACTS,
     ARRIVES_BY_DISPATCH,
     ARRIVES_THROUGH_DOOR,
     ELIMINATED,
@@ -183,6 +184,12 @@ def _report_follow_up(strategy: Strategy) -> None:
                 else "the map holds no log for it -- it settles nothing, so it is not a junction"
             )
         )
+        if follow.reader_acts != ACTS:
+            # Beside the name rather than only in the sentence below, because
+            # the heading above says "which query selects it" and a reader
+            # takes that as the thing that will pick the row up.  This is what
+            # the line above is worth.
+            click.echo(f"                                   {follow.reader_acts}")
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")

@@ -490,6 +490,101 @@ async def test_the_query_that_selects_the_value_is_named_with_the_log_it_writes_
     assert "TaskCommando" in strategy.follow_up.question
 
 
+_METRICS = "daemons/scripts/metric_collector.py::analy_pmerge_jobs_wait_time"
+_GETTER_READER = "taskbuffer/db_proxy_mods/task_standalone_module.py::checkDuplication_JEDI"
+
+
+def _read_only(owner: str, triggers: tuple[str, ...] = ()) -> LogSiteNode:
+    """A function the map records for its output and for nothing it settles."""
+    return LogSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=owner,
+        owner=owner,
+        log_files=[OTHER_LOG],
+        triggers=list(triggers),
+        owns_logger=True,
+    )
+
+
+async def _selected_by(reader: LogSiteNode, entities: list[EntityNode] | None = None):
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        entities=entities or [],
+        subjects=[
+            _subject(selected=["finishing"], selected_by={"finishing": [reader.owner]})
+        ],
+        junctions=[
+            _junction(
+                "jediorder/ContentsFeeder.py::feed",
+                Branch(outcome="finishing"),
+                log_files=[KNIGHT_LOG],
+                triggers=("polled",),
+            ),
+        ],
+        log_sites=[reader],
+    )
+    return await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="finishing", task_id="42")
+    )
+
+
+async def test_a_reader_that_changes_nothing_and_nothing_calls_leaves_the_row_where_it_is():
+    """Being selected and being acted on are not the same claim.
+
+    A metrics daemon selects ``cancelled`` jobs to average a wait time and
+    writes nothing back.  Reading "a query selects this value" as "something
+    will pick this row up" sent the verdict to ask that daemon why it had not.
+    """
+    strategy = await _selected_by(_read_only(_METRICS, triggers=("polled",)))
+
+    assert strategy.follow_up.selected is True
+    assert strategy.follow_up.reader_acts == models.READS_ONLY_AT_TOP
+    assert "did not pick the row up" not in strategy.follow_up.question
+    assert "waiting will not move the row" in strategy.follow_up.question
+
+
+async def test_a_reader_with_no_trigger_is_not_said_to_leave_the_row_where_it_is():
+    """The same emptiness, and the opposite conclusion would be just as wrong.
+
+    A getter settles nothing and writes nothing either, and what acts on the
+    row is whoever called it.  This map resolves reach by name one hop, so the
+    caller is not available to name here -- saying so beats implying the getter
+    is the answer, in either direction.
+    """
+    strategy = await _selected_by(_read_only(_GETTER_READER))
+
+    assert strategy.follow_up.selected is True
+    assert strategy.follow_up.reader_acts == models.READS_ONLY_FOR_A_CALLER
+    assert "whatever called it" in strategy.follow_up.question
+    assert "waiting will not move the row" not in strategy.follow_up.question
+
+
+async def test_a_reader_that_writes_a_row_somewhere_still_counts_as_acting():
+    """Settling no value and touching no row are different facts.
+
+    A proxy that only ever UPDATEs satisfies the first, and calling it inert on
+    that alone would put nine of this corpus's functions -- ``updateJobStatus``
+    among them -- in a state the map plainly contradicts elsewhere.
+    """
+    strategy = await _selected_by(
+        _read_only(_GETTER_READER),
+        entities=[
+            EntityNode(
+                name="jobsactive4",
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                tables=["jobsActive4"],
+                updated_by=[_GETTER_READER],
+            )
+        ],
+    )
+
+    assert strategy.follow_up.reader_acts == models.ACTS
+    assert "did not pick the row up" in strategy.follow_up.question
+
+
 async def test_a_value_only_an_update_acts_on_names_the_update_and_not_a_query():
     """The nine values in the corpus no query ever asks for.
 

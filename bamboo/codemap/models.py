@@ -1992,6 +1992,22 @@ class Observation(BaseModel):
     )
 
 
+#: What the reader a value's follow-up names can do to the row.  Three states,
+#: because "a query selects this value" and "something will move this row on"
+#: are not the same claim and the map was answering the second with the first:
+#: ``analy_pmerge_jobs_wait_time`` selects ``cancelled`` jobs to average a wait
+#: time and changes nothing, and the verdict told a reader to go and ask a
+#: metrics daemon why it had not picked their row up.
+#:
+#: The split is by whether the reader is started by something of its own, not
+#: by where it lives.  A getter settles nothing and writes nothing either, and
+#: saying the row will not move would be just as wrong in the other direction
+#: -- what acts is its caller, which the line does not name.
+ACTS = "acts"
+READS_ONLY_AT_TOP = "reads only, and nothing starts it but its own trigger"
+READS_ONLY_FOR_A_CALLER = "reads only, on behalf of whoever called it"
+
+
 class FollowUp(BaseModel):
     """Whether anything will move the value on, and what to ask if not.
 
@@ -2021,6 +2037,16 @@ class FollowUp(BaseModel):
         description=(
             "The functions whose query selects rows on the observed value.  "
             "Where the row has to be picked up, so where to ask why it was not."
+        ),
+    )
+    reader_acts: str = Field(
+        default=ACTS,
+        description=(
+            "What those readers can do to the row: ``ACTS`` where one settles a "
+            "value or writes a row, and one of the two reads-only states where "
+            "none does.  Separate from ``selected``, which stays true either "
+            "way -- a query really does select on the value; the question this "
+            "answers is whether being selected leads anywhere."
         ),
     )
     updated_by: list[str] = Field(
