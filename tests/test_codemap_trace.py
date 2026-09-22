@@ -587,3 +587,78 @@ class Impl(Base):
     steps, _ = _walk(roots, file="plugin", owner="run", lines=[7])
 
     assert [s.value for s in steps if s.name == "self.mode"] == ["'scouting'"]
+
+
+def test_a_name_bound_by_a_with_statement_is_not_called_unbound(tmp_path):
+    # ``with self.proxyPool.get() as proxy:`` is how every TaskBuffer method
+    # reaches the database, and reaching definitions do not cover the form, so
+    # the walk used to say the function does not bind a name it plainly binds.
+    roots = _tree(
+        tmp_path,
+        buffer='''\
+class Buffer:
+    def store(self):
+        with self.pool.get() as proxy:
+            spec.status = proxy
+''',
+    )
+
+    steps, _ = _walk(roots, file="buffer", owner="store", lines=[4])
+
+    held = [s for s in steps if s.name == "proxy"]
+    assert [s.kind for s in held] == [TRACE_BINDING]
+    assert held[0].value == "self.pool.get()"
+
+
+def test_a_name_bound_by_a_walrus_is_not_called_unbound(tmp_path):
+    roots = _tree(
+        tmp_path,
+        feeder='''\
+class Feeder:
+    def run(self):
+        if (staging := self.count_staging()) > 0:
+            spec.status = staging
+''',
+    )
+
+    steps, _ = _walk(roots, file="feeder", owner="run", lines=[4])
+
+    held = [s for s in steps if s.name == "staging"]
+    assert [s.kind for s in held] == [TRACE_BINDING]
+    assert held[0].value == "self.count_staging()"
+
+
+def test_a_module_level_constant_is_named_rather_than_stopped_at(tmp_path):
+    # A fact reachable forward from the anchor belongs to the trace, and a
+    # constant in the same file is as reachable as one a line above the arm.
+    roots = _tree(
+        tmp_path,
+        broker='''\
+SKIP_TYPES = ["prod_test"]
+
+class Broker:
+    def schedule(self):
+        spec.status = SKIP_TYPES
+''',
+    )
+
+    steps, _ = _walk(roots, file="broker", owner="schedule", lines=[5])
+
+    held = [s for s in steps if s.name == "SKIP_TYPES"]
+    assert [s.kind for s in held] == [TRACE_BINDING]
+    assert held[0].value == "['prod_test']"
+
+
+def test_a_name_nothing_in_the_module_binds_still_stops(tmp_path):
+    roots = _tree(
+        tmp_path,
+        broker='''\
+class Broker:
+    def schedule(self):
+        spec.status = mystery
+''',
+    )
+
+    steps, _ = _walk(roots, file="broker", owner="schedule", lines=[3])
+
+    assert [s.kind for s in steps if s.name == "mystery"] == [TRACE_UNBOUND]

@@ -108,6 +108,13 @@ def _nothing(_expression: ast.expr, _resolve=None) -> tuple[str, str]:
     return "", ""
 
 
+#: Where a binding the walk reports actually lives, when that is not the
+#: function the arm is in.  A note on ``TraceStep.unseen`` rather than a new
+#: kind: the row is still a binding, and what changes is whether the reader
+#: may take it as a step on the path to the arm.
+MODULE_SCOPE = "module-scope"
+
+
 class _Frame(NamedTuple):
     file: str
     owner: str
@@ -268,19 +275,89 @@ def _tuple_bindings(func: ast.AST, name: str) -> list[ast.Assign]:
 
 
 def _imported_names(tree: ast.Module) -> frozenset[str]:
-    """Names the module imports, which are modules and classes, not values.
+    """Names that stand for modules, classes and functions rather than values.
 
     Dropped from the walk rather than reported as unresolved: ``JediTaskSpec``
     and ``Interaction`` appear in half the conditions in this corpus and the
     walk has nothing to say about either, so keeping them produces one
     unexplained step per mention and hides the ones that matter.
+
+    A ``def`` or ``class`` at module scope is the same kind of name as an
+    import -- ``_compFunc`` passed as a sort key is a function, not a value --
+    so it is dropped here too.  Module-level *assignments* are not: those hold
+    values, and :func:`_module_bindings` reads them.
     """
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 found.add(alias.asname or alias.name.split(".")[0])
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.add(node.name)
     return frozenset(found)
+
+
+def _with_bindings(func: ast.AST, name: str) -> list[ast.expr]:
+    """The context expressions a ``with ... as <name>`` binds.
+
+    Reaching definitions do not cover the form, and it is how every
+    ``TaskBuffer`` method reaches the database -- ``with self.proxyPool.get()
+    as proxy`` -- so without it the walk said a function does not bind a name
+    it plainly binds.  Read here rather than in ``pathcond``: that module is
+    shared with the build, and widening it would move the map.
+    """
+    found: list[ast.expr] = []
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        for item in node.items:
+            held = item.optional_vars
+            targets = [held]
+            if isinstance(held, (ast.Tuple, ast.List)):
+                targets = list(held.elts)
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                found.append(item.context_expr)
+    return found
+
+
+def _walrus_bindings(func: ast.AST, name: str) -> list[ast.expr]:
+    """The values an assignment expression ``(<name> := ...)`` binds."""
+    return [
+        node.value
+        for node in ast.walk(func)
+        if isinstance(node, ast.NamedExpr)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == name
+    ]
+
+
+def _module_bindings(tree: ast.Module, name: str) -> list[ast.expr]:
+    """Module-scope assignments to *name*, nothing nested.
+
+    The last place to look before saying a name is not bound here, and the
+    trace's own rule says to look: a fact reachable forward from the anchor
+    belongs to the trace, and a constant in the same file is as reachable as
+    one a line above the arm.  ``skipBrokerageProTypes = ["prod_test"]``
+    is the shape -- a value the reader wants, previously reported as a name
+    nothing binds.
+
+    Only the module's own body, so a name assigned inside some unrelated
+    function of the same file is not offered as this one's.
+    """
+    found: list[ast.expr] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            elements = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+            if any(isinstance(e, ast.Name) and e.id == name for e in elements):
+                found.append(node.value)
+    return found
 
 
 def _caught_as(func: ast.AST, name: str) -> list[ast.ExceptHandler]:
@@ -504,9 +581,20 @@ class _Walk:
         bindings.extend(
             node.value for node in _tuple_bindings(frame.func, name)
         )
+        bindings.extend(_with_bindings(frame.func, name))
+        bindings.extend(_walrus_bindings(frame.func, name))
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
         if not bindings and not loops and not caught:
+            # The file's own body is the last place to look.  Asked only here,
+            # after the function has had its say, so a local always wins over a
+            # module constant of the same name.
+            parsed = self.module(frame.file)
+            outer = _module_bindings(parsed[1], name) if parsed is not None else []
+            if outer:
+                for expression in outer:
+                    self._module_binding(frame, name, expression, depth)
+                return
             self._unbound(frame, name, depth)
             return
         for expression in bindings:
@@ -549,6 +637,40 @@ class _Walk:
             return
         if not terminal:
             self.want(frame, reads, depth + 1)
+
+    def _module_binding(
+        self, frame: _Frame, name: str, expression: ast.expr, depth: int
+    ) -> None:
+        """A value the file binds once, when it is imported.
+
+        Recorded as a binding because that is what it is, and marked because
+        the reader must not read it as a step on the path: it ran at import,
+        not on the way to this arm, so no guard of this function dominated it.
+
+        The walk stops here rather than following what the expression reads.
+        Those names live in the module's scope, and resolving them inside this
+        function's frame would answer with whatever local happened to share the
+        name -- the mistake the scope note below exists to prevent.
+        """
+        terminal, detail = self.classify(expression, self.resolver(frame))
+        line = getattr(expression, "lineno", 0)
+        self.record(
+            TraceStep(
+                kind=TRACE_BINDING,
+                name=name,
+                owner=f"{frame.file}::{MODULE_SCOPE}",
+                file=frame.file,
+                line=line,
+                value=_text(expression),
+                unseen=[
+                    f"{MODULE_SCOPE} at {line}: bound when the file is imported, "
+                    f"not on the way here"
+                ],
+                terminal=terminal,
+                detail=detail,
+                depth=depth,
+            )
+        )
 
     def _loop(self, frame: _Frame, name: str, loop: ast.AST, depth: int) -> None:
         over = _text(loop.iter)
