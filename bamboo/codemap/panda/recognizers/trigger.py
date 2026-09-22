@@ -50,7 +50,9 @@ import ast
 from typing import Collection, Iterator, Optional
 
 from bamboo.codemap.models import (
+    ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
+    ARRIVES_THROUGH_DOOR,
     COMMAND,
     MESSAGE,
     POLLED,
@@ -333,6 +335,7 @@ def _called_on(
 def _outward_call_sites(
     module: SourceModule,
     forwarders: Optional[dict[str, tuple[str, int]]] = None,
+    doors: Optional[dict[str, set[str]]] = None,
 ) -> list[tuple[tuple[str, ...], str, ast.Call]]:
     """Return ``[(enclosing functions, method, call)]`` for *module*'s real calls.
 
@@ -386,6 +389,12 @@ def _outward_call_sites(
                 receiver = child.func.value
                 if not (isinstance(receiver, ast.Name) and receiver.id in pooled):
                     sites.append((enclosing, child.func.attr, child))
+                elif doors is not None and enclosing:
+                    # The hop this refuses to call a call is still a door, and
+                    # *which* door is the one thing a caller of the facade needs
+                    # to reach past it.  Recorded only when asked for, so the
+                    # log question keeps reading exactly what it read before.
+                    doors.setdefault(enclosing[0], set()).add(child.func.attr)
             queue.append((child, inner_names, inner_pooled))
     sites.extend(_forwarded_sites(module, forwarders or {}))
     return sites
@@ -394,6 +403,7 @@ def _outward_call_sites(
 def _outward_calls(
     module: SourceModule,
     forwarders: Optional[dict[str, tuple[str, int]]] = None,
+    doors: Optional[dict[str, set[str]]] = None,
 ) -> dict[str, ast.Call]:
     """Return ``{method name: first call}`` for the calls *module* really makes.
 
@@ -403,7 +413,7 @@ def _outward_calls(
     that is the call whose keyword arguments distinguish one entry from another.
     """
     calls: dict[str, ast.Call] = {}
-    for _enclosing, method, call in _outward_call_sites(module, forwarders):
+    for _enclosing, method, call in _outward_call_sites(module, forwarders, doors):
         calls.setdefault(method, call)
     return calls
 
@@ -588,7 +598,8 @@ def _arg_binding(call: ast.Call) -> dict[str, str]:
 
 def reaching_modules(
     modules: list[SourceModule],
-) -> dict[str, dict[str, list[tuple[str, str, ast.Call]]]]:
+    through_doors: bool = False,
+) -> dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]]:
     """Return ``{module: {method: [(entry module, door, call)]}}`` -- who reaches what.
 
     Deliberately unfiltered: *every* module is allowed to be an entry here.
@@ -613,28 +624,57 @@ def reaching_modules(
     The honesty of the cross-module hop is unchanged and does the work instead:
     a name is followed only where it means one thing (:func:`sole_definitions`)
     or where the entry imports the module it names.
+
+    *through_doors* lets a caller of the facade reach what the facade calls.
+    ``TaskBuffer.storeJobs`` is the only thing in the corpus that calls
+    ``proxy.insertNewJob``, and ``JobGenerator`` and ``api/v1/job_api`` both
+    call ``storeJobs`` -- so where a job row is created reported that nothing
+    starts it.  A facade method is a *door*, which is what ``EntryPoint.via``
+    already means, so crossing one is not the second hop the docstring above
+    refuses: the name is still matched once, against the door.
+
+    **Off by default, because only one of the two questions wants it.**  Whose
+    log will say it ran is answered by the immediate caller, and ``JobGenerator``
+    is not that for a line ``insertNewJob`` writes.  Turning it on for both
+    would move 23 junctions' log files on the strength of a change made for the
+    trigger question -- the failure the facade rule exists to prevent, in the
+    other direction.
     """
     forwarders = forwarder_classes(modules)
-    callers: dict[str, list[tuple[str, ast.Call]]] = {}
+    doors: dict[str, set[str]] = {}
+    callers: dict[str, list[tuple[str, Optional[ast.Call], Optional[str]]]] = {}
     for module in modules:
-        for name, call in _outward_calls(module, forwarders).items():
-            callers.setdefault(name, []).append((module.rel_path, call))
+        for name, call in _outward_calls(module, forwarders, doors).items():
+            callers.setdefault(name, []).append((module.rel_path, call, None))
+
+    if through_doors:
+        for door, forwarded in doors.items():
+            for entry, _call, via in list(callers.get(door, ())):
+                if via is not None:
+                    continue
+                for target in forwarded:
+                    # No call is carried across.  The keywords at the door
+                    # describe the door -- ``storeJobs(jobs, user, fqans=...)``
+                    # is not ``insertNewJob(job, user, serNum, ...)`` -- and
+                    # reporting them as what this entry handed over would put a
+                    # false argument list under a true edge.
+                    callers.setdefault(target, []).append((entry, None, door))
 
     implemented = sole_definitions(modules)
     imports = {module.rel_path: imported_modules(module) for module in modules}
-    inward: dict[str, dict[str, list[tuple[str, str, ast.Call]]]] = {}
+    inward: dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]] = {}
     for module in modules:
         edges = _self_calls(module.tree)
         for door in edges:
             unambiguous = implemented.get(door) == module.rel_path
-            for entry, call in callers.get(door, ()):
+            for entry, call, via in callers.get(door, ()):
                 if entry == module.rel_path:
                     continue
                 if not unambiguous and module.rel_path not in imports[entry]:
                     continue
                 for method in _downstream(edges, door):
                     inward.setdefault(module.rel_path, {}).setdefault(method, []).append(
-                        (entry, door, call)
+                        (entry, via or door, call)
                     )
     return inward
 
@@ -1202,7 +1242,7 @@ def attach(
     arm but not what handed the arm its input.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules)
+    inward = reaching_modules(modules, through_doors=True)
     # Taken from the caller where there is one, so that a build which also
     # reports on the dispatch walks for it once rather than twice.
     if uplinks is None:
@@ -1211,21 +1251,32 @@ def attach(
     reached = 0
     for junction in junctions:
         owner_module, _, method = junction.owner.partition("::")
-        found: dict[tuple[str, str, Optional[str]], EntryPoint] = {}
+        # Keyed by how it arrived as well as by where from.  Without that a
+        # facade crossing and a plain call that share a door name collide, and
+        # the survivor is whichever was built last -- which silently replaced
+        # real argument lists with unread ones and took twelve rows off the
+        # differing-arguments report.  The same collision was already possible
+        # between a call and a dispatch.
+        found: dict[tuple[str, str, Optional[str], str], EntryPoint] = {}
         for kind in triggers.get(owner_module, ()):
-            found[(kind, owner_module, None)] = EntryPoint(
+            found[(kind, owner_module, None, ARRIVES_BY_CALL)] = EntryPoint(
                 trigger=kind, entry=owner_module
             )
         for entry, door, call in inward.get(owner_module, {}).get(method, ()):
+            arrival = ARRIVES_BY_CALL if call is not None else ARRIVES_THROUGH_DOOR
             for kind in triggers.get(entry, ()):
-                found[(kind, entry, door)] = EntryPoint(
+                found[(kind, entry, door, arrival)] = EntryPoint(
                     trigger=kind,
                     entry=entry,
                     via=door,
                     # The binding is at the door, which is where the entries
                     # differ -- the message path omits ``minPriority`` there,
                     # not deeper in.
-                    arg_binding=_arg_binding(call),
+                    arg_binding=_arg_binding(call) if call is not None else {},
+                    # A facade crossing carries no call, and saying so is what
+                    # keeps ``differing_arguments`` from reading an unread list
+                    # as an entry that handed over nothing.
+                    reached_by=arrival,
                 )
         for entry, via, handover, span in uplinks.get((owner_module, method), ()):
             # The anchor decides which class the line is in.  Where there is
@@ -1236,7 +1287,7 @@ def attach(
             ):
                 continue
             for kind in triggers.get(entry, ()):
-                found[(kind, entry, via)] = EntryPoint(
+                found[(kind, entry, via, ARRIVES_BY_DISPATCH)] = EntryPoint(
                     trigger=kind,
                     entry=entry,
                     via=via,
@@ -1291,7 +1342,7 @@ def unreached_reasons(
     about four seconds on the PanDA corpus, against a build in minutes.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules)
+    inward = reaching_modules(modules, through_doors=True)
 
     found: dict[str, list[JunctionNode]] = {}
     for junction in junctions:

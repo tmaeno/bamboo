@@ -43,6 +43,7 @@ from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.lookup import CodeMap
 from bamboo.codemap.models import (
     ARRIVES_BY_DISPATCH,
+    ARRIVES_THROUGH_DOOR,
     ELIMINATED,
     LEAD_MAP,
     SEEN,
@@ -277,6 +278,12 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
                 if handover.reached_by == ARRIVES_BY_DISPATCH:
                     continue
                 where = f"{handover.entry.rsplit('/', 1)[-1]}::{handover.via}"
+                if handover.reached_by == ARRIVES_THROUGH_DOOR:
+                    # The facade rewrites the arguments, so this entry's are
+                    # not read.  "with nothing" would be a claim; the door is
+                    # the whole of what this line can say.
+                    click.echo(f"  {'':<10} reached through {where}")
+                    continue
                 click.echo(
                     f"  {'':<10} called from {where} with "
                     + ", ".join(sorted(handover.fields))

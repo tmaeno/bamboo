@@ -463,12 +463,19 @@ REQUEST = "request"
 SELF_REPAIRING_TRIGGERS = frozenset({POLLED})
 
 
-#: How control got in.  Two shapes, found two ways: a call is resolved by
-#: method name, a dispatch is a constructed worker being started -- and their
-#: ``arg_binding`` keys come from different namespaces, so the pair is what
-#: makes the two comparable only with their own kind.
+#: How control got in.  Three shapes, found three ways: a call is resolved by
+#: method name, a dispatch is a constructed worker being started, and a door is
+#: a facade method forwarding to a borrowed proxy.  Their ``arg_binding`` keys
+#: come from different namespaces -- and a door's are not read at all -- so the
+#: set is what makes each comparable only with its own kind.
 ARRIVES_BY_CALL = "call"
 ARRIVES_BY_DISPATCH = "dispatch"
+
+#: Through a facade.  ``api/v1/job_api`` calls ``TaskBuffer.storeJobs``, which
+#: calls ``proxy.insertNewJob`` -- the edge is real and the arguments are not
+#: this entry's, since the door rewrites them.  Kept apart from ``call`` so
+#: that "nothing was read here" is never compared against "nothing was passed".
+ARRIVES_THROUGH_DOOR = "door"
 
 
 class EntryPoint(BaseModel):
@@ -508,12 +515,14 @@ class EntryPoint(BaseModel):
     reached_by: str = Field(
         default=ARRIVES_BY_CALL,
         description=(
-            "``call`` or ``dispatch``.  A call is resolved by method name; a "
-            "dispatch is a knight constructing a worker and starting it, which "
-            "no name match reaches.  Recorded because the two bind their "
-            "arguments differently, and comparing one against the other "
-            "reports a difference in spelling as a difference in what the "
-            "path can do."
+            "``call``, ``dispatch`` or ``door``.  A call is resolved by "
+            "method name; a dispatch is a knight constructing a worker and "
+            "starting it, which no name match reaches; a door is a facade "
+            "method forwarding to a borrowed proxy, whose arguments are the "
+            "door's rather than this entry's and are left unread.  Recorded "
+            "because the three bind their arguments differently, and comparing "
+            "one against another reports a difference in spelling -- or an "
+            "unread list -- as a difference in what the path can do."
         ),
     )
 

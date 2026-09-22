@@ -4666,6 +4666,120 @@ def test_entries_that_hand_over_different_arguments_are_reported():
     ]
 
 
+_DOOR_FACADE = '''
+class TaskBuffer:
+    def storeJobs(self, jobs, user, fqans=None):
+        with self.proxyPool.get() as proxy:
+            return proxy.insertNewJob(jobs, user)
+'''
+
+_DOOR_PROXY = '''
+class JobComplexModule:
+    def insertNewJob(self, job, user):
+        self.recordStatusChange(job)
+        return 1
+
+    def recordStatusChange(self, job):
+        return 2
+'''
+
+_DOOR_API = '''
+import TaskBuffer
+
+@request_validation(secure=True)
+def submit(req, jobs):
+    return global_task_buffer.storeJobs(jobs, req.user, fqans=req.fqans)
+'''
+
+
+def test_an_entry_reaches_past_the_facade_it_borrows_a_proxy_through():
+    """Where a job row is created reported that nothing starts it.
+
+    ``TaskBuffer.storeJobs`` is the only caller of ``proxy.insertNewJob``, and
+    the facade hop is dropped so that its silent log file is not named -- which
+    left the API that submits jobs invisible to the trigger question.
+    """
+    junction = _junction("proxy.py::insertNewJob", "JobSpec.jobStatus")
+    _attach(
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_PROXY, "proxy.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert [(e.trigger, e.entry, e.via, e.reached_by) for e in junction.entry_points] == [
+        ("request", "api/v1/job_api.py", "storeJobs", "door")
+    ]
+
+
+def test_what_the_door_was_handed_is_not_reported_as_what_this_entry_passed():
+    """``storeJobs(jobs, user, fqans=...)`` is not ``insertNewJob(job, user)``.
+
+    The keywords at the door belong to the door.  Carrying them across would
+    put a false argument list under a true edge, and comparing them against a
+    direct caller's would report a guard that cannot fire.
+    """
+    junction = _junction("proxy.py::insertNewJob", "JobSpec.jobStatus")
+    _attach(
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_PROXY, "proxy.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert junction.entry_points[0].arg_binding == {}
+    assert trigger.differing_arguments([junction]) == []
+
+
+def test_a_door_reaches_what_the_method_behind_it_calls_on_itself():
+    """The door and the write are rarely the same method here either."""
+    junction = _junction("proxy.py::recordStatusChange", "JobSpec.jobStatus")
+    _attach(
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_PROXY, "proxy.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert [e.entry for e in junction.entry_points] == ["api/v1/job_api.py"]
+
+
+def test_the_log_question_still_stops_at_the_facade():
+    """The two consumers of ``reaching_modules`` want opposite things here.
+
+    The facade rule exists because ``JediTaskBuffer`` logs twice in the whole
+    file, so naming its log sent 71 junctions to a file that says nothing.
+    Reach crosses the door; the log question must not follow.
+    """
+    modules = [
+        _module(_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        _module(_DOOR_PROXY, "proxy.py"),
+        _module(_DOOR_API, "api/v1/job_api.py"),
+    ]
+
+    assert "insertNewJob" not in trigger.reaching_modules(modules).get("proxy.py", {})
+    assert "insertNewJob" in trigger.reaching_modules(modules, through_doors=True)["proxy.py"]
+
+
+def test_a_door_to_a_name_two_modules_define_carries_no_edge():
+    """The honesty of the hop is unchanged: one implementation, or an import.
+
+    Measured on the corpus: ``send_command_to_job`` is written in two modules,
+    so the door to it is refused even though a trigger calls the door.
+    """
+    junction = _junction("proxy.py::insertNewJob", "JobSpec.jobStatus")
+    rival = "class Other:\n    def insertNewJob(self, job, user):\n        return 3\n"
+    _attach(
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_PROXY, "proxy.py"),
+        (rival, "other.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert junction.entry_points == []
+
+
 def _reasons(*sources: tuple[str, str], junctions, tables=None):
     modules = [_module(text, rel) for text, rel in sources]
     trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})
