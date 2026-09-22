@@ -4666,6 +4666,56 @@ def test_entries_that_hand_over_different_arguments_are_reported():
     ]
 
 
+def _reasons(*sources: tuple[str, str], junctions, tables=None):
+    modules = [_module(text, rel) for text, rel in sources]
+    trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})
+    return trigger.unreached_reasons(junctions, modules, tables or {"PRODSYS_COMM"})
+
+
+def test_a_junction_nothing_calls_is_told_from_one_whose_caller_starts_nothing():
+    """The ratio covered both, and only one of them is work this slice could do.
+
+    ``lonely`` is called by nobody; ``driven`` is called by ``helper.py``, which
+    carries no trigger of its own.  Answering the second means asking what
+    starts ``helper``, which is the hop the module docstring refuses.
+    """
+    lonely = _junction("proxy.py::lonely")
+    driven = _junction("proxy.py::driven")
+    reasons = _reasons(
+        (
+            "class P:\n"
+            "    def lonely(self):\n        return 1\n"
+            "    def driven(self):\n        return 2\n",
+            "proxy.py",
+        ),
+        ("import proxy\n\ndef helper(p):\n    return p.driven()\n", "helper.py"),
+        junctions=[lonely, driven],
+    )
+
+    assert reasons[trigger.NO_CALLER_RESOLVED] == [lonely]
+    assert reasons[trigger.CALLER_STARTS_NOTHING] == [driven]
+    assert trigger.UNCLASSIFIED not in reasons
+
+
+def test_module_level_code_is_not_reported_as_uncalled():
+    """"Who imports it" is a different question, so it gets its own answer."""
+    at_import = _junction("sitemapper.py::<module>")
+    reasons = _reasons(("x = 1\n", "sitemapper.py"), junctions=[at_import])
+
+    assert reasons == {trigger.RUNS_AT_IMPORT: [at_import]}
+
+
+def test_a_reached_junction_is_given_no_reason():
+    """The groups have to add up to ``total - reached`` or they mean nothing."""
+    reached = _junction("daemons/scripts/d.py::f")
+    reasons = _reasons(
+        ("def f():\n    return 1\n", "daemons/scripts/d.py"), junctions=[reached]
+    )
+
+    assert reached.entry_points
+    assert reasons == {}
+
+
 def test_a_subject_no_loop_reaches_does_not_repair_itself():
     """The question a stalled task actually asks: will waiting help?"""
     polled = _junction("a.py::f", "JediTaskSpec.status")

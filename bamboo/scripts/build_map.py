@@ -392,6 +392,31 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
         + ")"
     )
 
+    # Why the others have none.  The log-file gap is already enumerated below;
+    # this one was a ratio, which reads as one backlog of the same kind when
+    # it is three different answers -- and the largest of them is the one-hop
+    # rule working, not a backlog at all.  Saying so here is what keeps the
+    # next reader from "fixing" it.
+    unreached = getattr(plugin, "unreached_junctions", {})
+    if unreached:
+        click.echo(f"  no entry point ({total - reached}), by what the map could tell:")
+        for reason, junctions in sorted(
+            unreached.items(), key=lambda item: (-len(item[1]), item[0])
+        ):
+            click.echo(f"    {len(junctions):>4} {reason}")
+            by_module = Counter(j.owner.split("::")[0] for j in junctions)
+            for module, count in by_module.most_common(3):
+                click.echo(f"           {module:<54} {count}")
+            if len(by_module) > 3:
+                click.echo(f"           … {len(by_module) - 3} more module(s)")
+        if trigger.CALLER_STARTS_NOTHING in unreached:
+            click.echo(
+                f"    {trigger.CALLER_STARTS_NOTHING!r} is the one-hop rule in"
+                " recognizers/trigger.py holding, not a backlog: reach is a"
+                " name match, and chaining name matches compounds them into a"
+                " claim"
+            )
+
     # What each junction consults, which is the edge outward rather than the
     # edges inward.  Reported because an empty ``calls`` has to be readable as
     # "this owner calls nothing on itself" and not as "nobody looked" -- a

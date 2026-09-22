@@ -1249,6 +1249,72 @@ def attach(
     return reached, len(junctions)
 
 
+#: Why a junction ended up with no entry point.  Three, because three is what
+#: :func:`attach` can decide from what it already reads -- whether
+#: :func:`reaching_modules` resolved a caller, whether :func:`classify` gave any
+#: of those callers a trigger, and whether the owner is module-level code.
+#: Anything needing a fourth judgment would be this slice guessing, and the
+#: report says "unclassified" rather than inventing a bucket for it.
+NO_CALLER_RESOLVED = "no caller the map resolves"
+CALLER_STARTS_NOTHING = "a caller is named, but nothing declares what starts it"
+RUNS_AT_IMPORT = "runs when its module is imported"
+UNCLASSIFIED = "unclassified"
+
+
+def unreached_reasons(
+    junctions: list[JunctionNode],
+    modules: list[SourceModule],
+    foreign_tables: set[str],
+) -> dict[str, list[JunctionNode]]:
+    """Return ``{reason: junctions}`` for the ones :func:`attach` left empty.
+
+    ``entry_points == []`` is an honest answer, but on its own it is one number
+    covering three different situations, and only one of them is work this
+    slice could do:
+
+    ``NO_CALLER_RESOLVED``
+        Nothing the map resolves calls the owner.  Either the corpus really
+        does not call it, or the call was dropped -- the facade hop is dropped
+        deliberately (:func:`_outward_call_sites`), so a proxy method the API
+        reaches only through ``TaskBuffer`` lands here.
+    ``CALLER_STARTS_NOTHING``
+        A caller is named and carries no trigger, so answering would mean
+        asking what starts *it*.  **That is the one-hop rule in the module
+        docstring, not a defect**: a name match is a weak edge, and chaining
+        weak edges multiplies the error rather than the reach.
+    ``RUNS_AT_IMPORT``
+        The owner is ``<module>``.  "What starts this" is "who imports it",
+        which is a different question with a different answer shape.
+
+    Recomputed rather than carried out of :func:`attach`, which would mean
+    widening its return for a reporting concern.  Both passes together are
+    about four seconds on the PanDA corpus, against a build in minutes.
+    """
+    triggers = classify(modules, foreign_tables)
+    inward = reaching_modules(modules)
+
+    found: dict[str, list[JunctionNode]] = {}
+    for junction in junctions:
+        if junction.entry_points:
+            continue
+        owner_module, _, method = junction.owner.partition("::")
+        callers = inward.get(owner_module, {}).get(method, ())
+        if method == "<module>":
+            reason = RUNS_AT_IMPORT
+        elif not callers:
+            reason = NO_CALLER_RESOLVED
+        elif not any(triggers.get(entry) for entry, _door, _call in callers):
+            reason = CALLER_STARTS_NOTHING
+        else:
+            # Unreachable as long as ``attach`` builds an EntryPoint for every
+            # (caller, trigger) pair it finds.  Kept so that a future filter
+            # there shows up as a number instead of being absorbed by one of
+            # the three answers above.
+            reason = UNCLASSIFIED
+        found.setdefault(reason, []).append(junction)
+    return found
+
+
 def _reaches_from_self(receiver: ast.expr) -> bool:
     """True when *receiver* is this object or a collaborator it holds.
 

@@ -438,6 +438,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             {b.interface.split(".")[-1] for b in channels},
             _merge_uplinks(self._uplinks, self._built),
         )
+        # Why the rest have none.  A bare ratio is one number covering three
+        # situations, only one of which is work this slice could do, and the
+        # report cannot tell them apart from the ratio alone.
+        self._unreached = trigger.unreached_reasons(
+            fragment.junctions,
+            self._modules,
+            {b.interface.split(".")[-1] for b in channels},
+        )
         # What each junction consults, as opposed to what starts it.  The one
         # edge out of a junction that a reader can follow without resolving a
         # name, and the only route from an arm to the aggregate it decided on.
@@ -518,6 +526,11 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def trigger_reach(self) -> tuple[int, int]:
         """``(junctions with an entry point, total)``."""
         return getattr(self, "_reached", (0, 0))
+
+    @property
+    def unreached_junctions(self) -> dict[str, list]:
+        """``{why it has no entry point: junctions}``."""
+        return getattr(self, "_unreached", {})
 
     @property
     def consulting(self) -> int:
