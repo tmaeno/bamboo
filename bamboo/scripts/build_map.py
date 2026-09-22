@@ -745,6 +745,12 @@ def main(
         click.echo("\n--dry-run: nothing written.")
     else:
         written = asyncio.run(_store(fragment))
+        cleared = written.pop("cleared", 0)
+        # Said separately and first, because it is the only destructive number
+        # in the report: a build replaces the whole map, so a mistyped
+        # ``--map-id`` deletes someone else's.
+        if cleared:
+            click.echo(f"\ncleared: {cleared} node(s) of map {fragment.map_id}")
         click.echo(
             "\nstored: "
             + ", ".join(f"{k}={v}" for k, v in written.items() if v)

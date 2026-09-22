@@ -256,9 +256,13 @@ async def test_a_version_pin_reads_every_node_that_version_had():
     moved.conditions = ["site.status != 'online'"]
     added = _stage("network check", "-network", 2)
     added.derived_from = later
+    # ``replace_map=False`` on purpose: a build replaces the map it writes, so
+    # two builds only coexist where a caller asks for that.  The read side is
+    # unchanged and this is what still exercises it.
     await store_fragment(
         MapFragment(map_id=MAP_ID, derived_from=later, filter_stages=[moved, added]),
         backend,
+        replace_map=False,
     )
 
     pinned = CodeMap(backend, map_id=MAP_ID, version=VERSION)

@@ -287,12 +287,13 @@ def test_content_hash_changes_when_the_condition_changes():
 
 
 @pytest.mark.asyncio
-async def test_store_fragment_replaces_only_its_own_version():
-    """A rebuild clears this map at this version, never the incident graph.
+async def test_store_fragment_replaces_the_whole_map_it_writes():
+    """A build is one build of one corpus, and replaces the map it writes.
 
-    ``clear_all`` would take human-validated incident knowledge with it, and
-    other versions must survive so an old incident can still be explained
-    against the code that was running when it happened.
+    Clearing only this build's own stamp left a 54-node fragment of a
+    different source tree under the same ``map_id``, answering queries about
+    a corpus it was never built from.  The incident graph is still untouched:
+    ``clear_all`` would take human-validated knowledge with it.
     """
     fragment = MapFragment(
         map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
@@ -304,20 +305,35 @@ async def test_store_fragment_replaces_only_its_own_version():
 
     written = await store_fragment(fragment, graph_db)
 
-    graph_db.clear_map.assert_awaited_once_with(MAP_ID, VERSION)
+    graph_db.clear_map.assert_awaited_once_with(MAP_ID)
     graph_db.clear_all.assert_not_awaited()
     assert written["value_enums"] == 1
     assert graph_db.merge_map_node.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_store_fragment_can_keep_existing_versions():
+async def test_store_fragment_says_how_much_it_deleted():
+    """The only destructive number in the build, so it is returned, not logged."""
+    fragment = MapFragment(
+        map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)]
+    )
+    graph_db = AsyncMock()
+    graph_db.clear_map.return_value = 54
+
+    from bamboo.codemap.store import store_fragment
+
+    assert (await store_fragment(fragment, graph_db))["cleared"] == 54
+
+
+@pytest.mark.asyncio
+async def test_store_fragment_can_write_beside_what_is_there():
+    """For a caller assembling one map from several fragments."""
     fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, value_enums=[_enum("EC_Kill", 100)])
     graph_db = AsyncMock()
 
     from bamboo.codemap.store import store_fragment
 
-    await store_fragment(fragment, graph_db, replace_version=False)
+    await store_fragment(fragment, graph_db, replace_map=False)
 
     graph_db.clear_map.assert_not_awaited()
 
