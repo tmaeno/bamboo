@@ -490,6 +490,49 @@ async def test_the_query_that_selects_the_value_is_named_with_the_log_it_writes_
     assert "TaskCommando" in strategy.follow_up.question
 
 
+async def test_a_run_time_candidate_says_where_its_value_comes_from():
+    """Why a candidate whose value nothing states is on the list at all.
+
+    The expression was already in the report, a hundred and eighty lines down
+    in ``code to read``.  A reader who stops at the candidate listing -- which
+    is most of the point of there being one -- saw four rows and no way to tell
+    which of them could have been theirs.  A stated value needs no such line
+    and does not get one.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[
+            models.Candidate(
+                owner="a.py::stated",
+                tier=1,
+                branches=[models.CandidateBranch(outcome="finishing", tier=1)],
+            ),
+            models.Candidate(
+                owner="b.py::copied",
+                tier=2,
+                branches=[
+                    models.CandidateBranch(outcome="passthrough(JobSpec.jobStatus)", tier=2)
+                ],
+            ),
+        ],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_candidates(strategy, 10, False, False))
+    output = runner.invoke(command).output
+
+    assert "value from passthrough(JobSpec.jobStatus)" in output
+    stated, copied = output.split("b.py::copied")[0], output.split("b.py::copied")[1]
+    assert "value from" not in stated
+    assert "value from" in copied
+
+
 _METRICS = "daemons/scripts/metric_collector.py::analy_pmerge_jobs_wait_time"
 _GETTER_READER = "taskbuffer/db_proxy_mods/task_standalone_module.py::checkDuplication_JEDI"
 

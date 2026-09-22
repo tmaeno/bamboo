@@ -250,6 +250,24 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
         click.echo(f"  {'':<10} {detail}")
         if evaluated and candidate.because:
             click.echo(f"  {'':<10} {candidate.because}")
+        if candidate.tier != 1:
+            # Why a candidate whose value nothing states is on the list at all.
+            # Shown here for the reason ``row_precondition`` just below is: it
+            # changes how the line above is to be read, and the reader who
+            # stops at this listing is the one who would otherwise take four
+            # rows as four equal answers.  The expression was already in the
+            # report -- a hundred and eighty lines further down, in ``code to
+            # read``, where it is found by whoever had already gone there.
+            #
+            # Most of what it says is that the value was copied from another
+            # field, which is the fact the reader needs and the one thing the
+            # candidate set cannot act on: ruling a copy out would need the
+            # source field's value set to be closed, and two of this corpus's
+            # hundred and eight subjects have one.  So it is handed over as
+            # evidence instead of being spent as a claim.
+            sources = sorted({b.outcome for b in candidate.branches if b.tier != 1})
+            if sources:
+                click.echo(f"  {'':<10} value from {', '.join(sources)}")
         if candidate.row_precondition:
             # Always shown, not folded into --full: it changes how the line
             # above is to be read, and a reader who stops at the default
