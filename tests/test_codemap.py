@@ -2832,6 +2832,60 @@ def test_a_table_with_no_spec_is_qualified_by_the_table():
     assert uncovered == {"ddm_endpoint"}
 
 
+def test_a_bind_filled_by_a_dict_literal_is_read():
+    """``var_map = {":blacklisted": "Y"}`` binds exactly as the subscript form does.
+
+    Reading only ``varMap[":x"] = v`` left 176 of the corpus's 1261 written
+    columns with no outcome -- 56% of everything this slice could not explain,
+    and the whole of the harvester, worker and data-carousel side of the
+    system, which writes its binds this way and was therefore invisible.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted '\n"
+        "        varMap = {':blacklisted': 'Y'}\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _subjects, junctions, _c, _uncovered, _conf, _a = _sql_extract(source)
+
+    assert junctions[0].subject == "ddm_endpoint.blacklisted"
+    assert [(b.outcome, b.tier) for b in junctions[0].branches] == [("Y", 1)]
+
+
+def test_a_dict_literal_bind_carries_the_guard_that_chose_the_dict():
+    """The condition on the write is the one on the statement holding the dict."""
+    source = (
+        "class M:\n"
+        "    def f(self, broken):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted '\n"
+        "        if broken:\n"
+        "            varMap = {':blacklisted': 'Y'}\n"
+        "        else:\n"
+        "            varMap = {':blacklisted': 'N'}\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _subjects, junctions, _c, _uncovered, _conf, _a = _sql_extract(source)
+
+    assert sorted(
+        (b.outcome, tuple(b.path_condition)) for b in junctions[0].branches
+    ) == [("N", ("not (broken)",)), ("Y", ("broken",))]
+
+
+def test_a_dict_literal_bind_whose_value_is_a_name_still_names_the_writer():
+    """126 of the 176 hold a name, so tier 2 is the common answer, not the rare one."""
+    source = (
+        "class M:\n"
+        "    def f(self, status):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.ddm_endpoint SET blacklisted=:blacklisted '\n"
+        "        varMap = {':blacklisted': status}\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _subjects, junctions, _c, _uncovered, _conf, _a = _sql_extract(source)
+
+    assert [(b.outcome, b.tier) for b in junctions[0].branches] == [("runtime(status)", 2)]
+
+
 def test_a_spec_backed_table_keeps_the_class_as_its_qualifier():
     """``jobsActive4`` and ``jobsArchived4`` are one JobSpec.jobStatus, not two.
 

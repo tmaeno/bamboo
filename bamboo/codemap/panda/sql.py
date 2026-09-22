@@ -1533,12 +1533,25 @@ def selected_literals(sql: str) -> list[tuple[str, str]]:
     return found
 
 
+class Bind(NamedTuple):
+    """One value filling one placeholder, and the statement that put it there.
+
+    ``value`` is what the placeholder receives; ``site`` is the statement to
+    ask for the guards that reached it.  They are the same node for
+    ``varMap[":x"] = v`` and different ones for a dict literal, which is the
+    whole reason this is a pair rather than the assignment.
+    """
+
+    value: ast.expr
+    site: ast.stmt
+
+
 def bound_values(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     varmap: str,
     key: str,
     window: Optional[tuple[int, int]] = None,
-) -> list[ast.Assign]:
+) -> list[Bind]:
     """Return the assignments filling ``<varmap>[<key>]`` in *func*.
 
     Several are normal and correct: a method that runs the same statement twice
@@ -1553,8 +1566,17 @@ def bound_values(
     function would have ``copyArchive.main`` claim its 23 statements each
     select all 11 values of ``:jobStatus``.  The bounds come from the code:
     see :func:`_binding_window`.
+
+    **Two spellings, one meaning.**  ``varMap[":status"] = v`` and ``var_map =
+    {":status": v}`` bind the same placeholder to the same value, and reading
+    only the first left 176 of the corpus's 1261 written columns unexplained
+    -- 56% of everything this slice could not account for, and the whole of
+    the harvester, worker and data-carousel side, which writes its binds as
+    dict literals throughout.  A :class:`Bind` rather than the assignment
+    itself because the two forms do not share a node: what the caller needs is
+    the value, and the statement it sits in for the guards that reached it.
     """
-    found: list[ast.Assign] = []
+    found: list[Bind] = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Assign):
             continue
@@ -1568,5 +1590,17 @@ def bound_values(
                 and isinstance(target.slice, ast.Constant)
                 and target.slice.value == key
             ):
-                found.append(node)
+                found.append(Bind(node.value, node))
+            elif isinstance(target, ast.Name) and target.id == varmap:
+                # The dict literal form.  Only constant keys: a computed one
+                # (``var_map[f":{column}"] = val``, which the worker modules
+                # also use) names a placeholder the statement itself does not
+                # spell either, so there is nothing to pair it with.
+                if not isinstance(node.value, ast.Dict):
+                    continue
+                found.extend(
+                    Bind(value, node)
+                    for spelled, value in zip(node.value.keys, node.value.values, strict=True)
+                    if isinstance(spelled, ast.Constant) and spelled.value == key
+                )
     return found

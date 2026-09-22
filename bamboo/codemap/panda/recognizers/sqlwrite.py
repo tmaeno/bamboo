@@ -351,32 +351,32 @@ def _outcomes(
             return []
         found = []
         for bind in sql.bound_values(func, run.varmap, supplied.text, run.window):
-            value = bind.value
+            value, site = bind.value, bind.site
             settled = settle(value, func)
             if settled:
-                found.extend((outcome, 1, bind, [], bind) for outcome in settled)
+                found.extend((outcome, 1, site, [], site) for outcome in settled)
                 continue
             template = values.diagnostic_template(value)
             if template:
-                templates.append((template, bind))
+                templates.append((template, site))
             if isinstance(value, ast.Name):
                 # Reaching definitions, the same reading the attribute slice
                 # makes of a local: 19% of the corpus's writes fill the bind
                 # from a variable a guarded chain assigned above it.
                 reached = literal_values(func, value.id, settle)
                 if reached:
-                    dominating = path_condition(bind)
+                    dominating = path_condition(site)
                     found.extend(
                         (
                             outcome,
                             1,
-                            bind,
+                            site,
                             [c for c in conditions if c not in dominating],
                             # Where the value was chosen, which is not where it
                             # was bound: ``newTaskStatus = "exhausted"`` sits in
                             # the block that also records why, and the bind is
                             # further down, after the chain has closed.
-                            _statement_at(func, line) or bind,
+                            _statement_at(func, line) or site,
                         )
                         for outcome, conditions, line in reached
                     )
@@ -384,7 +384,7 @@ def _outcomes(
             # The writer is known, the value is not until run time.
             # Recorded rather than dropped: localize and prune read
             # observed values, so they work from the writer alone.
-            found.append((f"runtime({ast.unparse(value)})", 2, bind, [], bind))
+            found.append((f"runtime({ast.unparse(value)})", 2, site, [], site))
         return found
 
     node = _deciding_fragment(func, run, column, supplied, statement.kind)
