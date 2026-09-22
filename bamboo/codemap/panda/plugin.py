@@ -255,6 +255,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         attributor = SpecAttributor(declarations, class_bases(self._modules))
         attributor.learn_self_attributes(self._modules)
         attributor.learn_return_types(self._modules)
+        attributor.learn_import_aliases(self._modules)
         self._table_conflicts = attributor.learn_table_classes(self._modules)
 
         # Audit the classes the map takes on trust from an annotation.  Needs an
@@ -265,6 +266,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         audited.learn_element_types(self._modules)
         audited.learn_self_attributes(self._modules)
         audited.learn_return_types(self._modules)
+        audited.learn_import_aliases(self._modules)
 
         # Writes the attribution drops for having a receiver whose class is a
         # run-time choice.  Collected here rather than counted inside the

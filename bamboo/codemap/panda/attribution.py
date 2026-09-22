@@ -175,6 +175,7 @@ class SpecAttributor:
         self._self_fields: dict[tuple[str, str], set[str]] = {}
         self._class_nodes: dict[str, ast.ClassDef] = {}
         self._return_annotations: dict[str, ast.expr] = {}
+        self._aliases: dict[str, str] = {}
 
     # -- container element types ----------------------------------------- #
 
@@ -1440,6 +1441,44 @@ class SpecAttributor:
     def _declares(self, spec_class: str, attribute: str) -> bool:
         return attribute in self._declarations.get(spec_class, ())
 
+    def _is_spec_class(self, name: str) -> bool:
+        """Whether *name* names a class that holds database columns.
+
+        Two hops rather than a lookup, because a name in the source is not
+        always the name a class was declared under.  A subclass declares no
+        columns of its own and is still a spec -- ``PickleFileSpec(FileSpec)``
+        -- so the hierarchy is walked; and ``from ...FileSpec import FileSpec
+        as JobFileSpec`` renames one, so the alias is followed.  Reading the
+        bare name alone would drop three correct writes in ``JediFileSpec.py``
+        the moment this predicate started guarding the write at all.
+        """
+        if self.family(name) & self._declarations.keys():
+            return True
+        aliased = self._aliases.get(name)
+        return aliased is not None and bool(
+            self.family(aliased) & self._declarations.keys()
+        )
+
+    def learn_import_aliases(self, modules: list[SourceModule]) -> None:
+        """Record ``from x import Spec as Other``, so a renamed class keeps its class.
+
+        Corpus-wide like the other ``learn_`` passes, and dropped where two
+        modules disagree about what a name means -- the same rule
+        :meth:`_built_class` uses for a variable built twice.  Without it a
+        spec under an alias looks exactly like a class that holds no columns.
+        """
+        seen: dict[str, set[str]] = {}
+        for module in modules:
+            for node in ast.walk(module.tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                for alias in node.names:
+                    if alias.asname and alias.asname != alias.name:
+                        seen.setdefault(alias.asname, set()).add(alias.name)
+        self._aliases = {
+            name: next(iter(targets)) for name, targets in seen.items() if len(targets) == 1
+        }
+
     def _declaring_ancestor(self, cls: str, attribute: str) -> Optional[str]:
         """Return the class in *cls*'s hierarchy that declares *attribute*."""
         seen: set[str] = set()
@@ -1616,6 +1655,25 @@ class SpecAttributor:
             owner = self._declaring_ancestor(enclosing_class, attribute)
             return (owner, CERTAIN) if owner else (None, NOT_A_SPEC)
 
+        # A receiver the code constructs answers before any shortcut does.  If
+        # its class declares no columns it is not a spec, so this is not a spec
+        # write and there is nothing to resolve.  Above the single-declaring
+        # rule rather than below it: that rule is right when nothing says what
+        # the object is, and wrong when the line above says exactly what it is.
+        # ``atom = NucleusSpec(ret.pandasite)`` then ``atom.state = ...`` in
+        # SiteMapper was filed as ``JediDatasetSpec.state`` with basis
+        # ``certain``, and ``structural-attribution-agrees`` passed it, because
+        # both readings come from this same declaration table.
+        #
+        # ``check_result = WFDataTargetCheckResult()`` then
+        # ``check_result.metadata = ...`` is the same reading, and was already
+        # dropped here -- a decision point the map invented, and the worst kind
+        # for elimination, since it can never be the answer.
+        if isinstance(target.value, ast.Name):
+            built = self._built_class(target.value.id, func)
+            if built is not None and not self._is_spec_class(built):
+                return None, NOT_A_SPEC
+
         # A single declaring class settles it without looking at the object
         # expression at all -- ``jobStatus`` and ``ddmErrorDiag`` resolve here,
         # including in ``self.job.jobStatus = ...`` where the object is itself
@@ -1628,17 +1686,6 @@ class SpecAttributor:
             certain = self._certain(target.value.id, attribute, func, enclosing_class)
             if certain is not None:
                 return certain, CERTAIN
-
-            # The same reasoning as the ``self`` branch above, for a receiver
-            # the code constructs: if its class declares no columns it is not a
-            # spec, so this is not a spec write and there is nothing to resolve.
-            # ``check_result = WFDataTargetCheckResult()`` then
-            # ``check_result.metadata = ...`` was being recorded as a junction
-            # with an unknown subject -- a decision point the map invented, and
-            # the worst kind for elimination, since it can never be the answer.
-            built = self._built_class(target.value.id, func)
-            if built is not None and built not in self._declarations:
-                return None, NOT_A_SPEC
 
             # And the same conclusion where the construction is visible but the
             # class is not: a registry lookup or a name pulled out with

@@ -526,6 +526,52 @@ def _progress(source: str, rel: str):
     return subjects, [j for j in junctions if j.owner.startswith(rel)], coverage
 
 
+def test_a_non_spec_receiver_wins_over_the_single_declaring_class():
+    """The shortcut that skips the receiver must not skip a receiver that answers.
+
+    ``atom = NucleusSpec(...)`` then ``atom.state = ...`` in SiteMapper was
+    filed as ``JediDatasetSpec.state`` with basis ``certain``, because ``state``
+    is declared by exactly one class and the shortcut never looks at the
+    object.  ``NucleusSpec`` declares no columns, so it is not a spec and there
+    is nothing to resolve -- the guard for that sat one rung too low to be
+    reached.  ``structural-attribution-agrees`` cannot catch it: both readings
+    come from the same declaration table and so agree on the wrong answer.
+    """
+    source = (
+        "class NucleusSpec(object):\n"
+        "    def __init__(self, name):\n"
+        "        self.name = name\n"
+        "\n"
+        "class M:\n"
+        "    def f(self, site):\n"
+        "        atom = NucleusSpec(site.name)\n"
+        "        atom.proc_status = site.proc_status\n"
+    )
+    _subjects, junctions, _coverage = _progress(source, "pandajedi/jedibrokerage/B.py")
+
+    assert junctions == []
+
+
+def test_a_receiver_built_from_an_import_alias_of_a_spec_is_still_a_spec_write():
+    """``from ...FileSpec import FileSpec as JobFileSpec`` is a spec by another name.
+
+    The guard above reads the constructor's name, and the name in the source
+    is the alias.  Without following it, moving the guard up would drop three
+    correct writes in ``JediFileSpec.py`` along with the one it is for.
+    """
+    source = (
+        "from pandaserver.taskbuffer.FileSpec import FileSpec as JobFileSpec\n"
+        "\n"
+        "class M:\n"
+        "    def f(self, token):\n"
+        "        jobFileSpec = JobFileSpec()\n"
+        "        jobFileSpec.lfn = token\n"
+    )
+    _subjects, junctions, _coverage = _progress(source, "pandaserver/taskbuffer/JediFileSpec.py")
+
+    assert [j.subject for j in junctions] == ["FileSpec.lfn"]
+
+
 def test_single_declaring_class_needs_no_object_type():
     """One declaring class settles the subject whatever the object expression is.
 
