@@ -448,6 +448,54 @@ class Branch(BaseModel):
     )
 
 
+#: A run-time outcome rendered as an f-string -- ``runtime(f'merge_{s}')``.
+#: The literal chunks around the holes are the *frame*, and a frame is a
+#: constraint on the value, not decoration.
+_FRAMED_OUTCOME = re.compile(r"^runtime\(f(['\"])(.*)\1\)$", re.DOTALL)
+
+#: One substitution hole inside a frame.  Nested braces are not matched on
+#: purpose: an outcome carrying them is left alone rather than split wrongly.
+_OUTCOME_HOLE = re.compile(r"\{[^{}]*\}")
+
+
+def outcome_excludes(outcome: Optional[str], value: str) -> bool:
+    """Whether a branch's own text proves it cannot have produced *value*.
+
+    Tier 2 says the writer is known and the value is settled at run time, and
+    everywhere else that is read as "this one could have" -- the honest answer
+    for ``runtime(newStatus)``, where nothing bounds what the name holds.  It
+    is not the honest answer for ``runtime(f'merge_{s}')``: whatever ``s``
+    turns out to be, the result begins with ``merge_``, so a row reading
+    ``es_inaction`` was written somewhere else.  Two of the four candidates the
+    map offered for that value were of exactly this kind, and a reader
+    following them opens a hundred and sixty lines that cannot produce it.
+
+    **Syntactic proof only.**  The frame has to be spelled out in the branch's
+    own text, which is why nothing here consults another node: an elimination
+    resting on some *other* fact being complete is the shape that turns an
+    incomplete candidate set into a confident wrong one.  Copying a value from
+    elsewhere -- ``passthrough(JobSpec.jobStatus)`` -- looks like it bounds the
+    value too, and does not: it would need that subject's value set to be
+    closed, and two of this corpus's hundred and eight subjects have one.
+
+    ``{{`` and ``}}`` are escaped braces rather than holes, so an outcome
+    carrying either is left alone instead of being read with the wrong frame.
+    """
+    match = _FRAMED_OUTCOME.match(outcome or "")
+    if not match:
+        return False
+    frame = match.group(2)
+    if "{{" in frame or "}}" in frame:
+        return False
+    literals = _OUTCOME_HOLE.split(frame)
+    if not any(literals):
+        return False
+    if literals[0] and not value.startswith(literals[0]):
+        return True
+    if literals[-1] and not value.endswith(literals[-1]):
+        return True
+    return any(chunk and chunk not in value for chunk in literals[1:-1])
+
 # How work arrives at a junction.  Declared with the field that carries it
 # rather than in the recognizer that assigns it, because both halves of the map
 # read them: the extraction to label an entry, and an investigation to decide
@@ -1800,8 +1848,10 @@ class Candidate(BaseModel):
         description=(
             "1 when a branch states this value outright, 2 when the writer is "
             "known and the value is only settled at run time.  A tier-2 "
-            "candidate is never eliminated by the value, because 'this one "
-            "could have' is the honest answer for it."
+            "candidate is not eliminated by the value, because 'this one could "
+            "have' is the honest answer for it -- unless the branch's own text "
+            "is a frame the value does not fit, which is the one case where "
+            "the arm rules itself out.  See ``outcome_excludes``."
         ),
     )
     dispatch: list[DispatchFanout] = Field(

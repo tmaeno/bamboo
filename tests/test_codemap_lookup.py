@@ -162,6 +162,84 @@ async def test_a_run_time_writer_is_never_eliminated_by_an_observed_value():
     assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
 
 
+async def test_a_run_time_writer_whose_frame_the_value_does_not_fit_is_eliminated():
+    """A frame is a bound, and the branch spells it out itself.
+
+    ``f'merge_{s}'`` produces a value beginning with ``merge_`` whatever ``s``
+    holds, so a row reading ``pending`` was written somewhere else.  This is
+    the one elimination a tier-2 branch licenses, and it licenses it from its
+    own text rather than from another node being complete.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction("framed.py::f", Branch(outcome="runtime(f'merge_{s}')", tier=2)),
+            _junction("free.py::g", Branch(outcome="runtime(newStatus)", tier=2)),
+        ],
+    )
+    code_map = await _stored(fragment)
+
+    assert [j.owner for j in await code_map.producers_of("JediTaskSpec.status", "pending")] == [
+        "free.py::g"
+    ]
+
+
+async def test_a_run_time_writer_whose_frame_the_value_fits_is_kept():
+    """The bound only rules out what falls outside it."""
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[_junction("framed.py::f", Branch(outcome="runtime(f'merge_{s}')", tier=2))],
+    )
+    code_map = await _stored(fragment)
+
+    assert len(await code_map.producers_of("JediTaskSpec.status", "merge_failed")) == 1
+
+
+async def test_a_junction_keeps_the_arms_a_frame_does_not_rule_out():
+    """One junction, two run-time arms, and only one of them bounded.
+
+    The junction has to survive on the strength of the free arm, so this is
+    where eliminating per *branch* and per *junction* have to agree: a
+    survivor offered with no arm to read is worse than either.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "mixed.py::f",
+                Branch(outcome="runtime(f'merge_{s}')", tier=2),
+                Branch(outcome="runtime(newStatus)", tier=2),
+            )
+        ],
+    )
+    code_map = await _stored(fragment)
+
+    assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
+
+
+async def test_a_frame_of_escaped_braces_is_left_alone():
+    """``{{`` is a literal brace, not a hole, so the frame cannot be read.
+
+    Left as an ordinary tier-2 branch rather than split on the wrong holes:
+    misreading the frame would eliminate on a bound the code never had.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[_junction("braced.py::f", Branch(outcome="runtime(f'{{merge}}')", tier=2))],
+    )
+    code_map = await _stored(fragment)
+
+    assert len(await code_map.producers_of("JediTaskSpec.status", "pending")) == 1
+
+
 async def test_a_passthrough_moves_the_question_to_the_field_it_came_from():
     """The reference lives inside JSON-encoded branches, so this is the hop
     that a property match in the query cannot make on its own."""

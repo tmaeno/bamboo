@@ -190,6 +190,36 @@ async def test_every_junction_that_could_produce_the_value_is_a_candidate():
     assert [(c.owner, c.tier) for c in strategy.candidates] == [("a.py::f", 1), ("b.py::g", 2)]
 
 
+async def test_a_framed_arm_is_not_offered_as_a_way_the_value_was_reached():
+    """The same rule as ``producers_of``, one level down, and it has to agree.
+
+    ``producers_of`` answers which junctions, this answers which arms of one,
+    and both are printed by the same report.  A junction kept by its free arm
+    must be shown with that arm and not the bounded one, or the report offers
+    a place to read that cannot produce what was observed.
+    """
+    fragment = MapFragment(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        subjects=[_subject()],
+        junctions=[
+            _junction(
+                "mixed.py::f",
+                Branch(outcome="runtime(f'merge_{s}')", tier=2),
+                Branch(outcome="runtime(newStatus)", tier=2),
+                log_files=[KNIGHT_LOG],
+            ),
+            _junction("framed.py::g", Branch(outcome="runtime(f'merge_{s}')", tier=2)),
+        ],
+    )
+    strategy = await strategy_mod.derive(
+        await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="1")
+    )
+
+    assert [c.owner for c in strategy.candidates] == ["mixed.py::f"]
+    assert [b.outcome for b in strategy.candidates[0].branches] == ["runtime(newStatus)"]
+
+
 async def test_a_proxy_is_probed_at_its_callers_log_and_not_its_own():
     """The guard that stops eleven candidates being ruled out at once.
 

@@ -48,6 +48,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     Symptom,
     ValueEnumNode,
+    outcome_excludes,
 )
 from bamboo.database.graph_database_client import GraphDatabaseClient
 from bamboo.models.graph_element import BaseNode, NodeType
@@ -239,11 +240,28 @@ class CodeMap:
         writer known, value settled at run time -- are kept, because "this one
         could have" is the honest answer for them and dropping them would turn
         an incomplete candidate set into a confident wrong one.
+
+        Kept, that is, unless the branch's own text says otherwise.  A tier-2
+        outcome is sometimes a frame with holes in it, and a frame bounds what
+        can come out: ``runtime(f'merge_{s}')`` cannot have written
+        ``es_inaction`` however ``s`` resolved.  That is a syntactic fact about
+        the branch, not a completeness claim about some other node, which is
+        what keeps it on the safe side of the paragraph above -- see
+        :func:`~bamboo.codemap.models.outcome_excludes`.
+
+        The same rule lives in :func:`~bamboo.codemap.strategy._reaching`, one
+        level down, because this answers *which junctions* and that answers
+        *which arms of one*.  Both are read by the same report and a reader
+        comparing them would see a junction offered with no arm to look at.
         """
         return [
             junction
             for junction in await self.writers_of(subject)
-            if any(b.outcome == outcome or b.tier == 2 for b in junction.branches)
+            if any(
+                b.outcome == outcome
+                or (b.tier == 2 and not outcome_excludes(b.outcome, outcome))
+                for b in junction.branches
+            )
         ]
 
     async def selection_gates_for(self, subject: str) -> list[str]:

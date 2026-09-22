@@ -102,6 +102,7 @@ from bamboo.codemap.models import (
     StageCut,
     Strategy,
     Symptom,
+    outcome_excludes,
 )
 
 logger = logging.getLogger(__name__)
@@ -383,11 +384,19 @@ def _reaching(junction: JunctionNode, observed: str) -> list:
     """The branches that can have produced *observed*.
 
     The ones that state it, or -- when none does -- the ones whose value is
-    only settled at run time.  A tier-2 branch is never ruled out by the value,
-    because "this one could have" is the honest answer for it.
+    only settled at run time.  A tier-2 branch is not ruled out by the value,
+    because "this one could have" is the honest answer for it -- unless its own
+    text is a frame the value does not fit, which is the one case where the arm
+    says so itself.  The junction-level half of the same rule is
+    :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`; this one has to agree
+    with it, or a surviving junction would be offered with no arm to read.
     """
     stated = [b for b in junction.branches if b.outcome == observed]
-    return stated or [b for b in junction.branches if b.tier == 2]
+    return stated or [
+        b
+        for b in junction.branches
+        if b.tier == 2 and not outcome_excludes(b.outcome, observed)
+    ]
 
 
 def _candidate(junction: JunctionNode, observed: str) -> Candidate:
