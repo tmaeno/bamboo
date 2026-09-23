@@ -3236,6 +3236,39 @@ async def test_the_handover_step_says_who_handed_it_over():
     assert "from   handed over by start, reached by dispatch" in runner.invoke(command).output
 
 
+async def test_the_follow_up_claims_only_what_it_looked_at():
+    """"Anything acts on this value" was wider than the thing computed.
+
+    ``selected`` is true when a SQL WHERE picks the value out literally or an
+    UPDATE acts on rows holding it, and nothing else.  Code that reads the
+    value and decides is invisible to it -- ``commandToHarvester`` sets
+    ``to_skip`` when an existing command holds this value, which stops the
+    next write.  That report contradicted itself eight lines apart, because
+    the trace printed the ``command_status in [...]`` test underneath.
+    """
+    strategy = await strategy_mod.derive(
+        await _map(
+            MapFragment(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                subjects=[_subject(selected=[])],
+                junctions=[
+                    _junction(
+                        "taskbuffer/db_proxy_mods/misc.py::update",
+                        Branch(outcome="finishing"),
+                        log_files=[KNIGHT_LOG],
+                    )
+                ],
+            )
+        ),
+        Symptom(subject=SUBJECT, observed="finishing", task_id="42"),
+    )
+
+    assert strategy.follow_up.selected is False
+    assert "no query in the map selects on 'finishing'" in strategy.follow_up.question
+    assert "waiting will not move the row" not in strategy.follow_up.question
+
+
 async def test_the_gap_counts_the_skeletons_lines_not_the_arms():
     """The count basis moved with the artefact.
 

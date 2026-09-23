@@ -741,9 +741,21 @@ def _follow_up(
                 "outside what was read"
             )
     else:
+        # Narrowed from "waiting will not move the row", which claimed more
+        # than the computation behind it.  ``selected`` is true when a SQL
+        # WHERE selects this value literally or an UPDATE acts on rows holding
+        # it -- nothing else.  Code that reads the value and decides is
+        # invisible to it: ``commandToHarvester`` sets ``to_skip`` when an
+        # existing command holds this value, which stops the next write and is
+        # unmistakably something acting on it.  That contradiction was in one
+        # report with itself, eight lines apart, because the trace printed the
+        # ``command_status in [...]`` test right underneath.  The population is
+        # not cheap to measure -- resolving the receiver's spec class needs the
+        # whole corpus -- so no count is claimed here and only the claim is
+        # brought back inside what was looked at.
         question = (
-            f"no query in the map selects on {observed!r}, so waiting will not move the "
-            f"row -- ask who wrote the step before it: {carried_or_writers}"
+            f"no query in the map selects on {observed!r} -- ask who wrote the step "
+            f"before it: {carried_or_writers}"
         )
     if reader_acts == READS_ONLY_FOR_A_CALLER:
         # Appended rather than replacing the sentence: everything it says is

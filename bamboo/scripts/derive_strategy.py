@@ -157,7 +157,11 @@ def _report_follow_up(strategy: Strategy) -> None:
     click.echo("\nwill anything move it on")
     selects = "yes" if follow.selected else "no"
     repair = "yes" if follow.self_repairing else "no"
-    click.echo(f"  anything acts on this value     {selects}")
+    # "anything acts on this value" was wider than the thing computed.  What
+    # ``selected`` holds is whether a query in the map picks the row out by
+    # this value -- a reader that takes a decision on it acts on it too, and
+    # this line has never been able to see one.
+    click.echo(f"  any query selects on this value {selects}")
     click.echo(
         f"  a re-evaluating trigger reaches  {repair}"
         + (f"  ({', '.join(follow.triggers)})" if follow.triggers else "")
