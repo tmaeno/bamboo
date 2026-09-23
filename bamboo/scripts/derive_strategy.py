@@ -483,6 +483,57 @@ def _report_walk(entry, top: int, full: bool) -> None:
         click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
 
 
+def _report_predicted(entry, top: int, full: bool) -> None:
+    """The line production prints when *this* arm runs, from the tree.
+
+    Printed beside the map's ``match against`` rather than in place of it, and
+    labelled so the two cannot be confused: the map's sentence is what the
+    questions already asked were built from, and swapping the two would make
+    every answer already collected read as unasked.  This one is computed here
+    and now, from the arm's own statement and the value observed, which is why
+    it can anchor either side of the hole the value fills where the map's can
+    only anchor before the first hole.
+    """
+    if not entry.predicted:
+        return
+    click.echo(
+        f"        the tree says these arms print ({len(entry.predicted)} line(s), "
+        "not what was asked)"
+    )
+    for line in entry.predicted if full else entry.predicted[:top]:
+        click.echo(f"          {line.line:>5}  {line.pattern}")
+        click.echo(f"                 from {line.at}: {line.hole} -- {line.because}")
+    if not full and len(entry.predicted) > top:
+        click.echo(f"          … {len(entry.predicted) - top} more (--full)")
+
+
+def _report_discrimination(strategy: Strategy) -> None:
+    """How far those lines narrow the answer, beside what the map asks now.
+
+    The gate the parent plan put on replacing the map's shared sentence with
+    these, and it is a gate rather than a switch: what is printed here is the
+    count, and the questions that go out are still the map's.
+
+    The two are not counted against a common denominator, because they do not
+    have one.  The map settles **one** sentence per subject, by majority over
+    every writer of it, and the tree produces one per arm and value -- so the
+    honest statement is how many of the tree's lines would settle an arm,
+    beside how many sentences the map had to pool them into.
+    """
+    walked = strategy_mod.predicted_sentences(strategy.readings)
+    if not walked:
+        return
+    counted = strategy_mod.discrimination(walked)
+    asked = {entry.log_pattern for entry in strategy.readings if entry.log_pattern}
+    click.echo(f"\nhow far a line narrows it ({len(walked)} line(s) from the tree)")
+    for kind in strategy_mod.DISCRIMINATION:
+        click.echo(f"  {counted[kind]:>5}  {kind}")
+    click.echo(
+        f"  beside {len(asked)} shared sentence(s) the map settled by majority over "
+        f"{len(strategy.readings)} function(s), which is what was actually asked"
+    )
+
+
 def _report_reading(
     strategy: Strategy, roots: Optional[dict], top: int, full: bool
 ) -> None:
@@ -559,6 +610,7 @@ def _report_reading(
                 f"        match against  {entry.log_pattern}"
                 f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
             )
+        _report_predicted(entry, top, full)
         _report_walk(entry, top, full)
         if full and region is not None:
             click.echo(region.marked(entry.lines))
@@ -1012,6 +1064,7 @@ def main(
         _report_observations(strategy, top, full, evaluated)
         _report_leads(strategy, top, full)
         _report_reading(strategy, roots, top, full)
+        _report_discrimination(strategy)
         _report_findings(strategy, top, full)
 
 

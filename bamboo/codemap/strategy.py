@@ -59,7 +59,7 @@ import logging
 import math
 import re
 from collections import Counter
-from typing import Optional
+from typing import NamedTuple, Optional, Sequence
 
 from bamboo.codemap import evidence, trace
 from bamboo.codemap.evidence import GrepQuery
@@ -1967,6 +1967,68 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     return name_the_arm(settled, diag) if diag else settled
 
 
+#: How far one sentence narrows the answer, worst first.  The four are
+#: disjoint and tested in this order: a line no file carries cannot be asked at
+#: all, a line two writers share cannot say which wrote it even when it is
+#: found, and a line several arms of one function share settles the function
+#: and not the arm.  Only the last is a question whose answer is an arm.
+LINE_NO_FILE = "no file carries it"
+LINE_ACROSS_WRITERS = "shared across writers"
+LINE_ONE_FUNCTION = "settles the function, not the arm"
+LINE_ONE_ARM = "names one arm"
+
+DISCRIMINATION = (LINE_ONE_ARM, LINE_ONE_FUNCTION, LINE_ACROSS_WRITERS, LINE_NO_FILE)
+
+
+class Sentence(NamedTuple):
+    """One line production could print, and what it would pin down if seen.
+
+    Deliberately the same shape for both cadences.  The map's arm sentences and
+    the trace's predicted lines are the two halves of the comparison this round
+    exists to make, and scoring them with two functions would make any
+    difference between them a fact about the two functions.
+    """
+
+    text: str
+    owner: str
+    line: Optional[int]
+    files: Sequence[str]
+
+
+def discrimination(sentences: Sequence[Sentence]) -> Counter:
+    """How many of *sentences* narrow to an arm, a function, a set, or nothing.
+
+    The whole set has to be passed at once: whether a line names one arm is not
+    a property of that line but of how many other arms say the same thing, and
+    a per-line answer would call every line unique.
+    """
+    owners: dict[str, set[str]] = {}
+    arms: dict[str, set[tuple[str, Optional[int]]]] = {}
+    for sentence in sentences:
+        owners.setdefault(sentence.text, set()).add(sentence.owner)
+        arms.setdefault(sentence.text, set()).add((sentence.owner, sentence.line))
+    counted: Counter = Counter()
+    for sentence in sentences:
+        if not sentence.files:
+            counted[LINE_NO_FILE] += 1
+        elif len(owners[sentence.text]) > 1:
+            counted[LINE_ACROSS_WRITERS] += 1
+        elif len(arms[sentence.text]) > 1:
+            counted[LINE_ONE_FUNCTION] += 1
+        else:
+            counted[LINE_ONE_ARM] += 1
+    return counted
+
+
+def predicted_sentences(readings: list[Reading]) -> list[Sentence]:
+    """The trace's side of the comparison, one entry per predicted line."""
+    return [
+        Sentence(line.pattern, entry.owner, line.line, entry.log_files)
+        for entry in readings
+        for line in entry.predicted
+    ]
+
+
 def _readings(candidates: list[Candidate], observations: list[Observation]) -> list[Reading]:
     """The code to read, one entry per function rather than per candidate.
 
@@ -2059,17 +2121,40 @@ def attach_traces(
     for entry in strategy.readings:
         if not entry.file or not entry.lines:
             continue
-        steps, note = trace.walk(
+        walked = trace.walk(
             roots,
             file=entry.file,
             owner=entry.owner,
             lines=entry.lines,
+            observed=strategy.symptom.observed or "",
             expected_sha=entry.blob_sha,
             handovers=handovers.get(entry.owner, ()),
             classify=classify,
         )
-        entry.trace = steps
-        entry.trace_note = note
+        entry.trace = walked.steps
+        entry.trace_note = walked.note
+        entry.predicted = walked.predicted
+    _report_what_the_lines_cannot_separate(strategy)
+
+
+def _report_what_the_lines_cannot_separate(strategy: Strategy) -> None:
+    """Say which predicted lines would not settle an arm if they were seen.
+
+    Before anything is asked, which is the half of this the map cannot do: a
+    line two arms share is a question whose answer is already known to be
+    ambiguous, and the reader is better served by being told that than by
+    getting the answer and drawing an arm out of it.
+    """
+    counted = discrimination(predicted_sentences(strategy.readings))
+    vague = sum(counted[kind] for kind in DISCRIMINATION[1:])
+    if not vague:
+        return
+    strategy.gaps.append(
+        f"{vague} of the {sum(counted.values())} line(s) the tree says these arms print "
+        f"would not settle which arm printed them: {counted[LINE_ONE_FUNCTION]} are "
+        f"shared by arms of one function, {counted[LINE_ACROSS_WRITERS]} by more than "
+        f"one writer, and {counted[LINE_NO_FILE]} land in no file the map names"
+    )
 
 
 def survivors(strategy: Strategy) -> list[Candidate]:

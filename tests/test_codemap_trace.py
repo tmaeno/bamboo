@@ -39,7 +39,7 @@ def _tree(tmp_path: Path, **files: str) -> dict[str, Path]:
     return {PACKAGE: root}
 
 
-def _walk(roots, *, file, owner, lines, **kwargs):
+def _walked(roots, *, file, owner, lines, **kwargs):
     return trace_mod.walk(
         roots,
         file=f"{PACKAGE}/{file}",
@@ -48,6 +48,12 @@ def _walk(roots, *, file, owner, lines, **kwargs):
         classify=provenance.classify,
         **kwargs,
     )
+
+
+def _walk(roots, *, file, owner, lines, **kwargs):
+    """The two answers most of these tests are about: the steps and the note."""
+    walked = _walked(roots, file=file, owner=owner, lines=lines, **kwargs)
+    return walked.steps, walked.note
 
 
 KNIGHT = '''\
@@ -702,3 +708,215 @@ class Daemon:
     held = [s for s in steps if s.name == "end_status"]
     assert [s.value for s in held] == ["'deleted'"]
     assert not any("nested-def" in entry for entry in held[0].unseen)
+
+
+# ---------------------------------------------------------------------------
+# The line production prints for this arm
+# ---------------------------------------------------------------------------
+
+
+def _predicted(roots, *, file, owner, lines, observed, **kwargs):
+    return _walked(
+        roots, file=file, owner=owner, lines=lines, observed=observed, **kwargs
+    ).predicted
+
+
+def test_the_line_is_anchored_either_side_of_the_hole_the_value_fills(tmp_path):
+    """What the map's shared sentence cannot do.
+
+    ``line_shape`` anchors on the literal before the *first* hole, whichever
+    hole that is.  Here the value goes in the second, and for 80 of the 182
+    subjects that get a probe at all the first is the wrong one.
+    """
+    roots = _tree(
+        tmp_path,
+        refiner='''\
+class Refiner:
+    def apply(self, taskSpec):
+        taskSpec.status = "exhausted"
+        logger.debug(f"task {taskSpec.taskID} set to {taskSpec.status} by goal check")
+''',
+    )
+
+    (line,) = _predicted(
+        roots, file="refiner", owner="apply", lines=[3], observed="exhausted"
+    )
+
+    assert line.line == 3
+    assert line.at == 4
+    assert line.hole == "taskSpec.status"
+    assert line.because == "the arm writes it"
+    assert line.pattern == r"task\ .*\ set\ to\ exhausted\ by\ goal\ check"
+
+
+def test_the_line_the_arm_writes_the_value_of_is_matched_too(tmp_path):
+    """An assignment is one fact said from two ends, and production reports
+    either end about as often."""
+    roots = _tree(
+        tmp_path,
+        refiner='''\
+class Refiner:
+    def apply(self, taskSpec):
+        newStatus = "exhausted"
+        taskSpec.status = newStatus
+        logger.debug(f"moving to {newStatus} now")
+''',
+    )
+
+    (line,) = _predicted(
+        roots, file="refiner", owner="apply", lines=[4], observed="exhausted"
+    )
+
+    assert (line.hole, line.pattern) == ("newStatus", r"moving\ to\ exhausted\ now")
+
+
+def test_a_line_from_a_branch_the_arm_excludes_is_not_predicted(tmp_path):
+    """The ``else`` of the arm's own ``if`` cannot have printed for this arm."""
+    roots = _tree(
+        tmp_path,
+        refiner='''\
+class Refiner:
+    def apply(self, taskSpec):
+        if taskSpec.useJumbo:
+            taskSpec.status = "exhausted"
+            logger.debug(f"jumbo task set to {taskSpec.status} here")
+        else:
+            taskSpec.status = "exhausted"
+            logger.debug(f"plain task set to {taskSpec.status} here")
+''',
+    )
+
+    (line,) = _predicted(
+        roots, file="refiner", owner="apply", lines=[4], observed="exhausted"
+    )
+
+    assert line.pattern == r"jumbo\ task\ set\ to\ exhausted\ here"
+
+
+def test_a_line_before_a_continue_the_arm_is_past_is_not_predicted(tmp_path):
+    """The exclusion a path condition alone cannot see.
+
+    ``if X: ...; continue`` puts ``not (X)`` on everything after it, and only
+    :func:`pathcond.enclosing_guards` knows that -- without it the skipped
+    block's line reads as compatible with the write below, and the arm gets
+    handed a sentence printed on the path it did not take.  Found in the
+    corpus, in ``setTobeDeletedToDis``.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def setTobeDeleted(self, dsList):
+        for tmpDS in dsList:
+            if tmpDS.status == 'deleting':
+                logger.debug(f"skip {tmpDS.name} since status={tmpDS.status}")
+                continue
+            tmpDS.status = 'deleting'
+            logger.debug(f"set {tmpDS.status} for {tmpDS.name}")
+''',
+    )
+
+    (line,) = _predicted(
+        roots, file="proxy", owner="setTobeDeleted", lines=[7], observed="deleting"
+    )
+
+    assert line.pattern == r"set\ deleting\ for\ "
+
+
+def test_a_hole_with_no_literal_beside_it_is_not_an_anchor(tmp_path):
+    """``.*deleting.*`` matches every line in the file that says the word, and
+    a question that cannot miss is read by the eliminator as one that was
+    answered."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        spec.status = "deleting"
+        logger.debug(f"{spec.name}{spec.status}")
+''',
+    )
+
+    assert _predicted(roots, file="proxy", owner="run", lines=[3], observed="deleting") == []
+
+
+def test_a_hole_reaching_the_value_is_used_only_where_the_arm_names_none(tmp_path):
+    """Second best, and said so: a hole the arm names is a fact about this
+    write, where one merely holding the value is a fact about the function."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        newStatus = "deleting"
+        spec.status = self.decide()
+        logger.debug(f"about to move it to {newStatus} now")
+''',
+    )
+
+    (line,) = _predicted(roots, file="proxy", owner="run", lines=[4], observed="deleting")
+
+    assert line.hole == "newStatus"
+    assert line.because == "newStatus is set to this value above"
+
+
+def test_the_arms_own_hole_wins_over_one_that_merely_holds_the_value(tmp_path):
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        newStatus = "deleting"
+        spec.status = newStatus
+        logger.debug(f"planning to use {newStatus} shortly")
+        logger.debug(f"moved it to {spec.status} at last")
+''',
+    )
+
+    lines = _predicted(roots, file="proxy", owner="run", lines=[4], observed="deleting")
+
+    assert [line.because for line in lines] == ["the arm writes it", "the arm writes it"]
+    assert sorted(line.hole for line in lines) == ["newStatus", "spec.status"]
+
+
+def test_no_observed_value_means_no_line_to_predict(tmp_path):
+    """Half the question is the value, and inventing one would put a pattern in
+    front of a reader that nothing in the record supports."""
+    roots = _tree(
+        tmp_path,
+        refiner='''\
+class Refiner:
+    def apply(self, taskSpec):
+        taskSpec.status = "exhausted"
+        logger.debug(f"task set to {taskSpec.status} by goal check")
+''',
+    )
+
+    assert _walked(roots, file="refiner", owner="apply", lines=[3]).predicted == []
+
+
+def test_a_tree_that_is_not_the_maps_predicts_nothing(tmp_path):
+    """The same refusal the steps get, for the same reason: a plausible line
+    computed from the wrong release reads exactly like an answer."""
+    roots = _tree(
+        tmp_path,
+        refiner='''\
+class Refiner:
+    def apply(self, taskSpec):
+        taskSpec.status = "exhausted"
+        logger.debug(f"task set to {taskSpec.status} by goal check")
+''',
+    )
+
+    walked = _walked(
+        roots,
+        file="refiner",
+        owner="apply",
+        lines=[3],
+        observed="exhausted",
+        expected_sha="0" * 40,
+    )
+
+    assert walked.predicted == []
+    assert walked.note == "the walk was not run: this tree is not the one that was mapped"
+

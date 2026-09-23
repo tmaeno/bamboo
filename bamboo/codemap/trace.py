@@ -51,6 +51,7 @@ from __future__ import annotations
 import ast
 import builtins
 import logging
+import re
 from collections import deque
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional, Sequence
@@ -66,9 +67,17 @@ from bamboo.codemap.models import (
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
+    PredictedLine,
     TraceStep,
 )
 from bamboo.codemap.panda import pathcond
+
+# ``_logged_arguments`` is the build's own spelling of "what this corpus logs",
+# reused rather than restated.  A second spelling here would be a second thing
+# to keep current, and the one thing the two cadences must agree on is which
+# calls are log calls: the map's question and the trace's prediction have to be
+# about the same sentence or they cannot be compared at all.
+from bamboo.codemap.panda.recognizers.emit import _logged_arguments
 from bamboo.codemap.reading import containing_function
 
 logger = logging.getLogger(__name__)
@@ -231,6 +240,86 @@ def _value_of(statement: ast.stmt) -> Optional[ast.expr]:
     if isinstance(statement, ast.Return):
         return statement.value
     return None
+
+
+def _reachable_when(node: ast.AST) -> list[str]:
+    """The conditions on reaching *node*, including the ones an ``if`` cannot say.
+
+    ``path_condition`` sees only ``ast.If``, so an ``if X: continue`` above a
+    site leaves the site reading as unconditional.  That blindness is not
+    harmless here: a log call inside the skipped block and a write after it are
+    on paths that cannot both run, and comparing their path conditions alone
+    says they are compatible.  The early exit puts ``not (X)`` on the write and
+    the block puts ``X`` on the call, which is exactly the shape
+    :func:`pathcond.exclusive` was built to detect.
+    """
+    return pathcond.path_condition(node) + [
+        unseen.detail
+        for unseen in pathcond.enclosing_guards(node)
+        if unseen.kind == pathcond.UNSEEN_EARLY_EXIT
+    ]
+
+
+def _written_texts(statement: ast.stmt) -> list[str]:
+    """How the arm spells what it writes, and what it writes it to.
+
+    Both, because a log line reports either one.  ``taskSpec.status = newStatus``
+    is followed by a line interpolating ``newStatus`` as often as by one
+    interpolating ``taskSpec.status``, and the two are the same fact said from
+    the two ends of the assignment.
+    """
+    targets: list[ast.expr] = []
+    if isinstance(statement, ast.Assign):
+        targets = list(statement.targets)
+    elif isinstance(statement, (ast.AugAssign, ast.AnnAssign)):
+        targets = [statement.target]
+    texts = [_text(target) for target in targets]
+    value = _value_of(statement)
+    if value is not None:
+        texts.append(_text(value))
+    return [text for text in texts if text and text != "..."]
+
+
+def _neighbouring_literal(message: ast.JoinedStr, hole: int) -> bool:
+    """Whether the hole at *hole* has literal text to anchor on beside it.
+
+    The requirement the map's shared sentence cannot make.  A pattern with no
+    literal next to the value is ``.*finished.*``, which matches every line in
+    the file that mentions the word -- and a question that cannot miss is read
+    by the eliminator as a question that was answered.
+    """
+    for side in (hole - 1, hole + 1):
+        if not 0 <= side < len(message.values):
+            continue
+        part = message.values[side]
+        if isinstance(part, ast.Constant) and isinstance(part.value, str) and part.value.strip():
+            return True
+    return False
+
+
+def _rendered(message: ast.JoinedStr, hole: int, observed: str) -> str:
+    """The message as a pattern: literals kept, the value's hole filled.
+
+    Every other hole becomes ``.*`` -- what the walk knows about them is that
+    something goes there, and guessing would make the question narrower than
+    the knowledge behind it.  Runs of them collapse, because two adjacent
+    ``.*`` ask for nothing that one does not.
+    """
+    parts: list[str] = []
+    for position, part in enumerate(message.values):
+        if position == hole:
+            parts.append(re.escape(observed))
+        elif isinstance(part, ast.Constant) and isinstance(part.value, str):
+            parts.append(re.escape(part.value))
+        elif parts and parts[-1] == ".*":
+            continue
+        else:
+            parts.append(".*")
+    while parts and parts[0] == ".*":
+        parts.pop(0)
+    while parts and parts[-1] == ".*":
+        parts.pop()
+    return "".join(parts)
 
 
 def _loop_bindings(func: ast.AST, name: str) -> list[ast.For | ast.AsyncFor]:
@@ -437,15 +526,19 @@ class _Walk:
         roots: dict[str, Path],
         classify: Classifier,
         budget: Budget,
+        observed: str = "",
     ) -> None:
         self.roots = roots
         self.classify = classify
         self.budget = budget
+        self.observed = observed
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
+        self.predicted: list[PredictedLine] = []
         self.seen: set[tuple[str, str]] = set()
         self._scopes: dict[tuple[str, str], str] = {}
+        self._logged: dict[tuple[str, str], list[tuple[ast.expr, ast.expr]]] = {}
         self.note = ""
         self.queue: deque[tuple[_Frame, str, int]] = deque()
 
@@ -594,8 +687,121 @@ class _Walk:
         )
         if not self.record(step):
             return
+        self.predict(frame, statement, line)
         if not terminal:
             self.want(frame, reads, 1)
+
+    def logged(self, frame: _Frame) -> list[tuple[ast.expr, ast.expr]]:
+        """The logging calls in this frame's function, found once per function."""
+        key = (frame.file, frame.owner)
+        if key not in self._logged:
+            self._logged[key] = (
+                _logged_arguments(frame.func)
+                if isinstance(frame.func, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else []
+            )
+        return self._logged[key]
+
+    def predict(self, frame: _Frame, statement: ast.stmt, line: int) -> None:
+        """Record what production prints when *this* arm writes *this* value.
+
+        Three things have to line up, and the map can supply none of them.  The
+        call has to be reachable on the arm's own path, so a log call the arm's
+        guard contradicts is dropped rather than averaged in.  One hole has to
+        be the value's, and the arm says which: the hole spells what the arm
+        writes, or what it writes to, or -- failing both -- holds the observed
+        value by a reaching definition of its own.  And the hole has to have
+        literal text beside it, or the pattern is not a question.
+
+        Nothing is guessed to fill a gap.  An arm no call here reports keeps
+        the silence the map already reports for it, which is the honest answer
+        and the one the reader can act on.
+        """
+        if not self.observed:
+            return
+        reachable = _reachable_when(statement)
+        written = _written_texts(statement)
+        seen: set[str] = set()
+        fallbacks: list[PredictedLine] = []
+        for argument, message in self.logged(frame):
+            if not isinstance(message, ast.JoinedStr):
+                # Only an interpolated line has a hole to put the value in.  A
+                # constant message is about the arm running, not about what it
+                # wrote, and is a different question asked the same way.
+                continue
+            if pathcond.exclusive(reachable, _reachable_when(argument)):
+                continue
+            holes = [
+                (position, part)
+                for position, part in enumerate(message.values)
+                if isinstance(part, ast.FormattedValue)
+            ]
+            at = getattr(argument, "lineno", line)
+            for position, part in holes:
+                spelled = _text(part.value)
+                if not _neighbouring_literal(message, position):
+                    continue
+                if spelled in written:
+                    self._predicted(
+                        seen, line, at, message, position, spelled, "the arm writes it"
+                    )
+                    break
+                if isinstance(part.value, ast.Name) and self._holds_observed(
+                    frame, part.value.id
+                ):
+                    fallbacks.append(
+                        PredictedLine(
+                            line=line,
+                            at=at,
+                            pattern=_rendered(message, position, self.observed),
+                            hole=spelled,
+                            because=f"{spelled} is set to this value above",
+                            text=_text(message),
+                        )
+                    )
+        # Second best, and only where nothing better was found for this arm: a
+        # hole the arm itself names is a fact about this write, where a hole
+        # merely reaching the value is a fact about the function.
+        if not seen:
+            for entry in fallbacks:
+                if entry.pattern in seen:
+                    continue
+                seen.add(entry.pattern)
+                self.predicted.append(entry)
+
+    def _predicted(
+        self,
+        seen: set[str],
+        line: int,
+        at: int,
+        message: ast.JoinedStr,
+        position: int,
+        spelled: str,
+        because: str,
+    ) -> None:
+        pattern = _rendered(message, position, self.observed)
+        if not pattern or pattern in seen:
+            return
+        seen.add(pattern)
+        self.predicted.append(
+            PredictedLine(
+                line=line,
+                at=at,
+                pattern=pattern,
+                hole=spelled,
+                because=because,
+                text=_text(message),
+            )
+        )
+
+    def _holds_observed(self, frame: _Frame, name: str) -> bool:
+        """Whether a reaching definition in this function settles *name* to it."""
+        if not isinstance(frame.func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        return any(
+            value == self.observed
+            for value, _conditions, _line in pathcond.literal_values(frame.func, name)
+        )
 
     def explain(self, frame: _Frame, name: str, depth: int) -> None:
         if name.startswith("self."):
@@ -928,22 +1134,42 @@ class _Walk:
         )
 
 
+class Walked(NamedTuple):
+    """What one walk found.
+
+    A named tuple rather than a pair because the walk now answers two
+    questions about the same arms -- why they ran, and what production prints
+    when they do -- and the second is empty whenever the first is refused.
+    """
+
+    steps: list[TraceStep]
+    note: str
+    predicted: list[PredictedLine] = []
+
+
 def walk(
     roots: dict[str, Path],
     *,
     file: str,
     owner: str,
     lines: Sequence[int],
+    observed: str = "",
     expected_sha: str = "",
     handovers: Sequence[Handover] = (),
     classify: Optional[Classifier] = None,
     budget: Budget = DEFAULT_BUDGET,
-) -> tuple[list[TraceStep], str]:
+) -> Walked:
     """Explain the arms at *lines*, and say why the answer is short when it is.
 
     *lines* are the arms of one function, walked together so that a flag they
     share is explained once.  Returns the steps and a note -- empty when the
     walk finished on its own, which the measurement says is the usual case.
+
+    *observed* is the value the record actually holds.  Given one, each arm
+    also gets the line production would print for it, anchored on the literal
+    text either side of the hole *that* value fills -- see
+    :class:`~bamboo.codemap.models.PredictedLine`.  Without one there is no
+    hole to pick, and the walk says only why the arm ran.
 
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
@@ -951,21 +1177,21 @@ def walk(
     once, to a report that only printed coordinates.  Computing from the wrong
     tree is worse than printing from it.
     """
-    state = _Walk(roots, classify or _nothing, budget)
+    state = _Walk(roots, classify or _nothing, budget, observed)
     parsed = state.module(file)
     if parsed is None:
-        return [], "the map's file could not be read from this tree"
+        return Walked([], "the map's file could not be read from this tree")
     source, _tree = parsed
     if expected_sha and git_blob_sha(source) != expected_sha:
-        return [], "the walk was not run: this tree is not the one that was mapped"
+        return Walked([], "the walk was not run: this tree is not the one that was mapped")
     if not lines:
-        return [], "the map records no line for these arms"
+        return Walked([], "the map records no line for these arms")
     frame = state.frame(file, owner, line=lines[0], handovers=handovers)
     if frame is None:
-        return [], "the map's function could not be located in this tree"
+        return Walked([], "the map's function could not be located in this tree")
     for line in lines:
         state.arm(frame, line)
     while state.queue:
         held, name, depth = state.queue.popleft()
         state.explain(held, name, depth)
-    return state.steps, state.note
+    return Walked(state.steps, state.note, state.predicted)

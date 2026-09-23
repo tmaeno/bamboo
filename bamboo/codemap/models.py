@@ -2331,6 +2331,35 @@ TRACE_HANDOVER = "handover"
 TRACE_UNBOUND = "unbound"
 
 
+class PredictedLine(BaseModel):
+    """The line production prints when one arm runs, as a pattern to match it.
+
+    The map's ``log_pattern`` is one sentence for a whole function, settled at
+    build time by majority over every writer of the subject and anchored on the
+    literal text before the *first* hole.  For 80 of the 182 subjects that get
+    a probe at all, that hole is not the one the value lands in, so the anchor
+    points at the wrong part of the sentence.
+
+    This is the other direction and it is only available at use time: the arm's
+    own statement and the value actually observed are both in hand, so the hole
+    can be picked by what it spells rather than by where it sits, and a log call
+    whose path condition contradicts the arm's contributes nothing at all.
+
+    Nothing here is written into the map.  Like the rest of the trace it is a
+    reading of the tree the map was built from, and is refused outright when
+    that is not the tree at hand.
+    """
+
+    line: int = Field(description="The arm this line would be printed for.")
+    at: int = Field(description="Where the logging call is.")
+    pattern: str = Field(
+        description="Anchored on the literals either side of the hole the value fills."
+    )
+    hole: str = Field(description="The expression whose place the observed value takes.")
+    because: str = Field(description="Why that hole is the one the value fills.")
+    text: str = Field(description="The message as the source spells it.")
+
+
 class TraceStep(BaseModel):
     """One thing the source says about why an arm ran with the value it did.
 
@@ -2426,6 +2455,15 @@ class Reading(BaseModel):
     trace_note: str = Field(
         default="",
         description="Why the trace is empty or short, when it is.",
+    )
+    predicted: list[PredictedLine] = Field(
+        default_factory=list,
+        description=(
+            "What production would print for each of these arms, computed from "
+            "the tree at use time.  Beside ``log_pattern`` rather than instead "
+            "of it: that one is the map's shared sentence and is what the "
+            "questions already asked are built from."
+        ),
     )
 
     @property
