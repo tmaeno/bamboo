@@ -127,6 +127,59 @@ def _line(counted: Counter, total: int) -> str:
     return f"  {total} sentence(s)\n" + "\n".join(f"  {part}" for part in parts)
 
 
+async def _which_family_answers(code_map, evidence: Optional[Path]) -> None:
+    """Which family of question the map still derives, and which get answered.
+
+    The question this settles is whether a family is worth keeping.  The probe
+    built from the head the most writers of a value share was removed after
+    this said it answered nothing at all, while the arm-tag and brokerage
+    families answered every question they put -- a fact no reading of the code
+    would have produced, because both families look equally alive in it.
+
+    Per term kind, because the kinds do not share a derivation: a value term
+    goes through the arm tags, a cut or a step through the brokerage survey.
+    """
+    from bamboo.codemap import evidence as evidence_mod
+
+    answers = evidence_mod.Evidence.load(evidence) if evidence is not None else None
+    asked: Counter = Counter()
+    settled: Counter = Counter()
+    for term in await code_map.vocabulary():
+        strategy = await strategy_mod.derive(code_map, term.symptom)
+        asked[(term.kind, "question(s)")] += len(strategy_mod.queries(strategy))
+        for observation in strategy.observations:
+            asked[(term.kind, f"{observation.role}(s)")] += 1
+        if answers is None:
+            continue
+        for observation in strategy_mod.evaluate(strategy, answers).observations:
+            if observation.verdict and observation.verdict != "not_asked":
+                settled[term.kind] += 1
+    click.echo("\nwhat the map puts to production, by term kind")
+    for (kind, what), count in sorted(asked.items()):
+        click.echo(f"  {kind:<6} {count:>6}  {what}")
+    if answers is not None:
+        click.echo("  answered by the evidence file at hand:")
+        for kind, count in sorted(settled.items()):
+            click.echo(f"  {kind:<6} {count:>6}  answer(s)")
+
+
+def _if_a_reader_asked_them_all(shape: Counter) -> None:
+    """How big the handover is, if someone asked for every line of it.
+
+    Not a question this side answers -- which lines are worth putting to
+    production depends on the log in hand.  Printed because the next mechanism
+    has to choose a rule, and choosing one from a document rather than from a
+    count is how the removed probe got its size wrong in the first place.
+    """
+    click.echo("\nif a reader asked for every line of one kind (probe and control)")
+    for name, rows in (
+        ("every printed line", shape["rows"] - shape["refused"]),
+        ("lines that name one arm", shape["reachable from 1 arm(s)"]),
+        ("lines carrying the value", shape["with a value in the hole"]),
+    ):
+        click.echo(f"  {name:<28} {rows * 2:>7}")
+
+
 async def _run(
     map_id: str,
     source_root: Optional[Path],
@@ -152,6 +205,8 @@ async def _run(
         ]
         click.echo("the map's arm sentences, over the whole map")
         click.echo(_line(strategy_mod.discrimination(everywhere), len(everywhere)))
+
+        await _which_family_answers(code_map, evidence)
 
         terms = [t for t in await code_map.vocabulary() if t.kind == "value"]
         from_map: Counter = Counter()
@@ -211,6 +266,7 @@ async def _run(
     click.echo("\nthe shape of those rows")
     for name, count in sorted(shape.items()):
         click.echo(f"  {count:>5}  {name}")
+    _if_a_reader_asked_them_all(shape)
     if evidence is not None:
         _against_production(patterns, _captured(evidence))
     if out is not None:
