@@ -3117,6 +3117,125 @@ async def test_a_reach_bounded_by_nothing_does_not_go_on_to_mention_those_tables
     assert "those tables" not in strategy.follow_up.question
 
 
+async def test_the_argument_list_goes_once_the_walk_has_crossed():
+    """The fields are input to the walk, not an answer for a reader.
+
+    Measured over the vocabulary: 491 lines and 103,127 characters of them,
+    41% repeated verbatim inside one report, and of the 4,620 fields printed
+    the walk drew on 232.  Once it has crossed, its ``handover`` step says the
+    same thing about the one name that mattered, with the expression actually
+    supplied.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    handover = models.Handover(
+        entry="jediorder/TaskCommando.py",
+        via="start",
+        reached_by=models.ARRIVES_BY_DISPATCH,
+        fields={"taskList": "taskList", "pid": "self.pid", "ddmIF": "self.ddmIF"},
+    )
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[
+            models.Candidate(
+                owner="jediorder/TaskCommando.py::runImpl",
+                tier=2,
+                branches=[models.CandidateBranch(outcome="finishing", tier=2)],
+                handovers=[handover],
+            )
+        ],
+        readings=[
+            models.Reading(
+                owner="jediorder/TaskCommando.py::runImpl",
+                trace=[models.TraceStep(kind=models.TRACE_HANDOVER, name="self.taskList")],
+            )
+        ],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_candidates(strategy, 10, False, False))
+
+    assert "built by" not in runner.invoke(command).output
+
+
+async def test_the_argument_list_stays_when_nothing_walked():
+    """The only line that says who filled ``self.taskList``.
+
+    No call runs between the handover and the arm, so a reader without a
+    source tree cannot recover it from the arm's own module either -- and
+    without a tree there is no ``handover`` step to carry it instead.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[
+            models.Candidate(
+                owner="jediorder/TaskCommando.py::runImpl",
+                tier=2,
+                branches=[models.CandidateBranch(outcome="finishing", tier=2)],
+                handovers=[
+                    models.Handover(
+                        entry="jediorder/TaskCommando.py",
+                        via="start",
+                        reached_by=models.ARRIVES_BY_DISPATCH,
+                        fields={"taskList": "taskList"},
+                    )
+                ],
+            )
+        ],
+        readings=[models.Reading(owner="jediorder/TaskCommando.py::runImpl")],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_candidates(strategy, 10, False, False))
+
+    assert "built by TaskCommando.py::start with taskList=taskList" in runner.invoke(command).output
+
+
+async def test_the_handover_step_says_who_handed_it_over():
+    """Computed all along and printed only for terminal steps.
+
+    So the one line that names the caller was being dropped while the
+    candidate block above repeated the whole argument list.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_reading
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        readings=[
+            models.Reading(
+                owner="jediorder/TaskCommando.py::runImpl",
+                trace=[
+                    models.TraceStep(
+                        kind=models.TRACE_HANDOVER,
+                        name="self.taskList",
+                        value="res[iRows:iRows + nRows]",
+                        detail="handed over by start, reached by dispatch",
+                    )
+                ],
+            )
+        ],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_reading(strategy, {}, 10, False))
+
+    assert "from   handed over by start, reached by dispatch" in runner.invoke(command).output
+
+
 async def test_the_gap_counts_the_skeletons_lines_not_the_arms():
     """The count basis moved with the artefact.
 

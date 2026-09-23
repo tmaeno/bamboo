@@ -227,6 +227,7 @@ def _arm(branch) -> str:
 
 def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool) -> None:
     candidates = strategy_mod.survivors(strategy) if evaluated else strategy.candidates
+    traced = {entry.owner for entry in strategy.readings if entry.trace}
     stated = sum(1 for c in strategy.candidates if c.tier == 1)
     groups = {tuple(c.log_files) for c in strategy.candidates}
     click.echo(
@@ -286,10 +287,20 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
         for handover in candidate.handovers:
             if handover.reached_by != ARRIVES_BY_DISPATCH:
                 continue
-            # Always shown, not folded into ``--full``: the arm's body reads
-            # ``self.taskList`` and this is the only line that says who filled
-            # it.  There is no call between the two, so a trace that starts at
-            # the arm cannot find it by reading the arm's own module.
+            if candidate.owner in traced:
+                # The fields are the *input* to the walk, not an answer for a
+                # reader.  Once the walk has crossed, its ``handover`` step
+                # says the same thing about the one name that mattered, with
+                # the expression actually supplied -- and the 4,620 fields
+                # printed across the vocabulary were drawn on 232 times, so
+                # 95% of this block never told anyone anything.  Measured at
+                # 491 lines and 103,127 characters, 41% of them repeated
+                # verbatim inside a single report.
+                continue
+            # Kept when nothing walked: there is then no step to carry it, and
+            # this is the only line that says who filled ``self.taskList``.
+            # No call runs between the two, so a reader without a source tree
+            # cannot recover it from the arm's own module either.
             where = f"{handover.entry.rsplit('/', 1)[-1]}::{handover.via}"
             click.echo(
                 f"  {'':<10} built by {where} with "
@@ -479,6 +490,11 @@ def _report_walk(entry, top: int, full: bool) -> None:
         if step.terminal:
             detail = f" -- {step.detail}" if step.detail else ""
             click.echo(f"                 stops  {step.terminal}{detail}")
+        elif step.kind == models_mod.TRACE_HANDOVER and step.detail:
+            # Computed all along and shown only for terminal steps, so the one
+            # line that says who handed the value over was being dropped while
+            # the candidate block above repeated the whole argument list.
+            click.echo(f"                 from   {step.detail}")
     if len(entry.trace) > len(shown):
         click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
 
