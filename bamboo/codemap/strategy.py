@@ -1990,7 +1990,11 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     # Narrowed for the same reason the leads are: offering a reading of code the
     # evidence has ruled out sends a reader to look at a path the system did not
     # take, which is worse than offering nothing.
-    settled.readings = _readings(survivors(settled), settled.observations)
+    settled.readings = _readings(
+        survivors(settled),
+        settled.observations,
+        {entry.gloss_key: entry for entry in settled.readings if entry.gloss_key},
+    )
     diag = _recorded_message(ev, strategy.symptom)
     return name_the_arm(settled, diag) if diag else settled
 
@@ -2067,7 +2071,11 @@ def skeleton_sentences(readings: list[Reading]) -> list[Sentence]:
     ]
 
 
-def _readings(candidates: list[Candidate], observations: list[Observation]) -> list[Reading]:
+def _readings(
+    candidates: list[Candidate],
+    observations: list[Observation],
+    walked: Optional[dict[str, Reading]] = None,
+) -> list[Reading]:
     """The code to read, one entry per function rather than per candidate.
 
     Grouped because the sharing is real and asking twice about one function
@@ -2079,6 +2087,15 @@ def _readings(candidates: list[Candidate], observations: list[Observation]) -> l
     out loud by the caller.  Five exist, all writes at module scope, where
     there is no enclosing function to hand over -- a fact about the code, not a
     hole in the reading.
+
+    *walked* carries over what a previous walk of the same function computed,
+    keyed the same way the readings are.  ``evaluate`` rebuilds these so that a
+    candidate the evidence ruled out stops being offered, and rebuilding them
+    from nothing discarded the tree that had already been read: the reader got
+    coordinates back from a run that had computed the text, and the only way to
+    recover it was to walk the same file a second time.  The key is the map's
+    gloss key rather than the owner, because that is what says two candidates
+    are the same piece of code.
     """
     # A record that names an arm has settled which one decided -- the message
     # and the branch were written in the same block -- so the reading narrows
@@ -2114,6 +2131,11 @@ def _readings(candidates: list[Candidate], observations: list[Observation]) -> l
                 log_pattern=pattern,
             )
             grouped[candidate.gloss_key] = reading
+            done = (walked or {}).get(candidate.gloss_key)
+            if done is not None:
+                reading.trace = list(done.trace)
+                reading.trace_note = done.trace_note
+                reading.skeleton = list(done.skeleton)
         arms = candidate.named or candidate.branches
         for branch in arms:
             if branch.line is not None and branch.line not in reading.lines:

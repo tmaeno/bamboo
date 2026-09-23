@@ -3297,3 +3297,28 @@ async def test_the_gap_counts_the_skeletons_lines_not_the_arms():
     counted = strategy_mod.discrimination(sentences)
     assert counted[strategy_mod.LINE_ONE_FUNCTION] == 2
     assert counted[strategy_mod.LINE_ONE_ARM] == 1
+
+
+def test_evaluating_keeps_the_skeleton_the_walk_already_built(tmp_path):
+    """The walk reads a tree; ``evaluate`` reads a file of answers.
+
+    ``evaluate`` rebuilds the readings so that a candidate the evidence ruled
+    out stops being offered, and rebuilding threw away what the walk had put
+    there.  The reader then got coordinates back from a run that had already
+    computed the text, and the only way to get it again was to walk the same
+    tree twice.
+    """
+    strategy, roots = _traceable(tmp_path)
+    strategy_mod.attach_traces(strategy, roots)
+    assert strategy.readings[0].skeleton, "fixture walks nothing"
+    before = strategy.readings[0].skeleton
+
+    settled = strategy_mod.evaluate(
+        strategy, Evidence(fetched_at="2026-09-05T00:00:00+00:00")
+    )
+
+    assert [row.model_dump() for row in settled.readings[0].skeleton] == [
+        row.model_dump() for row in before
+    ]
+    assert settled.readings[0].trace == strategy.readings[0].trace
+    assert settled.readings[0].trace_note == strategy.readings[0].trace_note
