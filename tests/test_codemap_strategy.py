@@ -1013,6 +1013,42 @@ async def test_evidence_that_answers_none_of_these_questions_settles_nothing():
     assert all(o.verdict == "not_asked" for o in settled.observations)
 
 
+async def test_a_candidate_no_question_was_put_about_is_not_ruled_out():
+    """The one path that could produce a confident wrong answer.
+
+    A junction whose arms print nothing gets no probe, but it still names log
+    files, so it walked past the guard above and reached the bottom of
+    ``_settle`` with an empty list of reasons -- which used to read as "absent
+    from every log that would carry the line".  Measured over the stored map,
+    every one of its 306 eliminations was of this kind.
+    """
+    other = "FileSpec.status"
+    strategy = await strategy_mod.derive(
+        await _map(
+            MapFragment(
+                map_id=MAP_ID,
+                derived_from=VERSION,
+                subjects=[_subject(selected=["finished"], name=other)],
+                junctions=[
+                    _junction(
+                        "taskbuffer/db_proxy_mods/misc.py::updateInFiles",
+                        Branch(outcome="finished"),
+                        log_files=[KNIGHT_LOG],
+                        subject=other,
+                    )
+                ],
+            )
+        ),
+        Symptom(subject=other, observed="finished", task_id="42"),
+    )
+    assert not [o for o in strategy.observations if o.role == strategy_mod.PROBE]
+
+    settled = strategy_mod.evaluate(strategy, Evidence(fetched_at="2026-09-05T00:00:00+00:00"))
+
+    assert [c.verdict for c in settled.candidates] == [UNSETTLED]
+    assert settled.candidates[0].because == "no question about this one was put to production"
+
+
 async def test_a_candidate_with_no_log_is_never_ruled_out_by_the_others_answers():
     strategy = await strategy_mod.derive(
         await _map(

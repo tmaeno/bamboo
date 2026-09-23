@@ -1264,19 +1264,31 @@ def _settle(
 ) -> Candidate:
     """Decide what production said about one candidate.
 
-    Three rules, all of them the asymmetry this layer is built on:
+    Four rules, all of them the asymmetry this layer is built on:
 
     * a line seen proves the writer wrote it, whatever the sample size;
     * a line not seen rules the writer out only where the answer was whole
       *and* the file is shown to carry that line at all;
     * a candidate no log names is not ruled out by anything -- being unable to
-      look is not evidence.
+      look is not evidence;
+    * a candidate no question names is not ruled out either -- not having
+      asked and having asked and heard nothing are different facts.
     """
     settled = candidate.model_copy(deep=True)
     mine = [probe for probe in probes if candidate.owner in probe.settles]
     if not candidate.log_files and not mine:
         settled.verdict = UNASKABLE
         settled.because = "no log file names it"
+        return settled
+    if not mine:
+        # Nobody asked.  Everything below reads a probe's silence, and with no
+        # probe there is no silence to read: falling through leaves ``reasons``
+        # empty and reaches the last branch, which rules the candidate out on
+        # the strength of a question that was never put.  Not asked and asked
+        # without an answer are different facts, and this is the one place the
+        # derivation could confuse them into a confident wrong answer.
+        settled.verdict = UNSETTLED
+        settled.because = "no question about this one was put to production"
         return settled
 
     asked = [
