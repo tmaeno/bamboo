@@ -3379,3 +3379,78 @@ def test_evaluating_keeps_the_skeleton_the_walk_already_built(tmp_path):
     ]
     assert settled.readings[0].trace == strategy.readings[0].trace
     assert settled.readings[0].trace_note == strategy.readings[0].trace_note
+
+
+async def test_a_function_whose_lines_the_walk_found_is_not_reported_as_silent():
+    """"Silent" meant the map had no pattern, which stopped meaning what it said.
+
+    While a question was derived from the head the writers share, an empty
+    ``log_pattern`` did mean nothing about this code is printed.  With that
+    question gone the field is empty for most arms, and the walk has meanwhile
+    read the tree and listed every line the function prints.  Reporting those
+    as silent tells a reader there is nothing to grep for at the exact moment
+    the map is holding a list of things to grep for.
+    """
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_reading
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        readings=[
+            models.Reading(
+                owner="jediorder/TaskCommando.py::runImpl",
+                log_files=[KNIGHT_LOG],
+                skeleton=[
+                    models.SkeletonLine(
+                        kind=models.SKELETON_PRINT,
+                        line=4,
+                        pattern=r"done\ with\ ",
+                        arms=[3],
+                        value=r"done\ with\ finishing",
+                    ),
+                    models.SkeletonLine(
+                        kind=models.SKELETON_PRINT,
+                        line=9,
+                        pattern=r"gave\ up",
+                        arms=[3, 7],
+                    ),
+                ],
+            )
+        ],
+    )
+    runner = click.testing.CliRunner()
+    output = runner.invoke(
+        click.Command("x", callback=lambda: _report_reading(strategy, {}, 10, False))
+    ).output
+
+    assert "silent" not in output
+    # What is handed over, and what the reader is left to choose.
+    assert "2 line(s)" in output
+    assert "1 name(s) one arm" in output
+    assert "1 carr" in output
+
+
+async def test_a_function_that_prints_nothing_is_still_reported_as_silent():
+    """The word has to keep meaning something, or the previous test is a way of
+    never saying it."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_reading
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        readings=[models.Reading(owner="jediorder/TaskCommando.py::runImpl")],
+    )
+    runner = click.testing.CliRunner()
+    output = runner.invoke(
+        click.Command("x", callback=lambda: _report_reading(strategy, {}, 10, False))
+    ).output
+
+    assert "silent" in output

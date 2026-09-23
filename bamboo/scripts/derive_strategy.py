@@ -503,13 +503,54 @@ def _report_walk(entry, top: int, full: bool) -> None:
         click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
 
 
+def _report_handover(entry) -> None:
+    """Where this map stops and the reader takes over, for one function.
+
+    Three different things used to print as one line.  A question derived here
+    prints as the question it is.  A function the walk read prints what it
+    hands over -- the lines, how many of them name a single arm, how many
+    carry the observed value -- and says plainly that choosing among them is
+    not this side's job: the map knows what the code prints and which arm
+    prints it, and what is worth asking production depends on the log in hand,
+    which the map has not seen.
+
+    Only a function that prints nothing is silent.  The word meant that while
+    a question was built from the head the writers share, and kept being
+    printed after that question went, at the exact moment the walk was holding
+    a list of things to grep for.
+    """
+    where = ", ".join(entry.log_files[:2]) or "no file"
+    if entry.log_pattern:
+        click.echo(f"        match against  {entry.log_pattern}  in {where}")
+        return
+    rows = [
+        row
+        for row in entry.skeleton
+        if row.kind == models_mod.SKELETON_PRINT and row.pattern
+    ]
+    if not rows:
+        click.echo(
+            "        silent -- the map records no line production prints for this arm"
+        )
+        return
+    click.echo(
+        f"        handed over: {len(rows)} line(s) this prints in {where}, "
+        f"{sum(1 for row in rows if len(row.arms) == 1)} name(s) one arm, "
+        f"{sum(1 for row in rows if row.value)} carr(y) the value asked about"
+    )
+    click.echo(
+        "                     which of them to put to production is yours -- "
+        "this side has not seen the log"
+    )
+
+
 def _report_skeleton(entry, top: int, full: bool) -> None:
     """What this function prints, in source order, with the arms in place.
 
-    Printed beside the map's ``match against`` rather than in place of it, and
-    labelled so the two cannot be confused: the map's sentence is what the
-    questions already asked were built from, and swapping the two would make
-    every answer already collected read as unasked.
+    Printed under what the reading hands over, and labelled so the two cannot
+    be confused: where a question was derived here it is still shown as the
+    question it is, and these rows are not questions -- they are what the code
+    prints, for a reader to choose among.
 
     Laid out as source rather than as a list because the nesting is the part a
     list cannot carry.  Two rows under one ``if`` were printed together or not
@@ -660,15 +701,7 @@ def _report_reading(
                 if fanout.announced_by
                 else "          nothing prints which one ran -- the set is all the map can say"
             )
-        if entry.silent:
-            click.echo(
-                "        silent -- the map records no line production prints for this arm"
-            )
-        else:
-            click.echo(
-                f"        match against  {entry.log_pattern}"
-                f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
-            )
+        _report_handover(entry)
         _report_skeleton(entry, top, full)
         _report_walk(entry, top, full)
         if full and region is not None:
