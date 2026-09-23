@@ -32,24 +32,37 @@ it, and they are independent:
 * the file asked is where a line *about this junction* can appear -- the
   caller's, or the junction's own only where its module declares a logger;
 * every probe is paired with a control asking whether that file carries the
-  line shape at all, and an absence eliminates only where the control says yes.
+  line at all, and an absence eliminates only where the control says yes.
 
 The second is the more important, because it is sound without the map being
 right about the first.
 
-**The line shape comes from the map.**  It did not for a long time: junctions
-carried no emits at all, so the pattern was a constant covering the one subject
-the transition gate needed, and every other subject came back as a capability
-gap.  ``Branch.emits`` now holds the sentence each writer leaves, and the probe
-is built from the head the most writers of the observed value share -- writers
-agreeing on a head are writers one question reaches.
+**What to look for in the log is not this module's question.**  It was for a
+long time: a probe was built from the head the most writers of the observed
+value shared, on the reasoning that writers agreeing on a head are writers one
+question reaches.  That reasoning is wrong wherever an arm names its own
+decision -- six arms write ``exhausted`` and the shared head belongs to the
+other writers entirely -- which is why the arms that tag themselves were moved
+out to their own family long ago, and it left the shared-head probe covering
+only the writers it happens to suit.
 
-Two things still bound what can be asked, and both are reported as gaps rather
-than papered over.  A writer that logs nothing about the value cannot be
-observed at all.  And the prefix that scopes a query to a single row names a
-task, so a subject whose rows are jobs cannot be scoped by it -- asking anyway
-would produce a pattern that never matches, and a silence is what the
-eliminator reads as evidence.
+Measured before it was removed, that probe answered nothing: over the whole
+vocabulary every one of its questions came back unasked, while the tagged and
+brokerage families answered all of theirs.  It was also narrower than what
+replaced it -- the walk reports every line a function prints, for more subjects
+than the shared head covered.
+
+So the map now publishes what it knows -- the lines the code prints, and which
+arm each belongs to -- and what to ask of production is chosen by whoever reads
+that.  What stays here is the half nothing else can derive: which candidate a
+given line settles if it is seen.
+
+Two families of question are still built here, because their patterns come from
+the map's own records rather than from a reading of the source: the arm that
+names its own decision, and the brokerage survey.  The prefix that scopes a
+query to a single row names a task, so a subject whose rows are jobs cannot be
+scoped by it -- asking anyway would produce a pattern that never matches, and a
+silence is what the eliminator reads as evidence.
 """
 
 from __future__ import annotations
@@ -126,13 +139,6 @@ CONTROL = "control"
 #: the one place it is written down.  Kept out of the eliminator: its silence
 #: says nothing about which writer fired.
 ROWS = "rows"
-
-#: Log line shapes, per subject.  Not read from the map -- see the module
-#: docstring.  ``{task}`` and ``{value}`` are filled in; a subject absent from
-#: here can be enumerated but not observed.
-_LINE_SHAPE: dict[str, str] = {
-    evidence.TRANSITION_SUBJECT: r"set task_status={value}",
-}
 
 #: Subjects the task prefix can scope.  A job is tagged ``PandaID``, a dataset
 #: by its own id, so building a ``jediTaskID=`` pattern for one of those asks a
@@ -288,48 +294,6 @@ def _exact_first(description: str, matches: list[Match]) -> list[Match]:
     return exact + [m for m in matches if m.term.key != said]
 
 
-def line_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
-    """The log line a writer of *subject* leaves, or None when none is known.
-
-    Read from the map first.  The constant below covers one subject and was
-    what this had while junctions carried no emits at all; keeping it as the
-    fallback costs nothing and means a map built before the emits existed still
-    answers for the subject it could always answer for.
-
-    The literal frame is turned into a pattern by anchoring on the text either
-    side of the hole the value goes in.  Only lines that *carry the value* can
-    do that, which is why the emits say which they are: a line reporting how
-    many rows changed is evidence about the same junction and answers a
-    different question, so building a value pattern out of it would ask
-    production for something that never appears in it.
-    """
-    heads: dict[str, set[str]] = {}
-    for junction in producers:
-        for branch in junction.branches:
-            if branch.tags:
-                # An arm that names its own decision speaks its own sentence,
-                # and it is asked for separately in the file that sentence lands
-                # in.  Pooled here it would win the shared head whenever the
-                # other writers log nothing, and then be put to every
-                # candidate's file as though they all said it.
-                continue
-            for emit in branch.emits:
-                if emit.reports != REPORTS_DECISION:
-                    continue
-                head = emit.template.partition("{}")[0]
-                if head.strip():
-                    heads.setdefault(head, set()).add(junction.owner)
-    if heads:
-        # The head is the part a pattern anchors on, so writers agreeing on a
-        # head are writers a single question reaches.  Most-shared first, and
-        # longest to break a tie: taking the shortest instead picked ``set to``
-        # out of one junction over ``set task_status=`` out of four, which is
-        # both less selective and about a different sentence.
-        best = max(heads, key=lambda head: (len(heads[head]), len(head)))
-        return re.escape(best) + "{value}"
-    return _LINE_SHAPE.get(subject)
-
-
 def rows_shape(producers: list[JunctionNode]) -> tuple[Optional[str], list[str]]:
     """The line saying how many rows a write changed, and where it lands.
 
@@ -356,32 +320,6 @@ def rows_shape(producers: list[JunctionNode]) -> tuple[Optional[str], list[str]]
         return None, []
     best = max(heads, key=lambda head: (len(heads[head]), len(head)))
     return re.escape(best), sorted(files[best])
-
-
-def _pattern(
-    subject: str, value: str, task_id: Optional[str], producers: list[JunctionNode]
-) -> Optional[str]:
-    """The regular expression to put to production, or None.
-
-    Values are escaped even though every status in the corpus is alphanumeric:
-    the symptom comes from a record, and a pattern assembled from data is one
-    place a stray metacharacter turns a precise question into a vague one.
-    """
-    shape = line_shape(subject, producers)
-    if shape is None:
-        return None
-    pattern = shape.format(value=re.escape(value))
-    if task_id is not None:
-        if not subject.startswith(_TASK_SCOPED):
-            return None
-        pattern = _TASK_PREFIX.format(task=re.escape(str(task_id))) + pattern
-    return pattern
-
-
-def control_shape(subject: str, producers: list[JunctionNode]) -> Optional[str]:
-    """The probe's sentence with nothing filled in -- does this file say it at all."""
-    shape = line_shape(subject, producers)
-    return None if shape is None else shape.replace("{value}", "")
 
 
 def _reaching(junction: JunctionNode, observed: str) -> list:
@@ -803,11 +741,12 @@ def _tag_observations(
 ) -> list[Observation]:
     """A probe per branch that names its own decision, in the file it writes to.
 
-    A second family, because the sentence differs.  ``line_shape`` picks the one
-    head the most writers share, which is right for a value every writer
-    announces the same way and useless for a branch whose line is about the
-    reason -- six arms write ``exhausted`` and the shared head belongs to the
-    other writers entirely.
+    Its own family, because the sentence is about the reason rather than the
+    value.  The probe this module used to build alongside it took the head the
+    most writers share, which is right for a value every writer announces the
+    same way and useless for a branch naming its own decision -- six arms write
+    ``exhausted`` and the shared head belongs to the other writers entirely.
+    That probe is gone; this one is built from what the branch itself tags.
 
     Its file comes from the emit rather than from the junction: the arm logs in
     the proxy's own file, while the line the shared head matches is written by
@@ -857,71 +796,31 @@ def _tag_observations(
     return observations
 
 
-def _observations(
-    candidates: list[Candidate],
-    pattern: str,
-    control: str,
-    with_control: bool,
-    rows: Optional[str] = None,
-    rows_files: Optional[list[str]] = None,
-) -> list[Observation]:
-    """One probe per log file, and its control where a control is meaningful.
+def _rows_observations(rows: Optional[str], files: list[str]) -> list[Observation]:
+    """The question about how many rows a write changed, where the map has one.
 
-    Grouped by file rather than by candidate: candidates share files -- the two
-    watchdog junctions reach three of them between them -- and one query per
-    candidate would ask the same question of the same file several times.
+    Not a question about the value: the knight announces the value in its own
+    log and the proxy reports the row count in the proxy's, and only the second
+    can distinguish a write that landed from one that lost a compare-and-set.
 
-    The control is the probe's own sentence with the entity and the value
-    taken out -- it has to be, or it answers about a line the probe was never
-    about.  While the shape was a constant this was the constant too, which was
-    right for the one subject it covered and silently wrong for any other.
-
-    The control is skipped when the symptom names no entity, because then the
-    probe *is* the control and the two would be one query asked twice.  That
-    also states the consequence honestly: with nothing to scope the pattern to,
-    a match confirms and a silence settles nothing.
+    It used to be built alongside the value probe and gated on that probe
+    existing, which made it depend on something it has nothing to do with -- a
+    subject whose writers share no head lost its row count as well.  Its own
+    gate now: the map records the line, and the symptom names a task the prefix
+    can scope.
     """
-    settles: dict[str, list[str]] = {}
-    for candidate in candidates:
-        for filename in candidate.log_files:
-            settles.setdefault(filename, []).append(candidate.owner)
-    observations = []
-    for filename, owners in sorted(settles.items()):
-        observations.append(
-            Observation(
-                log_file=filename,
-                pattern=pattern,
-                role=PROBE,
-                services=list(evidence.SERVICES),
-                settles=sorted(owners),
-            )
+    return [
+        Observation(
+            log_file=filename,
+            pattern=rows,
+            role=ROWS,
+            services=list(evidence.SERVICES),
+            # Settles nothing on its own: it says whether the row moved, not
+            # which of the candidates moved it.
+            settles=[],
         )
-        if with_control:
-            observations.append(
-                Observation(
-                    log_file=filename,
-                    pattern=control,
-                    role=CONTROL,
-                    services=list(evidence.SERVICES),
-                    settles=[],
-                    control_for=pattern,
-                )
-            )
-    for filename in rows_files or []:
-        if not rows:
-            break
-        observations.append(
-            Observation(
-                log_file=filename,
-                pattern=rows,
-                role=ROWS,
-                services=list(evidence.SERVICES),
-                # Settles nothing on its own: it says whether the row moved,
-                # not which of the candidates moved it.
-                settles=[],
-            )
-        )
-    return observations
+        for filename in (files if rows else [])
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1124,48 +1023,29 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
     carried = sorted(upstream)
 
     candidates = [_candidate(j, symptom.observed) for j in producers]
-    pattern = _pattern(symptom.subject, symptom.observed, symptom.task_id, producers)
     rows_head, rows_files = rows_shape(producers)
-    # Scoped to the row, like the probe: an unscoped row count answers about
-    # every write the proxy made, which is no answer about this one.
+    # Scoped to the row: an unscoped row count answers about every write the
+    # proxy made, which is no answer about this one.
     rows_pattern = (
         _TASK_PREFIX.format(task=re.escape(str(symptom.task_id))) + rows_head
         if rows_head and symptom.task_id is not None
         and symptom.subject.startswith(_TASK_SCOPED)
         else None
     )
-    if rows_pattern is None:
-        rows_files = []
 
     gaps: list[str] = []
-    if pattern is None:
-        gaps.append(
-            f"no question can be put to production about {symptom.subject}: "
-            + (
-                "the map records no diagnostic line on any of its writers"
-                if line_shape(symptom.subject, producers) is None
-                else "the entity given is a task and this subject's rows are not, "
-                "so the log prefix that scopes a query to one row does not apply"
-            )
-        )
     if symptom.task_id is None:
         gaps.append(
             "no entity was named, so a match confirms a writer is live but a silence "
             "rules nothing out -- elimination needs a pattern scoped to one row"
         )
 
-    asked = (
-        _observations(
-            candidates,
-            pattern,
-            control_shape(symptom.subject, producers) or "",
-            with_control=symptom.task_id is not None,
-            rows=rows_pattern,
-            rows_files=rows_files,
-        )
-        if pattern
-        else []
-    )
+    # No question is derived here from the line the writers share.  What the
+    # code prints is reported by the walk, per arm and in source order, and
+    # which of those lines to put to production is the reader's choice rather
+    # than this module's guess.  Not a gap: a gap is something missing, and
+    # what used to be here answered nothing on any subject in the vocabulary.
+    asked = _rows_observations(rows_pattern, rows_files)
     asked += _tag_observations(
         producers, symptom.task_id, symptom.subject.startswith(_TASK_SCOPED)
     )
@@ -2105,14 +1985,22 @@ def _readings(
     if named:
         candidates = named
 
-    scoped: dict[str, tuple[str, list[str]]] = {}
+    # Where a line about this owner can appear: the junction's own files, plus
+    # the file any question derived about it lands in -- an arm that names its
+    # decision logs in its own module's file, which is not always one of the
+    # junction's.  Read off the probe alone until the probe built per file of
+    # every candidate went away, and then most arms reported "no file the map
+    # names" although nothing about where the code logs had changed.
+    scoped: dict[str, str] = {}
+    extra: dict[str, list[str]] = {}
     for observation in observations:
         if observation.role != PROBE:
             continue
         for owner in observation.settles:
-            pattern, files = scoped.setdefault(owner, (observation.pattern, []))
-            if observation.log_file not in files:
-                files.append(observation.log_file)
+            scoped.setdefault(owner, observation.pattern)
+            where = extra.setdefault(owner, [])
+            if observation.log_file not in where:
+                where.append(observation.log_file)
 
     grouped: dict[str, Reading] = {}
     for candidate in candidates:
@@ -2120,15 +2008,19 @@ def _readings(
             continue
         reading = grouped.get(candidate.gloss_key)
         if reading is None:
-            pattern, files = scoped.get(candidate.owner, ("", []))
             reading = Reading(
                 owner=candidate.owner,
                 file=candidate.file,
                 blob_sha=candidate.blob_sha,
                 gloss_key=candidate.gloss_key,
                 dispatch=list(candidate.dispatch),
-                log_files=list(files),
-                log_pattern=pattern,
+                log_files=candidate.log_files
+                + [
+                    name
+                    for name in extra.get(candidate.owner, [])
+                    if name not in candidate.log_files
+                ],
+                log_pattern=scoped.get(candidate.owner, ""),
             )
             grouped[candidate.gloss_key] = reading
             done = (walked or {}).get(candidate.gloss_key)

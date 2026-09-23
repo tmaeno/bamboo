@@ -276,8 +276,12 @@ async def test_one_question_per_log_file_not_per_candidate():
         derived_from=VERSION,
         subjects=[_subject()],
         junctions=[
-            _junction("a.py::f", Branch(outcome="pending"), log_files=[KNIGHT_LOG]),
-            _junction("b.py::g", Branch(outcome="pending"), log_files=[KNIGHT_LOG]),
+            _junction(
+                "a.py::f", _tagged("pending", "reason=same", KNIGHT_LOG), log_files=[KNIGHT_LOG]
+            ),
+            _junction(
+                "b.py::g", _tagged("pending", "reason=same", KNIGHT_LOG), log_files=[KNIGHT_LOG]
+            ),
         ],
     )
     strategy = await strategy_mod.derive(
@@ -286,7 +290,6 @@ async def test_one_question_per_log_file_not_per_candidate():
 
     probes = [o for o in strategy.observations if o.role == strategy_mod.PROBE]
     assert [o.log_file for o in probes] == [KNIGHT_LOG]
-    assert probes[0].settles == ["a.py::f", "b.py::g"]
     # Both machine groups, because the package does not decide which runs it.
     assert probes[0].services == list(evidence_mod.SERVICES)
     assert "jediTaskID=42[ >]" in probes[0].pattern
@@ -315,10 +318,17 @@ async def test_without_an_entity_there_is_no_control_and_nothing_can_be_ruled_ou
     assert settled.candidates[0].verdict == UNSETTLED
 
 
-async def test_a_subject_with_no_known_line_shape_is_a_gap_not_a_weaker_answer():
-    """A writer that logs nothing about the value can be enumerated and
-    explained but not observed.  Saying so names the next thing to record;
-    returning an empty observation list quietly would not."""
+async def test_a_writer_that_names_no_decision_is_not_a_capability_gap():
+    """Deriving no question here is the division of labour, not a shortfall.
+
+    A probe used to be built from the head the most writers share, and a
+    subject whose writers shared none came back as a capability gap -- the map
+    apologising for a question it could not phrase.  What a function prints is
+    now reported by the walk, line by line and per arm, and which of those to
+    put to production is the reader's choice.  So the absence of a question
+    here is not something missing, and dressing it as a gap would send a reader
+    looking for the wrong repair.
+    """
     fragment = MapFragment(
         map_id=MAP_ID,
         derived_from=VERSION,
@@ -339,16 +349,17 @@ async def test_a_subject_with_no_known_line_shape_is_a_gap_not_a_weaker_answer()
 
     assert strategy.candidates
     assert strategy.observations == []
-    assert any("records no diagnostic line" in gap for gap in strategy.gaps)
+    assert not any("no question can be put to production" in gap for gap in strategy.gaps)
 
 
-async def test_an_entity_of_the_wrong_kind_is_a_gap_rather_than_a_query():
+async def test_an_entity_of_the_wrong_kind_does_not_get_the_task_prefix():
     """The prefix that scopes a query to one row names a task.
 
-    A job is tagged ``PandaID``.  Building a ``jediTaskID=`` pattern for one
-    asks production something that cannot match, and an answer that cannot
-    match is a silence -- which is exactly what the eliminator reads as
-    evidence.  Refused rather than asked.
+    A job is tagged ``PandaID``.  Putting ``jediTaskID=`` in front of a pattern
+    about one asks production something that cannot match, and an answer that
+    cannot match is a silence -- which is exactly what the eliminator reads as
+    evidence.  The question is still asked, unscoped; what is withheld is the
+    prefix, and with it the control that would license a silence.
     """
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -359,7 +370,14 @@ async def test_an_entity_of_the_wrong_kind_is_a_gap_rather_than_a_query():
                 "a.py::f",
                 Branch(
                     outcome="holding",
-                    emits=[Emit(template="set job status to {}", log_level="info")],
+                    tags=["reason=held"],
+                    emits=[
+                        Emit(
+                            template="set job status to {} reason=held",
+                            log_level="info",
+                            log_files=[KNIGHT_LOG],
+                        )
+                    ],
                 ),
                 log_files=[KNIGHT_LOG],
                 subject="JobSpec.jobStatus",
@@ -371,17 +389,20 @@ async def test_an_entity_of_the_wrong_kind_is_a_gap_rather_than_a_query():
         Symptom(subject="JobSpec.jobStatus", observed="holding", task_id="1"),
     )
 
-    assert strategy.observations == []
-    assert any("rows are not" in gap for gap in strategy.gaps)
+    probes = [o for o in strategy.observations if o.role == strategy_mod.PROBE]
+    assert [o.pattern for o in probes] == ["reason=held"]
+    assert not any("jediTaskID" in o.pattern for o in strategy.observations)
+    # No control either: it exists to license the silence of a scoped pattern,
+    # and there is nothing to license when the pattern was never narrowed.
+    assert not [o for o in strategy.observations if o.role == strategy_mod.CONTROL]
 
 
 async def test_the_control_asks_about_the_probes_own_sentence():
     """A control about a different line answers a question nobody asked.
 
     It licenses the probe's silence, so it has to be the same sentence with the
-    entity and the value taken out.  While the shape was a constant the control
-    was that constant too, which was right for one subject and would have been
-    silently wrong for every other.
+    entity taken out -- the probe scoped to one row, the control asking whether
+    the file carries that line at all.
     """
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -390,10 +411,7 @@ async def test_the_control_asks_about_the_probes_own_sentence():
         junctions=[
             _junction(
                 "jediorder/ContentsFeeder.py::feed",
-                Branch(
-                    outcome="pending",
-                    emits=[Emit(template="moved task to {}", log_level="info")],
-                ),
+                _tagged("pending", "reason=fed", KNIGHT_LOG),
                 log_files=[KNIGHT_LOG],
                 triggers=("polled",),
             ),
@@ -402,9 +420,12 @@ async def test_the_control_asks_about_the_probes_own_sentence():
     strategy = await strategy_mod.derive(
         await _map(fragment), Symptom(subject=SUBJECT, observed="pending", task_id="42")
     )
+    probes = [o for o in strategy.observations if o.role == strategy_mod.PROBE]
     controls = [o for o in strategy.observations if o.role == strategy_mod.CONTROL]
 
-    assert [o.pattern for o in controls] == [r"moved\ task\ to\ "]
+    assert [o.pattern for o in controls] == ["reason=fed"]
+    assert controls[0].control_for == probes[0].pattern
+    assert probes[0].pattern.endswith(controls[0].pattern)
 
 
 async def test_a_subject_the_map_does_not_hold_is_refused_with_what_it_does_hold():
@@ -832,6 +853,27 @@ async def test_a_value_nothing_selects_sends_the_question_one_step_back():
 # ---------------------------------------------------------------------------
 
 
+def _tagged(outcome: str, tag: str, log_file: str, **rest) -> Branch:
+    """A branch that names its own decision, which is what is asked about now.
+
+    The probe built from the head the writers share is gone, so a fixture that
+    wants a question put to production has to give the branch the thing the
+    surviving family reads: a tag, and an emit that writes it.
+    """
+    return Branch(
+        outcome=outcome,
+        tags=[tag],
+        emits=[
+            Emit(
+                template=f"set task_status={{}} {tag}",
+                log_level="info",
+                log_files=[log_file],
+            )
+        ],
+        **rest,
+    )
+
+
 async def _two_candidates() -> "strategy_mod.Strategy":
     fragment = MapFragment(
         map_id=MAP_ID,
@@ -840,13 +882,13 @@ async def _two_candidates() -> "strategy_mod.Strategy":
         junctions=[
             _junction(
                 "jediorder/ContentsFeeder.py::feed",
-                Branch(outcome="pending"),
+                _tagged("pending", "reason=fed", KNIGHT_LOG),
                 log_files=[KNIGHT_LOG],
                 triggers=("polled",),
             ),
             _junction(
                 "jediorder/TaskCommando.py::run",
-                Branch(outcome="pending"),
+                _tagged("pending", "reason=commanded", OTHER_LOG),
                 log_files=[OTHER_LOG],
                 triggers=("polled",),
             ),
@@ -893,7 +935,12 @@ async def test_a_confirmed_writer_whose_write_races_is_confirmed_as_the_decider(
         junctions=[
             _junction(
                 "jediorder/ContentsFeeder.py::feed",
-                Branch(outcome="pending", row_precondition=["status IN (:old_1)"]),
+                _tagged(
+                    "pending",
+                    "reason=fed",
+                    KNIGHT_LOG,
+                    row_precondition=["status IN (:old_1)"],
+                ),
                 log_files=[KNIGHT_LOG],
                 triggers=("polled",),
             ),
@@ -1059,7 +1106,7 @@ async def test_a_candidate_with_no_log_is_never_ruled_out_by_the_others_answers(
                 junctions=[
                     _junction(
                         "jediorder/ContentsFeeder.py::feed",
-                        Branch(outcome="pending"),
+                        _tagged("pending", "reason=fed", KNIGHT_LOG),
                         log_files=[KNIGHT_LOG],
                     ),
                     _junction(
@@ -1906,7 +1953,12 @@ async def test_eliminating_a_candidate_takes_its_leads_with_it():
         junctions=[
             _junction(
                 "jediorder/ContentsFeeder.py::feed",
-                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                _tagged(
+                    "passthrough(JediTaskSpec.oldStatus)",
+                    "reason=fed",
+                    KNIGHT_LOG,
+                    tier=2,
+                ),
                 log_files=[KNIGHT_LOG],
             ),
             _junction(
@@ -2027,7 +2079,12 @@ async def test_a_lead_survives_while_any_surviving_candidate_still_opens_it():
         junctions=[
             _junction(
                 "a.py::ruled_out",
-                Branch(outcome="passthrough(JediTaskSpec.oldStatus)", tier=2),
+                _tagged(
+                    "passthrough(JediTaskSpec.oldStatus)",
+                    "reason=fed",
+                    KNIGHT_LOG,
+                    tier=2,
+                ),
                 log_files=[KNIGHT_LOG],
             ),
             _junction(
