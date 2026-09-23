@@ -1056,12 +1056,27 @@ async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
             if cut.owner == owner:
                 cut.reads = named
 
+    # What the map can say about the described cut before a single line is
+    # read.  ``_leading`` picks the chain the tag sits in and stops there, and
+    # the stage itself was then left to be found in a listing a hundred and
+    # nine long -- so a description that resolved exactly still named no code.
+    # The tag is written per rejected site by production, which is what makes
+    # this a lookup rather than a search.
+    emitting = await code_map.stage_for_tag(symptom.focus) if symptom.focus else []
+    named = sorted((_cut(stage) for stage in emitting), key=lambda c: (c.owner, c.order))
+
     return Strategy(
         symptom=symptom,
         map_id=code_map.map_id,
         derived_from=next(iter(stages)).derived_from if stages else "",
         observations=_brokerage_observations(files, owners, symptom.task_id),
-        localization=Localization(chain=leading, log_files=files, cuts=cuts),
+        localization=Localization(
+            chain=leading,
+            log_files=files,
+            cuts=cuts,
+            describes=symptom.focus if named else "",
+            emitted_by=named,
+        ),
         leads=_deduped(ambiguous),
         findings=findings,
         gaps=gaps,

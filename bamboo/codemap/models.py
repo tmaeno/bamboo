@@ -2213,6 +2213,22 @@ class Localization(BaseModel):
     cuts: list[StageCut] = Field(
         default_factory=list, description="Ranked by how much of the list each took."
     )
+    describes: str = Field(
+        default="",
+        description="The ``criteria=-`` tag the description resolved to, when it was one.",
+    )
+    emitted_by: list[StageCut] = Field(
+        default_factory=list,
+        description=(
+            "The stages the map says write that tag.  Beside ``cuts`` rather "
+            "than inside it because the two are known at different times and a "
+            "reader must not confuse them: this is what the map can say before "
+            "anything is asked, while a cut's rank is what production measured. "
+            "Without it a described cut was never named at all -- the chain was "
+            "printed and the stage inside it was left to be found among a "
+            "hundred and nine, as deep as forty-seventh."
+        ),
+    )
     funnel: list[FunnelStep] = Field(default_factory=list)
     entered: Optional[int] = Field(
         default=None, description="Candidates the first step of the chain counted."

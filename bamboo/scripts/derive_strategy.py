@@ -685,6 +685,21 @@ def _report_localization(strategy: Strategy, top: int, full: bool) -> None:
             f"           {local.entered} candidate(s) in, {local.left} out, "
             f"over {local.passes} pass(es) · sample {local.sample}"
         )
+    if local.emitted_by:
+        # Before any evidence, and that is the point: production writes the tag
+        # per rejected site, so the description already names code.  Without
+        # this the report stopped at the chain and left the stage to be found
+        # among a hundred and nine, as deep as forty-seventh in the listing.
+        click.echo(f"\nwhat writes {local.describes} ({len(local.emitted_by)} stage(s), from the map)")
+        for cut in local.emitted_by:
+            click.echo(
+                f"  {strategy_mod.short_owner(cut.owner)}  #{cut.order}{_at(cut)}"
+                f"  {cut.funnel_label}"
+            )
+            click.echo(f"  {'':<7} in: {', '.join(cut.log_files) or 'no log file names it'}")
+            for condition in cut.conditions[: None if full else 2]:
+                click.echo(f"  {'':<7} when: {condition[:78]}")
+
     took = [cut for cut in local.cuts if cut.sites]
     click.echo(f"\nwhat took the list ({len(took)} of {len(local.cuts)} step(s) named a candidate)")
     shown = took if full else took[:top]

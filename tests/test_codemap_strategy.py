@@ -1537,6 +1537,73 @@ async def _localized(stages, lines, task="52249469", focus=None, whole=False):
     )
 
 
+async def test_a_described_cut_names_the_stage_before_anything_is_asked():
+    """The chain alone was not an answer.
+
+    ``_leading`` picks the chain the tag sits in and stops there, and the
+    ranked listing only ever holds stages the evidence measured -- so with no
+    evidence the report named no code at all, and with it the stage sat as deep
+    as forty-seventh in a listing of a hundred and nine.  Production writes the
+    tag per rejected site, which makes this a lookup.
+    """
+    stages = [
+        _filter_stage(PROD_TASK, "-status", "status check", 0, ["panda-AtlasProdTaskBroker.log"]),
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_JOB, "-lowmemory", "memory check", 4, [PROD_JOB_LOG],
+                      condition="siteSpec.maxrss < minRamCount"),
+    ]
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+
+    strategy = await strategy_mod.localize(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-lowmemory")
+    )
+    local = strategy.localization
+
+    assert local.describes == "-lowmemory"
+    (named,) = local.emitted_by
+    assert (named.owner, named.order, named.line) == (PROD_JOB, 4, 404)
+    assert named.conditions == ["siteSpec.maxrss < minRamCount"]
+    assert named.log_files == [PROD_JOB_LOG]
+    # Every chain stays in play: naming the stage is not narrowing to it.
+    assert len(local.cuts) == len(stages)
+
+
+async def test_a_tag_two_chains_emit_names_both_stages():
+    """Which of them it was is the file's answer and comes later, so both are
+    named rather than one being chosen here."""
+    stages = [
+        _filter_stage(PROD_TASK, "-status", "status check", 0, ["panda-AtlasProdTaskBroker.log"]),
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+    ]
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+
+    strategy = await strategy_mod.localize(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="-status")
+    )
+
+    assert [c.owner for c in strategy.localization.emitted_by] == sorted([PROD_TASK, PROD_JOB])
+
+
+async def test_a_chain_named_as_the_focus_names_no_stage():
+    """A chain is not a tag, and saying "every stage in it" would be a listing
+    rather than a localization."""
+    stages = [_filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG])]
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+
+    strategy = await strategy_mod.localize(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus=PROD_JOB)
+    )
+
+    assert strategy.localization.emitted_by == []
+    assert strategy.localization.describes == ""
+
+
 async def test_the_evidence_chooses_the_chain_and_the_focus_only_opens_the_answer():
     """A description naming one cut is a guess; the file the lines landed in is
     a fact.  Narrowing on the focus first cost exactly what it was meant to
