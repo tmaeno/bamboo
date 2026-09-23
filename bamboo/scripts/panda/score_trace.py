@@ -57,7 +57,7 @@ def _case_id(case: dict) -> str:
 
 def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
     out: list[str] = []
-    steps, note, _predicted = trace_mod.walk(
+    steps, note, _skeleton = trace_mod.walk(
         roots,
         file=case["file"],
         owner=case["owner"],
@@ -411,7 +411,7 @@ async def _scan(map_id: str, source_root: Optional[Path], budget, top: int) -> N
             {b.line for b in junction.branches if b.line} or {junction.anchor.line_start}
         )
         arms += len(lines)
-        steps, _note, _predicted = trace_mod.walk(
+        steps, _note, _skeleton = trace_mod.walk(
             roots,
             file=junction.anchor.file,
             owner=junction.owner,

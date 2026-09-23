@@ -3115,3 +3115,33 @@ async def test_a_reach_bounded_by_nothing_does_not_go_on_to_mention_those_tables
     assert strategy.follow_up.self_repairing is True
     assert "bounded by nothing this map can name" in strategy.follow_up.question
     assert "those tables" not in strategy.follow_up.question
+
+
+async def test_the_gap_counts_the_skeletons_lines_not_the_arms():
+    """The count basis moved with the artefact.
+
+    ``predicted`` produced one object per (arm, line) and the skeleton
+    produces one row per line, counted once per arm it could have been
+    printed alongside -- so the two are still like for like, and a row no arm
+    can be printed with keeps a ``None`` arm rather than being dropped.
+    """
+    reading = models.Reading(
+        owner="a.py::run",
+        log_files=[KNIGHT_LOG],
+        skeleton=[
+            models.SkeletonLine(kind=models.SKELETON_BRANCH, line=1, text="if x:"),
+            models.SkeletonLine(
+                kind=models.SKELETON_PRINT, line=2, pattern="one", arms=[3, 4]
+            ),
+            models.SkeletonLine(kind=models.SKELETON_PRINT, line=5, pattern="two", arms=[]),
+            models.SkeletonLine(kind=models.SKELETON_PRINT, line=6, pattern="", arms=[3]),
+            models.SkeletonLine(kind=models.SKELETON_ARM, line=3, text="x = 1"),
+        ],
+    )
+
+    sentences = strategy_mod.skeleton_sentences([reading])
+
+    assert [(s.text, s.line) for s in sentences] == [("one", 3), ("one", 4), ("two", None)]
+    counted = strategy_mod.discrimination(sentences)
+    assert counted[strategy_mod.LINE_ONE_FUNCTION] == 2
+    assert counted[strategy_mod.LINE_ONE_ARM] == 1

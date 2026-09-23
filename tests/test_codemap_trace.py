@@ -11,8 +11,10 @@ production.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+from bamboo.codemap import models
 from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.models import (
     STOP_CONFIG,
@@ -715,10 +717,16 @@ class Daemon:
 # ---------------------------------------------------------------------------
 
 
-def _predicted(roots, *, file, owner, lines, observed, **kwargs):
-    return _walked(
-        roots, file=file, owner=owner, lines=lines, observed=observed, **kwargs
-    ).predicted
+def _skeleton(roots, *, file, owner, lines, **kwargs):
+    return _walked(roots, file=file, owner=owner, lines=lines, **kwargs).skeleton
+
+
+def _printed(roots, *, file, owner, lines, **kwargs):
+    return [
+        row
+        for row in _skeleton(roots, file=file, owner=owner, lines=lines, **kwargs)
+        if row.kind == models.SKELETON_PRINT
+    ]
 
 
 def test_the_line_is_anchored_either_side_of_the_hole_the_value_fills(tmp_path):
@@ -734,19 +742,94 @@ def test_the_line_is_anchored_either_side_of_the_hole_the_value_fills(tmp_path):
 class Refiner:
     def apply(self, taskSpec):
         taskSpec.status = "exhausted"
-        logger.debug(f"task {taskSpec.taskID} set to {taskSpec.status} by goal check")
+        logger.debug(f"task {taskSpec.taskID} set to {taskSpec.status} by the goal check")
 ''',
     )
 
-    (line,) = _predicted(
+    (row,) = _printed(
         roots, file="refiner", owner="apply", lines=[3], observed="exhausted"
     )
 
-    assert line.line == 3
-    assert line.at == 4
-    assert line.hole == "taskSpec.status"
-    assert line.because == "the arm writes it"
-    assert line.pattern == r"task\ .*\ set\ to\ exhausted\ by\ goal\ check"
+    assert row.line == 4
+    assert row.arms == [3]
+    assert row.hole == "taskSpec.status"
+    assert row.because == "the arm writes it"
+    assert row.value == r"task\ [^\ ]*\ set\ to\ exhausted\ by\ the\ goal\ check"
+    assert row.pattern == r"task\ [^\ ]*\ set\ to\ [^\ ]*\ by\ the\ goal\ check"
+
+
+def test_a_hole_is_closed_against_the_literal_that_follows_it(tmp_path):
+    """The defect this round opens with.
+
+    ``set\\ .*=None`` matched ``set task_status=pending oldTask=False ...``:
+    the run crossed the field name, its value and two more fields to reach an
+    ``=None`` belonging to nothing in the statement.  The literal after the
+    hole says where the hole has to stop.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def reassign(self, spec):
+        spec.cloud = None
+        logger.debug(f"reassigning to set {target}={value} for this task now")
+''',
+    )
+
+    (row,) = _printed(roots, file="proxy", owner="reassign", lines=[3], observed="None")
+
+    assert row.pattern == r"reassigning\ to\ set\ [^=]*=[^\ ]*\ for\ this\ task\ now"
+    assert ".*" not in row.pattern
+    assert not re.search(row.pattern, "set task_status=pending oldTask=False with (True, 1)")
+
+
+def test_a_value_with_no_literal_after_it_gets_a_right_hand_anchor(tmp_path):
+    """``newPrio=100`` matched ``newPrio=1000``.
+
+    With nothing after the hole there is no literal to say the value ended,
+    and a question that cannot miss is read by the eliminator as one that was
+    answered.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def bump(self, spec):
+        spec.currentPriority = newPrio
+        logger.debug(f"raising the task priority to newPrio={newPrio}")
+''',
+    )
+
+    (row,) = _printed(roots, file="proxy", owner="bump", lines=[3], observed="100")
+
+    assert row.value.endswith(r"newPrio=100(?![\w.-])")
+    assert re.search(row.value, "raising the task priority to newPrio=100")
+    assert not re.search(row.value, "raising the task priority to newPrio=1000")
+
+
+def test_a_message_with_too_little_literal_is_refused_and_says_so(tmp_path):
+    """Refused rather than rendered, and said rather than left blank.
+
+    ``to\\ None`` is seven characters of literal; it is not a sentence, and
+    handing it to a reader to grep with is handing them a wrong conclusion.
+    A row that silently lost its pattern would read as *production does not
+    print here*, which is a different and also wrong thing to say.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        spec.status = "deleting"
+        logger.debug(f"to {spec.status}")
+''',
+    )
+
+    (row,) = _printed(roots, file="proxy", owner="run", lines=[3], observed="deleting")
+
+    assert row.pattern == ""
+    assert row.value == ""
+    assert row.refused == "too little literal (2 chars)"
 
 
 def test_the_line_the_arm_writes_the_value_of_is_matched_too(tmp_path):
@@ -759,19 +842,26 @@ class Refiner:
     def apply(self, taskSpec):
         newStatus = "exhausted"
         taskSpec.status = newStatus
-        logger.debug(f"moving to {newStatus} now")
+        logger.debug(f"moving the task over to {newStatus} right now")
 ''',
     )
 
-    (line,) = _predicted(
+    (row,) = _printed(
         roots, file="refiner", owner="apply", lines=[4], observed="exhausted"
     )
 
-    assert (line.hole, line.pattern) == ("newStatus", r"moving\ to\ exhausted\ now")
+    assert row.hole == "newStatus"
+    assert row.value == r"moving\ the\ task\ over\ to\ exhausted\ right\ now"
 
 
-def test_a_line_from_a_branch_the_arm_excludes_is_not_predicted(tmp_path):
-    """The ``else`` of the arm's own ``if`` cannot have printed for this arm."""
+def test_a_line_from_a_branch_the_arm_excludes_is_not_reachable_from_it(tmp_path):
+    """The ``else`` of the arm's own ``if`` cannot have printed for this arm.
+
+    Both lines are in the skeleton, because both are lines this function
+    prints and a reader laying a region against it needs to see both.  What
+    the arm's exclusion settles is which of them can have been printed
+    *alongside the arm*, and that is what ``arms`` carries.
+    """
     roots = _tree(
         tmp_path,
         refiner='''\
@@ -779,21 +869,22 @@ class Refiner:
     def apply(self, taskSpec):
         if taskSpec.useJumbo:
             taskSpec.status = "exhausted"
-            logger.debug(f"jumbo task set to {taskSpec.status} here")
+            logger.debug(f"jumbo task has been set to {taskSpec.status} here")
         else:
             taskSpec.status = "exhausted"
-            logger.debug(f"plain task set to {taskSpec.status} here")
+            logger.debug(f"plain task has been set to {taskSpec.status} here")
 ''',
     )
 
-    (line,) = _predicted(
-        roots, file="refiner", owner="apply", lines=[4], observed="exhausted"
-    )
+    rows = _printed(roots, file="refiner", owner="apply", lines=[4], observed="exhausted")
 
-    assert line.pattern == r"jumbo\ task\ set\ to\ exhausted\ here"
+    jumbo = next(row for row in rows if "jumbo" in row.text)
+    plain = next(row for row in rows if "plain" in row.text)
+    assert jumbo.arms == [4]
+    assert plain.arms == []
 
 
-def test_a_line_before_a_continue_the_arm_is_past_is_not_predicted(tmp_path):
+def test_a_line_before_a_continue_the_arm_is_past_is_not_reachable_from_it(tmp_path):
     """The exclusion a path condition alone cannot see.
 
     ``if X: ...; continue`` puts ``not (X)`` on everything after it, and only
@@ -809,18 +900,21 @@ class Proxy:
     def setTobeDeleted(self, dsList):
         for tmpDS in dsList:
             if tmpDS.status == 'deleting':
-                logger.debug(f"skip {tmpDS.name} since status={tmpDS.status}")
+                logger.debug(f"skipping {tmpDS.name} since its status={tmpDS.status}")
                 continue
             tmpDS.status = 'deleting'
-            logger.debug(f"set {tmpDS.status} for {tmpDS.name}")
+            logger.debug(f"now setting the status to {tmpDS.status} for {tmpDS.name}")
 ''',
     )
 
-    (line,) = _predicted(
+    rows = _printed(
         roots, file="proxy", owner="setTobeDeleted", lines=[7], observed="deleting"
     )
 
-    assert line.pattern == r"set\ deleting\ for\ "
+    skipped = next(row for row in rows if "skipping" in row.text)
+    written = next(row for row in rows if "now setting" in row.text)
+    assert skipped.arms == []
+    assert written.arms == [7]
 
 
 def test_a_hole_with_no_literal_beside_it_is_not_an_anchor(tmp_path):
@@ -833,11 +927,14 @@ def test_a_hole_with_no_literal_beside_it_is_not_an_anchor(tmp_path):
 class Proxy:
     def run(self, spec):
         spec.status = "deleting"
-        logger.debug(f"{spec.name}{spec.status}")
+        logger.debug(f"the dataset in question here{spec.name}{spec.status}")
 ''',
     )
 
-    assert _predicted(roots, file="proxy", owner="run", lines=[3], observed="deleting") == []
+    (row,) = _printed(roots, file="proxy", owner="run", lines=[3], observed="deleting")
+
+    assert row.value == ""
+    assert row.pattern == r"the\ dataset\ in\ question\ here"
 
 
 def test_a_hole_reaching_the_value_is_used_only_where_the_arm_names_none(tmp_path):
@@ -850,14 +947,14 @@ class Proxy:
     def run(self, spec):
         newStatus = "deleting"
         spec.status = self.decide()
-        logger.debug(f"about to move it to {newStatus} now")
+        logger.debug(f"we are about to move it over to {newStatus} now")
 ''',
     )
 
-    (line,) = _predicted(roots, file="proxy", owner="run", lines=[4], observed="deleting")
+    (row,) = _printed(roots, file="proxy", owner="run", lines=[4], observed="deleting")
 
-    assert line.hole == "newStatus"
-    assert line.because == "newStatus is set to this value above"
+    assert row.hole == "newStatus"
+    assert row.because == "newStatus is set to this value above"
 
 
 def test_the_arms_own_hole_wins_over_one_that_merely_holds_the_value(tmp_path):
@@ -868,34 +965,42 @@ class Proxy:
     def run(self, spec):
         newStatus = "deleting"
         spec.status = newStatus
-        logger.debug(f"planning to use {newStatus} shortly")
-        logger.debug(f"moved it to {spec.status} at last")
+        logger.debug(f"we are planning to use {newStatus} very shortly")
+        logger.debug(f"we have now moved it to {spec.status} at long last")
 ''',
     )
 
-    lines = _predicted(roots, file="proxy", owner="run", lines=[4], observed="deleting")
+    rows = _printed(roots, file="proxy", owner="run", lines=[4], observed="deleting")
 
-    assert [line.because for line in lines] == ["the arm writes it", "the arm writes it"]
-    assert sorted(line.hole for line in lines) == ["newStatus", "spec.status"]
+    assert [row.because for row in rows] == ["the arm writes it", "the arm writes it"]
+    assert sorted(row.hole for row in rows) == ["newStatus", "spec.status"]
 
 
-def test_no_observed_value_means_no_line_to_predict(tmp_path):
+def test_no_observed_value_means_no_value_in_any_hole(tmp_path):
     """Half the question is the value, and inventing one would put a pattern in
-    front of a reader that nothing in the record supports."""
+    front of a reader that nothing in the record supports.
+
+    The skeleton still comes back.  A line that reports nothing about the
+    value still says the code around it ran, which is the whole reason this
+    round stopped requiring every row to name one.
+    """
     roots = _tree(
         tmp_path,
         refiner='''\
 class Refiner:
     def apply(self, taskSpec):
         taskSpec.status = "exhausted"
-        logger.debug(f"task set to {taskSpec.status} by goal check")
+        logger.debug(f"the task has been set to {taskSpec.status} by the goal check")
 ''',
     )
 
-    assert _walked(roots, file="refiner", owner="apply", lines=[3]).predicted == []
+    (row,) = _printed(roots, file="refiner", owner="apply", lines=[3])
+
+    assert row.value == ""
+    assert row.pattern == r"the\ task\ has\ been\ set\ to\ [^\ ]*\ by\ the\ goal\ check"
 
 
-def test_a_tree_that_is_not_the_maps_predicts_nothing(tmp_path):
+def test_a_tree_that_is_not_the_maps_has_no_skeleton(tmp_path):
     """The same refusal the steps get, for the same reason: a plausible line
     computed from the wrong release reads exactly like an answer."""
     roots = _tree(
@@ -904,7 +1009,7 @@ def test_a_tree_that_is_not_the_maps_predicts_nothing(tmp_path):
 class Refiner:
     def apply(self, taskSpec):
         taskSpec.status = "exhausted"
-        logger.debug(f"task set to {taskSpec.status} by goal check")
+        logger.debug(f"the task has been set to {taskSpec.status} by the goal check")
 ''',
     )
 
@@ -917,6 +1022,141 @@ class Refiner:
         expected_sha="0" * 40,
     )
 
-    assert walked.predicted == []
+    assert walked.skeleton == []
     assert walked.note == "the walk was not run: this tree is not the one that was mapped"
 
+
+def test_a_subtree_with_no_line_and_no_arm_is_left_out(tmp_path):
+    """A skeleton is not the source again.
+
+    A 540-line function whose every branch is reproduced buries the handful of
+    rows a reader came for, which is the failure this round is elsewhere
+    fixing in the report.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        if spec.quiet:
+            spec.counter += 1
+            spec.other = self.decide()
+        if spec.loud:
+            spec.status = "deleting"
+            logger.debug(f"we have now set the status to {spec.status} here")
+''',
+    )
+
+    rows = _skeleton(roots, file="proxy", owner="run", lines=[7], observed="deleting")
+
+    assert [row.text for row in rows if row.kind == models.SKELETON_BRANCH] == [
+        "if spec.loud:"
+    ]
+    assert [row.line for row in rows if row.kind == models.SKELETON_ARM] == [7]
+
+
+def test_the_nesting_says_which_rows_could_have_been_printed_together(tmp_path):
+    """The part a flat list of lines cannot carry.
+
+    Two rows under one ``if`` were printed together or not at all; two rows
+    either side of an ``else`` cannot both have been.  A reader with a grepped
+    region reads that off the indentation, so the headers are the artefact and
+    not decoration.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        try:
+            if spec.loud:
+                logger.debug("about to start working on this dataset")
+                spec.status = "deleting"
+        except Exception:
+            logger.debug("failed while working on this dataset here")
+''',
+    )
+
+    rows = _skeleton(roots, file="proxy", owner="run", lines=[6], observed="deleting")
+
+    shape = [
+        (row.kind, row.text if row.kind == models.SKELETON_BRANCH else row.line, row.depth)
+        for row in rows
+    ]
+    assert shape == [
+        (models.SKELETON_BRANCH, "try:", 0),
+        (models.SKELETON_BRANCH, "if spec.loud:", 1),
+        (models.SKELETON_PRINT, 5, 2),
+        (models.SKELETON_ARM, 6, 2),
+        (models.SKELETON_BRANCH, "except Exception:", 0),
+        (models.SKELETON_PRINT, 8, 1),
+    ]
+
+
+def test_an_assignment_the_call_cannot_reach_is_not_one_of_its_messages(tmp_path):
+    """``_logged_arguments`` hands back every assignment to the name.
+
+    ``log.debug(msg_str)`` resolved one hop through a local gets all five
+    assignments to ``msg_str`` in the function, and four of them are in
+    branches the call cannot be reached from.  The build cannot narrow it --
+    a stored answer has to hold for every caller -- but at use time it can:
+    an assignment below the call cannot have run before it, and one the
+    call's own path condition contradicts cannot have run on the way to it.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        if spec.loud:
+            msg_str = "the first branch decided to stop here"
+        else:
+            msg_str = "the second branch decided to stop here"
+        logger.debug(msg_str)
+        spec.status = "deleting"
+        msg_str = "this one is assigned below the call above"
+''',
+    )
+
+    rows = _printed(roots, file="proxy", owner="run", lines=[8], observed="deleting")
+
+    assert [row.pattern for row in rows] == [
+        r"the\ first\ branch\ decided\ to\ stop\ here",
+        r"the\ second\ branch\ decided\ to\ stop\ here",
+    ]
+
+
+
+def test_a_shown_block_keeps_the_header_that_explains_it(tmp_path):
+    """An ``except`` with no ``try`` over it, and an ``else`` with no condition.
+
+    Dropping the headers of blocks that hold nothing produced both, and the
+    nesting is the thing a reader is here for -- a header that explains a
+    shown block is not decoration.  The rule that a statement holding neither
+    a line nor an arm is left out entirely still applies; this is about the
+    blocks *inside* one that is shown.
+    """
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def run(self, spec):
+        try:
+            spec.counter += 1
+        except Exception:
+            logger.debug("failed while working on this dataset here")
+        if spec.quiet:
+            spec.other = self.decide()
+        else:
+            spec.status = "deleting"
+''',
+    )
+
+    rows = _skeleton(roots, file="proxy", owner="run", lines=[10], observed="deleting")
+
+    assert [row.text for row in rows if row.kind == models.SKELETON_BRANCH] == [
+        "try:",
+        "except Exception:",
+        "if spec.quiet:",
+        "else:",
+    ]

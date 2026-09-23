@@ -483,28 +483,66 @@ def _report_walk(entry, top: int, full: bool) -> None:
         click.echo(f"          … {len(entry.trace) - len(shown)} more step(s) (--full)")
 
 
-def _report_predicted(entry, top: int, full: bool) -> None:
-    """The line production prints when *this* arm runs, from the tree.
+def _report_skeleton(entry, top: int, full: bool) -> None:
+    """What this function prints, in source order, with the arms in place.
 
     Printed beside the map's ``match against`` rather than in place of it, and
     labelled so the two cannot be confused: the map's sentence is what the
     questions already asked were built from, and swapping the two would make
-    every answer already collected read as unasked.  This one is computed here
-    and now, from the arm's own statement and the value observed, which is why
-    it can anchor either side of the hole the value fills where the map's can
-    only anchor before the first hole.
+    every answer already collected read as unasked.
+
+    Laid out as source rather than as a list because the nesting is the part a
+    list cannot carry.  Two rows under one ``if`` were printed together or not
+    at all; two rows either side of an ``else`` cannot both have been.  A
+    reader with a grepped region in the other hand reads that off the
+    indentation, and no per-row verdict is printed for them -- which line
+    proves what is theirs to conclude, and this side of the derivation has not
+    seen the log.
     """
-    if not entry.predicted:
+    if not entry.skeleton:
         return
+    printed = [row for row in entry.skeleton if row.kind != models_mod.SKELETON_BRANCH]
     click.echo(
-        f"        the tree says these arms print ({len(entry.predicted)} line(s), "
+        f"        what it prints, in source order ({len(printed)} line(s) and arm(s), "
         "not what was asked)"
     )
-    for line in entry.predicted if full else entry.predicted[:top]:
-        click.echo(f"          {line.line:>5}  {line.pattern}")
-        click.echo(f"                 from {line.at}: {line.hole} -- {line.because}")
-    if not full and len(entry.predicted) > top:
-        click.echo(f"          … {len(entry.predicted) - top} more (--full)")
+    shown = entry.skeleton if full else _skeleton_head(entry.skeleton, top)
+    for row in shown:
+        pad = "  " * row.depth
+        if row.kind == models_mod.SKELETON_BRANCH:
+            click.echo(f"                 {pad}{row.text}")
+            continue
+        if row.kind == models_mod.SKELETON_ARM:
+            click.echo(f"          {row.line:>5} ARM {pad}{row.text}")
+            continue
+        body = row.pattern or f"-- {row.refused} --"
+        click.echo(f"          {row.line:>5}  |  {pad}{body}")
+        if row.value:
+            click.echo(f"                 {pad}with the value: {row.value}")
+            click.echo(f"                 {pad}  {row.hole} -- {row.because}")
+    if len(shown) < len(entry.skeleton):
+        click.echo(f"          … {len(entry.skeleton) - len(shown)} more row(s) (--full)")
+
+
+def _skeleton_head(rows, top: int) -> list:
+    """The first *top* printed rows, with the branch headers that lead to them.
+
+    Cutting the list at *top* would drop the headers an early row sits under
+    and leave the rows that survive hanging at an indentation nothing
+    explains.  Counting only the rows that carry a line keeps the cut where a
+    reader expects it while the structure above each one stays.
+    """
+    kept: list = []
+    seen = 0
+    for row in rows:
+        if row.kind != models_mod.SKELETON_BRANCH:
+            seen += 1
+            if seen > top:
+                break
+        kept.append(row)
+    while kept and kept[-1].kind == models_mod.SKELETON_BRANCH:
+        kept.pop()
+    return kept
 
 
 def _report_discrimination(strategy: Strategy) -> None:
@@ -516,11 +554,12 @@ def _report_discrimination(strategy: Strategy) -> None:
 
     The two are not counted against a common denominator, because they do not
     have one.  The map settles **one** sentence per subject, by majority over
-    every writer of it, and the tree produces one per arm and value -- so the
-    honest statement is how many of the tree's lines would settle an arm,
-    beside how many sentences the map had to pool them into.
+    every writer of it, and the skeleton produces one row per line the
+    function prints, counted once per arm that row could have been printed
+    alongside -- so the honest statement is how many of the tree's lines would
+    settle an arm, beside how many sentences the map had to pool them into.
     """
-    walked = strategy_mod.predicted_sentences(strategy.readings)
+    walked = strategy_mod.skeleton_sentences(strategy.readings)
     if not walked:
         return
     counted = strategy_mod.discrimination(walked)
@@ -610,7 +649,7 @@ def _report_reading(
                 f"        match against  {entry.log_pattern}"
                 f"  in {', '.join(entry.log_files[:2]) or 'no file'}"
             )
-        _report_predicted(entry, top, full)
+        _report_skeleton(entry, top, full)
         _report_walk(entry, top, full)
         if full and region is not None:
             click.echo(region.marked(entry.lines))

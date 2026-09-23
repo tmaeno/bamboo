@@ -2347,33 +2347,69 @@ TRACE_HANDOVER = "handover"
 TRACE_UNBOUND = "unbound"
 
 
-class PredictedLine(BaseModel):
-    """The line production prints when one arm runs, as a pattern to match it.
+#: What a skeleton row is.  ``branch`` is a compound statement's header and
+#: carries no pattern; ``print`` is a line production writes; ``arm`` is one of
+#: the writes the map sent the reader here for.
+SKELETON_BRANCH = "branch"
+SKELETON_PRINT = "print"
+SKELETON_ARM = "arm"
 
-    The map's ``log_pattern`` is one sentence for a whole function, settled at
-    build time by majority over every writer of the subject and anchored on the
-    literal text before the *first* hole.  For 80 of the 182 subjects that get
-    a probe at all, that hole is not the one the value lands in, so the anchor
-    points at the wrong part of the sentence.
 
-    This is the other direction and it is only available at use time: the arm's
-    own statement and the value actually observed are both in hand, so the hole
-    can be picked by what it spells rather than by where it sits, and a log call
-    whose path condition contradicts the arm's contributes nothing at all.
+class SkeletonLine(BaseModel):
+    """One row of what a function prints, in source order, with the arms in place.
 
-    Nothing here is written into the map.  Like the rest of the trace it is a
+    The artefact a reader aligns a grepped log region against.  The map's
+    ``log_pattern`` is one sentence for a whole function, settled at build time
+    by majority over every writer of the subject; matched against a region it
+    says the function ran and nothing more.  A skeleton says *which branch*,
+    because the lines either side of an arm are in the region too and the
+    nesting says which of them can have been printed together.
+
+    Deliberately not one row per arm.  A line that reports nothing about the
+    value -- ``log.debug(blah1)`` before a write and ``log.debug(blah2)`` after
+    it -- still proves the write ran when both turn up, and a shape that
+    insists every row name the value cannot express that at all.  ``value`` is
+    the stronger reading kept beside the weaker one: where the observed value
+    does land in a hole, the pattern with it filled in is narrower than the
+    pattern without, so both are rendered and the row carries each.
+
+    Nothing here is written into the map.  Like the rest of the walk it is a
     reading of the tree the map was built from, and is refused outright when
     that is not the tree at hand.
     """
 
-    line: int = Field(description="The arm this line would be printed for.")
-    at: int = Field(description="Where the logging call is.")
-    pattern: str = Field(
-        description="Anchored on the literals either side of the hole the value fills."
+    kind: str = Field(description=f"{SKELETON_BRANCH} | {SKELETON_PRINT} | {SKELETON_ARM}")
+    line: int = Field(description="Where in the file this row is.")
+    depth: int = Field(default=0, description="How deep the nesting is at this row.")
+    text: str = Field(
+        default="",
+        description="The branch's header or the arm's statement, as the source spells it.",
     )
-    hole: str = Field(description="The expression whose place the observed value takes.")
-    because: str = Field(description="Why that hole is the one the value fills.")
-    text: str = Field(description="The message as the source spells it.")
+    pattern: str = Field(
+        default="",
+        description="The line as a pattern, with every hole left open.  Empty when refused.",
+    )
+    refused: str = Field(
+        default="",
+        description="Why no pattern was rendered, when none was -- shown in its place.",
+    )
+    arms: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The arms this row can have been printed alongside.  One of them "
+            "means the row names which arm ran; several mean it does not."
+        ),
+    )
+    value: str = Field(
+        default="",
+        description="The same line with the observed value in its hole, where one lands.",
+    )
+    hole: str = Field(
+        default="", description="The expression whose place the observed value takes."
+    )
+    because: str = Field(
+        default="", description="Why that hole is the one the value fills."
+    )
 
 
 class TraceStep(BaseModel):
@@ -2472,13 +2508,15 @@ class Reading(BaseModel):
         default="",
         description="Why the trace is empty or short, when it is.",
     )
-    predicted: list[PredictedLine] = Field(
+    skeleton: list[SkeletonLine] = Field(
         default_factory=list,
         description=(
-            "What production would print for each of these arms, computed from "
-            "the tree at use time.  Beside ``log_pattern`` rather than instead "
-            "of it: that one is the map's shared sentence and is what the "
-            "questions already asked are built from."
+            "What this function prints, in source order, with the arms in "
+            "place -- computed from the tree at use time.  Beside "
+            "``log_pattern`` rather than instead of it: that one is the map's "
+            "shared sentence and is what the questions already asked are "
+            "built from, and swapping them would make every answer already "
+            "collected read as unasked."
         ),
     )
 

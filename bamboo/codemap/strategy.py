@@ -81,6 +81,7 @@ from bamboo.codemap.models import (
     REPORTS_ROWS_CHANGED,
     SEEN,
     SELF_REPAIRING_TRIGGERS,
+    SKELETON_PRINT,
     STOP_AMBIGUOUS,
     STOP_DESCENT,
     STOP_NO_WRITER,
@@ -1998,8 +1999,8 @@ DISCRIMINATION = (LINE_ONE_ARM, LINE_ONE_FUNCTION, LINE_ACROSS_WRITERS, LINE_NO_
 class Sentence(NamedTuple):
     """One line production could print, and what it would pin down if seen.
 
-    Deliberately the same shape for both cadences.  The map's arm sentences and
-    the trace's predicted lines are the two halves of the comparison this round
+    Deliberately the same shape for both cadences.  The map's arm sentences
+    and the skeleton's lines are the two halves of the comparison this round
     exists to make, and scoring them with two functions would make any
     difference between them a fact about the two functions.
     """
@@ -2035,12 +2036,22 @@ def discrimination(sentences: Sequence[Sentence]) -> Counter:
     return counted
 
 
-def predicted_sentences(readings: list[Reading]) -> list[Sentence]:
-    """The trace's side of the comparison, one entry per predicted line."""
+def skeleton_sentences(readings: list[Reading]) -> list[Sentence]:
+    """The skeleton's side of the comparison, one entry per (line, arm) pair.
+
+    Per pair rather than per row because the question ``discrimination`` asks
+    is whether a sentence narrows to *an arm*, and a row two arms could both
+    have printed is two chances for the same text to turn up.  A row no arm
+    can be printed alongside keeps a ``None`` arm rather than being dropped:
+    it is a line the function prints, and leaving it out would quietly
+    flatter the count.
+    """
     return [
-        Sentence(line.pattern, entry.owner, line.line, entry.log_files)
+        Sentence(row.pattern, entry.owner, arm, entry.log_files)
         for entry in readings
-        for line in entry.predicted
+        for row in entry.skeleton
+        if row.kind == SKELETON_PRINT and row.pattern
+        for arm in (row.arms or [None])
     ]
 
 
@@ -2148,24 +2159,24 @@ def attach_traces(
         )
         entry.trace = walked.steps
         entry.trace_note = walked.note
-        entry.predicted = walked.predicted
+        entry.skeleton = walked.skeleton
     _report_what_the_lines_cannot_separate(strategy)
 
 
 def _report_what_the_lines_cannot_separate(strategy: Strategy) -> None:
-    """Say which predicted lines would not settle an arm if they were seen.
+    """Say which of the skeleton's lines would not settle an arm if they were seen.
 
     Before anything is asked, which is the half of this the map cannot do: a
     line two arms share is a question whose answer is already known to be
     ambiguous, and the reader is better served by being told that than by
     getting the answer and drawing an arm out of it.
     """
-    counted = discrimination(predicted_sentences(strategy.readings))
+    counted = discrimination(skeleton_sentences(strategy.readings))
     vague = sum(counted[kind] for kind in DISCRIMINATION[1:])
     if not vague:
         return
     strategy.gaps.append(
-        f"{vague} of the {sum(counted.values())} line(s) the tree says these arms print "
+        f"{vague} of the {sum(counted.values())} line(s) the tree says this code prints "
         f"would not settle which arm printed them: {counted[LINE_ONE_FUNCTION]} are "
         f"shared by arms of one function, {counted[LINE_ACROSS_WRITERS]} by more than "
         f"one writer, and {counted[LINE_NO_FILE]} land in no file the map names"

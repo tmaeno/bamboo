@@ -60,6 +60,9 @@ from bamboo.codemap.gitsource import blob_sha as git_blob_sha
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
+    SKELETON_ARM,
+    SKELETON_BRANCH,
+    SKELETON_PRINT,
     STOP_PARAMETER,
     TRACE_BINDING,
     TRACE_HANDOVER,
@@ -67,7 +70,7 @@ from bamboo.codemap.models import (
     TRACE_UNBOUND,
     TRACE_WRITE,
     Handover,
-    PredictedLine,
+    SkeletonLine,
     TraceStep,
 )
 from bamboo.codemap.panda import pathcond
@@ -280,6 +283,30 @@ def _written_texts(statement: ast.stmt) -> list[str]:
     return [text for text in texts if text and text != "..."]
 
 
+# How much literal text a pattern needs before it is a question rather than a
+# sieve.  Set from two measurements, neither of which found a clean answer.
+#
+# Put against the production lines already in the evidence file, the patterns
+# a lower bar would admit match the *wrong* message at 13 characters and below
+# -- ``IO intensity `` finds ``candidates passed max IO intensity check``, and
+# ``registering`` finds ``registering <dataset> with location=...``.  From 14
+# up, none of the admitted patterns matched a line it did not mean.
+#
+# The second measurement is the one to be honest about.  Asking how often a
+# message's literal run sits inside *another* message in the corpus gives 89%
+# at 0-4 characters, 65% at 5-9, 41% at 10-14, 37% at 15-19 -- and **11% at 40
+# and above**.  It decays and never reaches zero, so no length makes a pattern
+# safe and this guard only removes the worst of them.  A reader who takes a
+# long pattern for a reliable one is the next version of this bug.
+MIN_LITERAL = 14
+
+# What has to *not* follow a value for the pattern to be about that value.
+# ``newPrio=100`` matches ``newPrio=1000``: without a literal after the hole
+# there is nothing to say the number ended, and a question that cannot miss is
+# read by the eliminator as a question that was answered.
+NOT_A_WORD = r"(?![\w.-])"
+
+
 def _neighbouring_literal(message: ast.JoinedStr, hole: int) -> bool:
     """Whether the hole at *hole* has literal text to anchor on beside it.
 
@@ -297,29 +324,209 @@ def _neighbouring_literal(message: ast.JoinedStr, hole: int) -> bool:
     return False
 
 
-def _rendered(message: ast.JoinedStr, hole: int, observed: str) -> str:
-    """The message as a pattern: literals kept, the value's hole filled.
+def _literal_text(part: ast.expr) -> str:
+    """*part*'s text if it is a literal piece of the message, else ``""``."""
+    if isinstance(part, ast.Constant) and isinstance(part.value, str):
+        return part.value
+    return ""
 
-    Every other hole becomes ``.*`` -- what the walk knows about them is that
-    something goes there, and guessing would make the question narrower than
-    the knowledge behind it.  Runs of them collapse, because two adjacent
-    ``.*`` ask for nothing that one does not.
+
+def literal_length(message: ast.JoinedStr) -> int:
+    """How many characters of literal text the message carries.
+
+    What is left once the holes are taken out is the whole of what a pattern
+    can anchor on, so it is the only honest measure of whether the pattern is a
+    sentence.  Stripped, because a hole sitting between two spaces contributes
+    two characters that match anything with a space on either side.
     """
-    parts: list[str] = []
+    return sum(len(_literal_text(part).strip()) for part in message.values)
+
+
+def _bound(message: ast.JoinedStr, hole: int) -> str:
+    """A pattern for an unfilled hole, closed against the literal after it.
+
+    ``.*`` is unbounded, and unbounded is how ``set\\ .*=None`` came to match
+    ``set task_status=pending oldTask=False with (True, 1) ...``: the run
+    crossed the field name, its value and two more fields to reach an ``=None``
+    that belonged to nothing in this statement.  The literal after the hole
+    says where the hole has to stop, and excluding its first character is what
+    stops it there.
+
+    Falls back to ``.*`` with nothing to close against -- a trailing hole, or
+    one butted straight against another.
+    """
+    following = _literal_text(message.values[hole + 1]) if hole + 1 < len(message.values) else ""
+    if following:
+        return f"[^{re.escape(following[0])}]*"
+    return ".*"
+
+
+def _pattern(message: ast.JoinedStr, hole: Optional[int], observed: str) -> str:
+    """The message as a regular expression, with *hole* filled by *observed*.
+
+    *hole* is ``None`` for the skeleton's own line, where no value is put in
+    and the pattern says only *this line was printed here*.  That is the whole
+    difference between the two kinds this module now renders, and both go
+    through here so that neither can drift into being the looser one.
+
+    Three things keep the result a question that can come back empty.  Every
+    other hole is closed against the literal that follows it rather than left
+    as ``.*``; a filled hole with no literal after it gets :data:`NOT_A_WORD`,
+    so the value has to end where the pattern says it ends; and a message with
+    less than :data:`MIN_LITERAL` characters of literal is refused outright,
+    because there is not enough of it left to be a sentence.
+
+    Leading and trailing holes are dropped.  The search is unanchored, so a
+    run at either end asks for nothing the rest does not already ask for, and
+    printing it invites a reader to think it does.
+    """
+    if literal_length(message) < MIN_LITERAL:
+        return ""
+    pieces: list[tuple[str, bool]] = []
     for position, part in enumerate(message.values):
         if position == hole:
-            parts.append(re.escape(observed))
-        elif isinstance(part, ast.Constant) and isinstance(part.value, str):
-            parts.append(re.escape(part.value))
-        elif parts and parts[-1] == ".*":
+            pieces.append((re.escape(observed), False))
+            after = (
+                _literal_text(message.values[position + 1])
+                if position + 1 < len(message.values)
+                else ""
+            )
+            if not after:
+                pieces.append((NOT_A_WORD, False))
             continue
+        literal = _literal_text(part)
+        if literal:
+            pieces.append((re.escape(literal), False))
         else:
-            parts.append(".*")
-    while parts and parts[0] == ".*":
-        parts.pop(0)
-    while parts and parts[-1] == ".*":
-        parts.pop()
-    return "".join(parts)
+            pieces.append((_bound(message, position), True))
+    while pieces and pieces[0][1]:
+        pieces.pop(0)
+    while pieces and pieces[-1][1]:
+        pieces.pop()
+    out: list[str] = []
+    for text, is_hole in pieces:
+        if is_hole and out and out[-1] == text:
+            continue
+        out.append(text)
+    return "".join(out)
+
+
+def _rendered(message: ast.JoinedStr, hole: int, observed: str) -> str:
+    """The value pattern: the observed value put into the hole it fills."""
+    return _pattern(message, hole, observed)
+
+
+def line_pattern(message: ast.JoinedStr) -> str:
+    """The line pattern: every hole left open, so it names the line only."""
+    return _pattern(message, None, "")
+
+
+def _enclosing_statement(node: ast.AST) -> Optional[ast.stmt]:
+    """The statement *node* sits in, so a call is placed where the source puts it.
+
+    A call's first argument carries the line number the walk has in hand, and
+    for a message split over four lines that is not the line the reader sees
+    the call on.  The statement is.
+    """
+    if isinstance(node, ast.stmt):
+        return node
+    for ancestor in pathcond.ancestors(node):
+        if isinstance(ancestor, ast.stmt):
+            return ancestor
+    return None
+
+
+def _blocks_of(statement: ast.stmt) -> list[tuple[str, list[ast.stmt]]]:
+    """``(header, body)`` for each block a compound statement opens.
+
+    The nesting is the whole reason a skeleton beats a list of lines: two rows
+    under one ``if`` were printed together or not at all, and two rows either
+    side of an ``else`` cannot both have been.  Returning the headers in source
+    order is what lets the reader see that without being told it.
+
+    ``elif`` comes back as ``else:`` wrapping an ``if``, which is what it is.
+    """
+    if isinstance(statement, ast.If):
+        blocks = [(f"if {_clip(_text(statement.test))}:", statement.body)]
+        if statement.orelse:
+            blocks.append(("else:", statement.orelse))
+        return blocks
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        head = f"for {_clip(_text(statement.target))} in {_clip(_text(statement.iter))}:"
+        blocks = [(head, statement.body)]
+        if statement.orelse:
+            blocks.append(("else:", statement.orelse))
+        return blocks
+    if isinstance(statement, ast.While):
+        blocks = [(f"while {_clip(_text(statement.test))}:", statement.body)]
+        if statement.orelse:
+            blocks.append(("else:", statement.orelse))
+        return blocks
+    if isinstance(statement, ast.Try):
+        blocks = [("try:", statement.body)]
+        for handler in statement.handlers:
+            caught = _clip(_text(handler.type)) if handler.type else ""
+            blocks.append((f"except {caught}:" if caught else "except:", handler.body))
+        if statement.orelse:
+            blocks.append(("else:", statement.orelse))
+        if statement.finalbody:
+            blocks.append(("finally:", statement.finalbody))
+        return blocks
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        held = ", ".join(_clip(_text(item.context_expr)) for item in statement.items)
+        return [(f"with {held}:", statement.body)]
+    return []
+
+
+def _of_interest(
+    statement: ast.stmt,
+    printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+    armed: dict[int, ast.stmt],
+) -> bool:
+    """Whether anything under *statement* is a line printed or an arm written.
+
+    The rule that keeps a skeleton a skeleton.  Without it a 540-line function
+    comes back whole, and burying the rows a reader came for is the same
+    failure this round is fixing in the report's other half.
+    """
+    for node in ast.walk(statement):
+        if isinstance(node, ast.stmt):
+            if id(node) in printed or getattr(node, "lineno", 0) in armed:
+                return True
+    return False
+
+
+def _constant_pattern(message: ast.expr) -> str:
+    """A pattern for a message with no holes in it at all.
+
+    Worth rendering: a constant line says nothing about the value but proves
+    the branch it sits in ran, and that is what a reader aligning a region
+    needs from the rows around an arm.
+    """
+    if isinstance(message, ast.Constant) and isinstance(message.value, str):
+        text = message.value
+        return re.escape(text) if len(text.strip()) >= MIN_LITERAL else ""
+    return ""
+
+
+def _refusal(message: ast.expr) -> str:
+    """Why no pattern was rendered, in the words the skeleton prints in its place.
+
+    Said rather than left blank.  A row that silently loses its pattern reads
+    as a line production does not print, and the reader would go looking for
+    it in the log.
+    """
+    if isinstance(message, ast.JoinedStr):
+        return f"too little literal ({literal_length(message)} chars)"
+    if isinstance(message, ast.Constant) and isinstance(message.value, str):
+        return f"too little literal ({len(message.value.strip())} chars)"
+    return "the message is not a literal this walk can render"
+
+
+def _clip(text: str, width: int = 72) -> str:
+    """*text* on one line, cut to *width* with an ellipsis when it is longer."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[: width - 1] + "\u2026"
 
 
 def _loop_bindings(func: ast.AST, name: str) -> list[ast.For | ast.AsyncFor]:
@@ -535,7 +742,7 @@ class _Walk:
         self.parsed: dict[str, tuple[str, ast.Module]] = {}
         self.frames: dict[tuple[str, str], Optional[_Frame]] = {}
         self.steps: list[TraceStep] = []
-        self.predicted: list[PredictedLine] = []
+        self.armed: dict[int, ast.stmt] = {}
         self.seen: set[tuple[str, str]] = set()
         self._scopes: dict[tuple[str, str], str] = {}
         self._logged: dict[tuple[str, str], list[tuple[ast.expr, ast.expr]]] = {}
@@ -687,7 +894,11 @@ class _Walk:
         )
         if not self.record(step):
             return
-        self.predict(frame, statement, line)
+        # Kept for the skeleton, which is built once for the whole function
+        # after the walk rather than once per arm: the lines a function prints
+        # do not change with which arm is being explained, and rendering them
+        # per arm is what made the old shape repeat itself.
+        self.armed[line] = statement
         if not terminal:
             self.want(frame, reads, 1)
 
@@ -702,97 +913,210 @@ class _Walk:
             )
         return self._logged[key]
 
-    def predict(self, frame: _Frame, statement: ast.stmt, line: int) -> None:
-        """Record what production prints when *this* arm writes *this* value.
+    # -- skeleton ----------------------------------------------------------
 
-        Three things have to line up, and the map can supply none of them.  The
-        call has to be reachable on the arm's own path, so a log call the arm's
-        guard contradicts is dropped rather than averaged in.  One hole has to
-        be the value's, and the arm says which: the hole spells what the arm
-        writes, or what it writes to, or -- failing both -- holds the observed
-        value by a reaching definition of its own.  And the hole has to have
-        literal text beside it, or the pattern is not a question.
+    def reachable_calls(self, frame: _Frame) -> list[tuple[ast.expr, ast.expr]]:
+        """The logging calls in this frame, less the messages that cannot reach one.
 
-        Nothing is guessed to fill a gap.  An arm no call here reports keeps
-        the silence the map already reports for it, which is the honest answer
-        and the one the reader can act on.
+        ``_logged_arguments`` resolves ``log.debug(msg_str)`` one hop through a
+        local, and ``assigned_expressions`` hands back *every* assignment to
+        that name in the function.  Five of them for one call is common, and
+        four of the five are in branches the call cannot be reached from.  The
+        build cannot narrow it -- a stored answer has to hold for every caller
+        -- but at use time two rules in this module already do:
+
+        An assignment below the call cannot have run before it.  And an
+        assignment the call's own path condition contradicts cannot have run
+        on the way to it, which is the same exclusivity test the arms use.
+
+        A narrow fix, measured: 2188 (call, message) pairs become 1843, and
+        117 of 1568 call sites shrink at all.  The function this was found in
+        held eleven of them.
+        """
+        out: list[tuple[ast.expr, ast.expr]] = []
+        for argument, message in self.logged(frame):
+            if message is not argument:
+                if getattr(message, "lineno", 0) > getattr(argument, "lineno", 0):
+                    continue
+                if pathcond.exclusive(_reachable_when(argument), _reachable_when(message)):
+                    continue
+            out.append((argument, message))
+        return out
+
+    def _value_hole(
+        self, frame: _Frame, message: ast.JoinedStr, arms: Sequence[ast.stmt]
+    ) -> tuple[str, str, str]:
+        """``(pattern, hole, because)`` for the hole the observed value lands in.
+
+        The one thing the map's shared sentence cannot pick.  The arm's own
+        statement and the value actually observed are both in hand here, so
+        the hole can be chosen by what it *spells* rather than by where it
+        sits -- the map anchors on the text before the first hole, and for 80
+        of the 182 subjects that get a probe at all that is not the hole the
+        value fills.
+
+        First choice is a hole one of *arms* names, which is a fact about a
+        write.  Second is a hole holding a name a reaching definition settles
+        to the observed value, which is only a fact about the function.  Empty
+        when neither, and nothing is guessed to fill the gap: an arm no line
+        reports keeps its silence, which is the honest answer.
+
+        *arms* is every arm this row could have been printed alongside, and
+        the names they write are taken together.  A row is in the skeleton
+        once, so a value pattern that holds for any of them belongs on it --
+        and which ones those are is on the row, in ``arms``, rather than
+        implied by there being a value at all.
         """
         if not self.observed:
-            return
-        reachable = _reachable_when(statement)
-        written = _written_texts(statement)
-        seen: set[str] = set()
-        fallbacks: list[PredictedLine] = []
-        for argument, message in self.logged(frame):
-            if not isinstance(message, ast.JoinedStr):
-                # Only an interpolated line has a hole to put the value in.  A
-                # constant message is about the arm running, not about what it
-                # wrote, and is a different question asked the same way.
+            return "", "", ""
+        written: set[str] = set()
+        for arm in arms:
+            written.update(_written_texts(arm))
+        holes = [
+            (position, part)
+            for position, part in enumerate(message.values)
+            if isinstance(part, ast.FormattedValue)
+        ]
+        fallback = ("", "", "")
+        for position, part in holes:
+            if not _neighbouring_literal(message, position):
                 continue
-            if pathcond.exclusive(reachable, _reachable_when(argument)):
+            spelled = _text(part.value)
+            rendered = _rendered(message, position, self.observed)
+            if not rendered:
                 continue
-            holes = [
-                (position, part)
-                for position, part in enumerate(message.values)
-                if isinstance(part, ast.FormattedValue)
-            ]
-            at = getattr(argument, "lineno", line)
-            for position, part in holes:
-                spelled = _text(part.value)
-                if not _neighbouring_literal(message, position):
-                    continue
-                if spelled in written:
-                    self._predicted(
-                        seen, line, at, message, position, spelled, "the arm writes it"
-                    )
-                    break
-                if isinstance(part.value, ast.Name) and self._holds_observed(
-                    frame, part.value.id
-                ):
-                    fallbacks.append(
-                        PredictedLine(
-                            line=line,
-                            at=at,
-                            pattern=_rendered(message, position, self.observed),
-                            hole=spelled,
-                            because=f"{spelled} is set to this value above",
-                            text=_text(message),
+            if spelled in written:
+                return rendered, spelled, "the arm writes it"
+            if not fallback[0] and isinstance(part.value, ast.Name):
+                if self._holds_observed(frame, part.value.id):
+                    fallback = (rendered, spelled, f"{spelled} is set to this value above")
+        return fallback
+
+    def skeleton(self, frame: _Frame) -> list[SkeletonLine]:
+        """What this function prints, in source order, with the arms in place.
+
+        Built from the whole function rather than from the arms outward, and
+        that is the point: a line that says nothing about the value still
+        proves the code between two of them ran, so the rows that carry no
+        hole are as much of the answer as the rows that do.
+
+        Only the parts of the tree that lead to a printed line or an arm are
+        walked into.  A skeleton is not the source again -- a 540-line
+        function whose every branch is reproduced buries the handful of rows a
+        reader came for, which is the failure this round is elsewhere fixing.
+        """
+        func = frame.func
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return []
+        printed: dict[int, list[tuple[ast.expr, ast.expr]]] = {}
+        for argument, message in self.reachable_calls(frame):
+            statement = _enclosing_statement(argument)
+            if statement is not None:
+                printed.setdefault(id(statement), []).append((argument, message))
+        rows: list[SkeletonLine] = []
+        self._emit(frame, func.body, 0, printed, rows)
+        return rows
+
+    def _emit(
+        self,
+        frame: _Frame,
+        body: Sequence[ast.stmt],
+        depth: int,
+        printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+        rows: list[SkeletonLine],
+    ) -> None:
+        for statement in body:
+            if not _of_interest(statement, printed, self.armed):
+                continue
+            blocks = _blocks_of(statement)
+            if blocks:
+                # A call in the header itself -- ``if log.warning(x):`` is
+                # absurd but ``with open(name(log.debug(x))):`` is not, and
+                # ``_enclosing_statement`` hands both back keyed on the
+                # compound.  Emitted before the header so the row is not lost
+                # to a branch that only ever recurses.
+                for row in self._rows_for(frame, statement, depth, printed):
+                    if row.kind == SKELETON_PRINT:
+                        rows.append(row)
+                # Every header of a statement that is worth showing at all,
+                # even where that block holds nothing.  Dropping the empty
+                # ones produced an ``except Exception:`` with no ``try:`` over
+                # it and an ``else:`` whose condition was nowhere on the page
+                # -- and the nesting is the thing a reader is here for, so a
+                # header that explains a shown block is not decoration.
+                for header, inner in blocks:
+                    rows.append(
+                        SkeletonLine(
+                            kind=SKELETON_BRANCH,
+                            line=getattr(statement, "lineno", 0),
+                            depth=depth,
+                            text=header,
                         )
                     )
-        # Second best, and only where nothing better was found for this arm: a
-        # hole the arm itself names is a fact about this write, where a hole
-        # merely reaching the value is a fact about the function.
-        if not seen:
-            for entry in fallbacks:
-                if entry.pattern in seen:
-                    continue
-                seen.add(entry.pattern)
-                self.predicted.append(entry)
+                    if any(_of_interest(one, printed, self.armed) for one in inner):
+                        self._emit(frame, inner, depth + 1, printed, rows)
+                continue
+            for row in self._rows_for(frame, statement, depth, printed):
+                rows.append(row)
 
-    def _predicted(
+    def _rows_for(
         self,
-        seen: set[str],
-        line: int,
-        at: int,
-        message: ast.JoinedStr,
-        position: int,
-        spelled: str,
-        because: str,
-    ) -> None:
-        pattern = _rendered(message, position, self.observed)
-        if not pattern or pattern in seen:
-            return
-        seen.add(pattern)
-        self.predicted.append(
-            PredictedLine(
-                line=line,
-                at=at,
-                pattern=pattern,
-                hole=spelled,
-                because=because,
-                text=_text(message),
+        frame: _Frame,
+        statement: ast.stmt,
+        depth: int,
+        printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+    ) -> list[SkeletonLine]:
+        line = getattr(statement, "lineno", 0)
+        rows: list[SkeletonLine] = []
+        for argument, message in printed.get(id(statement), ()):
+            arms = [
+                arm
+                for arm, held in self.armed.items()
+                if not pathcond.exclusive(
+                    _reachable_when(held), _reachable_when(argument)
+                )
+            ]
+            if isinstance(message, ast.JoinedStr):
+                pattern = line_pattern(message)
+                value, hole, because = self._value_hole(
+                    frame, message, [self.armed[arm] for arm in arms]
+                )
+            else:
+                pattern = _constant_pattern(message)
+                value, hole, because = "", "", ""
+            refused = "" if pattern else _refusal(message)
+            # Deduped on what the row would *say*, refusals included: one call
+            # can resolve to several messages that render the same, and three
+            # identical "too little literal" rows on one line tell a reader
+            # nothing three times.
+            if any(
+                (row.pattern, row.text) == (pattern, _text(message)) for row in rows
+            ):
+                continue
+            rows.append(
+                SkeletonLine(
+                    kind=SKELETON_PRINT,
+                    line=line,
+                    depth=depth,
+                    text=_text(message),
+                    pattern=pattern,
+                    refused=refused,
+                    arms=sorted(arms),
+                    value=value,
+                    hole=hole,
+                    because=because,
+                )
             )
-        )
+        if line in self.armed:
+            rows.append(
+                SkeletonLine(
+                    kind=SKELETON_ARM,
+                    line=line,
+                    depth=depth,
+                    text=_text(statement),
+                )
+            )
+        return rows
 
     def _holds_observed(self, frame: _Frame, name: str) -> bool:
         """Whether a reaching definition in this function settles *name* to it."""
@@ -1137,14 +1461,22 @@ class _Walk:
 class Walked(NamedTuple):
     """What one walk found.
 
-    A named tuple rather than a pair because the walk now answers two
-    questions about the same arms -- why they ran, and what production prints
+    A named tuple rather than a pair because the walk answers two questions
+    about the same function -- why the arms ran, and what the function prints
     when they do -- and the second is empty whenever the first is refused.
+
+    The two are siblings rather than one inside the other because they are
+    ordered on different axes.  ``steps`` runs along data dependence and
+    crosses into other functions; the skeleton runs in source order and stays
+    in this one, because the thing it is laid against is a log region and a
+    log region is in time order.  Folding the skeleton into ``steps`` would
+    put rows that say nothing about the value into a list whose every row is
+    about the value.
     """
 
     steps: list[TraceStep]
     note: str
-    predicted: list[PredictedLine] = []
+    skeleton: list[SkeletonLine] = []
 
 
 def walk(
@@ -1165,11 +1497,13 @@ def walk(
     share is explained once.  Returns the steps and a note -- empty when the
     walk finished on its own, which the measurement says is the usual case.
 
-    *observed* is the value the record actually holds.  Given one, each arm
-    also gets the line production would print for it, anchored on the literal
-    text either side of the hole *that* value fills -- see
-    :class:`~bamboo.codemap.models.PredictedLine`.  Without one there is no
-    hole to pick, and the walk says only why the arm ran.
+    Also returns the skeleton: what this function prints, in source order,
+    with the arms in place -- see
+    :class:`~bamboo.codemap.models.SkeletonLine`.  *observed* is the value the
+    record actually holds, and given one the rows whose hole it lands in carry
+    the narrower pattern with it filled in as well.  Without one the skeleton
+    still comes back, because a line that reports nothing about the value
+    still says the code around it ran.
 
     **A tree that is not the map's is refused rather than warned about.**  A
     trace is shaped like an answer, and reading line 4971 of the wrong release
@@ -1194,4 +1528,4 @@ def walk(
     while state.queue:
         held, name, depth = state.queue.popleft()
         state.explain(held, name, depth)
-    return Walked(state.steps, state.note, state.predicted)
+    return Walked(state.steps, state.note, state.skeleton(frame))
