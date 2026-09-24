@@ -7777,6 +7777,8 @@ def _fragment_of(*nodes, version: str = VERSION) -> MapFragment:
             fragment.junctions.append(node)
         elif isinstance(node, BoundaryNode):
             fragment.boundaries.append(node)
+        elif isinstance(node, SubjectNode):
+            fragment.subjects.append(node)
     return fragment
 
 
@@ -7896,6 +7898,47 @@ def test_losing_a_polled_entry_is_reported():
     (change,) = [c for c in result.changes if c.field == "entry_points"]
     assert "polled" in change.before
     assert "polled" not in change.after
+
+
+def test_losing_the_one_query_that_selects_a_value_is_reported():
+    """Who selects on a value is the answer the map is asked for.
+
+    Taken from a round that moved it for real: ``copyArchive::main`` stopped
+    selecting ``JobSpec.jobStatus=closed`` because the binds it was credited
+    with belonged to a later statement.  ``selected_values`` did not move --
+    the value is still selected, by other functions -- so with only the value
+    set compared, the two builds reported as describing the same map.  It is
+    the same hole ``CONTENT_FIELDS`` exists to close.
+    """
+    def subject(selected_by):
+        return SubjectNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="JobSpec.jobStatus",
+            spec_class="JobSpec",
+            attribute="jobStatus",
+            selected_values=["closed"],
+            selected_by=selected_by,
+        )
+
+    result = diff.compare(
+        _fragment_of(subject({"closed": ["copyArchive.py::main", "a.py::f"]})),
+        _fragment_of(subject({"closed": ["a.py::f"]})),
+    )
+
+    (change,) = result.changes
+    assert change.field == "selected_by"
+    assert "copyArchive" in change.before
+    assert "copyArchive" not in change.after
+
+
+def test_every_field_a_subject_states_a_fact_in_is_compared():
+    """``selected_values`` alone left three of them unwatched, and each answers
+    a question the map is asked: who selects on a value, who updates rows
+    already holding it, and what bounds the selecting whatever the value is."""
+    fields = diff.CONTENT_FIELDS[NodeType.SUBJECT.value]
+
+    assert {"selected_by", "updated_by", "selection_gates"} <= set(fields)
 
 
 def test_added_and_removed_nodes_are_named():

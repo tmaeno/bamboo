@@ -43,6 +43,12 @@ _JUNCTION = NodeType.JUNCTION_POINT.value
 # would bury the changes that matter in changes that never do.
 CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     NodeType.VALUE_ENUM.value: ("namespace", "constant", "value", "comment"),
+    # ``selected_by``, ``updated_by`` and ``selection_gates`` are here because
+    # leaving them out was a hole of exactly the kind the whole module exists
+    # to close.  A round that took ``copyArchive::main`` off
+    # ``JobSpec.jobStatus[closed]`` -- who selects on a value, which is the
+    # answer the map is asked for -- was told the two builds described the same
+    # map, because the value *set* had not moved, only everyone who acts on it.
     NodeType.SUBJECT.value: (
         "spec_class",
         "qualifier_kind",
@@ -50,6 +56,9 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "criteria",
         "vocabulary",
         "selected_values",
+        "selected_by",
+        "updated_by",
+        "selection_gates",
     ),
     NodeType.ENTITY.value: (
         "tables",
