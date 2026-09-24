@@ -420,6 +420,25 @@ class CodeMap:
         """
         return await self._find(FilterStageNode, criteria_tag=tag)
 
+    async def stages_named(self, name: str) -> list[FilterStageNode]:
+        """The stages a description resolved to, by tag or by funnel label.
+
+        :meth:`stage_for_tag` answers only the first, and the vocabulary has
+        two names for the same stage: the ``criteria=-`` token production
+        writes per rejected candidate, and the coarser label it prints when it
+        counts what is left.  Forty-nine of the four hundred and forty-three
+        terms are the second kind, and asked about one the map resolved the
+        name in its header and then named no code at all -- the reader got the
+        funnel for twenty-one other steps and nothing about theirs.
+
+        A chain is still not a stage.  Its key is an owner, which matches
+        neither field, and answering "every stage in it" would be a listing
+        rather than a localization.
+        """
+        return await self.stage_for_tag(name) or await self._find(
+            FilterStageNode, funnel_label=name
+        )
+
     async def vocabulary(self) -> list[MapTerm]:
         """Everything this map can be asked about, with the symptom each becomes.
 

@@ -2215,7 +2215,12 @@ class Localization(BaseModel):
     )
     describes: str = Field(
         default="",
-        description="The ``criteria=-`` tag the description resolved to, when it was one.",
+        description=(
+            "What the description resolved to, when the map holds a stage for "
+            "it: the ``criteria=-`` tag production writes per rejected "
+            "candidate, or the funnel label it prints per count.  Empty for a "
+            "chain, whose key is an owner and names no single stage."
+        ),
     )
     emitted_by: list[StageCut] = Field(
         default_factory=list,

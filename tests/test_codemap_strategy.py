@@ -1635,6 +1635,48 @@ async def test_a_tag_two_chains_emit_names_both_stages():
     assert [c.owner for c in strategy.localization.emitted_by] == sorted([PROD_TASK, PROD_JOB])
 
 
+async def test_a_step_named_by_its_funnel_label_names_its_stage():
+    """The second name the vocabulary holds for a stage, and the one 49 of the
+    443 terms carry.  Asked about it the report named the label three times in
+    its header and no code at all in its body."""
+    stages = [
+        _filter_stage(PROD_TASK, "-status", "status check", 0, ["panda-AtlasProdTaskBroker.log"]),
+        _filter_stage(PROD_JOB, "-nospace", "SE space check", 7, [PROD_JOB_LOG],
+                      condition="siteSpec.space_free < minFreeSpace"),
+    ]
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+
+    strategy = await strategy_mod.localize(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="SE space check")
+    )
+    local = strategy.localization
+
+    assert local.describes == "SE space check"
+    (named,) = local.emitted_by
+    assert (named.owner, named.order, named.tag) == (PROD_JOB, 7, "-nospace")
+    assert named.conditions == ["siteSpec.space_free < minFreeSpace"]
+
+
+async def test_a_tag_wins_over_a_label_that_spells_the_same_thing():
+    """The tag is what production writes per rejected candidate, so a name that
+    is both is read as the tag and the label lookup never runs."""
+    stages = [
+        _filter_stage(PROD_TASK, "status check", "the other one", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_JOB, "-status", "status check", 1, [PROD_JOB_LOG]),
+    ]
+    code_map = await _map(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, filter_stages=stages)
+    )
+
+    strategy = await strategy_mod.localize(
+        code_map, Symptom(kind=SYMPTOM_DISTRIBUTION, focus="status check")
+    )
+
+    assert [c.owner for c in strategy.localization.emitted_by] == [PROD_TASK]
+
+
 async def test_a_chain_named_as_the_focus_names_no_stage():
     """A chain is not a tag, and saying "every stage in it" would be a listing
     rather than a localization."""
