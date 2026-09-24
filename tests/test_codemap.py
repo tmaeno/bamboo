@@ -10418,6 +10418,46 @@ def test_the_execute_form_keeps_reading_every_bind():
     assert [r.window for r in sql.executions(func)] == [None]
 
 
+def test_two_independent_choices_make_four_statements_not_five_halves():
+    """``insertTaskParams_JEDI`` builds one INSERT across two unrelated ``if``s.
+
+    The arms were grouped by connected component, and the two groups touch --
+    the inner ``if`` repeats the outer test, so one arm of each is exclusive
+    with one arm of the other.  Merged into a single alternative, exactly one
+    fragment of the five survives per variant, and every statement comes out
+    with an opening parenthesis and no closing one or the reverse.  ``writes``
+    reads none of them, which is how the map lost ``T_TASK.priority`` while
+    reporting six statements it could not name a column of.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'INSERT INTO ATLAS_DEFT.T_TASK (a,b,c) VALUES '\n"
+        "    if self.backend == 'oracle':\n"
+        "        sql += '(SEQ.nextval,'\n"
+        "    else:\n"
+        "        sql += '(:nextval,'\n"
+        "    sql += ':status,'\n"
+        "    if parent_tid is None:\n"
+        "        if self.backend == 'oracle':\n"
+        "            sql += 'SEQ.currval) '\n"
+        "        else:\n"
+        "            sql += ':currval) '\n"
+        "    else:\n"
+        "        sql += ':parent_tid) '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+    head = "INSERT INTO ATLAS_DEFT.T_TASK (a,b,c) VALUES "
+
+    assert sorted(r.sql for r in sql.executions(_func(source))) == sorted(
+        [
+            head + "(SEQ.nextval,:status,SEQ.currval) ",
+            head + "(SEQ.nextval,:status,:parent_tid) ",
+            head + "(:nextval,:status,:currval) ",
+            head + "(:nextval,:status,:parent_tid) ",
+        ]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # where an inline value is anchored
 # --------------------------------------------------------------------------- #

@@ -251,34 +251,64 @@ def _fold(parts: list[tuple[int, str, str, ast.stmt]]) -> str:
     return assembled
 
 
-def _exclusive_groups(
+def _compatible_sets(
     parts: list[tuple[int, str, str, ast.stmt]], start: int
-) -> list[list[int]]:
-    """Return the index groups whose members cannot all be in one statement.
+) -> list[frozenset[int]]:
+    """Return the fragment sets a single run of the code can append, largest first.
 
-    Connected components rather than pairs, because an ``if``/``elif``/``else``
-    appending a fragment from each arm makes three alternatives, not three
-    pairs.  The test is :func:`pathcond.exclusive`, reading the negations the
-    path condition already carries.
+    One set per statement a reader can meet.  The test between two fragments is
+    :func:`pathcond.exclusive`, reading the negations the path condition already
+    carries; a statement is then a set no two of whose members contradict, and
+    which nothing else can be added to -- a maximal clique of the compatibility
+    graph, enumerated with Bron-Kerbosch.
+
+    **Connected components were the wrong shape, and the corpus says where.**
+    Grouping the exclusive pairs and taking one member per group is right for
+    an ``if``/``elif``/``else``, whose arms are pairwise exclusive, and wrong
+    the moment two unrelated ``if``s touch.  ``insertTaskParams_JEDI`` builds
+    one INSERT across a backend test and a ``parent_tid`` test, and the inner
+    ``if`` repeats the outer one -- so one arm of each is exclusive with one arm
+    of the other and all five fragments collapse into a single alternative.
+    Exactly one of the five then survives per statement, and every statement
+    comes out with an opening parenthesis and no closing one, or the reverse.
+    ``writes`` reads none of them: the map reported six statements it could name
+    no column of, and ``ATLAS_DEFT.T_TASK`` lost ``priority``.
+
+    A fragment under no test is compatible with everything, so it lands in every
+    set without being special-cased.
     """
-    conditions = {index: path_condition(parts[index][3]) for index in range(start, len(parts))}
-    parent = {index: index for index in conditions}
+    indices = list(range(start, len(parts)))
+    conditions = {index: path_condition(parts[index][3]) for index in indices}
+    agrees = {
+        index: {
+            other
+            for other in indices
+            if other != index and not exclusive(conditions[index], conditions[other])
+        }
+        for index in indices
+    }
+    if all(len(agrees[index]) == len(indices) - 1 for index in indices):
+        # Nothing contradicts anything: one statement, which is most runs.
+        return [frozenset(indices)]
 
-    def root(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
+    found: list[frozenset[int]] = []
 
-    indices = sorted(conditions)
-    for position, one in enumerate(indices):
-        for other in indices[position + 1 :]:
-            if exclusive(conditions[one], conditions[other]):
-                parent[root(one)] = root(other)
-    grouped: dict[int, list[int]] = {}
-    for index in indices:
-        grouped.setdefault(root(index), []).append(index)
-    return [members for members in grouped.values() if len(members) > 1]
+    def expand(chosen: set[int], candidates: set[int], refused: set[int]) -> None:
+        if len(found) > _MAX_BRANCH_VARIANTS:
+            # The caller folds past the cap; stopping here keeps a pathological
+            # run from costing more than the answer it would be given.
+            return
+        if not candidates and not refused:
+            found.append(frozenset(chosen))
+            return
+        pivot = max(candidates | refused, key=lambda one: len(agrees[one] & candidates))
+        for one in sorted(candidates - agrees[pivot]):
+            expand(chosen | {one}, candidates & agrees[one], refused & agrees[one])
+            candidates = candidates - {one}
+            refused = refused | {one}
+
+    expand(set(), set(indices), set())
+    return sorted(found, key=lambda members: sorted(members))
 
 
 #: A hole standing where a whole table reference goes.  The keyword settles it
@@ -473,10 +503,10 @@ def _run_variants(
     no name for.
     """
     start = 1 if parts and parts[0][1] == "=" else 0
-    groups = _exclusive_groups(parts, start)
+    statements = _compatible_sets(parts, start)
     per_part, choices = _table_choices(func, parts)
     assignments = _assignments(choices)
-    total = math.prod(len(members) for members in groups) * len(assignments)
+    total = len(statements) * len(assignments)
     if total > _MAX_BRANCH_VARIANTS:
         # Folded as before rather than split into an arbitrary subset: a
         # truncated list of statements reads as the complete one.  Said out
@@ -492,11 +522,11 @@ def _run_variants(
         )
         return [_fold_filled(parts, per_part, {}, set())]
 
-    alternatives = {index for members in groups for index in members}
+    every = set(range(start, len(parts)))
     found: list[tuple[str, list[Span]]] = []
     seen: set[str] = set()
-    for combination in itertools.product(*groups):
-        dropped = alternatives - set(combination)
+    for members in statements:
+        dropped = every - members
         for assignment in assignments:
             text, spans = _fold_filled(parts, per_part, assignment, dropped)
             if text and text not in seen:
