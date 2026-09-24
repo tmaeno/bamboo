@@ -17,6 +17,7 @@ import ast
 from collections import Counter
 from unittest.mock import AsyncMock
 
+import click.testing
 import pytest
 
 from bamboo.codemap import diff, evidence, gates
@@ -52,7 +53,7 @@ from bamboo.codemap.panda.recognizers import (
     trigger,
 )
 from bamboo.models.graph_element import NodeType
-from bamboo.scripts import check_map
+from bamboo.scripts import check_map, diff_map
 
 MAP_ID = "panda"
 VERSION = "panda-server-source 1.0.2"
@@ -7915,6 +7916,78 @@ def test_two_identical_builds_report_as_identical():
 
     assert result.identical
     assert result.unchanged == 1
+
+
+# ---------------------------------------------------------------------------
+# Comparing two builds of the *same* source, made by two versions of this code
+# ---------------------------------------------------------------------------
+
+
+def _dumped(tmp_path):
+    """Run ``diff-map --dump`` and return the file it wrote."""
+    target = tmp_path / "before.json"
+    result = click.testing.CliRunner().invoke(diff_map.main, ["--dump", str(target)])
+    assert result.exit_code == 0, result.output
+    return target
+
+
+def test_a_dumped_build_reads_back_as_the_same_map(tmp_path, monkeypatch):
+    """``--dump`` has to be lossless or the baseline argues for the change.
+
+    A round that moves the map cannot hold both builds at once -- they need
+    two checkouts of *this* repository -- so the old side is a file, and a
+    field the file drops reads as a difference the round made.
+    """
+    built = _fragment_of(
+        _stage_for_diff("-disk", ["a < b"], 100),
+        _stage_for_diff("-rse", ["c"], 200),
+    )
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: built)
+
+    target = _dumped(tmp_path)
+
+    assert diff.compare(built, diff_map._load(target)).identical
+
+
+def test_a_baseline_file_stands_in_for_the_older_build(tmp_path, monkeypatch):
+    """The point of the pair: the source is fixed and the map moved anyway."""
+    before = _fragment_of(_stage_for_diff("-disk", ["a < b"], 100))
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: before)
+    target = _dumped(tmp_path)
+
+    after = _fragment_of(_stage_for_diff("-disk", ["a <= b"], 100))
+    monkeypatch.setattr(diff_map, "_build", lambda map_id, root: after)
+    result = click.testing.CliRunner().invoke(
+        diff_map.main, ["--baseline", str(target)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "condition drift (1)" in result.output
+    assert "a <= b" in result.output
+
+
+def test_comparing_a_baseline_with_a_source_tree_is_refused(tmp_path, monkeypatch):
+    """Both name the other side, so taking both would silently use one.
+
+    ``--against`` stopped being required when the two flags arrived, and the
+    failure that guards against is a run with neither: two builds of the same
+    source by the same code, reported as no difference at all.
+    """
+    monkeypatch.setattr(
+        diff_map, "_build", lambda map_id, root: _fragment_of(_stage_for_diff("-d", ["a"], 1))
+    )
+    target = _dumped(tmp_path)
+    runner = click.testing.CliRunner()
+
+    both = runner.invoke(
+        diff_map.main, ["--baseline", str(target), "--against", str(tmp_path)]
+    )
+    neither = runner.invoke(diff_map.main, [])
+
+    assert both.exit_code != 0
+    assert "--baseline" in both.output and "--against" in both.output
+    assert neither.exit_code != 0
+    assert "--dump" in neither.output
 
 
 # ---------------------------------------------------------------------------

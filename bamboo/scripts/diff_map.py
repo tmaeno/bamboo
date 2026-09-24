@@ -10,6 +10,14 @@ Comparing two builds is the only thing that surfaces that, which is why this
 is a separate command and not a mode of ``check-map``: it needs no production
 data at all, and must stay runnable when ``check-map`` cannot run.
 
+**The other direction: one source, two versions of this code.**  The question
+above is what the release changed.  A round that edits the extractor asks the
+opposite -- PanDA stands still and the map moves anyway, so every difference
+is something this repository did, and "the map is unchanged" stops being
+available as the gate.  The two builds cannot exist at once, because they need
+two checkouts of *this* repository rather than of PanDA, so one of them is
+written down.
+
 Usage::
 
     # Installed distribution against a checkout
@@ -17,6 +25,10 @@ Usage::
 
     # Two checkouts
     bamboo diff-map --source-root /path/to/old --against /path/to/new
+
+    # One source, two versions of this code
+    bamboo diff-map --dump before.json        # on the old code
+    bamboo diff-map --baseline before.json    # on the new code
 """
 
 from __future__ import annotations
@@ -38,6 +50,23 @@ def _build(map_id: str, source_root: Optional[Path]) -> MapFragment:
     plugin = get_code_map_plugin(map_id)
     plugin.prepare(source_root)
     return plugin.run()
+
+
+def _dump(fragment: MapFragment, path: Path) -> None:
+    """Write *fragment* where a later build of other code can read it back.
+
+    The whole fragment, not a summary of it: a baseline is only worth having
+    if the comparison it feeds is the same one two live builds would get, and
+    a field left out here reads afterwards as a difference the round made.
+    """
+    path.write_text(fragment.model_dump_json())
+
+
+def _load(path: Path) -> MapFragment:
+    try:
+        return MapFragment.model_validate_json(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(f"{path} is not a dumped map fragment: {exc}") from exc
 
 
 def _report(result: diff.MapDiff, top: int) -> None:
@@ -111,15 +140,32 @@ def _report(result: diff.MapDiff, top: int) -> None:
     default=None,
     metavar="PATH",
     type=click.Path(exists=True, file_okay=False, path_type=Path),
-    help="The older build's source.  Defaults to the installed distribution.",
+    help=(
+        "The source to build from.  Defaults to the installed distribution.  "
+        "With --against it is the older side."
+    ),
 )
 @click.option(
     "--against",
     default=None,
     metavar="PATH",
-    required=True,
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="The newer build's source.",
+)
+@click.option(
+    "--baseline",
+    default=None,
+    metavar="FILE",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="A fragment written by --dump, standing in for the older build.",
+)
+@click.option(
+    "--dump",
+    "dump_to",
+    default=None,
+    metavar="FILE",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="Write this run's build there, for a later run to read with --baseline.",
 )
 @click.option(
     "--strict",
@@ -135,13 +181,25 @@ def _report(result: diff.MapDiff, top: int) -> None:
 def main(
     map_id: str,
     source_root: Optional[Path],
-    against: Path,
+    against: Optional[Path],
+    baseline: Optional[Path],
+    dump_to: Optional[Path],
     strict: bool,
     top: int,
     verbose: bool,
 ) -> None:
     """Compare two builds of a Code Map and report what the code changed."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
+
+    if against is not None and baseline is not None:
+        # Both name the older side, so honouring both would mean picking one
+        # and reporting the result as though the other had been read.
+        raise click.UsageError("--baseline and --against name the same side; pass one.")
+    if against is None and baseline is None and dump_to is None:
+        # Without this the command would build the same source twice with the
+        # same code and report no difference -- which is true, and says
+        # nothing about anything.
+        raise click.UsageError("pass --against, --baseline, or --dump.")
 
     try:
         get_code_map_plugin(map_id)
@@ -151,10 +209,21 @@ def main(
         ) from exc
 
     try:
-        old = _build(map_id, source_root)
-        new = _build(map_id, against)
+        # The side this run builds.  With --against that is the newer source;
+        # otherwise it is this code's reading of the source it already has.
+        new = _build(map_id, against if against is not None else source_root)
+        old = _load(baseline) if baseline is not None else (
+            _build(map_id, source_root) if against is not None else None
+        )
     except FileNotFoundError as exc:
         raise click.ClickException(str(exc)) from exc
+
+    if dump_to is not None:
+        _dump(new, dump_to)
+        click.echo(f"wrote {dump_to}")
+
+    if old is None:
+        return
 
     result = diff.compare(old, new)
     _report(result, top)
