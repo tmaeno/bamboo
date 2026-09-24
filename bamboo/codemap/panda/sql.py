@@ -49,7 +49,7 @@ from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
-from bamboo.codemap.panda.pathcond import exclusive, path_condition
+from bamboo.codemap.panda.pathcond import attach_parents, exclusive, path_condition
 from bamboo.codemap.panda.values import rendered_text
 
 logger = logging.getLogger(__name__)
@@ -1047,6 +1047,14 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     The head is still required to be a readable name: it is what the statement
     *is*, and without it there is no anchor to hang the execution on.
     """
+    # ``_compatible_sets`` reads the arms a fragment sits under off the ancestor
+    # chain, and two of this function's callers -- ``boundary`` and ``trigger``
+    # -- never attached one.  A tree without parents does not raise: every
+    # fragment reads as unconditional, so the two arms of one ``if`` are
+    # concatenated into a statement nobody runs and the two the code does run
+    # are never seen.  Idempotent, so attaching again costs a walk and nothing
+    # else.
+    attach_parents(func)
     found: list[Execution] = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):

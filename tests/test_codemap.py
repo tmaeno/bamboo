@@ -10418,6 +10418,45 @@ def test_the_execute_form_keeps_reading_every_bind():
     assert [r.window for r in sql.executions(func)] == [None]
 
 
+# ---------------------------------------------------------------------------
+# Two arms of one statement are two statements, however the caller arrived
+# ---------------------------------------------------------------------------
+
+
+def _unattached(source: str, name: str = "f"):
+    """Parse without attaching parents, the way half this function's callers do."""
+    tree = ast.parse(source)
+    return next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
+    )
+
+
+def test_two_arms_stay_two_statements_when_no_caller_attached_parents():
+    """``boundary`` and ``trigger`` call ``executions`` and attach nothing.
+
+    The exclusive reading in ``_run_variants`` is answered off the ancestor
+    chain, and a tree without one does not raise -- every fragment reads as
+    unconditional, so both arms are concatenated into a statement nobody runs
+    and the two the code does run are never seen.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    if wanted:\n"
+        "        sql += 'WHERE b=:b '\n"
+        "    else:\n"
+        "        sql += 'WHERE c=:c '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    assert sorted(r.sql for r in sql.executions(_unattached(source))) == [
+        "SELECT a FROM ATLAS_PANDA.t1 WHERE b=:b ",
+        "SELECT a FROM ATLAS_PANDA.t1 WHERE c=:c ",
+    ]
+
+
 def test_two_independent_choices_make_four_statements_not_five_halves():
     """``insertTaskParams_JEDI`` builds one INSERT across two unrelated ``if``s.
 
