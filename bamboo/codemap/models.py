@@ -423,9 +423,9 @@ class Branch(BaseModel):
             "with the file it lands in.  Withdrawn once, when the only "
             "templates that survived promotion were identifier frames rather "
             "than diagnostics; raised again now that a consumer needs them -- "
-            "``strategy.line_shape`` reads them to build the probe, and while "
-            "they were empty it fell back to one hard-coded shape covering one "
-            "subject."
+            "the walk renders them into the skeleton, one row per line the "
+            "code prints, and while they were empty the report fell back to "
+            "one hard-coded shape covering one subject."
         ),
     )
     log_level: Optional[str] = Field(

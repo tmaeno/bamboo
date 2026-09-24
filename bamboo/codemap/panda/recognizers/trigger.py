@@ -625,6 +625,12 @@ def reaching_modules(
     a name is followed only where it means one thing (:func:`sole_definitions`)
     or where the entry imports the module it names.
 
+    **A caller in the owner's own module is skipped**, which is why the bucket
+    below is named for another module rather than for any caller at all.  The
+    question is what starts the owner, and a sibling does not answer it -- it
+    moves the question to what starts the sibling, which is the one-hop rule
+    again.  It is a deliberate narrowing and not a gap, so the name says so.
+
     *through_doors* lets a caller of the facade reach what the facade calls.
     ``TaskBuffer.storeJobs`` is the only thing in the corpus that calls
     ``proxy.insertNewJob``, and ``JobGenerator`` and ``api/v1/job_api`` both
@@ -1306,7 +1312,7 @@ def attach(
 #: of those callers a trigger, and whether the owner is module-level code.
 #: Anything needing a fourth judgment would be this slice guessing, and the
 #: report says "unclassified" rather than inventing a bucket for it.
-NO_CALLER_RESOLVED = "no caller the map resolves"
+NO_CALLER_RESOLVED = "no caller in another module that the map resolves"
 CALLER_STARTS_NOTHING = "a caller is named, but nothing declares what starts it"
 RUNS_AT_IMPORT = "runs when its module is imported"
 UNCLASSIFIED = "unclassified"
@@ -1324,10 +1330,16 @@ def unreached_reasons(
     slice could do:
 
     ``NO_CALLER_RESOLVED``
-        Nothing the map resolves calls the owner.  Either the corpus really
-        does not call it, or the call was dropped -- the facade hop is dropped
-        deliberately (:func:`_outward_call_sites`), so a proxy method the API
-        reaches only through ``TaskBuffer`` lands here.
+        No module other than the owner's own calls it.  Two of the three ways
+        that happens are deliberate, and only the first is an absence: the
+        corpus really does not call it; or the facade hop was dropped
+        (:func:`_outward_call_sites`), so a proxy method the API reaches only
+        through ``TaskBuffer`` lands here; or the only callers are in the
+        owner's own module, which :func:`reaching_modules` skips because
+        "what starts this" is not answered by a sibling -- it only moves the
+        question to what starts the sibling.  4 of the 32 junctions in this
+        bucket have a ``self.<method>`` call in their own file, and the name
+        used to read as though the map had found nothing at all.
     ``CALLER_STARTS_NOTHING``
         A caller is named and carries no trigger, so answering would mean
         asking what starts *it*.  **That is the one-hop rule in the module

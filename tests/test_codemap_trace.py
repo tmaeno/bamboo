@@ -732,9 +732,10 @@ def _printed(roots, *, file, owner, lines, **kwargs):
 def test_the_line_is_anchored_either_side_of_the_hole_the_value_fills(tmp_path):
     """What the map's shared sentence cannot do.
 
-    ``line_shape`` anchors on the literal before the *first* hole, whichever
-    hole that is.  Here the value goes in the second, and for 80 of the 182
-    subjects that get a probe at all the first is the wrong one.
+    The pooled question this replaced anchored on the literal before the
+    *first* hole, whichever hole that is.  Here the value goes in the second,
+    and for 80 of the 182 subjects that got a question at all the first was
+    the wrong one.  ``_value_hole`` is where that behaviour lives now.
     """
     roots = _tree(
         tmp_path,

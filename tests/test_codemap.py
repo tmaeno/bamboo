@@ -4927,6 +4927,26 @@ def test_a_junction_nothing_calls_is_told_from_one_whose_caller_starts_nothing()
     assert trigger.UNCLASSIFIED not in reasons
 
 
+def test_a_caller_in_the_owners_own_module_still_leaves_it_in_this_bucket():
+    """And the bucket is named for that, because it is a narrowing and not an
+    absence: ``what starts this`` is not answered by a sibling, only moved to
+    what starts the sibling.  4 of the corpus's 32 have a caller like this, and
+    a name reading "no caller the map resolves" said the map had found none."""
+    inner = _junction("watchdog.py::do_reassign")
+    reasons = _reasons(
+        (
+            "class W:\n"
+            "    def doAction(self, log):\n        return self.do_reassign(log)\n"
+            "    def do_reassign(self, log):\n        return 1\n",
+            "watchdog.py",
+        ),
+        junctions=[inner],
+    )
+
+    assert reasons == {trigger.NO_CALLER_RESOLVED: [inner]}
+    assert "in another module" in trigger.NO_CALLER_RESOLVED
+
+
 def test_module_level_code_is_not_reported_as_uncalled():
     """"Who imports it" is a different question, so it gets its own answer."""
     at_import = _junction("sitemapper.py::<module>")

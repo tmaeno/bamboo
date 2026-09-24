@@ -97,9 +97,13 @@ class Budget(NamedTuple):
     answer is the failure this whole design is built to avoid.
 
     ``depth`` is set where the walk converges rather than where it is
-    comfortable: at six, two of the 481 walks were still cut short; at
-    eight, none are, and the terminals the whole corpus reaches are the
-    same as six's but for two steps.  ``steps`` still bites three times.
+    comfortable: at six, two of the 481 walks were still cut short; at eight
+    one is, ``datasetManager.py::run``, and the terminals the whole corpus
+    reaches are the same as six's but for two steps.  ``steps`` bites three
+    times -- ``JobGenerator.py::runImpl``, the same ``run``, and
+    ``insertFilesForDataset_JEDI`` -- out of 540 readings.  The numbers are
+    not a tuning knob: four functions out of 540 is the design working, and
+    "none are" was written when the corpus was smaller.
     """
 
     files: int = 12

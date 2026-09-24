@@ -3,10 +3,11 @@
 Filter stages have carried their message templates from the start -- 94 of 109
 have one and 104 have a level -- and junctions never did: 0 of 1066 branches.
 The mechanism existed and was simply never pointed at the other node kind, and
-what that cost is visible in the consumer.  ``strategy.line_shape`` had to keep
-a hard-coded dictionary of one entry, ``set task_status={value}``, so
+what that cost is visible in the consumer.  The report had to keep a
+hard-coded dictionary of one entry, ``set task_status={value}``, so
 ``derive-strategy`` could observe exactly one subject and had to report every
-other as a capability gap.
+other as a capability gap.  The skeleton reads these now, and the pooled
+question that dictionary stood in for is gone.
 
 Written as an attach pass rather than inside the slices that build junctions,
 because two of them do -- the attribute slice and the SQL slice -- and reading
