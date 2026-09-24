@@ -1257,3 +1257,31 @@ def f(items, log):
     ]
     assert any("finished the pass over" in one for one in printed), printed
     assert any("starting the first pass" in one for one in printed), printed
+
+
+def test_a_message_the_walk_cannot_resolve_is_refused_rather_than_dropped(tmp_path):
+    """A bare name bound only by an unpacking resolves to nothing, and the call
+    used to leave no row at all -- where the same call holding an expression
+    leaves a refusal.  A reader lays the skeleton over a grep of the log
+    region, so a line there and not here reads as certainty."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(api, log):
+    out, err = api.list_datasets()
+    if out is None:
+        log.error(f"failed to list the datasets with {err}")
+    else:
+        log.debug(out)
+        spec.status = "done"
+""",
+    )
+
+    walked = _walked(roots, file="m", owner="f", lines=[8])
+
+    refused = {
+        row.line: row.refused
+        for row in walked.skeleton
+        if row.kind == models.SKELETON_PRINT and row.refused
+    }
+    assert refused == {7: "the message is not a literal this walk can render"}

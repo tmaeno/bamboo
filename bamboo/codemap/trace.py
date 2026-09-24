@@ -80,7 +80,7 @@ from bamboo.codemap.panda import pathcond
 # to keep current, and the one thing the two cadences must agree on is which
 # calls are log calls: the map's question and the trace's prediction have to be
 # about the same sentence or they cannot be compared at all.
-from bamboo.codemap.panda.recognizers.emit import _logged_arguments
+from bamboo.codemap.panda.recognizers.emit import _logged_arguments, logging_arguments
 from bamboo.codemap.reading import containing_function
 
 logger = logging.getLogger(__name__)
@@ -1068,10 +1068,23 @@ class _Walk:
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return []
         printed: dict[int, list[tuple[ast.expr, ast.expr]]] = {}
+        carried: set[int] = set()
         for argument, message in self.reachable_calls(frame):
             statement = _enclosing_statement(argument)
             if statement is not None:
                 printed.setdefault(id(statement), []).append((argument, message))
+                carried.add(id(argument))
+        # A call left with no message at all -- a bare name nothing in the
+        # function binds, or one whose every binding is out of reach -- used to
+        # leave no row.  The reader lays this over a grep of the log region, so
+        # a line that is there and not here reads as certainty rather than as
+        # a gap.  Refused out loud, in the words the other refusals use.
+        for argument in logging_arguments(frame.func):
+            if id(argument) in carried:
+                continue
+            statement = _enclosing_statement(argument)
+            if statement is not None:
+                printed.setdefault(id(statement), []).append((argument, argument))
         rows: list[SkeletonLine] = []
         self._emit(frame, func.body, 0, printed, rows)
         return rows

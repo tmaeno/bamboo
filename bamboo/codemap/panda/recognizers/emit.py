@@ -85,6 +85,26 @@ def _logged_arguments(
     assignments = assigned_expressions(func)
 
     found: list[tuple[ast.expr, ast.expr]] = []
+    for argument in logging_arguments(func):
+        if isinstance(argument, ast.Name):
+            found.extend((argument, built) for built in assignments.get(argument.id, ()))
+        else:
+            found.append((argument, argument))
+    return found
+
+
+def logging_arguments(func: ast.AST) -> list[ast.expr]:
+    """The message argument of every logging call in *func*, resolved or not.
+
+    Split out of :func:`_logged_arguments` because the two questions differ and
+    only one of them used to be answerable.  That function pairs a call with
+    the messages it could be printing, and a bare name it can resolve to
+    nothing yields no pair at all -- so the call vanishes, where a call holding
+    an expression it cannot render at least leaves a refusal.  Sixty-five calls
+    in this corpus go that way, and a reader lays the skeleton over a grep of
+    the log region: a line present there and absent here reads as certainty.
+    """
+    found: list[ast.expr] = []
     for node in ast.walk(func):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
@@ -95,10 +115,7 @@ def _logged_arguments(
         # is asked about the argument rather than about the call.
         if log_level(argument) is None:
             continue
-        if isinstance(argument, ast.Name):
-            found.extend((argument, built) for built in assignments.get(argument.id, ()))
-        else:
-            found.append((argument, argument))
+        found.append(argument)
     return found
 
 
