@@ -1698,6 +1698,108 @@ def test_a_bare_placeholder_is_filled_only_where_no_f_string_built_the_text():
     ] == ["JEDI_Tasks"]
 
 
+def test_a_format_call_at_the_assignment_names_one_table_per_pass():
+    """``(...).format(schemaPANDA, table)`` -- the older spelling, and the one
+    that still hid three statements.
+
+    ``rendered_text`` flattens ``{0}`` and ``{1}`` to ``{}`` so the statement
+    reads at all, and the arguments behind them were then out of reach: the map
+    knew ``getUsageBreakdown_JEDI`` queried a table and not which one.  The
+    indices are read back from the receiver instead, because a ``{0}`` left in
+    the rendered text is a ``{}`` that stopped working -- every reader
+    downstream keys on the two literal characters.
+    """
+    source = (
+        "def f(self):\n"
+        "    for table in ['jobsActive4', 'jobsArchived4']:\n"
+        "        sqlJ = (\n"
+        "            'SELECT COUNT(*),prodUserName '\n"
+        "            'FROM {0}.{1} '\n"
+        "            'WHERE prodSourceLabel=:label '\n"
+        "        ).format(panda_config.schemaPANDA, table)\n"
+        "        self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT COUNT(*),prodUserName FROM {}.jobsActive4 WHERE prodSourceLabel=:label ",
+        "SELECT COUNT(*),prodUserName FROM {}.jobsArchived4 WHERE prodSourceLabel=:label ",
+    ]
+
+
+def test_an_index_used_twice_fills_both_of_its_holes():
+    """``"FROM {0}.{1} j, {0}.Datasets d"`` has three markers and two arguments.
+
+    One entry per *marker* is the only shape ``_table_choices`` accepts -- it
+    measures the list against the number of ``{}`` the text carries -- so a
+    list of distinct arguments is one short and the fragment is dropped.
+    Dropped, not truncated, and without a word about it.
+    """
+    source = (
+        "def f(self, vo):\n"
+        "    tableName = 'jobsDefined4'\n"
+        "    sqlJ = 'SELECT distinct prodUserName '\n"
+        "    sqlJ += 'FROM {0}.{1} j, {0}.Datasets d '.format(schemaPANDA, tableName)\n"
+        "    sqlJ += 'WHERE vo=:vo '\n"
+        "    self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT distinct prodUserName FROM {}.jobsDefined4 j, {}.Datasets d WHERE vo=:vo "
+    ]
+
+
+def test_a_format_call_that_cannot_be_lined_up_leaves_the_hole_alone():
+    """The four shapes where marker and argument stop corresponding.
+
+    A hole filled from the wrong argument names a table with exactly the
+    confidence of one the code wrote, so each of these is read as written:
+
+    ``*args`` / ``**kwargs``      the source does not say how many, or which
+    ``{{`` / ``}}``               an escaped brace is not a field, but the
+                                  ``{}`` inside ``{{}}`` is matched as one, so
+                                  the two counts stop describing the same text
+    a receiver with its own hole  an f-string renders ``{}`` as well, and
+                                  afterwards nothing says which came from where
+    """
+    unreadable = {
+        "starred": "'FROM {0}.{1} '.format(*names)",
+        "keywords": "'FROM {0}.{1} '.format(**names)",
+        "escaped brace": "'FROM {0}.{1} {{}} '.format(schemaPANDA, 'jobsActive4')",
+        "receiver has a hole": "f'FROM {schemaPANDA}.{{1}} '.format('x', 'jobsActive4')",
+    }
+
+    for why, expression in unreadable.items():
+        source = (
+            "def f(self):\n"
+            f"    sqlJ = 'SELECT PandaID ' + {expression}\n"
+            "    self.cur.execute(sqlJ + comment, varMap)\n"
+        )
+
+        (run,) = sql.executions(_func(source))
+
+        assert "jobsActive4" not in run.sql, why
+
+
+def test_a_derived_field_holds_its_position_without_naming_anything():
+    """``{0[1]}`` and ``{2:.3%}`` take a marker but name a value computed from
+    an argument rather than the argument.
+
+    Leaving them out would move every later hole onto the wrong argument, and
+    the count guard that catches that drops the whole fragment -- so they hold
+    a position that resolves to nothing, and the hole beside them still fills.
+    """
+    source = (
+        "def f(self):\n"
+        "    sqlJ = 'SELECT PandaID '\n"
+        "    sqlJ += 'FROM {0[1]}.{1} WHERE pct>{2:.3%} '.format(names, 'jobsActive4', ratio)\n"
+        "    self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+
+    assert [run.sql for run in sql.executions(_func(source))] == [
+        "SELECT PandaID FROM {}.jobsActive4 WHERE pct>{} "
+    ]
+
+
 def test_a_table_name_the_loop_supplies_becomes_one_statement_per_table():
     """A hole standing for a whole table is not the schema.
 

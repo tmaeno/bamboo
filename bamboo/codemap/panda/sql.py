@@ -45,6 +45,7 @@ import itertools
 import logging
 import math
 import re
+import string
 from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
@@ -354,11 +355,74 @@ def _table_holes(text: str) -> set[int]:
     return found
 
 
+# A field marker whose value is derived from an argument rather than being one
+# -- ``{0.attr}``, ``{0[1]}``, ``{p:.3%}``, or an index the call passes nothing
+# for.  It holds a position so the markers and the ``{}``s stay in step, and
+# resolves to nothing, which is what a hole nobody can read is worth.
+_DERIVED_FIELD = ast.Constant(value=None)
+
+
+def _format_arguments(node: ast.Call) -> Optional[list[ast.expr]]:
+    """The expression behind each field marker of ``<text>.format(...)``.
+
+    One entry per marker in *source order, with repeats*, not one per distinct
+    argument: ``"FROM {0}.{1} j, {0}.Datasets d"`` has three markers and two
+    arguments, and :func:`_table_choices` measures this list against the number
+    of ``{}`` the rendered text carries.  A list of distinct arguments is one
+    short, and a fragment whose count does not match is dropped rather than
+    truncated -- silently, which is how a table name goes missing.
+
+    The indices are read back from the receiver, *before* :func:`rendered_text`
+    flattens every marker to ``{}``.  Leaving them in the rendered text instead
+    was measured and rejected: a ``{0}`` that survives is a ``{}`` that stopped
+    working, because every reader downstream keys on the two literal
+    characters, and the one that does not invented a boundary named ``{1}``.
+    """
+    text = rendered_text(node.func.value)
+    if text is None or "{{" in text or "}}" in text:
+        # An escaped brace is not a field, but ``_FIELD`` matches the ``{}``
+        # inside ``{{}}`` -- so the markers and the holes stop counting the
+        # same things, and nothing downstream would say which is which.
+        return None
+    if _hole_expressions(node.func.value) != []:
+        # The receiver has to be text the source wrote, whole.  An f-string, or
+        # a concatenation holding one, renders ``{}`` as well, and afterwards
+        # there is no telling which hole came from where.
+        return None
+    if any(isinstance(argument, ast.Starred) for argument in node.args) or any(
+        keyword.arg is None for keyword in node.keywords
+    ):
+        # ``*names`` / ``**names``: the call does not say how many, or which.
+        return None
+    named = {keyword.arg: keyword.value for keyword in node.keywords}
+    found: list[ast.expr] = []
+    automatic = 0
+    for _literal, field, spec, conversion in string.Formatter().parse(text):
+        if field is None:
+            continue
+        if spec or conversion or any(access in field for access in ".["):
+            found.append(_DERIVED_FIELD)
+        elif field == "":
+            found.append(node.args[automatic] if automatic < len(node.args) else _DERIVED_FIELD)
+            automatic += 1
+        elif field.isdigit():
+            index = int(field)
+            found.append(node.args[index] if index < len(node.args) else _DERIVED_FIELD)
+        else:
+            found.append(named.get(field, _DERIVED_FIELD))
+    # The same measurement :func:`_table_choices` will make, made here as well:
+    # composed under a ``+``, a list of the wrong length can be summed with a
+    # correct one into a total that matches and is aligned with nothing.
+    rendered = rendered_text(node)
+    if rendered is None or len(found) != rendered.count(_BARE_FIELD):
+        return None
+    return found
+
+
 def _hole_expressions(node: ast.expr) -> Optional[list[ast.expr]]:
     """The expressions behind each ``{}`` :func:`rendered_text` left, in order.
 
-    ``None`` when the alignment is not assured -- a ``.format`` call renders
-    its own field markers as holes too, and a hole filled with the wrong
+    ``None`` when the alignment is not assured -- a hole filled with the wrong
     expression's value would put an invented table name in the statement with
     the same confidence as one the code wrote.
     """
@@ -376,6 +440,12 @@ def _hole_expressions(node: ast.expr) -> Optional[list[ast.expr]]:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _hole_expressions(node.left), _hole_expressions(node.right)
         return None if left is None or right is None else left + right
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        return _format_arguments(node)
     return None
 
 
