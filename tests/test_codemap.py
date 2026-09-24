@@ -32,6 +32,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     FilterStageNode,
     JunctionNode,
+    LogSiteNode,
     LoopCutNode,
     MapFragment,
     SourceModule,
@@ -9906,12 +9907,35 @@ class Feeder:
 def test_a_log_site_is_a_stored_kind():
     """``DiagnosticTemplate`` and ``EnumerationWrite`` are built and unreachable.
 
-    An investigation reads a log site, so it needs a label and a diff entry.
+    An investigation reads a log site, so it needs a label and a diff entry --
+    and this asked for the entry without ever asking whether anything reached
+    it.  ``_index`` collected seven of the eight kinds the database stores, so
+    every log site compared as absent from both builds and the entry answered
+    a question nobody put to it.  Which log will show a reader's query running
+    is the point of the node; a build that moved it said nothing.
     """
     from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
 
     assert NodeType.LOG_SITE in CODE_MAP_NODE_TYPES
     assert NodeType.LOG_SITE.value in diff.CONTENT_FIELDS
+
+    def site(files):
+        return LogSiteNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::f",
+            owner="pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::f",
+            log_files=files,
+        )
+
+    old = MapFragment(map_id=MAP_ID, derived_from=VERSION, log_sites=[site(["panda-server.log"])])
+    new = MapFragment(map_id=MAP_ID, derived_from=VERSION, log_sites=[site(["panda-jedi.log"])])
+
+    (change,) = diff.compare(old, new).changes
+
+    assert change.field == "log_files"
+    assert "panda-server.log" in change.before
+    assert "panda-jedi.log" in change.after
 
 
 def test_a_call_and_a_dispatch_are_not_compared_with_each_other():

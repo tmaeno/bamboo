@@ -201,6 +201,12 @@ def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
         fragment.boundaries,
         fragment.filter_stages,
         fragment.loop_cuts,
+        # Every kind ``store_fragment`` writes belongs here.  ``log_sites`` was
+        # not, so ``CONTENT_FIELDS[LOG_SITE]`` was answering a question nobody
+        # asked and all 294 of them compared as absent from both builds: which
+        # log will show a reader's query running could move, or the reader
+        # could appear, and the report said nothing either way.
+        fragment.log_sites,
     ):
         for node in group:
             nodes[_key(node)] = node
