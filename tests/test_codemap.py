@@ -10456,6 +10456,136 @@ def test_two_arms_stay_two_statements_when_no_caller_attached_parents():
         "SELECT a FROM ATLAS_PANDA.t1 WHERE c=:c ",
     ]
 
+# ---------------------------------------------------------------------------
+# A statement is not run by every call in its function
+# ---------------------------------------------------------------------------
+#
+# The variants of a name are read across the whole function and were then
+# paired with every execution in it.  ``copyArchive.main`` assigns ``sql``
+# forty-four times and runs it twenty-three, so 21 of the 31 statements the
+# build reported as having a table name it could not resolve were one
+# statement, claimed at 21 call sites that never run it -- and resolved at the
+# one that does.
+
+
+_TWO_ARMS = (
+    "def f(self):\n"
+    "    if wanted:\n"
+    "        sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+    "        self.cur.execute(sql, varMap)\n"
+    "    else:\n"
+    "        sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+    "        self.cur.execute(sql, varMap)\n"
+)
+
+
+def test_a_call_under_one_arm_does_not_run_the_other_arm_s_statement():
+    """Both halves of the rule at once.
+
+    The ``else`` binding is *below* the ``if`` call, so position rules it out
+    there; the ``if`` binding is above the ``else`` call and only the path
+    condition separates them.  Neither reading alone leaves each call with one
+    statement.
+    """
+    runs = sorted(sql.executions(_func(_TWO_ARMS)), key=lambda r: r.call.lineno)
+
+    assert [r.sql for r in runs] == [
+        "SELECT a FROM ATLAS_PANDA.t1 ",
+        "SELECT b FROM ATLAS_PANDA.t2 ",
+    ]
+
+
+def test_the_arms_are_kept_apart_without_a_caller_attaching_parents():
+    """The rule is read off the ancestor chain, and half the callers bring none."""
+    runs = sorted(sql.executions(_unattached(_TWO_ARMS)), key=lambda r: r.call.lineno)
+
+    assert [r.sql for r in runs] == [
+        "SELECT a FROM ATLAS_PANDA.t1 ",
+        "SELECT b FROM ATLAS_PANDA.t2 ",
+    ]
+
+
+def test_a_statement_assigned_after_the_call_is_not_what_it_ran():
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    self.cur.execute(sql, varMap)\n"
+        "    sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    runs = sql.executions(_func(source))
+    first = [r.sql for r in runs if r.call.lineno == 3]
+
+    assert first == ["SELECT a FROM ATLAS_PANDA.t1 "]
+
+
+def test_a_loop_holding_both_keeps_a_statement_assigned_after_the_call():
+    """The half of the position rule that is not about position.
+
+    Every pass but the first runs the statement the foot of the body left
+    behind, so dropping it would lose what the loop actually executes.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    for row in rows:\n"
+        "        self.cur.execute(sql, varMap)\n"
+        "        sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+    )
+
+    runs = sql.executions(_func(source))
+
+    assert sorted(r.sql for r in runs) == [
+        "SELECT a FROM ATLAS_PANDA.t1 ",
+        "SELECT b FROM ATLAS_PANDA.t2 ",
+    ]
+
+
+def test_two_arms_building_the_same_statement_do_not_lose_the_second_one():
+    """Rule 39, and ``activateJob`` is where it costs four statements.
+
+    The fragments are keyed by the text they render, so two arms writing the
+    same statement leave only the first arm's fragment behind -- and asking
+    *that* whether it reaches the call in the second arm answers no.  Asking
+    every fragment that renders the text answers yes, which is what the code
+    does.  Filling cannot pool them the same way: ``_braces_are_literal`` is
+    answered per statement, for the reason its own docstring gives.
+
+    Each call still sees the statement once per variant rendering it, because
+    the variants are listed and not set -- 11 duplicate pairs over the corpus,
+    which this round leaves alone.  What it fixes is the second call seeing it
+    at all.
+    """
+    source = (
+        "def f(self):\n"
+        "    if wanted:\n"
+        "        sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET x=:x '\n"
+        "        self.cur.execute(sqlF, varMap)\n"
+        "    else:\n"
+        "        sqlF = 'UPDATE ATLAS_PANDA.filesTable4 SET x=:x '\n"
+        "        self.cur.execute(sqlF, varMap)\n"
+    )
+
+    runs = sql.executions(_func(source))
+
+    assert {r.call.lineno for r in runs} == {4, 7}
+    assert {r.sql for r in runs} == {"UPDATE ATLAS_PANDA.filesTable4 SET x=:x "}
+
+
+def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
+    """"No fragment reaches this call" and "there is no fragment" are
+    different answers.  Thirty pairs in the corpus write the statement into
+    the call, and reading the second as the first drops the daemon layer."""
+    func = _func(
+        "def f():\n"
+        "    if wanted:\n"
+        "        status, res = taskBuffer.querySQLS("
+        "'SELECT a FROM ATLAS_PANDA.t1', var_map)\n"
+    )
+
+    assert [r.sql for r in sql.executions(func)] == ["SELECT a FROM ATLAS_PANDA.t1"]
+
 
 def test_two_independent_choices_make_four_statements_not_five_halves():
     """``insertTaskParams_JEDI`` builds one INSERT across two unrelated ``if``s.

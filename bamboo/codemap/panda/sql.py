@@ -49,7 +49,12 @@ from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
-from bamboo.codemap.panda.pathcond import attach_parents, exclusive, path_condition
+from bamboo.codemap.panda.pathcond import (
+    attach_parents,
+    can_reach,
+    exclusive,
+    path_condition,
+)
 from bamboo.codemap.panda.values import rendered_text
 
 logger = logging.getLogger(__name__)
@@ -1046,6 +1051,18 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
     hole an f-string interpolation leaves, rather than sinking the statement.
     The head is still required to be a readable name: it is what the statement
     *is*, and without it there is no anchor to hang the execution on.
+
+    **A statement is not run by every call in the function.**  The variants of
+    a name are read across the whole function, and pairing each with every
+    execution in it is a cross product, not a reading.  ``copyArchive.main``
+    assigns ``sql`` forty-four times and runs it twenty-three: 21 of the 31
+    statements this build reported as having a table name supplied at run time
+    were *one* statement claimed at 21 call sites that never run it, and its
+    table is resolved at the call that does.  A fragment below the call, or
+    under an arm the call is not in, cannot be part of what the call runs --
+    :func:`pathcond.can_reach` is the predicate the walk already uses to decide
+    whether a binding can be what an arm read, and this is the same question
+    asked of a different pair.
     """
     # ``_compatible_sets`` reads the arms a fragment sits under off the ancestor
     # chain, and two of this function's callers -- ``boundary`` and ``trigger``
@@ -1068,6 +1085,7 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         statement, fillers, percent = _call_site_fill(func, expression)
         operands = _concatenated(statement)
         sources: dict[str, list[ast.stmt]] = {}
+        reaching: dict[str, list[ast.stmt]] = {}
         if isinstance(operands[0], ast.Name):
             base = operands[0]
             head = []
@@ -1079,6 +1097,15 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
                 # asks about them and not about every other statement the name
                 # has held.
                 sources.setdefault(text, [span.node for span in spans])
+                # The same fragments, pooled across variants instead of kept
+                # for the first.  Two arms of one ``if`` often build the same
+                # statement, and asking the first arm's copy whether it reaches
+                # a call in the second answers no: ``activateJob`` loses
+                # ``sqlF`` and ``sqlJob`` that way, four statements over the
+                # corpus.  Filling cannot pool them -- ``_braces_are_literal``
+                # is answered per statement, for the reason its docstring
+                # gives -- so this is a second reading and not a wider one.
+                reaching.setdefault(text, []).extend(span.node for span in spans)
             held = base.id
         elif forwarded:
             # The daemons write the statement into the call.  ``execute`` is
@@ -1123,6 +1150,15 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
             else None
         )
         for combination in itertools.product(*pieces):
+            built_by = reaching.get(combination[0], [])
+            if built_by and not any(can_reach(fragment, node) for fragment in built_by):
+                # Nothing that built this statement can be part of what this
+                # call runs.  Guarded on having a fragment at all, because the
+                # daemon layer writes the statement into the call and has none:
+                # "no fragment reaches here" and "there is no fragment" are
+                # different answers, and reading the second as the first would
+                # drop 30 pairs.
+                continue
             assembled = "".join(combination)
             for text in _substituted(
                 assembled, sources.get(combination[0], []), fillers, percent
