@@ -757,7 +757,9 @@ def _report_resolution(description: str, matches: list) -> None:
             )
 
 
-def _report_localization(strategy: Strategy, top: int, full: bool) -> None:
+def _report_localization(
+    strategy: Strategy, top: int, full: bool, evaluated: bool
+) -> None:
     """Which step of the chain took the list, and how much of it.
 
     The cuts first and the funnel second, because they answer from two
@@ -791,6 +793,29 @@ def _report_localization(strategy: Strategy, top: int, full: bool) -> None:
             click.echo(f"  {'':<7} in: {', '.join(cut.log_files) or 'no log file names it'}")
             for condition in cut.conditions[: None if full else 2]:
                 click.echo(f"  {'':<7} when: {condition[:78]}")
+
+    if evaluated and local.describes:
+        # What production said about the stage that was asked about, whether or
+        # not it took anything.  ``_settle_localization`` computes the verdict
+        # and the sentence for every stage and the ranked listing below shows
+        # only the ones with sites, so asking about a stage that removed
+        # nothing used to return the funnel for the others and no word about
+        # it.  The licence is the sample's: only a complete one lets "removed
+        # nothing" be said at all.
+        settled = {(cut.owner, cut.order): cut for cut in local.cuts}
+        click.echo(f"\nwhat production said about {local.describes}")
+        for named in local.emitted_by:
+            cut = settled.get((named.owner, named.order))
+            if cut is None:
+                click.echo(
+                    f"  {strategy_mod.short_owner(named.owner)}  #{named.order}"
+                    "  not in this file's chains, so this sample says nothing about it"
+                )
+                continue
+            click.echo(
+                f"  {strategy_mod.short_owner(cut.owner)}  #{cut.order}"
+                f"  {cut.verdict}  {cut.because}"
+            )
 
     took = [cut for cut in local.cuts if cut.sites]
     click.echo(f"\nwhat took the list ({len(took)} of {len(local.cuts)} step(s) named a candidate)")
@@ -1163,7 +1188,7 @@ def main(
         if matches and hop.number == 0:
             _report_resolution(description or "", matches)
         if strategy.localization is not None:
-            _report_localization(strategy, top, full)
+            _report_localization(strategy, top, full, evaluated)
         else:
             _report_verdict(strategy, evaluated)
             _report_follow_up(strategy)

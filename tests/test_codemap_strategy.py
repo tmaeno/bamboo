@@ -1754,6 +1754,48 @@ async def test_the_reason_the_line_gave_is_kept_with_the_cut():
     ]
 
 
+async def test_the_stage_that_was_asked_about_survives_the_file_the_lines_landed_in():
+    """The evidence picks the chain, and the stage the reader named can sit in
+    another one.  Dropping it leaves the report unable to say anything about
+    the question it was asked -- and takes it out of the ranked line's
+    denominator too, so nothing even shows that it was considered."""
+    stages = [
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_TASK, "-lowmemory", "memory check", 3,
+                      ["panda-AtlasProdTaskBroker.log"]),
+    ]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status")]},
+        focus="-lowmemory",
+    )
+
+    kept = {c.tag for c in strategy.localization.cuts}
+    assert kept == {"-status", "-lowmemory"}
+    (asked,) = [c for c in strategy.localization.cuts if c.tag == "-lowmemory"]
+    # Rule 22: a partial sample licenses no absence, so the stage is unsettled
+    # rather than ruled out, and the sentence says which.
+    assert asked.verdict == UNSETTLED
+    assert asked.because == "the sample is partial, so nothing follows from not seeing it"
+
+
+async def test_a_chain_asked_about_keeps_its_stages_whatever_file_won():
+    """A chain resolves to an owner, not a tag, so the same rule has to read
+    that name too or asking about a chain drops the whole of it."""
+    stages = [
+        _filter_stage(PROD_JOB, "-status", "status check", 0, [PROD_JOB_LOG]),
+        _filter_stage(PROD_TASK, "-lowmemory", "memory check", 3,
+                      ["panda-AtlasProdTaskBroker.log"]),
+    ]
+    strategy = await _localized(
+        stages,
+        {PROD_JOB_LOG: [_skip("52249469", "SITE_A", "-status")]},
+        focus=PROD_TASK,
+    )
+
+    assert {c.tag for c in strategy.localization.cuts} == {"-status", "-lowmemory"}
+
+
 async def test_a_partial_sample_rules_no_step_out():
     """An answer cut off at a bound is indistinguishable from a step that never
     fired, so only what was seen counts."""

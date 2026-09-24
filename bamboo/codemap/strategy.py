@@ -1700,6 +1700,16 @@ def _surviving_leads(strategy: Strategy) -> list[Lead]:
     return [lead for lead in strategy.leads if not lead.opened_by or lead.opened_by in alive]
 
 
+def _asked_about(cut: StageCut, focus: str) -> bool:
+    """Whether *cut* is the stage, or sits in the chain, the reader named.
+
+    All three names a description can resolve to, because the vocabulary holds
+    all three: the tag production writes, the label it counts under, and the
+    owner of a chain.
+    """
+    return bool(focus) and focus in (cut.tag, cut.funnel_label, cut.owner)
+
+
 def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localization:
     """Fill in how much of the list each step actually took.
 
@@ -1748,9 +1758,18 @@ def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localizat
     # Every chain was carried this far so that the evidence could choose; now it
     # has, and the chains whose lines are nowhere near this file are not part of
     # the answer.  A cut with sites is kept whatever file it names -- that is
-    # how a helper with no logger of its own stays in.
+    # how a helper with no logger of its own stays in.  So is the stage the
+    # reader named: dropping that one leaves the report unable to say anything
+    # about the question it was asked, not even that the chain ran and never
+    # reached it, and the denominator on the ranked line stops counting it too.
     if here:
-        settled.cuts = [cut for cut in settled.cuts if cut.sites or (here & set(cut.log_files))]
+        settled.cuts = [
+            cut
+            for cut in settled.cuts
+            if cut.sites
+            or (here & set(cut.log_files))
+            or _asked_about(cut, strategy.symptom.focus)
+        ]
     for cut in settled.cuts:
         if cut.sites:
             cut.verdict = SEEN
