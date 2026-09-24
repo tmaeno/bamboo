@@ -59,6 +59,10 @@ from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.panda import provenance
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 
+# The level vocabulary rather than a second copy of it, for the reason
+# ``log_level`` is public: one of them has to be kept current.
+from bamboo.codemap.panda.recognizers.selection import _LOG_LEVELS
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,6 +247,15 @@ async def _draw(
 )
 @click.option("--out", type=click.Path(path_type=Path), default=None)
 @click.option(
+    "--audit",
+    is_flag=True,
+    help=(
+        "Score the sample against the source mechanically instead of "
+        "printing a worksheet: what the walk listed beside what the "
+        "function holds, with the difference named."
+    ),
+)
+@click.option(
     "--scan",
     is_flag=True,
     help=(
@@ -262,6 +275,7 @@ def main(
     per_stratum: int,
     verdicts: Optional[Path],
     out: Optional[Path],
+    audit: bool,
     scan: bool,
     map_id: str,
     top: int,
@@ -288,6 +302,14 @@ def main(
     seal = hashlib.sha256(sample.read_bytes()).hexdigest()[:16]
     if verdicts is not None:
         _tally(cases, verdicts, seal)
+        return
+    if audit:
+        _audit(
+            cases,
+            PandaCodeMapPlugin._resolve_roots(source_root),
+            trace_mod.Budget(depth=depth),
+            seal,
+        )
         return
     roots = PandaCodeMapPlugin._resolve_roots(source_root)
     budget = trace_mod.Budget(depth=depth)
@@ -626,6 +648,303 @@ async def _scan(map_id: str, source_root: Optional[Path], budget, top: int) -> N
         click.echo(f"    {count:>4}  {owner}")
     if len(by_owner) > top:
         click.echo(f"    … {len(by_owner) - top} more owner(s)")
+
+
+# --------------------------------------------------------------------------
+# The audit: the machine half of a scoring round, kept as an artefact.
+#
+# P1-35 reported five figures and kept nothing that could produce them again
+# -- the checks were heredocs and went with the shell.  That is the failure
+# the retired holdout had and the failure a tool named in a plan for six
+# rounds had, so the third time it is written down.
+#
+# **Nothing here decides whether a site can reach an arm.**  That predicate is
+# what a fix round changes, and an oracle holding its own copy would agree
+# with whatever the walk had just been taught.  What the audit states instead
+# is the positional fact -- below the arm, inside a loop the arm is also in --
+# and names every step it holds for, so the list is read rather than counted.
+
+
+def _audit_names(target: ast.AST, name: str) -> bool:
+    """Whether *target*, an assignment target, binds the plain name *name*."""
+    if isinstance(target, ast.Name):
+        return target.id == name
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return any(_audit_names(element, name) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _audit_names(target.value, name)
+    return False
+
+
+def _binding_lines(func: ast.AST, name: str) -> dict[int, str]:
+    """``line -> how`` for every binding of *name* in *func*.
+
+    Read with :func:`_descend` for the reason that function already gives.
+    ``self.<field>`` is read as an attribute target instead, which is what
+    lets one check cover the steps the walk reaches by descending into
+    another method of the same class.
+    """
+    found: dict[int, str] = {}
+    if name.startswith("self."):
+        field = name.split(".", 1)[1]
+        for node in [func, *_descend(func)]:
+            if isinstance(node, ast.Assign):
+                targets: list = list(node.targets)
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            else:
+                continue
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == field
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    found[node.lineno] = "field"
+        return found
+    for node in [func, *_descend(func)]:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    found[node.lineno] = "="
+                elif isinstance(target, (ast.Tuple, ast.List)) and _audit_names(target, name):
+                    found[node.lineno] = "tuple"
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found[node.lineno] = "augmented"
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found[node.lineno] = "annotated"
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and _audit_names(node.target, name):
+            found[node.lineno] = "for"
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            if _audit_names(node.optional_vars, name):
+                found[node.context_expr.lineno] = "with"
+        elif isinstance(node, ast.NamedExpr):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                found[node.lineno] = "walrus"
+        elif isinstance(node, ast.ExceptHandler) and node.name == name:
+            found[node.lineno] = "except"
+    return found
+
+
+def _scope_at(roots: dict, file: str, owner: str, line: int):
+    """The innermost function holding *line*, or the module for a module arm.
+
+    Not :func:`_scope_of`, which finds a function by name.  ``datasetManager``
+    holds seven classes with a ``run`` method and the map records the owner as
+    ``run``: a lookup by name reads the first of the seven and then calls every
+    binding in the real one a fabrication.  Forty of those were reported before
+    this was noticed.  An arm has a line, so the line picks the scope.
+    """
+    tree = _tree_for(roots, file)
+    if tree is None:
+        return None
+    if owner.rsplit("::", 1)[-1] == "<module>":
+        return tree
+    holding = [
+        node
+        for node in [tree, *_descend(tree)]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    return min(holding, key=lambda n: (n.end_lineno or n.lineno) - n.lineno) if holding else tree
+
+
+def _statement_holding(func: ast.AST, line: int):
+    """The innermost statement of *func* on *line*."""
+    holding = [
+        node
+        for node in [func, *_descend(func)]
+        if isinstance(node, ast.stmt)
+        and node.lineno <= line <= (node.end_lineno or node.lineno)
+    ]
+    if not holding:
+        return None
+    return min(holding, key=lambda n: (n.end_lineno or n.lineno) - n.lineno)
+
+
+def _structures_over(func: ast.AST, line: int) -> list[tuple[str, int]]:
+    """``(kind, line)`` for every loop, ``try`` body, handler or ``with``
+    whose body holds *line*."""
+    out: list[tuple[str, int]] = []
+    for node in [func, *_descend(func)]:
+        start = getattr(node, "lineno", 0)
+        if not start or not (start <= line <= (getattr(node, "end_lineno", 0) or 0)):
+            continue
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            if node.body and node.body[0].lineno <= line <= (node.body[-1].end_lineno or 0):
+                out.append(("loop", start))
+        elif isinstance(node, ast.Try) and node.handlers:
+            if node.body and node.body[0].lineno <= line <= (node.body[-1].end_lineno or 0):
+                out.append(("try", start))
+        elif isinstance(node, ast.ExceptHandler):
+            out.append(("except", start))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            out.append(("with", start))
+    return out
+
+
+def _logging_calls(func: ast.AST) -> dict[int, str]:
+    """``line -> level`` for every logging call in *func*."""
+    found: dict[int, str] = {}
+    for node in [func, *_descend(func)]:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _LOG_LEVELS
+            and node.args
+        ):
+            found[node.lineno] = node.func.attr
+    return found
+
+
+def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) -> None:
+    """Score the sample against the source, mechanically, and print the tally.
+
+    Four numbers and a list.  ``complete`` and ``sound`` and ``honest`` are the
+    same three questions the worksheet asks by hand; ``skeleton`` asks whether
+    every logging call of the arm's function carries a row.  The list is the
+    positional one, and it is a list because it is the one a reader has to
+    settle.
+    """
+    names = names_complete = 0
+    step_total = step_exists = 0
+    honest_total = honest_said = 0
+    calls_total = calls_listed = 0
+    module_arms = 0
+    missing: list[str] = []
+    ghost: list[str] = []
+    below: list[str] = []
+    in_a_shared_loop: list[str] = []
+    silent: list[str] = []
+
+    for case in cases:
+        steps, _note, skeleton = trace_mod.walk(
+            roots,
+            file=case["file"],
+            owner=case["owner"],
+            lines=[case["line"]],
+            observed=case.get("outcome") or "",
+            classify=provenance.classify,
+            budget=budget,
+        )
+        cid = _case_id(case)
+
+        # sound: every step that names a line, read in its own frame.
+        for step in steps:
+            if not step.line:
+                continue
+            step_total += 1
+            where = _scope_at(
+                roots, step.file or case["file"], step.owner or case["owner"], step.line
+            )
+            if where is None:
+                continue
+            if step.kind == trace_mod.TRACE_WRITE:
+                # An arm has no name to look up; what it claims is that the
+                # line is a statement of this function, and that is checkable.
+                if _statement_holding(where, step.line) is not None:
+                    step_exists += 1
+                else:
+                    ghost.append(f"{cid}  arm@{step.line} is no statement of this function")
+            elif step.name and step.line in _binding_lines(where, step.name):
+                step_exists += 1
+            else:
+                ghost.append(f"{cid}  {step.name}@{step.line} binds nothing in the source")
+
+        # honest: a step under a structure the path condition cannot see.
+        for step in steps:
+            if not step.line:
+                continue
+            where = _scope_at(
+                roots, step.file or case["file"], step.owner or case["owner"], step.line
+            )
+            wants = _structures_over(where, step.line) if where is not None else []
+            if not wants:
+                continue
+            honest_total += 1
+            honest_said += all(
+                any(said.startswith(f"{kind} at {start}:") for said in step.unseen)
+                for kind, start in wants
+            )
+
+        func = _scope_at(roots, case["file"], case["owner"], case["line"])
+        if func is None:
+            continue
+
+        # complete: every binding the arm's own function holds for a name the
+        # walk explained there.
+        listed: dict[str, set] = {}
+        for step in steps:
+            if step.kind not in (trace_mod.TRACE_BINDING, trace_mod.TRACE_LOOP):
+                continue
+            if step.name and not step.name.startswith("self.") and step.owner == case["owner"]:
+                listed.setdefault(step.name, set()).add(step.line)
+        for name, lines in sorted(listed.items()):
+            names += 1
+            held = _binding_lines(func, name)
+            names_complete += not (set(held) - lines)
+            missing.extend(
+                f"{cid}  {name}@{line} ({held[line]}) is in the source and not listed"
+                for line in sorted(set(held) - lines)
+            )
+
+        # The positional relation, stated rather than judged.  Only in the
+        # arm's own frame: a field explained from another method has no
+        # ordering against the arm at all, and reading one as though it had is
+        # how two of these were miscounted by hand.
+        arm_loops = {at for kind, at in _structures_over(func, case["line"]) if kind == "loop"}
+        for step in steps:
+            if step.kind not in (trace_mod.TRACE_BINDING, trace_mod.TRACE_LOOP):
+                continue
+            if not step.name or step.name.startswith("self.") or not step.line:
+                continue
+            if step.owner != case["owner"] or step.line <= case["line"]:
+                continue
+            shared = {
+                at for kind, at in _structures_over(func, step.line) if kind == "loop"
+            } & arm_loops
+            (in_a_shared_loop if shared else below).append(
+                f"{cid}  {step.name}@{step.line} is below the arm"
+                + (f", in loop(s) {sorted(shared)} with it" if shared else "")
+            )
+
+        # skeleton: the logging calls of the arm's function carry a row.
+        if case["owner"].rsplit("::", 1)[-1] == "<module>":
+            # A module arm has no function to bound the check by, and the
+            # skeleton does not claim the whole file.  Counted, not folded in.
+            module_arms += 1
+            continue
+        rows = {row.line for row in skeleton if row.kind == models_mod.SKELETON_PRINT}
+        for line, level in sorted(_logging_calls(func).items()):
+            calls_total += 1
+            if line in rows:
+                calls_listed += 1
+            else:
+                silent.append(f"{cid}  the {level} call@{line} prints and has no row")
+
+    click.echo(f"sample sha256 {seal}  n={len(cases)}\n")
+    click.echo(f"  complete   {names_complete}/{names} name(s), every binding of it listed")
+    click.echo(f"  sound      {step_exists}/{step_total} step(s) name a site the source has")
+    click.echo(f"  honest     {honest_total and honest_said}/{honest_total} "
+               "step(s) under a structure say so")
+    click.echo(f"  skeleton   {calls_listed}/{calls_total} logging call(s) carry a row"
+               f"   ({module_arms} module arm(s) not checked)")
+    click.echo(
+        f"\nbelow the arm and in no loop it is in: {len(below)} step(s)"
+        "   -- a position, not a verdict"
+    )
+    for line in below:
+        click.echo(f"    {line}")
+    click.echo(f"\nbelow it but inside a loop it is in too: {len(in_a_shared_loop)} step(s)")
+    for line in in_a_shared_loop:
+        click.echo(f"    {line}")
+    for label, rows_ in (("missing", missing), ("fabricated", ghost), ("silent", silent)):
+        click.echo(f"\n{label}: {len(rows_)}")
+        for line in rows_:
+            click.echo(f"    {line}")
 
 
 if __name__ == "__main__":
