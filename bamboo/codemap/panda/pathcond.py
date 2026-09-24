@@ -17,7 +17,7 @@ such a helper between two releases.
 from __future__ import annotations
 
 import ast
-from typing import Callable, Iterator, NamedTuple, Optional
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 
 def functions_with_owner(
@@ -442,6 +442,103 @@ def exclusive(one: list[str], other: list[str]) -> bool:
     return any(f"not ({test})" in other for test in one) or any(
         f"not ({test})" in one for test in other
     )
+
+
+# ---------------------------------------------------------------------------
+# Whether what one site writes can be what another site reads
+# ---------------------------------------------------------------------------
+#
+# Written for the walk, which offers a reader every binding of a name it could
+# not value, and wrong there in one direction only: a site below the arm never
+# ran before it.  The build asks the same question of a different pair -- can
+# the fragments that built a statement reach the call that runs it -- and was
+# wrong in the same direction, attributing one statement to every call site in
+# the function.
+#
+# Here rather than in either caller because the build must not import the
+# walk: one makes the stored map and one reads it, and the separation is what
+# keeps a use-time convenience out of the stored facts.  One spelling, so the
+# two cannot drift into disagreeing about which writes a read can see.
+
+
+def site_of(expression: ast.AST) -> ast.AST:
+    """The statement *expression* is part of, or the expression itself.
+
+    :func:`assigned_expressions` hands back the right-hand side, and everything
+    positional -- the line, the guards above it, whether a loop holds it -- is
+    a property of the statement it sits in.
+    """
+    node: Optional[ast.AST] = expression
+    while node is not None and not isinstance(node, ast.stmt):
+        node = getattr(node, "parent", None)
+    return node if node is not None else expression
+
+
+def loops_over(node: ast.AST) -> set[int]:
+    """The header line of every loop whose *body* holds *node*."""
+    found: set[int] = set()
+    previous = node
+    for ancestor in ancestors(node):
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and previous in ancestor.body:
+            found.add(ancestor.lineno)
+        previous = ancestor
+    return found
+
+
+def not_below(site: ast.AST, target: ast.AST) -> bool:
+    """Whether *site* could have run before *target* on one pass.
+
+    A write below the read cannot have run before it -- unless a loop holds
+    them both, where the next iteration reaches it.  That second half is not a
+    refinement: without it the rule is unsound, and a message assigned at the
+    foot of a loop body and logged at its head is dropped although every
+    iteration but the first reaches it.
+    """
+    return getattr(site, "lineno", 0) <= getattr(target, "lineno", 0) or bool(
+        loops_over(site) & loops_over(target)
+    )
+
+
+def reaches_one(site: ast.AST, targets: Sequence[ast.AST]) -> bool:
+    """Whether *site* is positioned to reach any of *targets*."""
+    return any(not_below(site, target) for target in targets)
+
+
+def reachable_when(node: ast.AST) -> list[str]:
+    """The conditions on reaching *node*, including the ones an ``if`` cannot say.
+
+    :func:`path_condition` sees only ``ast.If``, so an ``if X: continue`` above
+    a site leaves the site reading as unconditional.  That blindness is not
+    harmless here: a log call inside the skipped block and a write after it are
+    on paths that cannot both run, and comparing their path conditions alone
+    says they are compatible.  The early exit puts ``not (X)`` on the write and
+    the block puts ``X`` on the call, which is exactly the shape
+    :func:`exclusive` was built to detect.
+    """
+    return path_condition(node) + [
+        unseen.detail
+        for unseen in enclosing_guards(node)
+        if unseen.kind == UNSEEN_EARLY_EXIT
+    ]
+
+
+def compatible(one: ast.AST, other: ast.AST) -> bool:
+    """Whether both nodes can be on one run through the function.
+
+    A path condition is a necessary condition, so this is conservative in the
+    direction that is safe: it separates two sites only where one's condition
+    contradicts the other's.
+    """
+    return not exclusive(reachable_when(one), reachable_when(other))
+
+
+def can_reach(site: ast.AST, target: ast.AST) -> bool:
+    """Whether what *site* writes can be what *target* reads."""
+    return not_below(site, target) and compatible(site, target)
 
 
 def literal_values(

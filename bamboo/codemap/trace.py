@@ -249,86 +249,6 @@ def _value_of(statement: ast.stmt) -> Optional[ast.expr]:
     return None
 
 
-def _site_of(expression: ast.AST) -> ast.AST:
-    """The statement *expression* is part of, or the expression itself.
-
-    ``assigned_expressions`` hands back the right-hand side, and everything
-    positional -- the line, the guards above it, whether a loop holds it -- is
-    a property of the statement it sits in.
-    """
-    node: Optional[ast.AST] = expression
-    while node is not None and not isinstance(node, ast.stmt):
-        node = getattr(node, "parent", None)
-    return node if node is not None else expression
-
-
-def _loops_over(node: ast.AST) -> set[int]:
-    """The header line of every loop whose *body* holds *node*."""
-    found: set[int] = set()
-    previous = node
-    for ancestor in pathcond.ancestors(node):
-        if isinstance(
-            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
-        ):
-            break
-        if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and previous in ancestor.body:
-            found.add(ancestor.lineno)
-        previous = ancestor
-    return found
-
-
-def _not_below(site: ast.AST, target: ast.AST) -> bool:
-    """Whether *site* could have run before *target* on one pass.
-
-    A write below the read cannot have run before it -- unless a loop holds
-    them both, where the next iteration reaches it.  That second half is new
-    and it is not a refinement: without it the rule is unsound, and a message
-    assigned at the foot of a loop body and logged at its head is dropped
-    although every iteration but the first reaches it.
-    """
-    return getattr(site, "lineno", 0) <= getattr(target, "lineno", 0) or bool(
-        _loops_over(site) & _loops_over(target)
-    )
-
-
-def _reaches_one(site: ast.AST, targets: Sequence[ast.AST]) -> bool:
-    """Whether *site* is positioned to reach any of *targets*."""
-    return any(_not_below(site, target) for target in targets)
-
-
-def _compatible(one: ast.AST, other: ast.AST) -> bool:
-    """Whether both nodes can be on one run through the function.
-
-    A path condition is a necessary condition, so this is conservative in the
-    direction that is safe: it separates two lines only where one's condition
-    contradicts the other's.
-    """
-    return not pathcond.exclusive(_reachable_when(one), _reachable_when(other))
-
-
-def _can_reach(site: ast.AST, target: ast.AST) -> bool:
-    """Whether what *site* writes can be what *target* reads."""
-    return _not_below(site, target) and _compatible(site, target)
-
-
-def _reachable_when(node: ast.AST) -> list[str]:
-    """The conditions on reaching *node*, including the ones an ``if`` cannot say.
-
-    ``path_condition`` sees only ``ast.If``, so an ``if X: continue`` above a
-    site leaves the site reading as unconditional.  That blindness is not
-    harmless here: a log call inside the skipped block and a write after it are
-    on paths that cannot both run, and comparing their path conditions alone
-    says they are compatible.  The early exit puts ``not (X)`` on the write and
-    the block puts ``X`` on the call, which is exactly the shape
-    :func:`pathcond.exclusive` was built to detect.
-    """
-    return pathcond.path_condition(node) + [
-        unseen.detail
-        for unseen in pathcond.enclosing_guards(node)
-        if unseen.kind == pathcond.UNSEEN_EARLY_EXIT
-    ]
-
-
 def _written_texts(statement: ast.stmt) -> list[str]:
     """How the arm spells what it writes, and what it writes it to.
 
@@ -1012,7 +932,7 @@ class _Walk:
         """
         out: list[tuple[ast.expr, ast.expr]] = []
         for argument, message in self.logged(frame):
-            if message is not argument and not _can_reach(message, argument):
+            if message is not argument and not pathcond.can_reach(message, argument):
                 continue
             out.append((argument, message))
         return out
@@ -1156,12 +1076,12 @@ class _Walk:
         line = getattr(statement, "lineno", 0)
         rows: list[SkeletonLine] = []
         for argument, message in printed.get(id(statement), ()):
-            # Compatibility only, not :func:`_can_reach`: a line printed after
+            # Compatibility only, not :func:`pathcond.can_reach`: a line printed after
             # the arm is printed alongside it just as much as one before, and
             # the position rule would drop exactly the lines that say what the
             # arm went on to do.
             arms = [
-                arm for arm, held in self.armed.items() if _compatible(held, argument)
+                arm for arm, held in self.armed.items() if pathcond.compatible(held, argument)
             ]
             if isinstance(message, ast.JoinedStr):
                 pattern = line_pattern(message)
@@ -1244,9 +1164,9 @@ class _Walk:
             # armed before the queue drains, and a site is kept if it reaches
             # any.
             arms = list(self.armed.values())
-            bindings = [b for b in bindings if _reaches_one(_site_of(b), arms)]
-            loops = [loop for loop in loops if _reaches_one(loop, arms)]
-            caught = [one for one in caught if _reaches_one(one, arms)]
+            bindings = [b for b in bindings if pathcond.reaches_one(pathcond.site_of(b), arms)]
+            loops = [loop for loop in loops if pathcond.reaches_one(loop, arms)]
+            caught = [one for one in caught if pathcond.reaches_one(one, arms)]
             if held and not (bindings or loops or caught):
                 # Bound here, and by nothing that could have run first.
                 # "Not bound in this function" would be false and silence
@@ -1280,7 +1200,7 @@ class _Walk:
         depth: int,
         slot: Optional[int] = None,
     ) -> None:
-        site = _site_of(expression)
+        site = pathcond.site_of(expression)
         resolve = self.resolver(frame)
         terminal, detail = self.classify(expression, resolve)
         unseen = _unseen(site)
