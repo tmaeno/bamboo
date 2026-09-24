@@ -855,6 +855,14 @@ def _elements(node: ast.expr) -> Optional[list[str]]:
     element nobody can read sinks the whole sequence, because half a list of
     tables read as the list is a statement about tables the code never names.
     """
+    if isinstance(node, ast.Dict):
+        # The same list, written so each table can carry what to ask of it:
+        # ``{"jobsDefined4": ["defined", "assigned"]}``.  The keys are the
+        # sequence.  A ``**other`` entry is a whole key set from somewhere this
+        # cannot see, and ``node.keys`` spells it ``None``.
+        if any(key is None for key in node.keys):
+            return None
+        node = ast.List(elts=list(node.keys))
     if not isinstance(node, (ast.Tuple, ast.List)):
         return None
     rendered = [rendered_text(element) for element in node.elts]
@@ -864,12 +872,17 @@ def _elements(node: ast.expr) -> Optional[list[str]]:
 def _sequence_values(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
 ) -> Optional[list[str]]:
-    """The strings local list *name* holds, across ``=`` and ``+=``.
+    """The strings local sequence *name* holds, across ``=``, ``+=`` and keys.
 
-    ``None`` rather than a partial answer wherever the list is built some other
-    way -- an ``append``, or a sequence that is not a literal.  A missing
+    ``None`` rather than a partial answer wherever the sequence is built some
+    other way -- an ``append``, or a sequence that is not a literal.  A missing
     element is not a smaller answer here: it is a statement the map says the
     code runs over a set of tables it does not.
+
+    Which is why the dict spelling needs both halves.  ``getDispatchDatasets
+    PerUser`` writes one table in the literal and adds two more by subscript
+    under a flag, so reading the literal alone answers ``jobsDefined4`` -- one
+    table of three, and nothing about it says it is one of three.
     """
     found: list[str] = []
     assigned = False
@@ -882,6 +895,19 @@ def _sequence_values(
                 return None
             found.extend(elements)
             assigned = True
+        elif isinstance(node, ast.Assign) and (
+            keys := [
+                target.slice
+                for target in node.targets
+                if isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+            ]
+        ):
+            rendered = [rendered_text(key) for key in keys]
+            if any(text is None for text in rendered):
+                return None
+            found.extend(str(text) for text in rendered)
         elif (
             isinstance(node, ast.AugAssign)
             and isinstance(node.target, ast.Name)
@@ -894,7 +920,11 @@ def _sequence_values(
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"append", "extend", "insert"}
+            # ``update`` and ``setdefault`` add keys from somewhere this cannot
+            # see; ``pop`` and ``clear`` take them away again.  Read the same
+            # way as ``append`` on a list, and for the same reason.
+            and node.func.attr
+            in {"append", "extend", "insert", "update", "setdefault", "pop", "clear"}
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id == name
         ):

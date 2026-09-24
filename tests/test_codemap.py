@@ -2190,6 +2190,81 @@ def test_a_list_built_some_other_way_leaves_the_table_hole_alone():
     ]
 
 
+def test_a_dict_keyed_by_table_name_is_a_list_of_tables():
+    """``getDispatchDatasetsPerUser`` writes its list of tables as a dict, so
+    each one can carry the statuses to ask it about, and adds two of the three
+    under a flag.
+
+    Reading only the literal answers ``jobsDefined4`` -- one table of three,
+    stated with the confidence of the whole list -- so the entries added by
+    subscript are read too, or none of it is.
+    """
+    source = (
+        "def f(self, onlyActive):\n"
+        "    tableStatMap = {'jobsDefined4': ['defined', 'assigned']}\n"
+        "    if not onlyActive:\n"
+        "        tableStatMap['jobsActive4'] = None\n"
+        "        tableStatMap['jobsArchived4'] = None\n"
+        "    for tableName in tableStatMap:\n"
+        "        sqlJ = 'SELECT prodUserName '\n"
+        "        sqlJ += 'FROM {0}.{1} j '.format(schemaPANDA, tableName)\n"
+        "        self.cur.execute(sqlJ + comment, varMap)\n"
+    )
+
+    assert sorted(run.sql for run in sql.executions(_func(source))) == [
+        "SELECT prodUserName FROM {}.jobsActive4 j ",
+        "SELECT prodUserName FROM {}.jobsArchived4 j ",
+        "SELECT prodUserName FROM {}.jobsDefined4 j ",
+    ]
+
+
+def test_a_dict_of_tables_mutated_some_other_way_leaves_the_hole_alone():
+    """``update`` and ``setdefault`` add keys from somewhere this cannot see,
+    and ``pop`` and ``clear`` take them away again.
+
+    The same reading as ``append`` on a list, for the same reason: a missing
+    table is not a smaller answer here, it is a statement the map says the
+    code runs over a set of tables it does not.
+    """
+    for mutation in (
+        "tableStatMap.update(more)",
+        "tableStatMap.setdefault(pick_one(), None)",
+        "tableStatMap.pop('jobsDefined4')",
+        "tableStatMap.clear()",
+    ):
+        source = (
+            "def f(self):\n"
+            "    tableStatMap = {'jobsDefined4': ['defined']}\n"
+            f"    {mutation}\n"
+            "    for tableName in tableStatMap:\n"
+            "        sqlJ = 'SELECT prodUserName '\n"
+            "        sqlJ += 'FROM {0}.{1} j '.format(schemaPANDA, tableName)\n"
+            "        self.cur.execute(sqlJ + comment, varMap)\n"
+        )
+
+        assert [run.sql for run in sql.executions(_func(source))] == [
+            "SELECT prodUserName FROM {}.{} j "
+        ], mutation
+
+
+def test_a_dict_whose_keys_are_not_written_out_leaves_the_hole_alone():
+    """A key computed at run time names no table, and ``{**other}`` is a whole
+    key set from somewhere this cannot see."""
+    for literal in ("{picked: ['defined']}", "{'jobsDefined4': ['defined'], **other}"):
+        source = (
+            "def f(self):\n"
+            f"    tableStatMap = {literal}\n"
+            "    for tableName in tableStatMap:\n"
+            "        sqlJ = 'SELECT prodUserName '\n"
+            "        sqlJ += 'FROM {0}.{1} j '.format(schemaPANDA, tableName)\n"
+            "        self.cur.execute(sqlJ + comment, varMap)\n"
+        )
+
+        assert [run.sql for run in sql.executions(_func(source))] == [
+            "SELECT prodUserName FROM {}.{} j "
+        ], literal
+
+
 def test_more_tables_than_the_cap_allows_are_not_split_at_all():
     """A silent cap reads exactly like full coverage.
 
