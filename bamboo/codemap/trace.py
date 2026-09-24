@@ -245,6 +245,68 @@ def _value_of(statement: ast.stmt) -> Optional[ast.expr]:
     return None
 
 
+def _site_of(expression: ast.AST) -> ast.AST:
+    """The statement *expression* is part of, or the expression itself.
+
+    ``assigned_expressions`` hands back the right-hand side, and everything
+    positional -- the line, the guards above it, whether a loop holds it -- is
+    a property of the statement it sits in.
+    """
+    node: Optional[ast.AST] = expression
+    while node is not None and not isinstance(node, ast.stmt):
+        node = getattr(node, "parent", None)
+    return node if node is not None else expression
+
+
+def _loops_over(node: ast.AST) -> set[int]:
+    """The header line of every loop whose *body* holds *node*."""
+    found: set[int] = set()
+    previous = node
+    for ancestor in pathcond.ancestors(node):
+        if isinstance(
+            ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+        ):
+            break
+        if isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While)) and previous in ancestor.body:
+            found.add(ancestor.lineno)
+        previous = ancestor
+    return found
+
+
+def _not_below(site: ast.AST, target: ast.AST) -> bool:
+    """Whether *site* could have run before *target* on one pass.
+
+    A write below the read cannot have run before it -- unless a loop holds
+    them both, where the next iteration reaches it.  That second half is new
+    and it is not a refinement: without it the rule is unsound, and a message
+    assigned at the foot of a loop body and logged at its head is dropped
+    although every iteration but the first reaches it.
+    """
+    return getattr(site, "lineno", 0) <= getattr(target, "lineno", 0) or bool(
+        _loops_over(site) & _loops_over(target)
+    )
+
+
+def _reaches_one(site: ast.AST, targets: Sequence[ast.AST]) -> bool:
+    """Whether *site* is positioned to reach any of *targets*."""
+    return any(_not_below(site, target) for target in targets)
+
+
+def _compatible(one: ast.AST, other: ast.AST) -> bool:
+    """Whether both nodes can be on one run through the function.
+
+    A path condition is a necessary condition, so this is conservative in the
+    direction that is safe: it separates two lines only where one's condition
+    contradicts the other's.
+    """
+    return not pathcond.exclusive(_reachable_when(one), _reachable_when(other))
+
+
+def _can_reach(site: ast.AST, target: ast.AST) -> bool:
+    """Whether what *site* writes can be what *target* reads."""
+    return _not_below(site, target) and _compatible(site, target)
+
+
 def _reachable_when(node: ast.AST) -> list[str]:
     """The conditions on reaching *node*, including the ones an ``if`` cannot say.
 
@@ -935,11 +997,8 @@ class _Walk:
         """
         out: list[tuple[ast.expr, ast.expr]] = []
         for argument, message in self.logged(frame):
-            if message is not argument:
-                if getattr(message, "lineno", 0) > getattr(argument, "lineno", 0):
-                    continue
-                if pathcond.exclusive(_reachable_when(argument), _reachable_when(message)):
-                    continue
+            if message is not argument and not _can_reach(message, argument):
+                continue
             out.append((argument, message))
         return out
 
@@ -1069,12 +1128,12 @@ class _Walk:
         line = getattr(statement, "lineno", 0)
         rows: list[SkeletonLine] = []
         for argument, message in printed.get(id(statement), ()):
+            # Compatibility only, not :func:`_can_reach`: a line printed after
+            # the arm is printed alongside it just as much as one before, and
+            # the position rule would drop exactly the lines that say what the
+            # arm went on to do.
             arms = [
-                arm
-                for arm, held in self.armed.items()
-                if not pathcond.exclusive(
-                    _reachable_when(held), _reachable_when(argument)
-                )
+                arm for arm, held in self.armed.items() if _compatible(held, argument)
             ]
             if isinstance(message, ast.JoinedStr):
                 pattern = line_pattern(message)
@@ -1139,6 +1198,33 @@ class _Walk:
         bindings.extend(_walrus_bindings(frame.func, name))
         loops = _loop_bindings(frame.func, name)
         caught = _caught_as(frame.func, name)
+        held = bool(bindings or loops or caught)
+        if depth == 1 and self.armed:
+            # ``assigned_expressions`` hands back every assignment in the
+            # function and the arms are at one point in it.  Pruning is by
+            # elimination, so a site that cannot have run on the way to any of
+            # them does not merely add noise: it dilutes "one of these three"
+            # into "one of these four" and sends a reader down a path the code
+            # did not take.  Measured on the 41-case sample, eight of 287
+            # steps.
+            #
+            # Depth one only, and that is a limit rather than a choice.  A
+            # name is explained once for every place that reads it, so deeper
+            # than this the reading point is whichever want arrived first and
+            # filtering against it would drop sites the other readers can
+            # reach.  At depth one the readers are the arms, all of them
+            # armed before the queue drains, and a site is kept if it reaches
+            # any.
+            arms = list(self.armed.values())
+            bindings = [b for b in bindings if _reaches_one(_site_of(b), arms)]
+            loops = [loop for loop in loops if _reaches_one(loop, arms)]
+            caught = [one for one in caught if _reaches_one(one, arms)]
+            if held and not (bindings or loops or caught):
+                # Bound here, and by nothing that could have run first.
+                # "Not bound in this function" would be false and silence
+                # would leave the guard unexplained, so it says which.
+                self._unbound(frame, name, depth, only_below=True)
+                return
         if not bindings and not loops and not caught:
             # The file's own body is the last place to look.  Asked only here,
             # after the function has had its say, so a local always wins over a
@@ -1159,10 +1245,7 @@ class _Walk:
             self._caught(frame, name, handler, depth)
 
     def _binding(self, frame: _Frame, name: str, expression: ast.expr, depth: int) -> None:
-        statement = expression
-        while statement is not None and not isinstance(statement, ast.stmt):
-            statement = getattr(statement, "parent", None)
-        site: ast.AST = statement if statement is not None else expression
+        site = _site_of(expression)
         resolve = self.resolver(frame)
         terminal, detail = self.classify(expression, resolve)
         unseen = _unseen(site)
@@ -1428,7 +1511,9 @@ class _Walk:
         if other is not None:
             self.want(other, reads, depth + 1)
 
-    def _unbound(self, frame: _Frame, name: str, depth: int) -> None:
+    def _unbound(
+        self, frame: _Frame, name: str, depth: int, only_below: bool = False
+    ) -> None:
         # A parameter is settled at the call site, and for the entries the map
         # reached by a plain call it recorded what was passed -- so the same
         # crossing that answers a worker's attribute answers this too.  Kept
@@ -1451,6 +1536,9 @@ class _Walk:
                 detail=(
                     "a parameter, so its value is chosen at the call site"
                     if parameter
+                    else "bound in this function only below the arms, and in no loop that "
+                    "holds both, so none of those can have set it"
+                    if only_below
                     else "not bound in this function -- module scope, an import, or a form the walk does not read"
                 ),
                 depth=depth,

@@ -1160,3 +1160,100 @@ class Proxy:
         "if spec.quiet:",
         "else:",
     ]
+
+
+# ---------------------------------------------------------------------------
+# What a site has to be able to reach
+# ---------------------------------------------------------------------------
+
+
+def test_a_binding_below_the_arm_is_not_offered_as_an_explanation(tmp_path):
+    """Pruning is by elimination, so a site that cannot have run on the way
+    does not merely add noise -- it dilutes "one of these two" into "one of
+    these three" and sends a reader down a path the code did not take."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(spec):
+    status = "new"
+    if spec.kind == "merge":
+        status = "merging"
+    spec.status = status
+    status = "done"
+    return status
+""",
+    )
+
+    steps, _note = _walk(roots, file="m", owner="f", lines=[6])
+
+    listed = {(step.line, step.value) for step in steps if step.name == "status"}
+    assert listed == {(3, "'new'"), (5, "'merging'")}
+
+
+def test_a_binding_below_the_arm_inside_a_loop_that_holds_it_stays(tmp_path):
+    """The next iteration reaches it.  Without this half the position rule is
+    not a refinement but an error -- and it is the half ``reachable_calls`` has
+    been missing since it was written."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(items):
+    token = "first"
+    for item in items:
+        spec.status = token
+        token = item.next_token
+""",
+    )
+
+    steps, _note = _walk(roots, file="m", owner="f", lines=[5])
+
+    listed = {step.line for step in steps if step.name == "token"}
+    assert listed == {3, 6}
+
+
+def test_a_name_bound_only_below_the_arm_says_which(tmp_path):
+    """"Not bound in this function" would be false and silence would leave the
+    guard unexplained, so the step names the third possibility."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(spec):
+    if later == "x":
+        spec.status = "done"
+    later = "x"
+""",
+    )
+
+    steps, _note = _walk(roots, file="m", owner="f", lines=[4])
+
+    (step,) = [s for s in steps if s.name == "later"]
+    assert step.kind == TRACE_UNBOUND
+    assert "only below the arms" in step.detail
+    assert step.terminal != STOP_PARAMETER
+
+
+def test_a_message_assigned_at_the_foot_of_a_loop_still_reaches_its_call(tmp_path):
+    """``reachable_calls`` dropped it on the plain position test, although
+    every iteration but the first reaches it -- three rows came back over the
+    41-case sample when the loop half was added."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(items, log):
+    message = "starting the first pass over the list"
+    for item in items:
+        log.debug(message)
+        spec.status = "done"
+        message = f"finished the pass over {item} in the list"
+""",
+    )
+
+    walked = _walked(roots, file="m", owner="f", lines=[6])
+
+    printed = [
+        row.text
+        for row in walked.skeleton
+        if row.kind == models.SKELETON_PRINT and row.pattern
+    ]
+    assert any("finished the pass over" in one for one in printed), printed
+    assert any("starting the first pass" in one for one in printed), printed
