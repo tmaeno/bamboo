@@ -247,6 +247,16 @@ def _report_candidates(strategy: Strategy, top: int, full: bool, evaluated: bool
             else ""
         )
     )
+    # The count in the heading is the whole set and the listing is the
+    # survivors, so with anything ruled out the two stopped adding up and the
+    # reader who asked about a candidate the evidence eliminated was handed a
+    # list it was not on, with nothing saying why.
+    ruled_out = len(strategy.candidates) - len(candidates)
+    if ruled_out:
+        click.echo(
+            f"           {ruled_out} ruled out by the evidence and not listed below"
+            " (--full lists what is left, not them)"
+        )
     shown = candidates if full else candidates[:top]
     for candidate in shown:
         mark = f"{candidate.verdict:<10}" if evaluated else f"tier {candidate.tier}   "

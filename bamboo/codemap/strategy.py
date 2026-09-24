@@ -1889,8 +1889,16 @@ def evaluate(strategy: Strategy, ev: evidence.Evidence) -> Strategy:
     # Narrowed for the same reason the leads are: offering a reading of code the
     # evidence has ruled out sends a reader to look at a path the system did not
     # take, which is worse than offering nothing.
+    alive = survivors(settled)
+    set_aside = len(alive) - len(_narrowed_by_naming(alive))
+    if set_aside:
+        settled.gaps.append(
+            f"{set_aside} candidate(s) are not read below: one of them names the arm it "
+            "took, which settles which decided, so the others are not offered as code to "
+            "read -- they are still in the list above"
+        )
     settled.readings = _readings(
-        survivors(settled),
+        alive,
         settled.observations,
         {entry.gloss_key: entry for entry in settled.readings if entry.gloss_key},
     )
@@ -1970,6 +1978,20 @@ def skeleton_sentences(readings: list[Reading]) -> list[Sentence]:
     ]
 
 
+def _narrowed_by_naming(candidates: list[Candidate]) -> list[Candidate]:
+    """The candidates worth reading, once any of them has named its arm.
+
+    A record that names an arm has settled which one decided -- the message and
+    the branch were written in the same block.  The other direction is not
+    available: naming none proves nothing, and then every candidate is still
+    worth reading.  Kept as one function because the count of what it sets
+    aside is reported beside the readings, and two spellings of the predicate
+    would drift.
+    """
+    named = [candidate for candidate in candidates if candidate.named]
+    return named or candidates
+
+
 def _readings(
     candidates: list[Candidate],
     observations: list[Observation],
@@ -2000,9 +2022,7 @@ def _readings(
     # and the branch were written in the same block -- so the reading narrows
     # to it.  The other direction is not available: naming none proves nothing,
     # and then every candidate is still worth reading.
-    named = [c for c in candidates if c.named]
-    if named:
-        candidates = named
+    candidates = _narrowed_by_naming(candidates)
 
     # Where a line about this owner can appear: the junction's own files, plus
     # the file any question derived about it lands in -- an arm that names its

@@ -1796,6 +1796,81 @@ async def test_a_chain_asked_about_keeps_its_stages_whatever_file_won():
     assert {c.tag for c in strategy.localization.cuts} == {"-status", "-lowmemory"}
 
 
+def test_what_is_reported_as_set_aside_is_what_is_actually_not_read():
+    """One candidate naming its arm settles which decided, so the others are
+    not offered as code to read.  The number saying so is computed from the
+    same predicate the narrowing uses -- two spellings of it would drift, and
+    a count that disagrees with the listing is worse than no count."""
+    candidates = [
+        models.Candidate(
+            owner="a.py::named",
+            file="a.py",
+            gloss_key="a.py::named",
+            tier=1,
+            branches=[
+                models.CandidateBranch(outcome="finishing", tier=1, line=10, matched=True)
+            ],
+        ),
+        models.Candidate(
+            owner="b.py::quiet",
+            file="b.py",
+            gloss_key="b.py::quiet",
+            tier=1,
+            branches=[models.CandidateBranch(outcome="finishing", tier=1, line=20)],
+        ),
+        models.Candidate(
+            owner="c.py::quiet",
+            file="c.py",
+            gloss_key="c.py::quiet",
+            tier=1,
+            branches=[models.CandidateBranch(outcome="finishing", tier=1, line=30)],
+        ),
+    ]
+
+    kept = strategy_mod._narrowed_by_naming(candidates)
+    read = strategy_mod._readings(candidates, [])
+
+    assert len(candidates) - len(kept) == 2
+    assert {entry.owner for entry in read} == {"a.py::named"}
+
+
+def test_the_candidate_heading_counts_what_the_listing_leaves_out():
+    """The heading counts the whole set and the listing shows the survivors, so
+    with anything ruled out the two stopped adding up -- and a reader asking
+    about an eliminated candidate got a list it was not on and no word why."""
+    import click
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_candidates
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(subject=SUBJECT, observed="finishing"),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        candidates=[
+            models.Candidate(
+                owner="a.py::alive",
+                tier=1,
+                verdict=UNSETTLED,
+                branches=[models.CandidateBranch(outcome="finishing", tier=1)],
+            ),
+            models.Candidate(
+                owner="b.py::gone",
+                tier=1,
+                verdict=ELIMINATED,
+                branches=[models.CandidateBranch(outcome="finishing", tier=1)],
+            ),
+        ],
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command("x", callback=lambda: _report_candidates(strategy, 5, False, True))
+    output = runner.invoke(command).output
+
+    assert "candidates (2)" in output
+    assert "1 ruled out by the evidence and not listed below" in output
+    assert "b.py::gone" not in output
+
+
 def _localization_report(local, evaluated=True, full=False):
     import click.testing
 
