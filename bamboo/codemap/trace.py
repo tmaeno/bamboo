@@ -611,8 +611,8 @@ def _loop_bindings(func: ast.AST, name: str) -> list[ast.For | ast.AsyncFor]:
     return found
 
 
-def _tuple_bindings(func: ast.AST, name: str) -> list[ast.Assign]:
-    """Assignments that bind *name* as one element of an unpacking.
+def _tuple_bindings(func: ast.AST, name: str) -> list[tuple[ast.Assign, Optional[int]]]:
+    """Assignments that bind *name* as one element of an unpacking, and which.
 
     ``pathcond.assigned_expressions`` deliberately reads only ``ast.Name``
     targets, and it is shared with the build, so the form is picked up here
@@ -620,16 +620,27 @@ def _tuple_bindings(func: ast.AST, name: str) -> list[ast.Assign]:
     the walk.  The form matters: ``tmpStat, taskSpec = getTaskWithID_JEDI(...)``
     is how a spec arrives, and without it a guard reading ``taskSpec`` looks
     like a name nothing binds.
+
+    The slot comes back with it because the site is only half the answer.
+    ``tmpStat, taskSpec = get(...)`` rendered as ``taskSpec = get(...)`` says
+    the call returns the spec, when it returns a pair whose second element is
+    the spec -- and the first is the status that decides whether the second
+    means anything.  38 of 218 binding steps over the 41-case sample are this
+    shape.  A ``*rest`` in the target makes the position of everything after it
+    depend on the length of the value, so the slot is left unsaid there rather
+    than guessed.
     """
-    found: list[ast.Assign] = []
+    found: list[tuple[ast.Assign, Optional[int]]] = []
     for node in ast.walk(func):
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
             if not isinstance(target, (ast.Tuple, ast.List)):
                 continue
-            if any(isinstance(e, ast.Name) and e.id == name for e in target.elts):
-                found.append(node)
+            starred = any(isinstance(e, ast.Starred) for e in target.elts)
+            for slot, element in enumerate(target.elts):
+                if isinstance(element, ast.Name) and element.id == name:
+                    found.append((node, None if starred else slot))
     return found
 
 
@@ -1204,9 +1215,9 @@ class _Walk:
             self._field(frame, name, depth)
             return
         bindings = list(pathcond.assigned_expressions(frame.func).get(name, []))
-        bindings.extend(
-            node.value for node in _tuple_bindings(frame.func, name)
-        )
+        unpacked = _tuple_bindings(frame.func, name)
+        slots = {id(node.value): slot for node, slot in unpacked}
+        bindings.extend(node.value for node, _slot in unpacked)
         bindings.extend(_with_bindings(frame.func, name))
         bindings.extend(_walrus_bindings(frame.func, name))
         loops = _loop_bindings(frame.func, name)
@@ -1251,13 +1262,20 @@ class _Walk:
             self._unbound(frame, name, depth)
             return
         for expression in bindings:
-            self._binding(frame, name, expression, depth)
+            self._binding(frame, name, expression, depth, slots.get(id(expression)))
         for loop in loops:
             self._loop(frame, name, loop, depth)
         for handler in caught:
             self._caught(frame, name, handler, depth)
 
-    def _binding(self, frame: _Frame, name: str, expression: ast.expr, depth: int) -> None:
+    def _binding(
+        self,
+        frame: _Frame,
+        name: str,
+        expression: ast.expr,
+        depth: int,
+        slot: Optional[int] = None,
+    ) -> None:
         site = _site_of(expression)
         resolve = self.resolver(frame)
         terminal, detail = self.classify(expression, resolve)
@@ -1282,7 +1300,7 @@ class _Walk:
             owner=frame.owner,
             file=frame.file,
             line=getattr(site, "lineno", 0),
-            value=_text(expression),
+            value=_text(expression) if slot is None else f"{_text(expression)}[{slot}]",
             guards=pathcond.path_condition(site),
             unseen=unseen,
             reads=reads,

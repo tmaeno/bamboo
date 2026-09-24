@@ -1285,3 +1285,40 @@ def f(api, log):
         if row.kind == models.SKELETON_PRINT and row.refused
     }
     assert refused == {7: "the message is not a literal this walk can render"}
+
+
+def test_an_unpacked_binding_says_which_slot_it_took(tmp_path):
+    """``tmpStat, taskSpec = get(...)`` rendered as ``taskSpec = get(...)`` says
+    the call returns the spec, when it returns a pair whose first element is
+    the status deciding whether the second means anything."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(db):
+    status, spec, extra = db.get_task()
+    job.state = spec
+""",
+    )
+
+    steps, _note = _walk(roots, file="m", owner="f", lines=[4])
+
+    (step,) = [s for s in steps if s.name == "spec"]
+    assert step.value == "db.get_task()[1]"
+
+
+def test_a_starred_target_leaves_the_slot_unsaid(tmp_path):
+    """Where the position of everything after the star depends on how long the
+    value is, no slot is better than a guessed one."""
+    roots = _tree(
+        tmp_path,
+        m="""
+def f(db):
+    first, *rest, spec = db.get_task()
+    job.state = spec
+""",
+    )
+
+    steps, _note = _walk(roots, file="m", owner="f", lines=[4])
+
+    (step,) = [s for s in steps if s.name == "spec"]
+    assert step.value == "db.get_task()"
