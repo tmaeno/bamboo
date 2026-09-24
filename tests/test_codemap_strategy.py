@@ -1796,6 +1796,57 @@ async def test_a_chain_asked_about_keeps_its_stages_whatever_file_won():
     assert {c.tag for c in strategy.localization.cuts} == {"-status", "-lowmemory"}
 
 
+def _localization_report(local, evaluated=True, full=False):
+    import click.testing
+
+    from bamboo.scripts.derive_strategy import _report_localization
+
+    strategy = strategy_mod.Strategy(
+        symptom=Symptom(kind=SYMPTOM_DISTRIBUTION, focus=local.describes or local.chain),
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        localization=local,
+    )
+    runner = click.testing.CliRunner()
+    command = click.Command(
+        "x", callback=lambda: _report_localization(strategy, 5, full, evaluated)
+    )
+    return runner.invoke(command).output
+
+
+def test_an_empty_funnel_says_so_instead_of_printing_nothing():
+    """It is built out of production's counts alone, so an empty one means the
+    counts are missing and not that the chain has no steps.  Returning on it
+    said that by saying nothing, which reads as the second."""
+    local = models.Localization(chain=PROD_JOB, log_files=[PROD_JOB_LOG])
+
+    asked = _localization_report(local, evaluated=True)
+    unasked = _localization_report(local, evaluated=False)
+
+    assert "production counted nothing in this sample" in asked
+    assert "nothing being cut" in asked
+    assert "nothing was asked of production" in unasked
+
+
+def test_a_step_the_map_runs_and_the_sample_missed_is_named():
+    """The reader asked about this step and the funnel is silent about it.
+    Silence there is production's, not the map's, and the two read alike."""
+    local = models.Localization(
+        chain=PROD_JOB,
+        log_files=[PROD_JOB_LOG],
+        describes="SE space check",
+        emitted_by=[
+            models.StageCut(owner=PROD_JOB, order=2, funnel_label="SE space check")
+        ],
+        funnel=[models.FunnelStep(label="status check", order=0, most=9, fewest=9, seen=1)],
+    )
+
+    output = _localization_report(local, evaluated=True)
+
+    assert "the map runs a step at 'SE space check' and this sample counted" in output
+    assert "absent here is not absent in production" in output
+
+
 async def test_a_partial_sample_rules_no_step_out():
     """An answer cut off at a bound is indistinguishable from a step that never
     fired, so only what was seen counts."""

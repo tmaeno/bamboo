@@ -836,19 +836,39 @@ def _report_localization(
     if not took:
         click.echo("  nothing was seen -- the questions came back empty, which settles nothing")
 
-    if not local.funnel:
-        return
+    # The funnel is built out of production's counts alone, so a step the map
+    # holds and production never reported is simply not here.  Returning on an
+    # empty one said that by saying nothing, which reads as "no funnel exists".
     click.echo("\nthe funnel, in the order the map runs it")
-    click.echo("           most … fewest left after each step, pooled over passes")
-    click.echo("           no difference is taken: the log marks no boundary between passes, so")
-    click.echo("           two steps' maxima can come from two different ones")
-    steps = local.funnel if full else local.funnel[:top]
-    for step in steps:
-        where = f"#{step.order}" if step.order is not None else "  ?"
-        spread = f"{step.most:5d} … {step.fewest:<5d}"
-        click.echo(f"  {where:>5}  {spread}  {step.label}")
-    if len(local.funnel) > len(steps):
-        click.echo(f"  … {len(local.funnel) - len(steps)} more (--full)")
+    if not local.funnel:
+        click.echo(
+            "           production counted nothing in this sample, which is not the "
+            "same as nothing being cut"
+            if evaluated
+            else "           nothing was asked of production, so there are no counts "
+            "-- --fetch asks for them"
+        )
+    else:
+        click.echo("           most … fewest left after each step, pooled over passes")
+        click.echo(
+            "           no difference is taken: the log marks no boundary between passes, so"
+        )
+        click.echo("           two steps' maxima can come from two different ones")
+        steps = local.funnel if full else local.funnel[:top]
+        for step in steps:
+            where = f"#{step.order}" if step.order is not None else "  ?"
+            spread = f"{step.most:5d} … {step.fewest:<5d}"
+            click.echo(f"  {where:>5}  {spread}  {step.label}")
+        if len(local.funnel) > len(steps):
+            click.echo(f"  … {len(local.funnel) - len(steps)} more (--full)")
+    if evaluated and local.describes:
+        counted = {step.label for step in local.funnel}
+        for label in sorted({c.funnel_label for c in local.emitted_by if c.funnel_label}):
+            if label not in counted:
+                click.echo(
+                    f"           the map runs a step at {label!r} and this sample counted"
+                )
+                click.echo("           nothing at it -- absent here is not absent in production")
 
 
 async def walk(
