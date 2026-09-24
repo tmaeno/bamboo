@@ -43,6 +43,7 @@ from typing import Optional
 
 import click
 
+from bamboo.codemap import models as models_mod
 from bamboo.codemap import reading as reading_mod
 from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.panda import provenance
@@ -55,13 +56,44 @@ def _case_id(case: dict) -> str:
     return f"{case['owner']}@{case['line']}"
 
 
+def _skeleton_rows(skeleton) -> list[str]:
+    """What the walk says this function prints, laid out as source.
+
+    Scored beside the steps rather than instead of them, because they fail
+    differently: a step is wrong when it names a site the source does not have,
+    and a skeleton row is wrong when the pattern it renders is not what that
+    line would print.  The nesting is kept because it carries the part a list
+    cannot -- two rows under one ``if`` were printed together or not at all.
+    """
+    if not skeleton:
+        return ["    (nothing)"]
+    out = []
+    for row in skeleton:
+        pad = "  " * row.depth
+        if row.kind == models_mod.SKELETON_BRANCH:
+            out.append(f"           {pad}{row.text}")
+        elif row.kind == models_mod.SKELETON_ARM:
+            out.append(f"    {row.line:>5} ARM {pad}{row.text}")
+        else:
+            body = row.pattern or f"-- {row.refused} --"
+            out.append(f"    {row.line:>5}  |  {pad}{body}")
+            if row.value:
+                out.append(f"           {pad}with the value: {row.value}")
+    return out
+
+
 def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
     out: list[str] = []
-    steps, note, _skeleton = trace_mod.walk(
+    # ``observed`` is what makes the walk render the narrower pattern -- the
+    # line with the value in its hole beside the line with every hole open.
+    # Left at its default the skeleton still comes back, and the half of it
+    # this sample is meant to score does not.
+    steps, note, skeleton = trace_mod.walk(
         roots,
         file=case["file"],
         owner=case["owner"],
         lines=[case["line"]],
+        observed=case.get("outcome") or "",
         classify=provenance.classify,
         budget=budget,
     )
@@ -87,6 +119,8 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
             out.append(f"           stops  {step.terminal}{detail}")
     if not steps:
         out.append("    (nothing)")
+    out.append("  -- what the skeleton says is printed " + "-" * 36)
+    out.extend(_skeleton_rows(skeleton))
     out.append("  -- the source " + "-" * 59)
     region = reading_mod.region_for(
         roots, file=case["file"], owner=case["owner"], line=case["line"]
@@ -147,7 +181,11 @@ def main(
         lines.append(f"case {index}/{len(cases)}  {_case_id(case)}")
         lines.extend(_render(case, roots, budget))
         lines.append("")
-        lines.append(f"VERDICT {_case_id(case)}  complete=?  sound=?  honest=?  note=")
+        for artefact in ("walk", "skeleton"):
+            lines.append(
+                f"VERDICT {artefact}:{_case_id(case)}  "
+                "complete=?  sound=?  honest=?  note="
+            )
         lines.append("")
     text = "\n".join(lines)
     if out is not None:
@@ -183,18 +221,29 @@ def _tally(cases: list[dict], verdicts: Path, seal: str) -> None:
         scored[case_id.strip()] = fields
         if note:
             notes.append((case_id.strip(), note))
-    counts = {k: Counter() for k in ("complete", "sound", "honest")}
-    for fields in scored.values():
-        for key, counter in counts.items():
+    # Kept apart because they are two artefacts, not two readings of one: the
+    # walk can be right about why an arm ran while the skeleton is wrong about
+    # what the function prints, and an average over both would hide either.
+    artefacts: dict[str, dict[str, Counter]] = {}
+    for case_id, fields in scored.items():
+        artefact, _, _rest = case_id.partition(":")
+        if not _rest:
+            artefact = "walk"
+        bucket = artefacts.setdefault(
+            artefact, {k: Counter() for k in ("complete", "sound", "honest")}
+        )
+        for key, counter in bucket.items():
             counter[fields.get(key, "?")] += 1
     click.echo(f"sample sha256 {seal}  n={len(cases)}  scored={len(scored)}")
-    for key, counter in counts.items():
-        total = sum(v for k, v in counter.items() if k != "?")
-        yes = counter.get("y", 0)
-        click.echo(
-            f"  {key:<9} {yes}/{total}"
-            + (f"   unscored {counter['?']}" if counter.get("?") else "")
-        )
+    for artefact in sorted(artefacts):
+        click.echo(f"  {artefact}")
+        for key, counter in artefacts[artefact].items():
+            total = sum(v for k, v in counter.items() if k != "?")
+            yes = counter.get("y", 0)
+            click.echo(
+                f"    {key:<9} {yes}/{total}"
+                + (f"   unscored {counter['?']}" if counter.get("?") else "")
+            )
     if notes:
         click.echo("\n  what the misses were:")
         for case_id, note in notes:
