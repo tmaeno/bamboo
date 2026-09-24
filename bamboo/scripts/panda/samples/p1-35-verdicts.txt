@@ -1,0 +1,82 @@
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::insertNewJob@2924  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::insertNewJob@2924  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedirefine/TaskRefinerBase.py::extractCommon@154  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jedirefine/TaskRefinerBase.py::extractCommon@154  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateRelatedEventServiceJobs@1691  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateRelatedEventServiceJobs@1691  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess@75  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess@75  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJobStatus@284  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJobStatus@284  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateEventRanges@538  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateEventRanges@538  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::recover_stale_results@534  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::recover_stale_results@534  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess@83  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess@83  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/dataservice/setupper_atlas_plugin.py::setup_destination@773  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/dataservice/setupper_atlas_plugin.py::setup_destination@773  complete=n  sound=y  honest=y  note=a logging call whose message is a bare name is dropped, not refused
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::restartTasksForContentsUpdate_JEDI@1841  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::restartTasksForContentsUpdate_JEDI@1841  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::getOutputFiles_JEDI@6175  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::getOutputFiles_JEDI@6175  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::throttleTasks_JEDI@2865  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::throttleTasks_JEDI@2865  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedirefine/TaskRefinerBase.py::extractCommon@474  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jedirefine/TaskRefinerBase.py::extractCommon@474  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py::initialize_cpu_time_task@397  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py::initialize_cpu_time_task@397  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jediorder/JobGenerator.py::clonePandaJob@2572  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jediorder/JobGenerator.py::clonePandaJob@2572  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@4971  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@4971  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@5119  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@5119  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@4945  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI@4945  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI@1362  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI@1362  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI@1383  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI@1383  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::killJob@1036  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::killJob@1036  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::setScoreSiteToEs@3383  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::setScoreSiteToEs@3383  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::claim_async_result@304  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::claim_async_result@304  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo@1907  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo@1907  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo@1900  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo@1900  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1583  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1583  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1638  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1638  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1650  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1650  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1566  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob@1566  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJob@584  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJob@584  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/dataservice/closer.py::run@212  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/dataservice/closer.py::run@212  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedirefine/TaskRefinerBase.py::doBasicRefine@669  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandajedi/jedirefine/TaskRefinerBase.py::doBasicRefine@669  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/daemons/scripts/datasetManager.py::run@723  complete=y  sound=n  honest=y  note=lists a local bound after the arm, outside every loop containing it
+VERDICT skeleton:pandaserver/daemons/scripts/datasetManager.py::run@723  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/daemons/scripts/datasetManager.py::run@847  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/daemons/scripts/datasetManager.py::run@847  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/workflow/workflow_core.py::process_workflow_running@1923  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/workflow/workflow_core.py::process_workflow_running@1923  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/brokerage/SiteMapper.py::<module>@20  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/brokerage/SiteMapper.py::<module>@20  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/brokerage/SiteMapper.py::<module>@25  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/brokerage/SiteMapper.py::<module>@25  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/brokerage/SiteMapper.py::<module>@16  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/brokerage/SiteMapper.py::<module>@16  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/brokerage/SiteMapper.py::<module>@19  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/brokerage/SiteMapper.py::<module>@19  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandaserver/brokerage/SiteMapper.py::<module>@21  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandaserver/brokerage/SiteMapper.py::<module>@21  complete=y  sound=y  honest=y  note=
+VERDICT walk:pandajedi/jedirefine/GenTaskRefiner.py::doRefine@60  complete=y  sound=y  honest=y  note=
+VERDICT skeleton:pandajedi/jedirefine/GenTaskRefiner.py::doRefine@60  complete=y  sound=y  honest=y  note=
