@@ -10587,6 +10587,87 @@ def test_a_call_carrying_its_own_statement_has_no_fragment_to_place():
     assert [r.sql for r in sql.executions(func)] == ["SELECT a FROM ATLAS_PANDA.t1"]
 
 
+def test_a_statement_thrown_away_before_the_call_is_not_what_it_ran():
+    """What position alone leaves behind.
+
+    ``copyArchive.main`` binds ``sql`` at line 532 and runs it hundreds of
+    lines below, and the binding does reach that call -- what stops it is the
+    plain ``sql = ...`` in between, each of which discards the statement
+    before it.  Nine of its statements were still read as unresolved after
+    the reachability rule for exactly that reason.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    self.cur.execute(sql, varMap)\n"
+        "    sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    runs = sql.executions(_func(source))
+    second = [r.sql for r in runs if r.call.lineno == 5]
+
+    assert second == ["SELECT b FROM ATLAS_PANDA.t2 "]
+
+
+def test_a_statement_editing_itself_does_not_throw_itself_away():
+    """``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket.
+
+    Counting a self-reference as a replacement cost three real read edges when
+    it was measured that way, which is the whole difference between this rule
+    and a wrong one.  Most of that spelling never reaches ``_parts``, which
+    keeps only what renders; the f-string spelling does.
+
+    Both halves stay: the fragment the second line edits is still what the
+    call runs, and the map reads the edit as its own variant because the
+    reassembly cannot fold a name back into itself.  That is untouched here --
+    what matters is that the edit does not throw the first away.
+    """
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 WHERE x IN ('\n"
+        "    sql = f'{sql}:v) '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    assert sorted(r.sql for r in sql.executions(_func(source))) == [
+        "SELECT a FROM ATLAS_PANDA.t1 WHERE x IN (",
+        "{}:v) ",
+    ]
+
+
+def test_a_rebinding_under_an_arm_the_call_is_not_in_throws_nothing_away():
+    """One arm's rebinding is not the other arm's."""
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    if wanted:\n"
+        "        sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+        "    else:\n"
+        "        self.cur.execute(sql, varMap)\n"
+    )
+
+    assert [r.sql for r in sql.executions(_func(source))] == [
+        "SELECT a FROM ATLAS_PANDA.t1 "
+    ]
+
+
+def test_a_rebinding_inside_a_loop_leaves_the_first_pass_alone():
+    """The pass before it ran is a pass where the earlier statement stood."""
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT a FROM ATLAS_PANDA.t1 '\n"
+        "    for row in rows:\n"
+        "        sql = 'SELECT b FROM ATLAS_PANDA.t2 '\n"
+        "    self.cur.execute(sql, varMap)\n"
+    )
+
+    assert sorted(r.sql for r in sql.executions(_func(source))) == [
+        "SELECT a FROM ATLAS_PANDA.t1 ",
+        "SELECT b FROM ATLAS_PANDA.t2 ",
+    ]
+
+
 def test_two_independent_choices_make_four_statements_not_five_halves():
     """``insertTaskParams_JEDI`` builds one INSERT across two unrelated ``if``s.
 

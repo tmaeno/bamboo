@@ -53,6 +53,7 @@ from bamboo.codemap.panda.pathcond import (
     attach_parents,
     can_reach,
     exclusive,
+    loops_over,
     path_condition,
 )
 from bamboo.codemap.panda.values import rendered_text
@@ -956,6 +957,45 @@ def _literal_values(
     return found
 
 
+def _reads(expression: ast.expr, name: str) -> bool:
+    """Whether *expression* reads *name* -- editing what is there, not replacing it."""
+    return any(
+        isinstance(node, ast.Name) and node.id == name for node in ast.walk(expression)
+    )
+
+
+def _runs_before(site: ast.stmt, call: ast.AST) -> bool:
+    """Whether reaching *call* means having run *site* on the same pass.
+
+    Position is not enough.  A rebinding under an arm the call is not in never
+    runs for that call, and one inside a loop the call is outside leaves the
+    first pass -- where the earlier statement is still what the name holds.
+    Both are read as containment: every condition guarding the rebinding also
+    guards the call, and every loop holding it holds the call.
+    """
+    return set(path_condition(site)) <= set(path_condition(call)) and loops_over(
+        site
+    ) <= loops_over(call)
+
+
+def _discarded(discards: list[ast.stmt], built: list[ast.stmt], call: ast.AST) -> bool:
+    """Whether the statement *built* was thrown away before *call* ran.
+
+    Reachability is positional and path-sensitive and still leaves
+    ``copyArchive.main`` claiming nine statements at each of its calls: a
+    fragment written at line 532 does reach a call hundreds of lines below,
+    and what stops it is the plain ``sql = ...`` in between, each of which
+    discards the statement before it.
+
+    From the last fragment, because that is when the statement exists.
+    """
+    after = max(part.lineno for part in built)
+    return any(
+        after < part.lineno < getattr(call, "lineno", 0) and _runs_before(part, call)
+        for part in discards
+    )
+
+
 def _substituted(
     text: str,
     sources: list[ast.stmt],
@@ -1086,6 +1126,7 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
         operands = _concatenated(statement)
         sources: dict[str, list[ast.stmt]] = {}
         reaching: dict[str, list[ast.stmt]] = {}
+        discards: list[ast.stmt] = []
         if isinstance(operands[0], ast.Name):
             base = operands[0]
             head = []
@@ -1107,6 +1148,17 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
                 # gives -- so this is a second reading and not a wider one.
                 reaching.setdefault(text, []).extend(span.node for span in spans)
             held = base.id
+            # Where the name is thrown away and given a new statement.  A
+            # statement that reads its own name is not one of these:
+            # ``sql_to_get_ids = sql_to_get_ids[:-1] + ") "`` closes a bracket
+            # on what is already there, and counting it cost three real read
+            # edges, measured.  Most of that spelling never reaches ``_parts``,
+            # which keeps only what renders -- ``sql = f"{sql} AND x"`` does.
+            discards = [
+                part
+                for _line, operator, _text, part in _parts(func, base.id)
+                if operator == "=" and not _reads(part.value, base.id)
+            ]
         elif forwarded:
             # The daemons write the statement into the call.  ``execute`` is
             # left requiring a name on purpose: widening it would move the
@@ -1158,6 +1210,8 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
                 # "no fragment reaches here" and "there is no fragment" are
                 # different answers, and reading the second as the first would
                 # drop 30 pairs.
+                continue
+            if built_by and _discarded(discards, built_by, node):
                 continue
             assembled = "".join(combination)
             for text in _substituted(
