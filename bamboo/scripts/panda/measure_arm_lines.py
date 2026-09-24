@@ -9,9 +9,11 @@ prints today.
 Two populations, and keeping them apart is the point:
 
 **The map's arm sentences.**  One per ``junction x branch x emit`` the build
-recorded as reporting a decision.  This is what ``line_shape`` pools into a
-single question per subject, by majority, and it knows nothing about the value
-actually observed.
+recorded as reporting a decision.  A question used to be built from these by
+majority -- one per subject, knowing nothing about the value observed -- and
+that question was removed once this file measured that it answered none.  They
+are still counted here because they are what the build records, and because
+the comparison below is what said the majority was the wrong reduction.
 
 **The skeleton's lines.**  One per ``(value term, printed line, reachable
 arm)`` the use-time walk renders.  A different and smaller population by

@@ -1,0 +1,527 @@
+[
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::insertNewJob",
+  "line": 2924,
+  "outcome": "6000",
+  "tier": 1,
+  "kinds": [
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:chosen by whoever called or built this"
+ },
+ {
+  "file": "pandajedi/jedirefine/TaskRefinerBase.py",
+  "owner": "pandajedi/jedirefine/TaskRefinerBase.py::extractCommon",
+  "line": 154,
+  "outcome": "0",
+  "tier": 1,
+  "kinds": [
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:chosen by whoever called or built this"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateRelatedEventServiceJobs",
+  "line": 1691,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:chosen by whoever called or built this"
+ },
+ {
+  "file": "pandajedi/jedipprocess/PostProcessorBase.py",
+  "owner": "pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess",
+  "line": 75,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:chosen by whoever called or built this"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJobStatus",
+  "line": 284,
+  "outcome": "waiting",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:chosen by whoever called or built this"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::updateEventRanges",
+  "line": 538,
+  "outcome": "zipoutput",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "loop-target"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/async_request_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::recover_stale_results",
+  "line": 534,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "loop-target"
+ },
+ {
+  "file": "pandajedi/jedipprocess/PostProcessorBase.py",
+  "owner": "pandajedi/jedipprocess/PostProcessorBase.py::doBasicPostProcess",
+  "line": 83,
+  "outcome": "done",
+  "tier": 1,
+  "kinds": [
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "loop-target"
+ },
+ {
+  "file": "pandaserver/dataservice/setupper_atlas_plugin.py",
+  "owner": "pandaserver/dataservice/setupper_atlas_plugin.py::setup_destination",
+  "line": 773,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "loop-target"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::restartTasksForContentsUpdate_JEDI",
+  "line": 1841,
+  "outcome": "defined",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "write"
+  ],
+  "stratum": "loop-target"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::getOutputFiles_JEDI",
+  "line": 6175,
+  "outcome": "1",
+  "tier": 1,
+  "kinds": [
+   "write"
+  ],
+  "stratum": "write"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::throttleTasks_JEDI",
+  "line": 2865,
+  "outcome": "passthrough(JediTaskSpec.status)",
+  "tier": 2,
+  "kinds": [
+   "write"
+  ],
+  "stratum": "write"
+ },
+ {
+  "file": "pandajedi/jedirefine/TaskRefinerBase.py",
+  "owner": "pandajedi/jedirefine/TaskRefinerBase.py::extractCommon",
+  "line": 474,
+  "outcome": "Undefined",
+  "tier": 1,
+  "kinds": [
+   "write"
+  ],
+  "stratum": "write"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py::initialize_cpu_time_task",
+  "line": 397,
+  "outcome": "HS06sPerEvent",
+  "tier": 1,
+  "kinds": [
+   "write"
+  ],
+  "stratum": "write"
+ },
+ {
+  "file": "pandajedi/jediorder/JobGenerator.py",
+  "owner": "pandajedi/jediorder/JobGenerator.py::clonePandaJob",
+  "line": 2572,
+  "outcome": "runtime(siteSpec.get_unified_name())",
+  "tier": 2,
+  "kinds": [
+   "write"
+  ],
+  "stratum": "write"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
+  "line": 4971,
+  "outcome": "exhausted",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "handover"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
+  "line": 5119,
+  "outcome": "ready",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "handover"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
+  "line": 4945,
+  "outcome": "exhausted",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "handover"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI",
+  "line": 1362,
+  "outcome": "runtime(taskSpec.status)",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "handover",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "handover"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTaskStatusByContFeeder_JEDI",
+  "line": 1383,
+  "outcome": "None",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "handover"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::killJob",
+  "line": 1036,
+  "outcome": "closed",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "write"
+  ],
+  "stratum": "binding"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::setScoreSiteToEs",
+  "line": 3383,
+  "outcome": "1",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "write"
+  ],
+  "stratum": "binding"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/async_request_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/async_request_module.py::claim_async_result",
+  "line": 304,
+  "outcome": "None",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "write"
+  ],
+  "stratum": "binding"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo",
+  "line": 1907,
+  "outcome": "runtime(queue_data['releases'])",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "write"
+  ],
+  "stratum": "binding"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo",
+  "line": 1900,
+  "outcome": "runtime(int(queue_data['corecount']))",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "write"
+  ],
+  "stratum": "binding"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
+  "line": 1583,
+  "outcome": "es_badstatus",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value the database supplies, whose writers the map names"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
+  "line": 1638,
+  "outcome": "jc_unlock",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value the database supplies, whose writers the map names"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
+  "line": 1650,
+  "outcome": "fg_done",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value the database supplies, whose writers the map names"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
+  "line": 1566,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value the database supplies, whose writers the map names"
+ },
+ {
+  "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::updateJob",
+  "line": 584,
+  "outcome": "running",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value the database supplies, whose writers the map names"
+ },
+ {
+  "file": "pandaserver/dataservice/closer.py",
+  "owner": "pandaserver/dataservice/closer.py::run",
+  "line": 212,
+  "outcome": "runtime(final_status)",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "handover",
+   "loop-target",
+   "unbound:a value the database supplies, whose writers the map names",
+   "unbound:chosen by whoever called or built this",
+   "unbound:none",
+   "write"
+  ],
+  "stratum": "unbound:none"
+ },
+ {
+  "file": "pandajedi/jedirefine/TaskRefinerBase.py",
+  "owner": "pandajedi/jedirefine/TaskRefinerBase.py::doBasicRefine",
+  "line": 669,
+  "outcome": "runtime(JediDatasetSpec.get_constituent_input_type())",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "unbound:none",
+   "write"
+  ],
+  "stratum": "unbound:none"
+ },
+ {
+  "file": "pandaserver/daemons/scripts/datasetManager.py",
+  "owner": "pandaserver/daemons/scripts/datasetManager.py::run",
+  "line": 723,
+  "outcome": "failed",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "unbound:none",
+   "write"
+  ],
+  "stratum": "unbound:none"
+ },
+ {
+  "file": "pandaserver/daemons/scripts/datasetManager.py",
+  "owner": "pandaserver/daemons/scripts/datasetManager.py::run",
+  "line": 847,
+  "outcome": "ready",
+  "tier": 1,
+  "kinds": [
+   "binding",
+   "handover",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "unbound:none",
+   "write"
+  ],
+  "stratum": "unbound:none"
+ },
+ {
+  "file": "pandaserver/workflow/workflow_core.py",
+  "owner": "pandaserver/workflow/workflow_core.py::process_workflow_running",
+  "line": 1923,
+  "outcome": "runtime(WorkflowStatus.done)",
+  "tier": 2,
+  "kinds": [
+   "binding",
+   "handover",
+   "loop-target",
+   "unbound:chosen by whoever called or built this",
+   "unbound:none",
+   "write"
+  ],
+  "stratum": "unbound:none"
+ },
+ {
+  "file": "pandaserver/brokerage/SiteMapper.py",
+  "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
+  "line": 20,
+  "outcome": "runtime(panda_config.def_type)",
+  "tier": 2,
+  "kinds": [],
+  "stratum": "no steps"
+ },
+ {
+  "file": "pandaserver/brokerage/SiteMapper.py",
+  "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
+  "line": 25,
+  "outcome": "runtime({})",
+  "tier": 2,
+  "kinds": [],
+  "stratum": "no steps"
+ },
+ {
+  "file": "pandaserver/brokerage/SiteMapper.py",
+  "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
+  "line": 16,
+  "outcome": "runtime(panda_config.def_sitename)",
+  "tier": 2,
+  "kinds": [],
+  "stratum": "no steps"
+ },
+ {
+  "file": "pandaserver/brokerage/SiteMapper.py",
+  "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
+  "line": 19,
+  "outcome": "runtime({'default': panda_config.def_ddm})",
+  "tier": 2,
+  "kinds": [],
+  "stratum": "no steps"
+ },
+ {
+  "file": "pandaserver/brokerage/SiteMapper.py",
+  "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
+  "line": 21,
+  "outcome": "runtime(panda_config.def_status)",
+  "tier": 2,
+  "kinds": [],
+  "stratum": "no steps"
+ },
+ {
+  "file": "pandajedi/jedirefine/GenTaskRefiner.py",
+  "owner": "pandajedi/jedirefine/GenTaskRefiner.py::doRefine",
+  "line": 60,
+  "outcome": "runtime(f'tmpl_{datasetSpec.type}')",
+  "tier": 2,
+  "kinds": [
+   "loop-target",
+   "unbound:a value another system supplies",
+   "unbound:chosen by whoever called or built this",
+   "write"
+  ],
+  "stratum": "unbound:a value another system supplies"
+ }
+]

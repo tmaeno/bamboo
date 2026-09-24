@@ -19,12 +19,21 @@ differently and only one of them is silent:
               themselves, which is why it is scored separately and why the
               pass mark for it is zero failures rather than a proportion.
 
-**The sample is drawn once, stratified, and the holdout is sealed.**  Two
+**The sample is drawn here, stratified, and nothing is sealed.**  Two
 walkthroughs picked by hand would only ever test the blind spots that were
 predicted from reading the code, and the corpus has punished reasoning from a
-list of known failures before.  The strata come from the map's own arms: an
-``if`` chain (71.0%), no ``if`` but inside a try, a loop or a ``with``
-(18.1%), and plain straight-line code (4.9%).
+list of known failures before.  Drawing lives in this file rather than beside
+it because the last sample was drawn by a script that is gone: the cases
+survived in a JSON file nobody could regenerate, then the JSON went too, and a
+sealed holdout that cannot be opened is worse than no holdout.  So the draw is
+a flag here, the sample it writes is committed, and none of it is sealed.
+
+**The strata are what the walk has to resolve**, not the shape of the guard
+above the arm -- that axis was tried and it cut across the thing being scored.
+Each arm goes to the rarest kind of step its walk produced, and the rarity is
+measured in the same pass rather than fixed here, because it moves: the walk
+returned 2969 steps over 830 arms when this was first sized and returns four
+times that now.
 
 Honest about what this cannot be: the author of the walk is also its scorer,
 so sealing the holdout buys "not tuned against these cases" and not blindness.
@@ -37,6 +46,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -129,8 +139,102 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
     return out
 
 
+async def _draw(
+    map_id: str,
+    source_root: Optional[Path],
+    budget,
+    seed: int,
+    per_stratum: int,
+    out: Optional[Path],
+) -> None:
+    """Walk every arm, stratify by what the walk had to resolve, and sample.
+
+    The rarity order is computed here rather than written down, so a stratum
+    that stops being rare stops being over-sampled.  An arm goes to the rarest
+    kind of step its own walk produced: sampling by the commonest instead puts
+    almost every case in one stratum, since nearly every walk binds something.
+    """
+    from bamboo.codemap.lookup import CodeMap
+    from bamboo.codemap.models import JunctionNode
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+
+    roots = PandaCodeMapPlugin._resolve_roots(source_root)
+    graph_db = GraphDatabaseClient()
+    await graph_db.connect()
+    try:
+        junctions = await CodeMap(graph_db, map_id=map_id)._find(JunctionNode)
+    finally:
+        await graph_db.close()
+
+    arms: list[dict] = []
+    kind_counts: Counter = Counter()
+    for junction in junctions:
+        if junction.anchor is None:
+            continue
+        by_line = {b.line: b for b in junction.branches if b.line}
+        lines = sorted(by_line) or [junction.anchor.line_start]
+        for line in lines:
+            steps, _note, _skeleton = trace_mod.walk(
+                roots,
+                file=junction.anchor.file,
+                owner=junction.owner,
+                lines=[line],
+                observed=(by_line.get(line).outcome if by_line.get(line) else ""),
+                handovers=_handovers(junction),
+                classify=provenance.classify,
+                budget=budget,
+            )
+            kinds = {
+                f"unbound:{step.terminal or 'none'}"
+                if step.kind == trace_mod.TRACE_UNBOUND
+                else step.kind
+                for step in steps
+            }
+            kind_counts.update(kinds)
+            branch = by_line.get(line)
+            arms.append(
+                {
+                    "file": junction.anchor.file,
+                    "owner": junction.owner,
+                    "line": line,
+                    "outcome": branch.outcome if branch else "",
+                    "tier": branch.tier if branch else 0,
+                    "kinds": sorted(kinds),
+                }
+            )
+
+    rarity = dict(kind_counts)
+    for arm in arms:
+        arm["stratum"] = (
+            min(arm["kinds"], key=lambda k: (rarity[k], k)) if arm["kinds"] else "no steps"
+        )
+    strata: dict[str, list[dict]] = {}
+    for arm in arms:
+        strata.setdefault(arm["stratum"], []).append(arm)
+
+    click.echo(f"arms {len(arms)}   strata {len(strata)}   seed {seed}")
+    drawn: list[dict] = []
+    for name in sorted(strata, key=lambda s: (-len(strata[s]), s)):
+        pool = sorted(strata[name], key=lambda a: (a["owner"], a["line"]))
+        take = min(per_stratum, len(pool))
+        picked = random.Random(f"{seed}:{name}").sample(pool, take)
+        drawn.extend(picked)
+        click.echo(f"  {len(pool):>4} arm(s)  drew {take}   {name}")
+    click.echo(f"\nn={len(drawn)}")
+    # Rule 4: say what a sample this size would catch, or the number is decor.
+    for rate in (0.10, 0.05):
+        caught = 1 - (1 - rate) ** len(drawn)
+        click.echo(f"  a defect in {rate:.0%} of arms is caught with probability {caught:.0%}")
+    if out is not None:
+        out.write_text(json.dumps(drawn, indent=1))
+        click.echo(f"\nsample written to {out}")
+
+
 @click.command("score-trace")
 @click.option("--sample", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--draw", is_flag=True, help="Walk every arm, stratify, and write a sample.")
+@click.option("--seed", type=int, default=None, help="The draw is this and the population.")
+@click.option("--per-stratum", default=5, show_default=True)
 @click.option(
     "--verdicts",
     type=click.Path(exists=True, path_type=Path),
@@ -153,6 +257,9 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
 @click.option("--source-root", type=click.Path(path_type=Path), default=None)
 def main(
     sample: Optional[Path],
+    draw: bool,
+    seed: Optional[int],
+    per_stratum: int,
     verdicts: Optional[Path],
     out: Optional[Path],
     scan: bool,
@@ -163,6 +270,15 @@ def main(
 ) -> None:
     if scan:
         asyncio.run(_scan(map_id, source_root, trace_mod.Budget(depth=depth), top))
+        return
+    if draw:
+        if seed is None:
+            raise click.UsageError("--draw needs --seed: a draw nobody can repeat is a guess")
+        asyncio.run(
+            _draw(
+                map_id, source_root, trace_mod.Budget(depth=depth), seed, per_stratum, out
+            )
+        )
         return
     if sample is None:
         raise click.UsageError(
