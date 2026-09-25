@@ -10882,7 +10882,7 @@ def test_an_annotated_literal_is_a_value_the_name_can_hold():
 
 
 def test_an_augmented_assignment_is_still_a_fragment_not_a_statement():
-    """``_targets_of`` leaves ``AugAssign`` out on purpose.  Folding it in would
+    """``pathcond.targets_of`` leaves ``AugAssign`` out on purpose.  Folding it in would
     make ``sql += ' AND x=1'`` look like the whole statement rather than a piece
     of it, and the reassembled text is what every reader downstream matches."""
     source = (

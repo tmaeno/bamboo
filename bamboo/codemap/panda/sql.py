@@ -56,6 +56,8 @@ from bamboo.codemap.panda.pathcond import (
     exclusive,
     loops_over,
     path_condition,
+    targets_of,
+    written_value,
 )
 from bamboo.codemap.panda.values import rendered_text
 
@@ -211,45 +213,6 @@ class SqlWrite(BaseModel):
     )
 
 
-def _targets_of(node: ast.AST) -> list[ast.expr]:
-    """What an ``=`` statement writes to, or ``[]`` if *node* is not one.
-
-    ``x: dict[str, Any] = {...}`` is the same write as ``x = {...}`` and the
-    corpus spells it that way 914 times, against five in the release the map was
-    last built from.  Reading only :class:`ast.Assign` cost eleven facts --
-    three tables their reader, three values their selector, a criterion, two
-    junctions and the whole of ``harvester_workers.pilotStatus`` -- and left one
-    statement's table unresolved.  None of that was a change in PanDA: both
-    versions of ``getDispatchDatasetsPerUser`` are identical but for the
-    annotation.
-
-    An ``AnnAssign`` with no value -- ``found: list[str]`` -- states a type and
-    writes nothing, so it has no targets here: reading one as a write would have
-    the name hold whatever the *next* statement assigns.
-
-    ``AugAssign`` is deliberately absent.  Every caller that wants ``+=`` treats
-    it as a different operator, and folding it in here would make ``sql +=
-    " AND x=1"`` look like the statement rather than a fragment of it.
-    """
-    if isinstance(node, ast.Assign):
-        return node.targets
-    if isinstance(node, ast.AnnAssign) and node.value is not None:
-        return [node.target]
-    return []
-
-
-def _written_value(node: ast.AST) -> Optional[ast.expr]:
-    """What an assignment writes, across all three spellings of one.
-
-    Unlike :func:`_targets_of` this does fold in ``AugAssign``, because its
-    callers are reassembling a statement from the ``=`` and ``+=`` fragments
-    that build it and need the right-hand side of both.
-    """
-    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-        return node.value
-    return None
-
-
 def _parts(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     name: str,
@@ -261,7 +224,7 @@ def _parts(
     seen = seen | {name}
     parts: list[tuple[int, str, str, ast.stmt]] = []
     for node in ast.walk(func):
-        if targets := _targets_of(node):
+        if targets := targets_of(node):
             for target in targets:
                 if not (isinstance(target, ast.Name) and target.id == name):
                     continue
@@ -517,7 +480,7 @@ def _table_choices(
     per_part: list[tuple[list[ast.expr], set[int]]] = []
     choices: dict[str, list[str]] = {}
     for _line, _operator, text, node in parts:
-        value = _written_value(node)
+        value = written_value(node)
         expressions = _hole_expressions(value) if value is not None else None
         if expressions is None or len(expressions) != text.count(_BARE_FIELD):
             per_part.append(([], set()))
@@ -785,7 +748,7 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     """
     found: list[str] = []
     for _line, _operator, _text, node in _parts(func, name):
-        value = _written_value(node)
+        value = written_value(node)
         if not isinstance(value, ast.JoinedStr):
             continue
         found.extend(
@@ -880,7 +843,7 @@ def _braces_are_literal(sources: list[ast.stmt]) -> bool:
     as ``FROM ATLAS_PANDA.{}`` -- naming no table at all.
     """
     return not any(
-        (value := _written_value(node)) is not None and _interpolates(value)
+        (value := written_value(node)) is not None and _interpolates(value)
         for node in sources
     )
 
@@ -928,7 +891,7 @@ def _sequence_values(
     for node in ast.walk(func):
         if any(
             isinstance(target, ast.Name) and target.id == name
-            for target in _targets_of(node)
+            for target in targets_of(node)
         ):
             elements = _elements(node.value)
             if elements is None:
@@ -937,7 +900,7 @@ def _sequence_values(
             assigned = True
         elif keys := [
             target.slice
-            for target in _targets_of(node)
+            for target in targets_of(node)
             if isinstance(target, ast.Subscript)
             and isinstance(target.value, ast.Name)
             and target.value.id == name
@@ -1086,7 +1049,7 @@ def _literal_values(
                 found.extend(elements)
         elif any(
             isinstance(target, ast.Name) and target.id == expression.id
-            for target in _targets_of(node)
+            for target in targets_of(node)
         ):
             if _is_literal(node.value):
                 found.append(node.value.value)
@@ -1388,7 +1351,7 @@ def _binding_window(
     for node in ast.walk(func):
         # ``targets`` first: it is what rules out the nodes with no line number
         # at all, so testing it before ``lineno`` is what keeps this safe.
-        targets = _targets_of(node)
+        targets = targets_of(node)
         if not targets or node.lineno >= line:
             continue
         if not isinstance(node.value, (ast.Dict, ast.DictComp)) and not (
@@ -1847,7 +1810,7 @@ def bound_values(
     """
     found: list[Bind] = []
     for node in ast.walk(func):
-        targets = _targets_of(node)
+        targets = targets_of(node)
         if not targets:
             continue
         if window is not None and not window[0] <= node.lineno <= window[1]:

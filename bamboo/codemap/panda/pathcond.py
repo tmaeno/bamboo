@@ -57,6 +57,49 @@ def enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFun
     return None
 
 
+def targets_of(node: ast.AST) -> list[ast.expr]:
+    """What an ``=`` statement writes to, or ``[]`` if *node* is not one.
+
+    ``x: dict[str, Any] = {...}`` is the same write as ``x = {...}`` and the
+    corpus spells it that way 914 times in a function body, against five in the
+    release the map was last built from.  Reading only :class:`ast.Assign` cost
+    the SQL slice eleven facts -- three tables their reader, three values their
+    selector, a criterion, two junctions and the whole of
+    ``harvester_workers.pilotStatus`` -- and left one statement's table
+    unresolved.  None of that was a change in PanDA: both versions of
+    ``getDispatchDatasetsPerUser`` are identical but for the annotation.
+
+    Here rather than in one recognizer because the same reading was found and
+    fixed three separate times, each time at the single site that had just been
+    caught.  A reader asking "is this an assignment" should get one answer.
+
+    An ``AnnAssign`` with no value -- ``found: list[str]`` -- states a type and
+    writes nothing, so it has no targets here: reading one as a write would have
+    the name hold whatever the *next* statement assigns.
+
+    ``AugAssign`` is deliberately absent.  Every caller that wants ``+=`` treats
+    it as a different operator, and folding it in here would make ``sql +=
+    " AND x=1"`` look like the statement rather than a fragment of it.
+    """
+    if isinstance(node, ast.Assign):
+        return node.targets
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        return [node.target]
+    return []
+
+
+def written_value(node: ast.AST) -> Optional[ast.expr]:
+    """What an assignment writes, across all three spellings of one.
+
+    Unlike :func:`targets_of` this does fold in ``AugAssign``, because its
+    callers are reassembling a statement from the ``=`` and ``+=`` fragments
+    that build it and need the right-hand side of both.
+    """
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        return node.value
+    return None
+
+
 def single_definition(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
 ) -> Optional[ast.expr]:
