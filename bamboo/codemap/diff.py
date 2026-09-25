@@ -23,6 +23,7 @@ everything else rather than listed among renamed fields and new columns.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -290,6 +291,49 @@ def _node_changes(kind: str, name: str, old: Any, new: Any) -> list[Change]:
     return changes
 
 
+#: The digest ``selection.py`` appends to a filter stage that carries no tag of
+#: its own -- six hex characters of the conditions it tests.
+_DIGEST_SUFFIX = re.compile(r"#[0-9a-f]{6}$")
+
+
+def _resignatured(
+    gone: list[tuple[str, str]], arrived: list[tuple[str, str]]
+) -> list[tuple[tuple[str, str], tuple[str, str]]]:
+    """Pairs that are one node whose signature moved with its own conditions.
+
+    ``selection.py`` names an untagged filter stage after a digest of what it
+    tests, and defends that in its own docstring: a step testing something else
+    is another step.  It is right about identity and it defeats this report.
+    The one change no other check can see -- a condition quietly edited --
+    arrives here as a removal and an addition that read as unrelated, and two
+    real edits were lost exactly that way:
+
+        - avoid VP queue check#558682    + avoid VP queue check#c02f04
+        - input data check#d05145        + input data check#573efe
+
+    So the identity stays where it is and the reporting is what changes.
+    """
+
+    def stem(key: tuple[str, str]) -> Optional[tuple[str, str]]:
+        base, replaced = _DIGEST_SUFFIX.subn("", key[1])
+        return (key[0], base) if replaced else None
+
+    left: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    right: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for keys, index in ((gone, left), (arrived, right)):
+        for key in keys:
+            if (base := stem(key)) is not None:
+                index.setdefault(base, []).append(key)
+    return [
+        (olds[0], news[0])
+        for base, olds in left.items()
+        # Only an unambiguous pair.  Two steps of one funnel whose conditions
+        # both changed have nothing left in the name to tell them apart, and
+        # guessing would report one step's new condition as the other's.
+        if len(olds) == 1 and len(news := right.get(base, [])) == 1
+    ]
+
+
 def _anchor_ref(node: Any) -> Optional[str]:
     anchor = getattr(node, "anchor", None)
     return anchor.as_ref() if anchor else None
@@ -307,9 +351,20 @@ def compare(old: MapFragment, new: MapFragment) -> MapDiff:
     after = _index(new)
     diff = MapDiff(old_version=old.derived_from, new_version=new.derived_from)
 
-    for key in sorted(set(before) - set(after)):
+    gone = sorted(set(before) - set(after))
+    arrived = sorted(set(after) - set(before))
+    for old_key, new_key in _resignatured(gone, arrived):
+        changes = _node_changes(new_key[0], new_key[1], before[old_key], after[new_key])
+        if not changes:
+            # Nothing to say about the pair, so leave it as it was found rather
+            # than have a node disappear from the report altogether.
+            continue
+        gone.remove(old_key)
+        arrived.remove(new_key)
+        diff.changes.extend(changes)
+    for key in gone:
         diff.removed.append(f"{key[0]} {key[1]}")
-    for key in sorted(set(after) - set(before)):
+    for key in arrived:
         diff.added.append(f"{key[0]} {key[1]}")
 
     for key in sorted(set(before) & set(after)):

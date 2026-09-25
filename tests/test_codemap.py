@@ -7993,6 +7993,61 @@ def test_an_edited_condition_is_reported_as_drift():
     assert "skip_RSE_check" not in drifted.after
 
 
+def _vp_stage(digest: str, conditions: list[str]) -> FilterStageNode:
+    """An untagged stage, named the way ``selection.py`` names one."""
+    return FilterStageNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=f"panda:AtlasAnalJobBroker.py::doBrokerage:avoid VP queue check#{digest}",
+        owner="pandajedi/jedibrokerage/AtlasAnalJobBroker.py::doBrokerage",
+        conditions=conditions,
+        anchor=Anchor(
+            package="pandajedi",
+            file="pandajedi/jedibrokerage/AtlasAnalJobBroker.py",
+            line_start=100,
+            line_end=100,
+        ),
+    )
+
+
+def test_a_stage_renamed_by_its_own_conditions_is_drift_and_not_two_nodes():
+    """A stage with no tag of its own is named after a digest of what it tests,
+    which is right for identity -- a step testing something else is another
+    step -- and defeats this report, because editing the condition renames the
+    node and the edit arrives as an unrelated removal and addition.
+
+    Two real ones were lost that way between 1.0.2 and master, both in
+    ``AtlasAnalJobBroker``; this is one of them.
+    """
+    old = _fragment_of(
+        _vp_stage("558682", ["taskSpec.ioIntensity and (not inputChunk.isMerging)"])
+    )
+    new = _fragment_of(_vp_stage("c02f04", ["not inputChunk.isMerging"]))
+
+    result = diff.compare(old, new)
+
+    assert result.added == []
+    assert result.removed == []
+    (drifted,) = result.drift()
+    assert drifted.field == "conditions"
+    assert "ioIntensity" in drifted.before
+    assert "ioIntensity" not in drifted.after
+
+
+def test_two_stages_of_one_funnel_changing_together_are_not_paired():
+    """Once both digests have moved there is nothing left in either name to
+    tell the two apart, so pairing them would report one step's new condition
+    as the other's.  Reported as it was found instead."""
+    old = _fragment_of(_vp_stage("aaaaaa", ["a"]), _vp_stage("bbbbbb", ["b"]))
+    new = _fragment_of(_vp_stage("cccccc", ["c"]), _vp_stage("dddddd", ["d"]))
+
+    result = diff.compare(old, new)
+
+    assert len(result.removed) == 2
+    assert len(result.added) == 2
+    assert result.drift() == []
+
+
 def test_a_changed_interface_is_a_change_but_not_drift():
     """Both matter; only one of them silently rewrites an explanation."""
     def boundary(values):
