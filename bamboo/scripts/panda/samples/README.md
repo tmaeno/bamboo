@@ -14,9 +14,23 @@ for vocabulary terms.
 stratify over the stored map, so the seed alone does not reproduce it: the
 version stamp does the other half.  `p1-35-walk.json` audited against the map
 rebuilt in P1-40 covers 98 of 102 names where it had covered 147 of 152 --
-the arms are still there, the line numbers are a release behind.  So a sample
-is superseded when the stored map is rebuilt, and the old one is kept as the
-record of what was scored rather than re-run.
+the arms are still there, the line numbers are a release behind.
+
+**What supersedes a sample is the release moving, not the rebuild.**  P1-41
+rebuilt the map again from the same corpus at the same commit -- the readers
+widened, the source did not -- and `p1-40-walk.json` came through it scoring
+better than before (181 of 184 names against 175 of 180) with nothing
+fabricated and nothing silent.  A sample survives a rebuild that does not move
+a line number.
+
+**Score a sample with the `--source-root` the map was built from.**  Without
+it `_resolve_roots(None)` reads the *installed* distribution, which is a
+different release from the one the stored map describes, and the audit comes
+back smaller rather than wrong -- 120 of 123 instead of 181 of 184, which
+reads like a regression and is not one.  The command is part of the baseline:
+
+    score_trace --sample samples/p1-40-walk.json --audit \
+                --source-root /path/to/the/release/the/map/names
 
 | sample | seed | drawn from |
 |---|---|---|
