@@ -9288,6 +9288,76 @@ def test_a_clean_verdict_says_so(capsys):
     assert "nothing to change" in capsys.readouterr().out
 
 
+def _stored(*versions):
+    async def read(map_id):
+        return list(versions)
+
+    return read
+
+
+def test_a_check_against_a_different_release_says_which_two(monkeypatch, capsys):
+    """``check-map`` rebuilds the map every run and never reads the graph, which
+    is what makes it quick and what makes this mistake invisible.  Without
+    ``--source-root`` the build takes the installed distribution, so a stored
+    map built from a checkout gets checked against a *different* release's code
+    and every line of the report reads as though it were about the stored map.
+    """
+    monkeypatch.setattr(check_map, "_stored_versions", _stored("panda-server-source 1.0.2"))
+
+    check_map._say_if_the_stored_map_is_a_different_release(
+        "panda",
+        MapFragment(map_id=MAP_ID, derived_from="git:1.0.4-295-gbf2812ba"),
+        None,
+    )
+    out = capsys.readouterr().out
+
+    assert "panda-server-source 1.0.2" in out
+    assert "git:1.0.4-295-gbf2812ba" in out
+    # No --source-root was given, so the fix is to pass one.
+    assert "Pass --source-root" in out
+
+
+def test_a_check_against_the_release_the_stored_map_names_says_nothing(monkeypatch, capsys):
+    """A note on every run is a note nobody reads."""
+    monkeypatch.setattr(check_map, "_stored_versions", _stored("panda-server-source 1.0.2"))
+
+    check_map._say_if_the_stored_map_is_a_different_release(
+        "panda",
+        MapFragment(map_id=MAP_ID, derived_from="panda-server-source 1.0.2"),
+        None,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_a_map_nothing_stored_yet_says_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(check_map, "_stored_versions", _stored())
+
+    check_map._say_if_the_stored_map_is_a_different_release(
+        "panda", MapFragment(map_id=MAP_ID, derived_from="git:abc"), None
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+async def test_an_unreachable_graph_is_silence_and_not_an_error(monkeypatch):
+    """The database is not a dependency of this command and must not become
+    one: every gate below reads source and a file, and both work with the graph
+    down.  Closing a connection that was never opened must not raise either."""
+    import bamboo.database.graph_database_client as graph_client
+
+    class Refusing:
+        async def connect(self):
+            raise ConnectionError("bolt://localhost:7687 refused")
+
+        async def close(self):
+            raise ConnectionError("never opened")
+
+    monkeypatch.setattr(graph_client, "GraphDatabaseClient", Refusing)
+
+    assert await check_map._stored_versions("panda") is None
+
+
 def test_the_level_table_collapses_to_the_file_that_differs(capsys):
     """Thirty rows whose whole payload was one sentence -- and the ``… 12 more``
     that truncated them was hiding one of the run's two findings."""

@@ -441,6 +441,62 @@ def _report_gates(results: list[gates.GateResult]) -> None:
         )
 
 
+async def _stored_versions(map_id: str) -> Optional[list[str]]:
+    """What the graph says this map was built from, or ``None`` if it cannot say.
+
+    The database is not a dependency of this command and must not become one:
+    everything below reads source and a file, and both work with the graph
+    down.  So an unreachable database is silence here, never an error.
+    """
+    from bamboo.codemap.lookup import CodeMap
+    from bamboo.database.graph_database_client import GraphDatabaseClient
+
+    graph_db = GraphDatabaseClient()
+    try:
+        await graph_db.connect()
+        return await CodeMap(graph_db, map_id=map_id).versions()
+    except Exception:
+        logger.debug("could not read the stored map's versions", exc_info=True)
+        return None
+    finally:
+        try:
+            await graph_db.close()
+        except Exception:
+            logger.debug("could not close the graph connection", exc_info=True)
+
+
+def _say_if_the_stored_map_is_a_different_release(
+    map_id: str, fragment: MapFragment, source_root: Optional[Path]
+) -> None:
+    """Say so when the source on disk is not the release the stored map describes.
+
+    This command rebuilds the map every run and never reads the graph, which is
+    what makes it quick and what makes this mistake invisible.  Without
+    ``--source-root`` the build takes the installed distribution, so a stored
+    map built from a checkout gets checked against a *different* release's code
+    and every line of the report reads as though it were about the stored map.
+
+    A note rather than a failure, for the same reason a failing gate is "go and
+    look" rather than "do not build": which of the two versions is the wrong one
+    is the reader's to decide, and sometimes checking the older one is the point.
+    """
+    stored = asyncio.run(_stored_versions(map_id))
+    if not stored or fragment.derived_from in stored:
+        return
+    click.echo(
+        f"note: the stored map was built from {', '.join(stored)}; this check "
+        f"rebuilt it from {fragment.derived_from}."
+    )
+    click.echo(
+        "      Everything below is about the rebuilt version.  "
+        + (
+            "Pass --source-root to check the release the stored map names."
+            if source_root is None
+            else "Drop --source-root, or point it at that release."
+        )
+    )
+
+
 @click.command("check-map")
 @click.option("--map-id", default="panda", show_default=True, help="Which Code Map to check.")
 @click.option(
@@ -545,6 +601,7 @@ def main(
     # cheap and the only way to be sure the evidence is being compared against
     # the version named in the report.
     fragment = plugin.run()
+    _say_if_the_stored_map_is_a_different_release(map_id, fragment, source_root)
 
     if fetch:
         targets = _targets(fragment, getattr(plugin, "declared_log_files", {}))
