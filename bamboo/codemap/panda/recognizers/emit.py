@@ -63,6 +63,8 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    targets_of,
+    written_value,
 )
 from bamboo.codemap.panda.recognizers import logfile
 from bamboo.codemap.panda.recognizers.selection import log_level
@@ -130,11 +132,10 @@ def _row_counts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """
     found: set[str] = set()
     for node in ast.walk(func):
-        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute)):
+        value = written_value(node)
+        if not (isinstance(value, ast.Attribute) and value.attr == "rowcount"):
             continue
-        if node.value.attr != "rowcount":
-            continue
-        found |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        found |= {t.id for t in targets_of(node) if isinstance(t, ast.Name)}
     return found
 
 

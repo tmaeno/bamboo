@@ -54,7 +54,11 @@ from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.pathcond import attach_parents, functions_with_owner
+from bamboo.codemap.panda.pathcond import (
+    attach_parents,
+    functions_with_owner,
+    targets_of,
+)
 
 CERTAIN = "certain"
 # One hop through the adder idiom: what the code put into the container.
@@ -387,12 +391,13 @@ class SpecAttributor:
             return None
         found: list[ast.expr] = []
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            targets = targets_of(node)
+            if len(targets) != 1:
                 continue
             stated = self._stated_return(node.value)
             if stated is None:
                 continue
-            target = node.targets[0]
+            target = targets[0]
             if isinstance(target, ast.Name):
                 if target.id == variable:
                     found.append(stated)
@@ -638,9 +643,9 @@ class SpecAttributor:
         if isinstance(expression, ast.Name) and func is not None:
             sources: set[str] = set()
             for node in ast.walk(func):
-                if not isinstance(node, ast.Assign) or not any(
+                if not any(
                     isinstance(t, ast.Name) and t.id == expression.id
-                    for t in node.targets
+                    for t in targets_of(node)
                 ):
                     continue
                 if self._container_read(node.value) is None and not (
@@ -1103,11 +1108,9 @@ class SpecAttributor:
             return yielded
         constructors: set[str] = set()
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign):
-                continue
             if not any(
                 isinstance(target, ast.Name) and target.id == variable
-                for target in node.targets
+                for target in targets_of(node)
             ):
                 continue
             built = self._constructed_class(node.value, func, seen | {variable})
@@ -1177,8 +1180,8 @@ class SpecAttributor:
             return None
         built: set[str] = set()
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign) or not any(
-                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            if not any(
+                isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
                 continue
             callee = node.value.func if isinstance(node.value, ast.Call) else None
@@ -1232,16 +1235,15 @@ class SpecAttributor:
         reflected = {
             target.id
             for node in ast.walk(func)
-            if isinstance(node, ast.Assign)
-            for target in node.targets
+            for target in targets_of(node)
             if isinstance(target, ast.Name)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
             and node.value.func.id == "getattr"
         }
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign) or not any(
-                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            if not any(
+                isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
                 continue
             if not isinstance(node.value, ast.Call):
@@ -1286,8 +1288,8 @@ class SpecAttributor:
         if variable in seen:
             return None
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign) or not any(
-                isinstance(t, ast.Name) and t.id == variable for t in node.targets
+            if not any(
+                isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
                 continue
             value = node.value
@@ -2111,9 +2113,10 @@ def _classes_put_in(
     found: set[str] = set()
     for func, owner in scope:
         for node in ast.walk(func):
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            targets = targets_of(node)
+            if len(targets) != 1:
                 continue
-            target = node.targets[0]
+            target = targets[0]
             if not isinstance(target, ast.Subscript):
                 continue
             base = target.value

@@ -39,7 +39,11 @@ from typing import Any, Iterable, Optional
 
 from bamboo.codemap.models import Anchor, BoundaryNode, CoverageStat, SourceModule
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.pathcond import (
+    functions_with_owner,
+    targets_of,
+    written_value,
+)
 
 SLICE_NAME = "boundary"
 CHANNEL_SLICE_NAME = "db-channel"
@@ -234,11 +238,10 @@ def schema_names(modules: list[SourceModule]) -> dict[str, str]:
     found: dict[str, str] = {}
     for module in modules:
         for node in ast.walk(module.tree):
-            if not isinstance(node, ast.Assign):
+            value = written_value(node)
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
                 continue
-            if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
-                continue
-            for target in node.targets:
+            for target in targets_of(node):
                 key = target.slice if isinstance(target, ast.Subscript) else None
                 if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
                     continue

@@ -63,6 +63,8 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    targets_of,
+    written_value,
 )
 
 SLICE_NAME = "write-alias"
@@ -86,12 +88,10 @@ def _literal_self_writes(
     """Return ``(attribute, literal, inner conditions)`` for ``self.attr = "lit"``."""
     found: list[tuple[str, str, list[str]]] = []
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign):
-            continue
-        value = node.value
+        value = written_value(node)
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             continue
-        for target in node.targets:
+        for target in targets_of(node):
             if (
                 isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
@@ -232,16 +232,16 @@ def extract_producers(
         candidates = 0
         explained = 0
         for node in ast.walk(module.tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            call = written_value(node)
+            if not isinstance(call, ast.Call):
                 continue
-            call = node.value
             if not (
                 isinstance(call.func, ast.Attribute)
                 and isinstance(call.func.value, ast.Name)
                 and call.func.value.id == "self"
             ):
                 continue
-            targets = [t for t in node.targets if isinstance(t, ast.Attribute)]
+            targets = [t for t in targets_of(node) if isinstance(t, ast.Attribute)]
             if not targets:
                 continue
             func = enclosing_function(node)

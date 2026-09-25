@@ -64,7 +64,11 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.pathcond import functions_with_owner
+from bamboo.codemap.panda.pathcond import (
+    functions_with_owner,
+    targets_of,
+    written_value,
+)
 from bamboo.codemap.panda.recognizers.boundary import endpoint_decorator
 
 # The trigger vocabulary is imported rather than declared here.  It lives with
@@ -174,8 +178,8 @@ def _pool_bindings(func: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
                     item.context_expr
                 ):
                     bound.add(item.optional_vars.id)
-        elif isinstance(node, ast.Assign) and _rooted_at_pool(node.value):
-            bound.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif (borrowed := written_value(node)) is not None and _rooted_at_pool(borrowed):
+            bound.update(t.id for t in targets_of(node) if isinstance(t, ast.Name))
     return frozenset(bound)
 
 
@@ -226,16 +230,16 @@ def _held_callables(cls: ast.ClassDef) -> Optional[tuple[str, int]]:
     parameters = [argument.arg for argument in init.args.args[1:]]
     kept: dict[str, str] = {}
     for node in ast.walk(init):
+        targets = targets_of(node)
         if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Attribute)
-            and isinstance(node.targets[0].value, ast.Name)
-            and node.targets[0].value.id == "self"
+            len(targets) == 1
+            and isinstance(targets[0], ast.Attribute)
+            and isinstance(targets[0].value, ast.Name)
+            and targets[0].value.id == "self"
             and isinstance(node.value, ast.Name)
             and node.value.id in parameters
         ):
-            kept[node.targets[0].attr] = node.value.id
+            kept[targets[0].attr] = node.value.id
     called = {
         node.func.attr
         for method in cls.body
@@ -295,12 +299,13 @@ def _forwarded_sites(
     for func, _owner in functions_with_owner(module.tree):
         built: list[tuple[Optional[str], str, ast.Call]] = []
         for node in ast.walk(func):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                method = _forwarded_call(node.value, forwarders)
+            built_here = written_value(node)
+            if isinstance(built_here, ast.Call) and targets_of(node):
+                method = _forwarded_call(built_here, forwarders)
                 if method:
                     built.extend(
-                        (_bound_name(target), method, node.value)
-                        for target in node.targets
+                        (_bound_name(target), method, built_here)
+                        for target in targets_of(node)
                     )
             elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
                 method = _forwarded_call(node.value, forwarders)
@@ -822,9 +827,10 @@ def _handover(
     )
     fields: dict[str, str] = {}
     for node in ast.walk(init):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        targets = targets_of(node)
+        if len(targets) != 1:
             continue
-        target = node.targets[0]
+        target = targets[0]
         if (
             isinstance(target, ast.Attribute)
             and isinstance(target.value, ast.Name)
@@ -891,13 +897,14 @@ def worker_uplinks(
             built: list[tuple[Optional[str], ast.Call]] = []
             dispatched: set[str] = set()
             for node in ast.walk(func):
+                value = written_value(node)
                 if (
-                    isinstance(node, ast.Assign)
-                    and isinstance(node.value, ast.Call)
-                    and isinstance(node.value.func, ast.Name)
-                    and node.value.func.id in workers
+                    targets_of(node)
+                    and isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name)
+                    and value.func.id in workers
                 ):
-                    built.extend((_bound_name(t), node.value) for t in node.targets)
+                    built.extend((_bound_name(t), value) for t in targets_of(node))
                 elif (
                     isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
@@ -1090,18 +1097,20 @@ def _fanouts_in(
     body = list(ast.walk(func))
     seen: set[tuple[str, str]] = set()
     for node in body:
-        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+        targets = targets_of(node)
+        if not (targets and isinstance(node.value, ast.Call)):
             continue
-        name = _assigned_to(node.targets[0])
+        name = _assigned_to(targets[0])
         if name is None:
             continue
         for guard in body:
             if not isinstance(guard, ast.If) or not _tests_none(guard.test, name):
                 continue
             for statement in ast.walk(guard):
+                inner = targets_of(statement)
                 if not (
-                    isinstance(statement, ast.Assign)
-                    and _assigned_to(statement.targets[0]) == name
+                    inner
+                    and _assigned_to(inner[0]) == name
                     and isinstance(statement.value, ast.Name)
                 ):
                     continue

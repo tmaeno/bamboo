@@ -68,6 +68,7 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    targets_of,
 )
 
 # The block a decision records about itself reads the same way whichever slice
@@ -611,8 +612,9 @@ def _assembled_queries(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]
     names = {
         target.id
         for node in ast.walk(func)
-        if isinstance(node, (ast.Assign, ast.AugAssign))
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        for target in (
+            [node.target] if isinstance(node, ast.AugAssign) else targets_of(node)
+        )
         if isinstance(target, ast.Name)
     }
     return {

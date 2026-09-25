@@ -10992,6 +10992,68 @@ def test_a_branch_is_not_explained_by_the_write_its_else_makes():
     assert pathcond.path_condition(inside) == ["res"]
 
 
+def test_a_row_count_taken_into_an_annotated_local_is_still_a_row_count():
+    """The line saying whether a compare-and-set landed is what `emit` looks for.
+
+    ``data_carousel_module`` writes ``ret_req: int = self.cur.rowcount`` in four
+    of its methods, and eleven locals across the corpus are spelled that way.
+    Without this the junction carries the message and not the fact that the
+    message reports how many rows moved."""
+    source = (
+        "def f(self):\n"
+        "    self.cur.execute(sql_update + comment, var_map)\n"
+        "    ret_req: int = self.cur.rowcount\n"
+        "    tmp_log.debug(f'done with {ret_req} rows')\n"
+    )
+    func = _func(source)
+
+    assert emit._row_counts(func) == {"ret_req"}
+
+
+def test_a_construction_hands_over_what_an_annotated_field_receives():
+    """``Finisher.__init__`` writes ``self.dataset: DatasetSpec | None = dataset``.
+
+    ``datasetManager`` calls ``Finisher(taskBuffer, None, job)``, so what it
+    hands over for that field is ``None``.  Keyed by the field rather than the
+    parameter, which is why the annotated write has to be read: without it the
+    entry point looked as though it supplied no dataset argument at all."""
+    source = (
+        "class Finisher:\n"
+        "    def __init__(self, taskBuffer, dataset, job=None):\n"
+        "        self.taskBuffer = taskBuffer\n"
+        "        self.dataset: DatasetSpec | None = dataset\n"
+        "        self.job: JobSpec | None = job\n"
+    )
+    init = next(
+        n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)
+    )
+    call = ast.parse("Finisher(taskBuffer, None, job)", mode="eval").body
+
+    assert trigger._handover(call, init) == {
+        "taskBuffer": "taskBuffer",
+        "dataset": "None",
+        "job": "job",
+    }
+
+
+def test_an_annotated_module_constant_is_a_module_constant():
+    """A dispatch table the reader cannot explain still belongs in the denominator.
+
+    ``processor.HANDLERS``, ``data_carousel_ops.OPERATIONS`` and
+    ``jedi_config._SECTION_CLASSES`` are all annotated, and all three were
+    invisible rather than unexplained -- which is the failure the coverage
+    figure exists to prevent."""
+    tree = ast.parse(
+        "HANDLERS: dict[str, Callable] = {'grep': _handle_grep}\n"
+        "EC_Kill: Final[int] = 100\n"
+        "declared: list[str]\n"
+    )
+
+    found = {name: type(node).__name__ for name, node in errorcode._iter_module_constants(tree)}
+
+    assert found == {"HANDLERS": "AnnAssign", "EC_Kill": "AnnAssign"}
+
+
 # ---------------------------------------------------------------------------
 # Two arms of one statement are two statements, however the caller arrived
 # ---------------------------------------------------------------------------

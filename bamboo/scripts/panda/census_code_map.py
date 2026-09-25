@@ -44,6 +44,8 @@ from typing import Any, Iterator, Optional
 
 import click
 
+from bamboo.codemap.panda.pathcond import targets_of
+
 # Packages that make up the PanDA map.  Both ship in one distribution
 # (``panda-server-source``), so a single version stamps the whole census.
 PACKAGES = ("pandaserver", "pandajedi")
@@ -227,9 +229,7 @@ def collect_spec_attributes(modules: list[Module]) -> dict[str, set[str]]:
     for mod in modules:
         for cls in (n for n in ast.walk(mod.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
-                if not isinstance(stmt, ast.Assign):
-                    continue
-                names = {t.id for t in stmt.targets if isinstance(t, ast.Name)}
+                names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & set(ATTR_DECLS):
                     continue
                 if isinstance(stmt.value, (ast.Tuple, ast.List)):
@@ -458,8 +458,8 @@ def collect_writers(modules: list[Module], subjects: set[str]) -> list[Writer]:
     writers: list[Writer] = []
     for mod in modules:
         for node in ast.walk(mod.tree):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
+            if targets_of(node):
+                for target in targets_of(node):
                     if isinstance(target, ast.Attribute) and target.attr in subjects:
                         writers.append(
                             Writer(
@@ -542,9 +542,7 @@ def collect_literal_writes(modules: list[Module]) -> dict[str, tuple[set[str], i
     total_writes: Counter = Counter()
     for mod in modules:
         for node in ast.walk(mod.tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            for target in node.targets:
+            for target in targets_of(node):
                 if not isinstance(target, ast.Attribute):
                     continue
                 total_writes[target.attr] += 1
@@ -562,9 +560,7 @@ def collect_guarded_attributes(modules: list[Module]) -> set[str]:
     out: set[str] = set()
     for mod in modules:
         for node in ast.walk(mod.tree):
-            if not isinstance(node, ast.Assign):
-                continue
-            for target in node.targets:
+            for target in targets_of(node):
                 if isinstance(target, ast.Attribute) and _under_condition(node):
                     out.add(target.attr)
     return out
@@ -587,11 +583,11 @@ MP_REQ_ENTRY = "request entry point (req arg)"
 MP_CONFIG_KEY = "config key literal"
 
 
-def _module_constant_name(node: ast.Assign) -> Optional[str]:
+def _module_constant_name(node: ast.stmt) -> Optional[str]:
     """Return the constant's name if *node* is a module-level CONSTANT = ... ."""
     if not isinstance(getattr(node, "parent", None), ast.Module):
         return None
-    for target in node.targets:
+    for target in targets_of(node):
         if isinstance(target, ast.Name) and (target.id.isupper() or target.id.startswith(("EC_", "ST_"))):
             return target.id
     return None
@@ -620,7 +616,7 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
                         for key, dash, _val in _TAG_RE.findall(value.value):
                             if dash or key in ("criteria", "reason", "action"):
                                 found[MP_TAG][mod.rel] += 1
-            elif isinstance(node, ast.Assign):
+            elif targets_of(node):
                 # Two different things hide under "module constant", and they
                 # feed different consumers:
                 #   EC_Kill = 100 / ST_ready = 0   -> a name<->value pair, which

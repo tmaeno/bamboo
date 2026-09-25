@@ -60,6 +60,8 @@ from bamboo.codemap.panda.pathcond import (
     attach_parents,
     functions_with_owner,
     path_condition,
+    targets_of,
+    written_value,
 )
 from bamboo.codemap.panda.recognizers import logfile
 from bamboo.codemap.panda.recognizers.emit import row_count_lines
@@ -92,15 +94,14 @@ def _string_fragments(
 ) -> Iterator[tuple[ast.stmt, str]]:
     """Every statement in *func* that appends literal text to a local name."""
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            targets = [t for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
             targets = [node.target]
         else:
+            targets = [t for t in targets_of(node) if isinstance(t, ast.Name)]
+        value = written_value(node)
+        if not targets or value is None:
             continue
-        if not targets:
-            continue
-        text = rendered_text(node.value)
+        text = rendered_text(value)
         if text:
             yield node, text
 
@@ -232,9 +233,7 @@ def _changed_attributes(
     """``{spec class: attributes assigned on it}`` inside *func*."""
     changed: dict[str, set[str]] = {}
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
+        for target in targets_of(node):
             if not isinstance(target, ast.Attribute):
                 continue
             spec = attributor.class_of(target.value, func, owner)

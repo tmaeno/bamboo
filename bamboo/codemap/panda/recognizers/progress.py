@@ -65,6 +65,8 @@ from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     literal_values,
     path_condition,
+    targets_of,
+    written_value,
 )
 from bamboo.codemap.panda.recognizers.selection import log_level
 
@@ -166,11 +168,12 @@ def _attribute_writes(
     question, and it needs the enclosing function this does not have.
     """
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
+        value = written_value(node)
+        if value is None:
             continue
-        for target in node.targets:
+        for target in targets_of(node):
             if isinstance(target, ast.Attribute):
-                yield target, node.value, node
+                yield target, value, node
 
 
 # --------------------------------------------------------------------------- #
@@ -221,9 +224,10 @@ def spec_setters(
                 continue
             written: dict[str, set[str]] = {}
             for node in ast.walk(func):
-                if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                targets = targets_of(node)
+                if len(targets) != 1:
                     continue
-                target = node.targets[0]
+                target = targets[0]
                 if not (
                     isinstance(target, ast.Attribute)
                     and isinstance(target.value, ast.Name)
@@ -290,10 +294,9 @@ def _recorded_in(
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Attribute)
-            and node.targets[0].attr != settling
+            len(targets_of(node)) == 1
+            and isinstance(targets_of(node)[0], ast.Attribute)
+            and targets_of(node)[0].attr != settling
             and isinstance(node.value, (ast.Constant, ast.JoinedStr, ast.BinOp))
         ):
             yield node.value
@@ -333,10 +336,7 @@ def _reaching(
         (
             node
             for node in ast.walk(func)
-            if (
-                isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
-            )
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node))
             or (
                 isinstance(node, ast.AugAssign)
                 and isinstance(node.target, ast.Name)
@@ -416,10 +416,9 @@ def recorded_signature(
         settling = sum(
             1
             for statement in block
-            if isinstance(statement, ast.Assign)
-            and any(
+            if any(
                 isinstance(target, ast.Attribute) and target.attr == attribute
-                for target in statement.targets
+                for target in targets_of(statement)
             )
         )
         if settling > 1:
@@ -747,13 +746,7 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
     for module in modules:
         for cls in (n for n in ast.walk(module.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
-                if isinstance(stmt, ast.Assign):
-                    targets: list[ast.expr] = list(stmt.targets)
-                elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-                    targets = [stmt.target]
-                else:
-                    continue
-                names = {t.id for t in targets if isinstance(t, ast.Name)}
+                names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & SPEC_DECLARATION_NAMES:
                     continue
                 found.append((cls.name, module.rel_path, _declared_names(stmt.value)))

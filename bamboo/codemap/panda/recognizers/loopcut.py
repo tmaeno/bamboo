@@ -59,6 +59,7 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     functions_with_owner,
     path_condition,
+    targets_of,
 )
 from bamboo.codemap.panda.recognizers.selection import _TAG, _identifiers, _rendered
 
@@ -135,9 +136,11 @@ def _last_assignment(
     """The last statement above *before* that assigns *name*."""
     found: Optional[ast.stmt] = None
     for node in ast.walk(func):
-        if not isinstance(node, (ast.Assign, ast.AugAssign)) or node.lineno >= before:
+        if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if node.lineno >= before:
+            continue
+        targets = [node.target] if isinstance(node, ast.AugAssign) else targets_of(node)
         if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
             continue
         if found is None or node.lineno > found.lineno:

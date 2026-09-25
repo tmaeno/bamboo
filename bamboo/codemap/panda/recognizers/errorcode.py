@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from bamboo.codemap.models import Anchor, CoverageStat, SourceModule, ValueEnumNode
+from bamboo.codemap.panda.pathcond import targets_of
 
 SLICE_NAME = "value-enum"
 
@@ -108,12 +109,15 @@ def _leading_comment(lines: list[str], lineno: int) -> Optional[str]:
     return " ".join(reversed(collected)) or None
 
 
-def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.Assign]]:
-    """Yield ``(name, node)`` for module-level constant assignments."""
+def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.stmt]]:
+    """Yield ``(name, node)`` for module-level constant assignments.
+
+    ``ST_ready: Final[int] = 0`` is the same declaration as ``ST_ready = 0``;
+    the caller reads ``node.value`` off what comes back and both spellings have
+    one.
+    """
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
+        for target in targets_of(node):
             if isinstance(target, ast.Name) and _is_enum_name(target.id):
                 yield target.id, node
                 break

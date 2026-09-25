@@ -645,15 +645,16 @@ def literal_values(
         return []
 
     settle = resolve or literal_only
-    found: list[tuple[ast.Assign, list[str]]] = []
+    found: list[tuple[ast.stmt, list[str]]] = []
     for node in ast.walk(func):
-        if not isinstance(node, ast.Assign):
+        value = written_value(node)
+        if value is None:
             continue
-        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+        if not any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node)):
             continue
         if enclosing_function(node) is not func:
             continue
-        settled = settle(node.value, func)
+        settled = settle(value, func)
         if settled:
             found.append((node, settled))
     found.sort(key=lambda pair: pair[0].lineno)
