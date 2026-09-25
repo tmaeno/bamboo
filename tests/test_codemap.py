@@ -10928,6 +10928,70 @@ def test_a_declaration_binds_nothing_to_the_name_it_declares():
     assert [ast.unparse(e) for e in held] == ["compute()"]
 
 
+def test_an_annotated_initialiser_is_the_definition_behind_a_bare_test():
+    """``if not ret_req:`` names no predicate; the write it tests does.
+
+    ``data_carousel_module`` takes the row count into an annotated local and
+    then branches on it, which is the corpus's way of saying "the compare-and-
+    set lost".  Four of its methods are written exactly this way."""
+    source = (
+        "def f(self):\n"
+        "    self.cur.execute(sql_update + comment, var_map)\n"
+        "    ret_req: int = self.cur.rowcount\n"
+        "    if not ret_req:\n"
+        "        tmp_log.warning('already terminated; cannot be cancelled ; skipped')\n"
+    )
+    func = _func(source)
+
+    definition = pathcond.single_definition(func, "ret_req")
+
+    assert definition is not None and ast.unparse(definition) == "self.cur.rowcount"
+
+
+def test_a_name_written_twice_explains_no_branch_however_it_is_spelled():
+    """Two writes are fan-out, and one of them is not the reason for a branch.
+
+    This is the half of the ``AnnAssign`` reading that *withdraws* an answer,
+    and it is the contract working rather than a fact going missing.  Reading
+    only ``ast.Assign``, ``misc_standalone_module`` had ``if res:`` annotated
+    with ``res := []`` -- the write in that test's own ``else``, which runs
+    because the test failed.  Nine of the ten substitutions this withdraws
+    pointed at a statement that runs after the test or inside its else."""
+    source = (
+        "def f(self):\n"
+        "    res: Sequence[Any] = self.cur.fetchone()\n"
+        "    if res:\n"
+        "        tmp_log.debug(f'task has status: {res[0]}')\n"
+        "    else:\n"
+        "        res = []\n"
+        "        tmp_log.debug('task not found')\n"
+    )
+    func = _func(source)
+
+    assert pathcond.single_definition(func, "res") is None
+
+
+def test_a_branch_is_not_explained_by_the_write_its_else_makes():
+    """The same site read through ``path_condition``, which is what the map stores.
+
+    The unit above says the definition is withdrawn; this says the guard the
+    map writes down no longer carries the backwards annotation."""
+    source = (
+        "def f(self):\n"
+        "    res: Sequence[Any] = self.cur.fetchone()\n"
+        "    if res:\n"
+        "        tmp_log.debug(f'task has status: {res[0]}')\n"
+        "    else:\n"
+        "        res = []\n"
+    )
+    func = _func(source)
+    inside = next(
+        n for n in ast.walk(func) if isinstance(n, ast.Call) and ast.unparse(n).startswith("tmp_log")
+    )
+
+    assert pathcond.path_condition(inside) == ["res"]
+
+
 # ---------------------------------------------------------------------------
 # Two arms of one statement are two statements, however the caller arrived
 # ---------------------------------------------------------------------------

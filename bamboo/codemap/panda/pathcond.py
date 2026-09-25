@@ -115,21 +115,33 @@ def single_definition(
     fan-out case (a flag set from many places), where one expression would
     misrepresent the branch rather than explain it.
 
+    Counting the annotated spelling is what makes that refusal honest.  The
+    corpus's habit is to declare the initial value -- ``decoded = None``,
+    ``res: Sequence[Any] = self.cur.fetchone()`` -- and overwrite it under a
+    condition, so a reading blind to the annotation sees the *overwrite* alone
+    and calls it the single definition.  Ten guards in the corpus were annotated
+    that way, and nine of them named a statement that runs after the test or
+    inside the test's own ``else``: ``if res:`` came out as ``res  [res := []]``,
+    where ``res = []`` is what the failing branch does about it.  Withdrawing
+    those is the contract, not a loss.  Six hundred and twenty-two guards gain a
+    definition in exchange.
+
     The node rather than its text, because the other caller resolves what the
     expression *evaluates to* -- a local holding a declared mapping, which needs
     the tree.
     """
     found: list[ast.expr] = []
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    found.append(node.value)
-                elif isinstance(target, ast.Tuple):
-                    for index, element in enumerate(target.elts):
-                        if isinstance(element, ast.Name) and element.id == name:
-                            found.append(node.value)
-                            del index
+        value = written_value(node)
+        if value is None:
+            continue
+        for target in targets_of(node):
+            if isinstance(target, ast.Name) and target.id == name:
+                found.append(value)
+            elif isinstance(target, ast.Tuple):
+                for element in target.elts:
+                    if isinstance(element, ast.Name) and element.id == name:
+                        found.append(value)
     return found[0] if len(found) == 1 else None
 
 
