@@ -10663,6 +10663,118 @@ def test_the_execute_form_keeps_reading_every_bind():
 
 
 # ---------------------------------------------------------------------------
+# An annotated assignment is an assignment
+# ---------------------------------------------------------------------------
+
+
+def test_an_annotated_dict_is_the_list_of_tables_it_is():
+    """The shape that cost the map eleven facts.  ``getDispatchDatasetsPerUser``
+    writes one table in the literal and adds two more by subscript; upstream
+    annotated the literal and changed nothing else about the function, so the
+    three tables went unnamed and the statement was reported as "table supplied
+    at run time and not resolved"."""
+    source = (
+        "def f(self):\n"
+        "    tableStatMap: dict[str, Any] = {'jobsDefined4': ['defined', 'assigned']}\n"
+        "    if not onlyActive:\n"
+        "        tableStatMap['jobsActive4'] = None\n"
+        "        tableStatMap['jobsArchived4'] = None\n"
+    )
+    func = _func(source)
+
+    assert sorted(sql._sequence_values(func, "tableStatMap")) == [
+        "jobsActive4",
+        "jobsArchived4",
+        "jobsDefined4",
+    ]
+
+
+def test_a_bind_written_as_an_annotated_dict_literal_is_read():
+    """The harvester, worker and data-carousel modules write their binds as
+    dict literals, and master annotates 45 of those keys across 12 files.
+    ``harvester_workers.pilotStatus`` was a subject that existed only through
+    them, so reading ``ast.Assign`` alone took the whole node away."""
+    source = (
+        "def f(self):\n"
+        "    var_map: dict[str, Any] = {':site': site, ':status': 'running'}\n"
+    )
+    func = _func(source)
+
+    assert [
+        ast.literal_eval(b.value) for b in sql.bound_values(func, "var_map", ":status")
+    ] == ["running"]
+
+
+def test_an_annotated_empty_dict_restarts_the_binding_window():
+    """The window only ever moves later, so reading one more assignment takes
+    binds *away* -- and that is the point.  ``copyArchive.main`` writes
+    ``var_map: dict[str, Any] = {}`` on the line above a forwarded call, so the
+    map was attributing every earlier bind to a statement whose var map had
+    just been emptied."""
+    source = (
+        "def f():\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:jobStatus'\n"
+        "    var_map = {}\n"
+        "    var_map[':jobStatus'] = 'activated'\n"
+        "    var_map: dict[str, Any] = {}\n"
+        "    status, res = taskBuffer.querySQLS(sql, var_map)\n"
+    )
+    func = _func(source)
+
+    runs = sql.executions(func)
+
+    assert [
+        ast.literal_eval(b.value)
+        for run in runs
+        for b in sql.bound_values(func, run.varmap, ":jobStatus", run.window)
+    ] == []
+
+
+def test_a_declaration_without_a_value_writes_nothing():
+    """``tables: list[str]`` states a type and assigns nothing.  Read as a write
+    it would hand the name whatever the *next* statement assigns -- and here the
+    sequence would be withdrawn entirely, because there is no value to read."""
+    source = "def f():\n    tables: list[str]\n    tables = ['jobsActive4']\n"
+    func = _func(source)
+
+    assert sql._sequence_values(func, "tables") == ["jobsActive4"]
+
+
+def test_an_annotated_literal_is_a_value_the_name_can_hold():
+    """``_literal_values`` accumulates rather than withdrawing, so an annotated
+    initial value it could not see made the answer quietly smaller instead of
+    absent.  34 names on master have exactly this shape."""
+    source = (
+        "def f():\n"
+        "    table: str = 'jobsActive4'\n"
+        "    if archived:\n"
+        "        table = 'jobsArchived4'\n"
+    )
+    func = _func(source)
+    name = ast.parse("table", mode="eval").body
+
+    assert sorted(sql._literal_values(func, name)) == ["jobsActive4", "jobsArchived4"]
+
+
+def test_an_augmented_assignment_is_still_a_fragment_not_a_statement():
+    """``_targets_of`` leaves ``AugAssign`` out on purpose.  Folding it in would
+    make ``sql += ' AND x=1'`` look like the whole statement rather than a piece
+    of it, and the reassembled text is what every reader downstream matches."""
+    source = (
+        "def f(self):\n"
+        "    sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 '\n"
+        "    sql += 'WHERE jobStatus=:jobStatus'\n"
+        "    self.cur.execute(sql + comment, varMap)\n"
+    )
+    func = _func(source)
+
+    assert [operator for _line, operator, _text, _node in sql._parts(func, "sql")] == [
+        "=",
+        "+=",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Two arms of one statement are two statements, however the caller arrived
 # ---------------------------------------------------------------------------
 
