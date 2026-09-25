@@ -148,17 +148,24 @@ def assigned_expressions(
     An augmented assignment contributes its own right-hand side rather than the
     concatenation.  ``errMsg += ...`` under a condition may not run, so the
     pieces are what the reading establishes and the whole is not.
+
+    Only names, still: an attribute target belongs to :func:`attribute_expressions`
+    and putting one here would attach a spec field's history to a local's.  But
+    a name is a name however it is declared, and ``error_message: str | None =
+    f"method {method_name} is forbidden"`` is the write the emit pass has to
+    follow to give the 403 any text at all.
     """
     found: dict[str, list[ast.expr]] = {}
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign):
-            targets = [t for t in node.targets if isinstance(t, ast.Name)]
-        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            targets = [node.target]
+        if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names = [node.target]
         else:
+            names = [t for t in targets_of(node) if isinstance(t, ast.Name)]
+        value = written_value(node)
+        if value is None:
             continue
-        for target in targets:
-            found.setdefault(target.id, []).append(node.value)
+        for name in names:
+            found.setdefault(name.id, []).append(value)
     return found
 
 

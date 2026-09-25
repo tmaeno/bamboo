@@ -10898,6 +10898,35 @@ def test_an_augmented_assignment_is_still_a_fragment_not_a_statement():
         "+=",
     ]
 
+def test_an_annotated_local_is_a_value_the_name_can_hold():
+    """``assigned_expressions`` is what the emit pass follows one hop through.
+
+    ``server/panda.py`` annotates the message it is about to log, so without
+    this the 403 it writes has no text: the call resolves to nothing and the
+    line vanishes from the map rather than arriving unexplained."""
+    source = (
+        "def f():\n"
+        "    if not validate_method(method_name, api_module, version):\n"
+        "        error_message: str | None = f'method {method_name} is forbidden'\n"
+        "        tmp_log.error(error_message)\n"
+    )
+    func = _func(source)
+
+    held = pathcond.assigned_expressions(func)["error_message"]
+
+    assert [ast.unparse(e) for e in held] == ["f'method {method_name} is forbidden'"]
+
+
+def test_a_declaration_binds_nothing_to_the_name_it_declares():
+    """``found: list[str]`` states a type.  Counting it as a binding would have
+    the name hold whatever the next statement assigns, one line early."""
+    source = "def f():\n    found: list[str]\n    found = compute()\n"
+    func = _func(source)
+
+    held = pathcond.assigned_expressions(func)["found"]
+
+    assert [ast.unparse(e) for e in held] == ["compute()"]
+
 
 # ---------------------------------------------------------------------------
 # Two arms of one statement are two statements, however the caller arrived
