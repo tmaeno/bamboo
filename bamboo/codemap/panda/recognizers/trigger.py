@@ -64,7 +64,7 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.attribution import class_bases
+from bamboo.codemap.panda.attribution import annotated_class, class_bases
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     targets_of,
@@ -544,7 +544,28 @@ def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
     return edges
 
 
-def _inherited_homes(modules: list[SourceModule]) -> dict[str, dict[str, str]]:
+def _ancestors(bases: dict[str, list[str]], cls: str) -> Iterator[str]:
+    """Yield every class *cls* derives from, transitively.
+
+    Shared by the two readings that need the hierarchy in this module: which
+    file an inherited method lives in, and whether a module declares a class
+    the factory's return type names.  One walk, so the two cannot disagree
+    about what derives from what.
+    """
+    seen: set[str] = set()
+    queue = list(bases.get(cls, ()))
+    while queue:
+        base = queue.pop(0)
+        if base in seen:
+            continue
+        seen.add(base)
+        yield base
+        queue.extend(bases.get(base, ()))
+
+
+def _inherited_homes(
+    modules: list[SourceModule], bases: dict[str, list[str]]
+) -> dict[str, dict[str, str]]:
     """Return ``{module: {method: the module a base class defines it in}}``.
 
     The companion to :func:`_self_calls`, and it rests on the same fact.  That
@@ -595,22 +616,12 @@ def _inherited_homes(modules: list[SourceModule]) -> dict[str, dict[str, str]]:
                 declares.setdefault(module.rel_path, []).append(node.name)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 defines.setdefault(module.rel_path, set()).add(node.name)
-    bases = class_bases(modules)
-
-    def ancestors(cls: str, seen: set[str]) -> Iterator[str]:
-        for base in bases.get(cls, ()):
-            if base in seen:
-                continue
-            seen.add(base)
-            yield base
-            yield from ancestors(base, seen)
-
     homes: dict[str, dict[str, str]] = {}
     for module in modules:
         here = defines.get(module.rel_path, set())
         found: dict[str, set[str]] = {}
         for cls in declares.get(module.rel_path, ()):
-            for ancestor in ancestors(cls, set()):
+            for ancestor in _ancestors(bases, cls):
                 where = declared_in.get(ancestor, set())
                 if len(where) != 1:
                     continue
@@ -627,6 +638,178 @@ def _inherited_homes(modules: list[SourceModule]) -> dict[str, dict[str, str]]:
         if settled:
             homes[module.rel_path] = settled
     return homes
+
+
+def _declared_family(
+    modules: list[SourceModule], bases: dict[str, list[str]]
+) -> dict[str, frozenset[str]]:
+    """Return ``{module: the classes it declares, and everything those derive from}``.
+
+    The answer to "is this module one of the things that factory hands back?".
+    Keyed by module rather than by class because a junction is owned by a file,
+    and a plugin file declares the one class it exists to provide.
+    """
+    family: dict[str, set[str]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            here = family.setdefault(module.rel_path, set())
+            here.add(node.name)
+            here.update(_ancestors(bases, node.name))
+    return {rel: frozenset(names) for rel, names in family.items()}
+
+
+def _dispatch_families(
+    modules: list[SourceModule], bases: dict[str, list[str]]
+) -> dict[str, dict[str, str]]:
+    """Return ``{module: {method called on a dispatched object: the class declared}}``.
+
+    The third thing a cross-module hop is allowed to rest on, after "the name
+    means one thing" and "the caller imports the module it names".  A JEDI
+    knight names its plugin in neither: ``WatchDog.start`` calls
+    ``impl.doAction()`` on whatever ``self.getImpl`` returned, the plugin is
+    loaded from a string in ``jedi_config``, and eight modules define
+    ``doAction``.  What the corpus *does* state is the factory's return type,
+    and the class hierarchy says which files are in it.
+
+    **Two receiver forms, because that is where the sites are.**
+    ``impl = self.getImpl(...)`` resolves against the enclosing class.
+    ``impl = self.implFactory.instantiateImpl(...)`` does not: the factory was
+    handed to a worker thread and kept as an attribute, so the only statement
+    about its type is the annotation on the ``__init__`` parameter it came
+    from.  That form carries the larger share of the sites -- the knight's own
+    ``getImpl`` accounts for the ``WatchDog`` family alone.
+
+    A name bound twice to different types, or a method the receiver's class and
+    its ancestors never annotate, yields nothing: unique or nothing, the same
+    rule :func:`_inherited_homes` follows and for the same reason.  An answer
+    must also name a class the corpus declares, which is what ``bases`` is
+    passed for -- ``FactoryBase.instantiateImpl`` is annotated ``-> Any``, and
+    calling ``Any`` the declared family would be stating something untrue even
+    where no module declares it and nothing can match.
+
+    **The binding is per function, not per statement order.**  ``ast.walk``
+    does not run the function, so a local assigned anywhere in the body is
+    taken to be that type throughout it.  Reassigning ``impl`` to a different
+    family within one method is a shape the corpus does not have, and the
+    alternative -- ordering the walk -- would claim a flow analysis this is
+    deliberately not doing.
+
+    What it is worth, measured on ``1.0.4-302-g219ed0af`` as a funnel, because
+    the number of sites with the shape says nothing on its own:
+
+    ============================================================  =====
+    ``(module, method)`` pairs this index settles as the corpus
+    stands today                                                     42
+    ... of which move a junction's entry points                       0
+    ------------------------------------------------------------  -----
+    pairs added by annotating the two families that can be
+    annotated (see :func:`reaching_modules`)                          5
+    **junctions that gain an entry point**                        **18**
+    ============================================================  =====
+
+    The first two lines are the point.  Forty-two receivers already resolve --
+    ``ddmIF``, ``siteMapper``, a site spec -- and every one of them was already
+    reached by the name or by the import, so this rescue admits nothing new for
+    any of them.  Sizing the rule by how often its shape occurs would have
+    claimed forty-two and delivered none of them.
+    """
+    returns: dict[tuple[str, str], str] = {}
+    held: dict[tuple[str, str], str] = {}
+    for module in modules:
+        for func, owner in functions_with_owner(module.tree):
+            if owner is None:
+                continue
+            if func.returns is not None:
+                stated_return = annotated_class(func.returns, bases)
+                if stated_return is not None:
+                    returns[(owner, func.name)] = stated_return
+            if func.name != "__init__":
+                continue
+            arguments = (
+                *func.args.posonlyargs,
+                *func.args.args,
+                *func.args.kwonlyargs,
+            )
+            stated = {
+                arg.arg: named
+                for arg in arguments
+                if arg.annotation is not None
+                and (named := annotated_class(arg.annotation, bases)) is not None
+            }
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                    continue
+                target, value = node.targets[0], node.value
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                    and isinstance(value, ast.Name)
+                    and value.id in stated
+                ):
+                    held[(owner, target.attr)] = stated[value.id]
+
+    def stated_by(
+        table: dict[tuple[str, str], str], cls: str, name: str
+    ) -> Optional[str]:
+        for candidate in (cls, *_ancestors(bases, cls)):
+            found = table.get((candidate, name))
+            if found is not None:
+                return found
+        return None
+
+    families: dict[str, dict[str, set[str]]] = {}
+    for module in modules:
+        for func, owner in functions_with_owner(module.tree):
+            if owner is None:
+                continue
+            bound: dict[str, str] = {}
+            for node in ast.walk(func):
+                if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                    continue
+                target, value = node.targets[0], node.value
+                if not (isinstance(target, ast.Name) and isinstance(value, ast.Call)):
+                    continue
+                if not isinstance(value.func, ast.Attribute):
+                    continue
+                receiver = value.func.value
+                if isinstance(receiver, ast.Name) and receiver.id == "self":
+                    factory: Optional[str] = owner
+                elif (
+                    isinstance(receiver, ast.Attribute)
+                    and isinstance(receiver.value, ast.Name)
+                    and receiver.value.id == "self"
+                ):
+                    factory = stated_by(held, owner, receiver.attr)
+                else:
+                    continue
+                if factory is None:
+                    continue
+                named = stated_by(returns, factory, value.func.attr)
+                if named is not None:
+                    bound[target.id] = named
+            if not bound:
+                continue
+            for node in ast.walk(func):
+                if not (
+                    isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                ):
+                    continue
+                receiver = node.func.value
+                if isinstance(receiver, ast.Name) and receiver.id in bound:
+                    families.setdefault(module.rel_path, {}).setdefault(
+                        node.func.attr, set()
+                    ).add(bound[receiver.id])
+    return {
+        rel: {
+            method: next(iter(named))
+            for method, named in found.items()
+            if len(named) == 1
+        }
+        for rel, found in families.items()
+    }
 
 
 def _downstream(edges: dict[str, set[str]], start: str) -> set[str]:
@@ -691,6 +874,7 @@ def reaching_modules(
     modules: list[SourceModule],
     through_doors: bool = False,
     through_inheritance: bool = False,
+    through_dispatch: bool = False,
 ) -> dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]]:
     """Return ``{module: {method: [(entry module, door, call)]}}`` -- who reaches what.
 
@@ -749,6 +933,31 @@ def reaching_modules(
     log question deliberately: the immediate caller answers whose log says it
     ran, and a mixin's file is that caller even when the method it calls lives
     one file up.
+
+    *through_dispatch* adds the third thing the hop may rest on
+    (:func:`_dispatch_families`): the entry calls the method on an object whose
+    declared type names a class this module derives from.  A knight neither
+    imports its plugins nor calls a name only they define, so ``doRefine``,
+    ``doPostProcess`` and ``doAction`` read as though nothing ran them -- while
+    the factory's return type says exactly which family runs.
+
+    **The corpus does not state those return types yet, so this earns nothing
+    here today.**  Measured against a copy of ``1.0.4-302-g219ed0af`` with them
+    added: ``WatchDog.getImpl -> WatchDogBase | None`` reaches 3 junctions, and
+    ``TaskRefiner.instantiateImpl -> TaskRefinerBase | None`` with
+    ``implFactory: TaskRefiner`` on its worker reaches 15 -- 18, none lost, and
+    nothing changed for a junction that already had an entry.
+
+    ``PostProcessor``'s 6 are not among them and cannot be, by an annotation:
+    ``PostProcessorThread`` is built twice, and
+    ``jedi_post_processor_msg_processor`` hands it a bare ``FactoryBase``, so no
+    single class names that parameter.  ``FactoryBase(Generic[T])`` would state
+    it, and reading that needs a type variable bound at the subscript, which
+    this does not do.
+
+    **Off by default, and off for the log question**, which is the same
+    reasoning once more: ``AtlasProdWatchDog`` writes its own log file, and the
+    knight that dispatched it writes another.
     """
     forwarders = forwarder_classes(modules)
     doors: dict[str, set[str]] = {}
@@ -772,7 +981,12 @@ def reaching_modules(
 
     implemented = sole_definitions(modules)
     imports = {module.rel_path: imported_modules(module) for module in modules}
-    homes = _inherited_homes(modules) if through_inheritance else {}
+    # Read once and handed to both, so the two readings of the hierarchy cannot
+    # come to different conclusions about what derives from what.
+    bases = class_bases(modules) if through_inheritance or through_dispatch else {}
+    homes = _inherited_homes(modules, bases) if through_inheritance else {}
+    dispatched = _dispatch_families(modules, bases) if through_dispatch else {}
+    kin = _declared_family(modules, bases) if through_dispatch else {}
     self_calls = {module.rel_path: _self_calls(module.tree) for module in modules}
     inward: dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]] = {}
     for module in modules:
@@ -784,7 +998,9 @@ def reaching_modules(
                 if entry == module.rel_path:
                     continue
                 if not unambiguous and module.rel_path not in imports[entry]:
-                    continue
+                    stated = dispatched.get(entry, {}).get(door)
+                    if stated is None or stated not in kin.get(module.rel_path, ()):
+                        continue
                 for method in _downstream(edges, door):
                     inward.setdefault(module.rel_path, {}).setdefault(method, []).append(
                         (entry, via or door, call)
@@ -1369,7 +1585,9 @@ def attach(
     arm but not what handed the arm its input.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules, through_doors=True, through_inheritance=True)
+    inward = reaching_modules(
+        modules, through_doors=True, through_inheritance=True, through_dispatch=True
+    )
     # Taken from the caller where there is one, so that a build which also
     # reports on the dispatch walks for it once rather than twice.
     if uplinks is None:
@@ -1475,7 +1693,9 @@ def unreached_reasons(
     about four seconds on the PanDA corpus, against a build in minutes.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules, through_doors=True, through_inheritance=True)
+    inward = reaching_modules(
+        modules, through_doors=True, through_inheritance=True, through_dispatch=True
+    )
 
     found: dict[str, list[JunctionNode]] = {}
     for junction in junctions:

@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Iterator, NamedTuple, Optional
+from typing import Collection, Iterator, NamedTuple, Optional
 
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql
@@ -117,6 +117,49 @@ def _unquoted(annotation: ast.expr, depth: int = 0) -> ast.expr:
     except (SyntaxError, ValueError):
         return annotation
     return _unquoted(parsed, depth + 1)
+
+
+def annotated_class(
+    annotation: ast.expr, known: Optional[Collection[str]] = None
+) -> Optional[str]:
+    """The class an annotation names, through the wrappers it may wear.
+
+    Reading only ``Name`` and ``Attribute`` left annotations PanDA had
+    already written unread: ``upsert_workflow_entities`` declares
+    ``workflow_spec: WorkflowSpec | None = None`` and three writes under it
+    came out unattributed, because a PEP 604 union is a ``BinOp`` and
+    neither branch matched.
+
+    ``Optional[X]`` and ``X | None`` are the same statement, and both mean
+    "X, or absent" -- absence writes nothing, so for the purpose of naming
+    what a write went to they say X.  A union of two named classes says
+    neither, and is left open rather than guessed at.
+
+    *known* is the set of class names an answer is allowed to be, which is what
+    makes one reading serve two questions.  Attribution passes its declaration
+    table, because a write only belongs to a class that holds columns.  The
+    reach question passes nothing, because a plugin base class holds none and
+    is still the type a dispatched object was declared as -- and reimplementing
+    the shape reading there would be two readers of one fact, free to drift.
+    """
+    annotation = _unquoted(annotation)
+    if isinstance(annotation, ast.Name):
+        return annotation.id if known is None or annotation.id in known else None
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr if known is None or annotation.attr in known else None
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        found = {
+            cls
+            for side in (annotation.left, annotation.right)
+            if (cls := annotated_class(side, known)) is not None
+        }
+        return next(iter(found)) if len(found) == 1 else None
+    if isinstance(annotation, ast.Subscript):
+        base = annotation.value
+        name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+        if name == "Optional":
+            return annotated_class(annotation.slice, known)
+    return None
 
 
 def _rooted_at_self(expression: ast.expr) -> bool:
@@ -805,37 +848,15 @@ class SpecAttributor:
         return order
 
     def _annotated_class(self, annotation: ast.expr) -> Optional[str]:
-        """The spec class an annotation names, through the wrappers it may wear.
+        """The *spec* class an annotation names -- :func:`annotated_class`, gated.
 
-        Reading only ``Name`` and ``Attribute`` left annotations PanDA had
-        already written unread: ``upsert_workflow_entities`` declares
-        ``workflow_spec: WorkflowSpec | None = None`` and three writes under it
-        came out unattributed, because a PEP 604 union is a ``BinOp`` and
-        neither branch matched.
-
-        ``Optional[X]`` and ``X | None`` are the same statement, and both mean
-        "X, or absent" -- absence writes nothing, so for the purpose of naming
-        what a write went to they say X.  A union of two spec classes says
-        neither, and is left open rather than guessed at.
+        The shape reading lives at module level because the reach question needs
+        the same one without this gate.  The gate is the difference: a write
+        belongs to a class only if that class holds database columns, so a name
+        outside the declaration table says nothing here even when it is a
+        perfectly good class.
         """
-        annotation = _unquoted(annotation)
-        if isinstance(annotation, ast.Name):
-            return annotation.id if annotation.id in self._declarations else None
-        if isinstance(annotation, ast.Attribute):
-            return annotation.attr if annotation.attr in self._declarations else None
-        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-            found = {
-                cls
-                for side in (annotation.left, annotation.right)
-                if (cls := self._annotated_class(side)) is not None
-            }
-            return next(iter(found)) if len(found) == 1 else None
-        if isinstance(annotation, ast.Subscript):
-            base = annotation.value
-            name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-            if name == "Optional":
-                return self._annotated_class(annotation.slice)
-        return None
+        return annotated_class(annotation, self._declarations)
 
     def _annotated_element(self, annotation: ast.expr) -> Optional[str]:
         """The spec class a container annotation says it holds.

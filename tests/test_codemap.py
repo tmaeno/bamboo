@@ -5163,6 +5163,222 @@ def test_the_log_question_does_not_follow_an_inherited_call():
     assert entries(through_inheritance=True) == ["proxy.py", "api/v1/job_api.py"]
 
 
+_DISPATCH_BASE = '''
+class WatchDogBase:
+    def pre_action(self, log, vo, label, pid):
+        return None
+'''
+
+_DISPATCH_FACTORY = '''
+from dog_base import WatchDogBase
+
+
+class FactoryBase:
+    def getImpl(self, vo, label):
+        return self.implMap.get((vo, label))
+
+
+class WatchDog(FactoryBase):
+    def getImpl(self, vo, label) -> WatchDogBase | None:
+        return FactoryBase.getImpl(self, vo, label)
+
+    def start(self):
+        while True:
+            time.sleep(jedi_config.watchdog.loopCycle)
+            impl = self.getImpl("atlas", "managed")
+            if impl is not None:
+                impl.doAction()
+'''
+
+_DISPATCH_PLUGIN = '''
+from dog_base import WatchDogBase
+
+
+class AtlasProdWatchDog(WatchDogBase):
+    def doAction(self):
+        self.doForPriorityMassage()
+        return 0
+
+    def doForPriorityMassage(self):
+        return 1
+'''
+
+# Without a rival the name resolves on its own and the test below would pass
+# for the wrong reason.  The corpus has eight of these.
+_DISPATCH_RIVAL = '''
+from dog_base import WatchDogBase
+
+
+class AtlasAnalWatchDog(WatchDogBase):
+    def doAction(self):
+        return 0
+'''
+
+
+def _dogs():
+    return (
+        (_DISPATCH_BASE, "pandajedi/jedidog/dog_base.py"),
+        (_DISPATCH_FACTORY, "pandajedi/jediorder/WatchDog.py"),
+        (_DISPATCH_PLUGIN, "pandajedi/jedidog/AtlasProdWatchDog.py"),
+        (_DISPATCH_RIVAL, "pandajedi/jedidog/AtlasAnalWatchDog.py"),
+    )
+
+
+def test_a_dispatched_call_reaches_the_family_the_factory_declares():
+    """The knight never names the plugin; the factory's return type does.
+
+    ``WatchDog.start`` calls ``impl.doAction()`` on whatever
+    ``self.getImpl`` handed back, and the plugin is loaded from a config
+    string -- so the knight does not import it and eight modules define
+    ``doAction``.  The junction is in what ``doAction`` calls, not in
+    ``doAction`` itself, which is why the edge has to carry downstream.
+    """
+    junction = _junction(
+        "pandajedi/jedidog/AtlasProdWatchDog.py::doForPriorityMassage",
+        "JediTaskSpec.currentPriority",
+    )
+    _attach(*_dogs(), junctions=[junction])
+
+    assert [(e.trigger, e.entry) for e in junction.entry_points] == [
+        ("polled", "pandajedi/jediorder/WatchDog.py")
+    ]
+
+
+def test_a_class_outside_the_declared_family_gains_no_dispatched_edge():
+    """The declared type is the whole restriction, so it has to narrow.
+
+    ``doAction`` is a common enough name that accepting every definition of
+    it would hand the WatchDog knight edges into modules it dispatches
+    nothing to.
+    """
+    stranger = (
+        "class Unrelated:\n"
+        "    def doAction(self):\n"
+        "        return self.doForPriorityMassage()\n"
+        "\n"
+        "    def doForPriorityMassage(self):\n"
+        "        return 1\n"
+    )
+    junction = _junction(
+        "pandaserver/dataservice/unrelated.py::doForPriorityMassage",
+        "JediTaskSpec.currentPriority",
+    )
+    _attach(
+        *_dogs(),
+        (stranger, "pandaserver/dataservice/unrelated.py"),
+        junctions=[junction],
+    )
+
+    assert junction.entry_points == []
+
+
+_REFINER_BASE = '''
+class TaskRefinerBase:
+    def doBasicRefine(self, task_params):
+        return 1
+'''
+
+_DISPATCH_WORKER = '''
+from refiner_base import TaskRefinerBase
+
+
+class TaskRefiner(FactoryBase):
+    def instantiateImpl(self, vo, label, *args) -> Optional[TaskRefinerBase]:
+        return FactoryBase.instantiateImpl(self, vo, label, *args)
+
+    def start(self):
+        while True:
+            time.sleep(jedi_config.taskrefine.loopCycle)
+            worker = TaskRefinerThread(self)
+            worker.start()
+
+
+class TaskRefinerThread(WorkerThread):
+    def __init__(self, implFactory: TaskRefiner):
+        self.implFactory = implFactory
+
+    def runImpl(self):
+        impl = self.implFactory.instantiateImpl("atlas", "managed")
+        if impl is None:
+            return
+        impl.doRefine(1, {})
+'''
+
+_DISPATCH_REFINER = '''
+from refiner_base import TaskRefinerBase
+
+
+class AtlasProdTaskRefiner(TaskRefinerBase):
+    def doRefine(self, task_id, task_params):
+        self.doBasicRefine(task_params)
+        return 0
+'''
+
+_DISPATCH_REFINER_RIVAL = '''
+from refiner_base import TaskRefinerBase
+
+
+class AtlasAnalTaskRefiner(TaskRefinerBase):
+    def doRefine(self, task_id, task_params):
+        return 0
+'''
+
+
+def test_the_factory_a_worker_was_handed_resolves_through_its_annotation():
+    """21 of the 24 sites put the factory in a worker thread first.
+
+    ``TaskRefiner.start`` hands ``self`` to ``TaskRefinerThread``, which
+    keeps it as ``self.implFactory`` and calls ``instantiateImpl`` on that --
+    so the receiver is ``self.<attr>`` and only the parameter annotation says
+    what it is.  ``Optional[X]`` here and ``X | None`` above, because the
+    corpus would be free to write either and an annotation nothing reads is
+    the failure this is guarding.
+
+    Both junctions are asserted: the plugin's own ``doRefine`` and the base's
+    ``doBasicRefine``, which needs the inherited hop as well -- that pair is
+    14 of the 24.
+    """
+    own = _junction(
+        "pandajedi/jedirefine/AtlasProdTaskRefiner.py::doRefine",
+        "JediTaskSpec.status",
+    )
+    inherited = _junction(
+        "pandajedi/jedirefine/refiner_base.py::doBasicRefine",
+        "JediTaskSpec.splitRule",
+    )
+    _attach(
+        (_REFINER_BASE, "pandajedi/jedirefine/refiner_base.py"),
+        (_DISPATCH_WORKER, "pandajedi/jediorder/TaskRefiner.py"),
+        (_DISPATCH_REFINER, "pandajedi/jedirefine/AtlasProdTaskRefiner.py"),
+        (_DISPATCH_REFINER_RIVAL, "pandajedi/jedirefine/AtlasAnalTaskRefiner.py"),
+        junctions=[own, inherited],
+    )
+
+    assert [e.entry for e in own.entry_points] == ["pandajedi/jediorder/TaskRefiner.py"]
+    assert [e.entry for e in inherited.entry_points] == [
+        "pandajedi/jediorder/TaskRefiner.py"
+    ]
+
+
+def test_the_log_question_does_not_follow_a_dispatched_call():
+    """Whose log says it ran is answered by the immediate caller.
+
+    ``AtlasProdWatchDog`` declares its own logger and writes to
+    ``panda-AtlasProdWatchDog.log``; the knight that dispatched it writes to
+    ``panda-jedi.log``.  Following the dispatch here would name the wrong
+    file, which is the P1-37 failure.
+    """
+    modules = [_module(text, rel) for text, rel in _dogs()]
+
+    def entries(**flags):
+        reached = trigger.reaching_modules(modules, through_doors=True, **flags)
+        found = reached.get("pandajedi/jedidog/AtlasProdWatchDog.py", {})
+        return [e for e, _door, _call in found.get("doForPriorityMassage", ())]
+
+    assert entries() == []
+    assert entries(through_dispatch=True) == ["pandajedi/jediorder/WatchDog.py"]
+
+
 def _reasons(*sources: tuple[str, str], junctions, tables=None):
     modules = [_module(text, rel) for text, rel in sources]
     trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})
