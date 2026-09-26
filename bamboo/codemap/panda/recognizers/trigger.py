@@ -64,6 +64,7 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import sql
+from bamboo.codemap.panda.attribution import class_bases
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     targets_of,
@@ -543,6 +544,91 @@ def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
     return edges
 
 
+def _inherited_homes(modules: list[SourceModule]) -> dict[str, dict[str, str]]:
+    """Return ``{module: {method: the module a base class defines it in}}``.
+
+    The companion to :func:`_self_calls`, and it rests on the same fact.  That
+    function follows ``self.<name>()`` transitively within one module because no
+    resolution is involved -- and an *inherited* ``self.<name>()`` is equally
+    unresolved: the class states its base, the base states where it lives, and
+    the language decides which method runs.  Stopping at the file boundary was
+    reading the hierarchy as though it were a name match.
+
+    What it is worth, measured on ``1.0.4-295-gbf2812ba``, as a funnel rather
+    than as the one big number -- the shape count says nothing on its own:
+
+    ==========================================================  =====
+    ``self.<name>()`` calls naming a method the module lacks      1811
+    ``(module, method)`` pairs this index settles                 1372
+    pairs :func:`_downstream` actually asks about                  180
+    ... of which the index answers                                 154
+    **junctions that gain an entry point**                        **4**
+    ==========================================================  =====
+
+    Four, and they are the right four: three arms of
+    ``base_module.recordStatusChange`` and one of ``setDeftStatus_JEDI``, called
+    through ``self`` from the ``job_standalone`` and ``task_complex`` mixins and
+    started by ``JobGenerator``, ``TaskCommando``, ``PostProcessor``,
+    ``ContentsFeeder`` and two message processors.  They read as "nothing starts
+    this", which was false.  A mixin's ``self.foo()`` is the same object at run
+    time, so the edge is not an inference about which object -- there is only
+    one.  Nothing else moved: no junction gained a second-hand entry, none lost
+    one, and no stored node count changed.
+
+    **Unique or nothing**, in two places, so this never degrades into the name
+    match the module docstring refuses:
+
+    * a base class declared in more than one file is skipped -- the name would
+      be doing the resolving, not the hierarchy;
+    * a method two different ancestor modules define is skipped, even though
+      Python's MRO would pick one.  Reading the MRO would mean ordering bases
+      that ``class_bases`` records unordered, and a confident wrong home is
+      worse than the unresolved method it replaces.
+    """
+    declared_in: dict[str, set[str]] = {}
+    defines: dict[str, set[str]] = {}
+    declares: dict[str, list[str]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if isinstance(node, ast.ClassDef):
+                declared_in.setdefault(node.name, set()).add(module.rel_path)
+                declares.setdefault(module.rel_path, []).append(node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defines.setdefault(module.rel_path, set()).add(node.name)
+    bases = class_bases(modules)
+
+    def ancestors(cls: str, seen: set[str]) -> Iterator[str]:
+        for base in bases.get(cls, ()):
+            if base in seen:
+                continue
+            seen.add(base)
+            yield base
+            yield from ancestors(base, seen)
+
+    homes: dict[str, dict[str, str]] = {}
+    for module in modules:
+        here = defines.get(module.rel_path, set())
+        found: dict[str, set[str]] = {}
+        for cls in declares.get(module.rel_path, ()):
+            for ancestor in ancestors(cls, set()):
+                where = declared_in.get(ancestor, set())
+                if len(where) != 1:
+                    continue
+                home = next(iter(where))
+                if home == module.rel_path:
+                    continue
+                for method in defines.get(home, set()) - here:
+                    found.setdefault(method, set()).add(home)
+        settled = {
+            method: next(iter(where))
+            for method, where in found.items()
+            if len(where) == 1
+        }
+        if settled:
+            homes[module.rel_path] = settled
+    return homes
+
+
 def _downstream(edges: dict[str, set[str]], start: str) -> set[str]:
     """Return every method reachable from *start* through ``self`` calls."""
     seen = {start}
@@ -604,6 +690,7 @@ def _arg_binding(call: ast.Call) -> dict[str, str]:
 def reaching_modules(
     modules: list[SourceModule],
     through_doors: bool = False,
+    through_inheritance: bool = False,
 ) -> dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]]:
     """Return ``{module: {method: [(entry module, door, call)]}}`` -- who reaches what.
 
@@ -650,6 +737,18 @@ def reaching_modules(
     would move 23 junctions' log files on the strength of a change made for the
     trigger question -- the failure the facade rule exists to prevent, in the
     other direction.
+
+    *through_inheritance* carries the same edge into the module a base class
+    lives in (:func:`_inherited_homes`).  ``AtlasProdTaskRefiner.doRefine``
+    calls ``self.doBasicRefine``, which ``TaskRefinerBase`` defines in another
+    file, and the eleven junctions in ``doBasicRefine`` and ``doPreProRefine``
+    read as though nothing ran them.  The method set is recorded under the
+    *base's* module, because that is where the junction that needs it is owned.
+
+    **Off by default for the same reason as the doors**, and left off for the
+    log question deliberately: the immediate caller answers whose log says it
+    ran, and a mixin's file is that caller even when the method it calls lives
+    one file up.
     """
     forwarders = forwarder_classes(modules)
     doors: dict[str, set[str]] = {}
@@ -673,9 +772,12 @@ def reaching_modules(
 
     implemented = sole_definitions(modules)
     imports = {module.rel_path: imported_modules(module) for module in modules}
+    homes = _inherited_homes(modules) if through_inheritance else {}
+    self_calls = {module.rel_path: _self_calls(module.tree) for module in modules}
     inward: dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]] = {}
     for module in modules:
-        edges = _self_calls(module.tree)
+        edges = self_calls[module.rel_path]
+        inherited = homes.get(module.rel_path, {})
         for door in edges:
             unambiguous = implemented.get(door) == module.rel_path
             for entry, call, via in callers.get(door, ()):
@@ -687,6 +789,16 @@ def reaching_modules(
                     inward.setdefault(module.rel_path, {}).setdefault(method, []).append(
                         (entry, via or door, call)
                     )
+                    home = inherited.get(method)
+                    if home is None:
+                        continue
+                    # Inside the base's file the within-one-module rule applies
+                    # again, so the inherited method's own ``self`` calls are
+                    # followed there -- the same reading, not a second hop.
+                    for reached in _downstream(self_calls[home], method):
+                        inward.setdefault(home, {}).setdefault(reached, []).append(
+                            (entry, via or door, call)
+                        )
     return inward
 
 
@@ -1257,7 +1369,7 @@ def attach(
     arm but not what handed the arm its input.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules, through_doors=True)
+    inward = reaching_modules(modules, through_doors=True, through_inheritance=True)
     # Taken from the caller where there is one, so that a build which also
     # reports on the dispatch walks for it once rather than twice.
     if uplinks is None:
@@ -1363,7 +1475,7 @@ def unreached_reasons(
     about four seconds on the PanDA corpus, against a build in minutes.
     """
     triggers = classify(modules, foreign_tables)
-    inward = reaching_modules(modules, through_doors=True)
+    inward = reaching_modules(modules, through_doors=True, through_inheritance=True)
 
     found: dict[str, list[JunctionNode]] = {}
     for junction in junctions:

@@ -5075,6 +5075,94 @@ def test_a_door_to_a_name_two_modules_define_carries_no_edge():
     assert junction.entry_points == []
 
 
+_INHERITED_BASE = '''
+class BaseModule:
+    def recordStatusChange(self, job):
+        return 2
+'''
+
+_INHERITED_SUB = '''
+from base_module import BaseModule
+
+
+class JobStandaloneModule(BaseModule):
+    def insertNewJob(self, job, user):
+        self.recordStatusChange(job)
+        return 1
+'''
+
+
+def test_an_inherited_self_call_reaches_the_module_its_base_lives_in():
+    """The junction is in the base's file and the call to it is in the subclass.
+
+    ``JobStandaloneModule.insertNewJob`` calls ``self.recordStatusChange``,
+    which ``BaseModule`` defines one file up, so three junctions in
+    ``recordStatusChange`` read as though nothing ran them -- while the API that
+    submits jobs, ``JobGenerator`` and ``TaskCommando`` all reach it.
+    """
+    junction = _junction("base_module.py::recordStatusChange", "JobSpec.jobStatus")
+    _attach(
+        (_INHERITED_BASE, "base_module.py"),
+        (_INHERITED_SUB, "proxy.py"),
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert [e.entry for e in junction.entry_points] == ["api/v1/job_api.py"]
+
+
+def test_a_method_two_ancestor_modules_define_carries_no_inherited_edge():
+    """Unique or nothing, so the hierarchy resolves rather than the name.
+
+    Python's MRO would pick one of the two, but ``class_bases`` records bases
+    unordered, and a confident wrong home is worse than the unresolved method
+    it replaces.
+    """
+    junction = _junction("base_module.py::recordStatusChange", "JobSpec.jobStatus")
+    rival = "class Mixin:\n    def recordStatusChange(self, job):\n        return 9\n"
+    two_bases = _INHERITED_SUB.replace(
+        "class JobStandaloneModule(BaseModule):",
+        "class JobStandaloneModule(BaseModule, Mixin):",
+    )
+    _attach(
+        (_INHERITED_BASE, "base_module.py"),
+        (rival, "mixin.py"),
+        (two_bases, "proxy.py"),
+        (_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        (_DOOR_API, "api/v1/job_api.py"),
+        junctions=[junction],
+    )
+
+    assert junction.entry_points == []
+
+
+def test_the_log_question_does_not_follow_an_inherited_call():
+    """The immediate caller answers whose log says it ran.
+
+    Measured on the corpus: following it there would have ``recordStatusChange``
+    name ``panda-adder.log``, ``panda-api_event.log`` and
+    ``panda-AtlasAnalWatchDog.log`` at once -- the P1-37 failure, in which 71
+    junctions were sent to a file that says nothing, in the other direction.
+    """
+    modules = [
+        _module(_INHERITED_BASE, "base_module.py"),
+        _module(_INHERITED_SUB, "proxy.py"),
+        _module(_DOOR_FACADE, "taskbuffer/TaskBuffer.py"),
+        _module(_DOOR_API, "api/v1/job_api.py"),
+    ]
+
+    def entries(**flags):
+        reached = trigger.reaching_modules(modules, through_doors=True, **flags)
+        return [e for e, _door, _call in reached["base_module.py"]["recordStatusChange"]]
+
+    # The edge itself is already there without the hop -- ``recordStatusChange``
+    # is written in one module, so the name resolves.  What the hop carries is
+    # the *entry*: the subclass's own file starts nothing, and the API does.
+    assert entries() == ["proxy.py"]
+    assert entries(through_inheritance=True) == ["proxy.py", "api/v1/job_api.py"]
+
+
 def _reasons(*sources: tuple[str, str], junctions, tables=None):
     modules = [_module(text, rel) for text, rel in sources]
     trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})
