@@ -5379,6 +5379,182 @@ def test_the_log_question_does_not_follow_a_dispatched_call():
     assert entries(through_dispatch=True) == ["pandajedi/jediorder/WatchDog.py"]
 
 
+_GENERIC_FACTORY = '''
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class FactoryBase(Generic[T]):
+    def getImpl(self, vo, label) -> T | None:
+        return self.implMap.get((vo, label))
+
+    def instantiateImpl(self, vo, label, *args) -> T | None:
+        return self.classMap.get((vo, label))
+'''
+
+_GENERIC_KNIGHT = '''
+from dog_base import WatchDogBase
+from pandajedi.jedicore.FactoryBase import FactoryBase
+
+
+class WatchDog(FactoryBase[WatchDogBase]):
+    def start(self):
+        while True:
+            time.sleep(jedi_config.watchdog.loopCycle)
+            impl = self.getImpl("atlas", "managed")
+            if impl is not None:
+                impl.doAction()
+'''
+
+
+def test_a_subscripted_base_class_is_still_a_base_class():
+    """``FactoryBase[WatchDogBase]`` states the same descent ``FactoryBase`` does.
+
+    ``ast.Subscript`` carries neither ``id`` nor ``attr``, so the base was read
+    as nothing and dropped -- which would take ``FactoryBase`` out of eight
+    classes' ancestry the moment the corpus parameterises it, and four readers
+    of the hierarchy with it.
+    """
+    source = (
+        "class JediKnight:\n    pass\n"
+        "\n"
+        "class WatchDog(JediKnight, FactoryBase[WatchDogBase]):\n    pass\n"
+        "\n"
+        "class Plain(JediKnight, FactoryBase):\n    pass\n"
+    )
+    bases = attribution.class_bases([_module(source, "pandajedi/jediorder/WatchDog.py")])
+
+    assert bases["WatchDog"] == ["JediKnight", "FactoryBase"]
+    # The unsubscripted form is what the corpus writes today, and it must read
+    # exactly as it did -- this rule is a widening, not a replacement.
+    assert bases["Plain"] == ["JediKnight", "FactoryBase"]
+
+
+def test_a_type_argument_is_not_mistaken_for_a_base_class():
+    """The family a base is parameterised *with* is not something the class derives from.
+
+    ``WatchDog`` is a ``FactoryBase``; it is not a ``WatchDogBase``.  Recording
+    the argument as a base would put every knight in its own plugins' family and
+    let ``_declared_family`` match the knight's own module.
+    """
+    source = "class WatchDog(FactoryBase[WatchDogBase]):\n    pass\n"
+    bases = attribution.class_bases([_module(source, "pandajedi/jediorder/WatchDog.py")])
+
+    assert bases["WatchDog"] == ["FactoryBase"]
+
+
+def _generic_dogs():
+    return (
+        (_GENERIC_FACTORY, "pandajedi/jedicore/FactoryBase.py"),
+        (_DISPATCH_BASE, "pandajedi/jedidog/dog_base.py"),
+        (_GENERIC_KNIGHT, "pandajedi/jediorder/WatchDog.py"),
+        (_DISPATCH_PLUGIN, "pandajedi/jedidog/AtlasProdWatchDog.py"),
+        (_DISPATCH_RIVAL, "pandajedi/jedidog/AtlasAnalWatchDog.py"),
+    )
+
+
+def test_a_dispatched_call_resolves_through_the_class_type_argument():
+    """The family is stated once, on the knight's own base clause.
+
+    ``FactoryBase.getImpl`` returns ``T | None``; which class ``T`` is comes
+    from ``class WatchDog(FactoryBase[WatchDogBase])``.  That is one statement
+    per knight instead of an override whose only purpose is to restate a type,
+    and it is the form that also carries the worker-thread case below.
+    """
+    junction = _junction(
+        "pandajedi/jedidog/AtlasProdWatchDog.py::doForPriorityMassage",
+        "JediTaskSpec.currentPriority",
+    )
+    _attach(*_generic_dogs(), junctions=[junction])
+
+    assert [(e.trigger, e.entry) for e in junction.entry_points] == [
+        ("polled", "pandajedi/jediorder/WatchDog.py")
+    ]
+
+
+_PPROCESS_BASE = '''
+class PostProcessorBase:
+    def doBasicPostProcess(self, task):
+        return 1
+'''
+
+_GENERIC_WORKER = '''
+from pandajedi.jedicore.FactoryBase import FactoryBase
+from pprocess_base import PostProcessorBase
+
+
+class PostProcessor(FactoryBase[PostProcessorBase]):
+    def start(self):
+        while True:
+            time.sleep(jedi_config.postprocessor.loopCycle)
+            worker = PostProcessorThread(self)
+            worker.start()
+
+
+class PostProcessorThread(WorkerThread):
+    def __init__(self, implFactory: FactoryBase[PostProcessorBase]):
+        self.implFactory = implFactory
+
+    def post_process_tasks(self, task_list):
+        impl = self.implFactory.instantiateImpl("atlas", "managed")
+        if impl is None:
+            return
+        impl.doPostProcess(task_list)
+'''
+
+_GENERIC_PPROCESS = '''
+from pprocess_base import PostProcessorBase
+
+
+class AtlasProdPostProcessor(PostProcessorBase):
+    def doPostProcess(self, task):
+        self.doBasicPostProcess(task)
+        return 0
+'''
+
+_GENERIC_PPROCESS_RIVAL = '''
+from pprocess_base import PostProcessorBase
+
+
+class AtlasAnalPostProcessor(PostProcessorBase):
+    def doPostProcess(self, task):
+        return 0
+'''
+
+
+def test_a_dispatched_call_resolves_through_a_parameterised_parameter():
+    """21 of the 24 sites reach the factory through a worker thread's parameter.
+
+    ``PostProcessorThread`` is constructed twice -- by the knight with ``self``
+    and by a message processor with a bare factory -- so no concrete class names
+    that parameter and only the parameterised base does.  This is the case a
+    concrete override cannot reach, and the reason the generic form is what was
+    asked for upstream.
+    """
+    own = _junction(
+        "pandajedi/jedipprocess/AtlasProdPostProcessor.py::doPostProcess",
+        "JediTaskSpec.status",
+    )
+    inherited = _junction(
+        "pandajedi/jedipprocess/pprocess_base.py::doBasicPostProcess",
+        "JediTaskSpec.splitRule",
+    )
+    _attach(
+        (_GENERIC_FACTORY, "pandajedi/jedicore/FactoryBase.py"),
+        (_PPROCESS_BASE, "pandajedi/jedipprocess/pprocess_base.py"),
+        (_GENERIC_WORKER, "pandajedi/jediorder/PostProcessor.py"),
+        (_GENERIC_PPROCESS, "pandajedi/jedipprocess/AtlasProdPostProcessor.py"),
+        (_GENERIC_PPROCESS_RIVAL, "pandajedi/jedipprocess/AtlasAnalPostProcessor.py"),
+        junctions=[own, inherited],
+    )
+
+    assert [e.entry for e in own.entry_points] == ["pandajedi/jediorder/PostProcessor.py"]
+    assert [e.entry for e in inherited.entry_points] == [
+        "pandajedi/jediorder/PostProcessor.py"
+    ]
+
+
 def _reasons(*sources: tuple[str, str], junctions, tables=None):
     modules = [_module(text, rel) for text, rel in sources]
     trigger.attach(junctions, modules, tables or {"PRODSYS_COMM"})

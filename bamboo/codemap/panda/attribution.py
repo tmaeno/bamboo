@@ -119,6 +119,31 @@ def _unquoted(annotation: ast.expr, depth: int = 0) -> ast.expr:
     return _unquoted(parsed, depth + 1)
 
 
+def base_name(base: ast.expr) -> Optional[str]:
+    """The class a base-clause expression names, however it is written.
+
+    ``ast.Subscript`` carries neither ``id`` nor ``attr``, so reading those two
+    alone dropped a parameterised base entirely -- and dropping a base is silent
+    in a way that dropping a write is not: the class simply reads as descending
+    from one fewer thing.  ``class SpecColumn(Generic[_T])`` is the only one in
+    the corpus today, and ``FactoryBase[WatchDogBase]`` is what the JEDI
+    factories are being asked to become, which would take ``FactoryBase`` out of
+    eight classes' ancestry at once.
+
+    **The argument is not a base.**  ``WatchDog`` is a ``FactoryBase``; it is
+    not a ``WatchDogBase``.  Only the subscripted expression's own value is
+    followed, which is why this recurses on ``value`` rather than walking the
+    node.
+    """
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    if isinstance(base, ast.Subscript):
+        return base_name(base.value)
+    return None
+
+
 def annotated_class(
     annotation: ast.expr, known: Optional[Collection[str]] = None
 ) -> Optional[str]:
@@ -162,6 +187,38 @@ def annotated_class(
     return None
 
 
+def annotated_generic(
+    annotation: ast.expr, known: Optional[Collection[str]] = None
+) -> Optional[tuple[str, list[str]]]:
+    """The class an annotation names, together with the arguments it parameterises it with.
+
+    :func:`annotated_class` on its own answers "which class is this", and
+    deliberately says nothing for ``FactoryBase[PostProcessorBase]`` -- a
+    subscript it does not recognise is not a class name.  For the reach question
+    the subscript is the whole point: the parameter is where a worker thread's
+    factory states its plugin family, because no concrete class names that
+    parameter at all.
+
+    Kept beside :func:`annotated_class` rather than folded into it.  Attribution
+    reads a field's annotation to decide which spec class a write belongs to,
+    and teaching it that ``Foo[JobSpec]`` means ``JobSpec`` would attribute
+    writes to the element type of any container -- a different claim, in 411
+    places.
+    """
+    annotation = _unquoted(annotation)
+    if isinstance(annotation, ast.Subscript):
+        named = base_name(annotation.value)
+        if named is None or (known is not None and named not in known):
+            return None
+        inner = annotation.slice
+        parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+        return named, [
+            name if (name := base_name(part)) is not None else "" for part in parts
+        ]
+    plain = annotated_class(annotation, known)
+    return (plain, []) if plain is not None else None
+
+
 def _rooted_at_self(expression: ast.expr) -> bool:
     """Whether *expression* is ``self.<field>``, however many fields deep.
 
@@ -190,12 +247,49 @@ def class_bases(modules: list[SourceModule]) -> dict[str, list[str]]:
         for node in ast.walk(module.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
-            names = [
-                base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
-                for base in node.bases
-            ]
+            names = [base_name(base) for base in node.bases]
             bases[node.name] = [n for n in names if n]
     return bases
+
+
+def class_type_arguments(
+    modules: list[SourceModule],
+) -> dict[str, dict[str, list[str]]]:
+    """Return ``{class: {base: [type argument, ...]}}`` for parameterised bases.
+
+    The companion to :func:`class_bases`, which says *that* a class derives from
+    something and deliberately not *with what*.  Two questions read this pair
+    together: ``Generic[T]`` on a base names the parameter, and
+    ``FactoryBase[WatchDogBase]`` on a subclass binds it -- so a method
+    annotated ``-> T | None`` can be read as returning the family the subclass
+    declared.
+
+    By position, not by name, because that is what the language does.  An
+    argument that is not a plain class name -- a nested generic, a union, an
+    ellipsis -- yields nothing for that position rather than a guess.
+
+    PEP 695 (``class Foo[T]:``) is not read: it puts the parameters in
+    ``type_params`` rather than in a ``Generic`` base, and no module in the
+    corpus uses it, which is a fact about the Python floor rather than a choice.
+    """
+    arguments: dict[str, dict[str, list[str]]] = {}
+    for module in modules:
+        for node in ast.walk(module.tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for base in node.bases:
+                if not isinstance(base, ast.Subscript):
+                    continue
+                named = base_name(base)
+                if named is None:
+                    continue
+                inner = base.slice
+                parts = inner.elts if isinstance(inner, ast.Tuple) else [inner]
+                arguments.setdefault(node.name, {})[named] = [
+                    name if (name := base_name(part)) is not None else ""
+                    for part in parts
+                ]
+    return arguments
 
 
 class SpecAttributor:

@@ -64,7 +64,12 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import sql
-from bamboo.codemap.panda.attribution import annotated_class, class_bases
+from bamboo.codemap.panda.attribution import (
+    annotated_class,
+    annotated_generic,
+    class_bases,
+    class_type_arguments,
+)
 from bamboo.codemap.panda.pathcond import (
     functions_with_owner,
     targets_of,
@@ -704,9 +709,9 @@ def _dispatch_families(
     stands today                                                     42
     ... of which move a junction's entry points                       0
     ------------------------------------------------------------  -----
-    pairs added by annotating the two families that can be
-    annotated (see :func:`reaching_modules`)                          5
-    **junctions that gain an entry point**                        **18**
+    pairs added by ``FactoryBase(Generic[T])`` and the eight
+    knights declaring ``FactoryBase[XxxBase]``                       11
+    **junctions that gain an entry point**                        **24**
     ============================================================  =====
 
     The first two lines are the point.  Forty-two receivers already resolve --
@@ -714,15 +719,35 @@ def _dispatch_families(
     reached by the name or by the import, so this rescue admits nothing new for
     any of them.  Sizing the rule by how often its shape occurs would have
     claimed forty-two and delivered none of them.
+
+    Nor are the eleven a harvest either: ``TaskBroker.doBrokerage`` and
+    ``JobThrottler.toBeThrottled`` resolve and move nothing, because the
+    junctions in those two families already had an entry.  The twenty-four are
+    ``TaskRefiner`` 15, ``PostProcessor`` 6 and ``WatchDog`` 3.
     """
+    type_arguments = class_type_arguments(modules)
+    # ``class FactoryBase(Generic[T])`` names the parameter; ``FactoryBase[X]``
+    # on a subclass binds it.  An empty name is a position whose argument was
+    # not a plain class, which :func:`class_type_arguments` records rather than
+    # guesses at.
+    parameters = {
+        cls: [name for name in found["Generic"] if name]
+        for cls, found in type_arguments.items()
+        if found.get("Generic")
+    }
     returns: dict[tuple[str, str], str] = {}
-    held: dict[tuple[str, str], str] = {}
+    held: dict[tuple[str, str], tuple[str, list[str]]] = {}
     for module in modules:
         for func, owner in functions_with_owner(module.tree):
             if owner is None:
                 continue
             if func.returns is not None:
+                # A type parameter is the other thing a return may name, and it
+                # is not a class, so it has to be accepted separately or
+                # ``-> T | None`` reads as saying nothing.
                 stated_return = annotated_class(func.returns, bases)
+                if stated_return is None and owner in parameters:
+                    stated_return = annotated_class(func.returns, parameters[owner])
                 if stated_return is not None:
                     returns[(owner, func.name)] = stated_return
             if func.name != "__init__":
@@ -733,10 +758,10 @@ def _dispatch_families(
                 *func.args.kwonlyargs,
             )
             stated = {
-                arg.arg: named
+                arg.arg: found
                 for arg in arguments
                 if arg.annotation is not None
-                and (named := annotated_class(arg.annotation, bases)) is not None
+                and (found := annotated_generic(arg.annotation, bases)) is not None
             }
             for node in ast.walk(func):
                 if not isinstance(node, ast.Assign) or len(node.targets) != 1:
@@ -751,13 +776,37 @@ def _dispatch_families(
                 ):
                     held[(owner, target.attr)] = stated[value.id]
 
-    def stated_by(
-        table: dict[tuple[str, str], str], cls: str, name: str
-    ) -> Optional[str]:
+    def declared_in(cls: str, name: str) -> tuple[Optional[str], Optional[str]]:
+        """The class whose annotation answers for *name*, and what it says."""
         for candidate in (cls, *_ancestors(bases, cls)):
-            found = table.get((candidate, name))
+            found = returns.get((candidate, name))
             if found is not None:
-                return found
+                return candidate, found
+        return None, None
+
+    def family(declared: str, explicit: list[str], method: str) -> Optional[str]:
+        """The class *method* hands back, with a type parameter resolved.
+
+        Two places can bind it, and the order matters.  The annotation that
+        produced the receiver binds it directly --
+        ``implFactory: FactoryBase[PostProcessorBase]`` -- and otherwise the
+        receiver's own class does, through the base clause that parameterised
+        the declaring class: ``class WatchDog(FactoryBase[WatchDogBase])``.
+        By position, because that is what the language does.
+        """
+        declaring, stated = declared_in(declared, method)
+        if declaring is None or stated is None:
+            return None
+        params = parameters.get(declaring, ())
+        if stated not in params:
+            return stated
+        index = params.index(stated)
+        if declared == declaring and index < len(explicit):
+            return explicit[index] or None
+        for cls in (declared, *_ancestors(bases, declared)):
+            bound = type_arguments.get(cls, {}).get(declaring)
+            if bound and index < len(bound):
+                return bound[index] or None
         return None
 
     families: dict[str, dict[str, set[str]]] = {}
@@ -776,18 +825,22 @@ def _dispatch_families(
                     continue
                 receiver = value.func.value
                 if isinstance(receiver, ast.Name) and receiver.id == "self":
-                    factory: Optional[str] = owner
+                    factory: Optional[tuple[str, list[str]]] = (owner, [])
                 elif (
                     isinstance(receiver, ast.Attribute)
                     and isinstance(receiver.value, ast.Name)
                     and receiver.value.id == "self"
                 ):
-                    factory = stated_by(held, owner, receiver.attr)
+                    factory = None
+                    for candidate in (owner, *_ancestors(bases, owner)):
+                        factory = held.get((candidate, receiver.attr))
+                        if factory is not None:
+                            break
                 else:
                     continue
                 if factory is None:
                     continue
-                named = stated_by(returns, factory, value.func.attr)
+                named = family(factory[0], factory[1], value.func.attr)
                 if named is not None:
                     bound[target.id] = named
             if not bound:
@@ -942,18 +995,21 @@ def reaching_modules(
     the factory's return type says exactly which family runs.
 
     **The corpus does not state those return types yet, so this earns nothing
-    here today.**  Measured against a copy of ``1.0.4-302-g219ed0af`` with them
-    added: ``WatchDog.getImpl -> WatchDogBase | None`` reaches 3 junctions, and
-    ``TaskRefiner.instantiateImpl -> TaskRefinerBase | None`` with
-    ``implFactory: TaskRefiner`` on its worker reaches 15 -- 18, none lost, and
-    nothing changed for a junction that already had an entry.
+    here today.**  Measured against a copy of ``1.0.4-302-g219ed0af`` with
+    ``FactoryBase`` made generic and the eight knights declaring their family:
+    **24 junctions** gain the knight that dispatches them -- ``TaskRefiner`` 15,
+    ``PostProcessor`` 6, ``WatchDog`` 3 -- none lose an entry, and nothing
+    changes for a junction that already had one.  The plugin directories go from
+    27 junctions with no entry point to 3.
 
-    ``PostProcessor``'s 6 are not among them and cannot be, by an annotation:
-    ``PostProcessorThread`` is built twice, and
+    Those last 3 stay: ``doSetup`` twice and ``doBrokerage`` once, in
+    ``TaskSetupper.py`` and ``JobBroker.py``, which carry no trigger of their
+    own.  That is a fact about how they are started, not a gap.
+
+    **The generic form is what reaches ``PostProcessor``, and a concrete
+    annotation cannot.**  ``PostProcessorThread`` is built twice and
     ``jedi_post_processor_msg_processor`` hands it a bare ``FactoryBase``, so no
-    single class names that parameter.  ``FactoryBase(Generic[T])`` would state
-    it, and reading that needs a type variable bound at the subscript, which
-    this does not do.
+    single class names that parameter -- only the parameterised base does.
 
     **Off by default, and off for the log question**, which is the same
     reasoning once more: ``AtlasProdWatchDog`` writes its own log file, and the
