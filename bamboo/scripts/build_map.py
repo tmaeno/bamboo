@@ -741,6 +741,8 @@ def main(
         if len(uncovered) > top:
             click.echo(f"  … {len(uncovered) - top} more")
 
+    _report_unexplained(fragment, plugin, top)
+
     if dry_run:
         click.echo("\n--dry-run: nothing written.")
     else:
@@ -758,6 +760,91 @@ def main(
 
     if not all_passed and strict:
         raise SystemExit(1)
+
+
+def _report_unexplained(fragment, plugin, top: int) -> None:
+    """Say which candidates the SQL slices counted and could not account for.
+
+    A ratio at 89% says a tenth is missing and not which tenth, and this slice
+    carried 140 of those across five rounds while every number beside it stayed
+    still.  So the slices name them, split two ways.
+
+    **Gap against accounted for.**  The same distinction the line above draws
+    for a table that holds no spec.  On this corpus only the read side has any:
+    a statement handed to a caller to run is not a gap in the function that
+    assembled it.  Every unaccounted-for *write* is a gap, and getting there
+    took a correction -- 51 of them were first read as "the varmap comes from
+    outside, so this code decides nothing", and the varmap turned out to be a
+    list handed to ``executemany`` with every value filled right there.
+    ``hs_scrapers`` does write five of seven columns from a row of a parsed HTML
+    table, and those stay on the gap side: the reading that would tell them from
+    a helper filling the same map does not exist yet, and guessing would put a
+    judgement where a measurement belongs.
+
+    Being accounted for does not remove a candidate from the denominator, either
+    way: changing what counts as a candidate would move ``slice coverage`` and
+    hide a judgement inside a number that looks measured.
+
+    **A missing junction against a missing arm.**  For a write, ``explained``
+    and "this column joins an anchored junction" are the same event, so a
+    column with no outcome either leaves a junction unbuilt -- the map cannot
+    offer that value at all -- or leaves one of the ways of setting it off a
+    junction that otherwise looks complete.  The second is the dangerous one:
+    pruning is by elimination, so an explanation that never becomes a candidate
+    lets a wrong one survive with confidence.
+    """
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    built = {junction.name for junction in fragment.junctions}
+    reported = (
+        ("sql-write", getattr(plugin, "unexplained_writes", [])),
+        ("sql-read", getattr(plugin, "unexplained_reads", [])),
+    )
+    for label, rows in reported:
+        if not rows:
+            continue
+        # Split on the reason's class, so a reason that names an instance after
+        # a colon -- the call form it declined -- still lands in its class.
+        gaps = [r for r in rows if r.reason.split(":")[0] not in sqlwrite.ACCOUNTED_FOR]
+        click.echo(
+            f"\n{label} candidates not accounted for: {len(rows)}"
+            f"   ({len(gaps)} a gap in the extraction,"
+            f" {len(rows) - len(gaps)} not)"
+        )
+        for reason, count in Counter(r.reason for r in rows).most_common():
+            mark = " " if reason.split(":")[0] in sqlwrite.ACCOUNTED_FOR else "*"
+            here = [r for r in rows if r.reason == reason]
+            where = Counter(r.file for r in here).most_common(1)[0]
+            click.echo(
+                f"  {mark} {count:>4}  {reason}"
+                f"   (most in {where[0]}, {where[1]})"
+            )
+        if label == "sql-write":
+            missing_arm = [r for r in rows if r.junction in built]
+            click.echo(
+                f"    of these, {len(missing_arm)} leave a way of setting a value off a"
+                " junction that already exists; the rest leave no junction at all"
+            )
+            for row in missing_arm[:top]:
+                click.echo(f"      - {row.owner}  {row.table}.{row.column}")
+    click.echo("  * = a gap in the extraction")
+
+    # The slices with a gap and no reasons, said out loud rather than left to a
+    # reader to notice by subtraction.  Each keeps its own notion of what a
+    # candidate is, so a reason vocabulary for one does not transfer, and
+    # claiming these were classified would be the more expensive mistake.
+    told = {label for label, rows in reported if rows}
+    rest = Counter()
+    for row in fragment.coverage:
+        if row.slice_name not in told and row.candidates > row.explained:
+            rest[row.slice_name] += row.candidates - row.explained
+    if rest:
+        click.echo(
+            f"\nnot classified this round: {sum(rest.values())} candidate(s)"
+            f" in {len(rest)} slice(s) whose recognizers report no reason"
+        )
+        for slice_name, count in rest.most_common():
+            click.echo(f"    {count:>4}  {slice_name}")
 
 
 if __name__ == "__main__":

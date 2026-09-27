@@ -1429,11 +1429,84 @@ def _sql_extract(source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/t
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     conflicts = attributor.learn_table_classes(modules)
-    subjects, junctions, coverage, uncovered, _diag = sqlwrite.extract(
+    subjects, junctions, coverage, uncovered, _diag, _why = sqlwrite.extract(
         modules, MAP_ID, VERSION, attributor
     )
     return subjects, junctions, coverage, uncovered, conflicts, attributor
 
+
+def _sql_unexplained(
+    source: str, rel: str = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+):
+    """The columns the slice counted and could not account for, and its coverage.
+
+    Beside :func:`_sql_extract` rather than widening it: nineteen tests unpack
+    that one, and none of them are about this.
+    """
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, rel)]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    _s, _j, coverage, _u, _d, unexplained = sqlwrite.extract(
+        modules, MAP_ID, VERSION, attributor
+    )
+    return unexplained, coverage
+
+
+
+def test_a_varmap_handed_to_executemany_is_named_as_the_reason():
+    # 104 of the corpus's 140 unaccounted-for written columns are this one
+    # shape, and every number beside it said only "89%".  executemany takes
+    # a *sequence* of maps, so the name in the call is never subscripted with a
+    # placeholder -- looking for one and reporting "nothing binds it" sends a
+    # reader to a function that plainly fills every value.
+    unexplained, coverage = _sql_unexplained('''
+class TaskModule:
+    def bulkUpdate(self, ids):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status "
+        sqlU += "WHERE jediTaskID=:jediTaskID "
+        varMaps = []
+        for jediTaskID in ids:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            varMap[":status"] = "finished"
+            varMaps.append(varMap)
+        self.cur.executemany(sqlU + comment, varMaps)
+''')
+
+    assert [(row.column, row.reason) for row in unexplained] == [
+        ("status", sqlwrite.VARMAP_IS_A_LIST)
+    ]
+    # Read off the call form, so the detail names the list rather than guessing.
+    assert "varmap=varMaps" in unexplained[0].detail
+    # The reason is a gap: every value is decided right here.
+    assert sqlwrite.VARMAP_IS_A_LIST not in sqlwrite.ACCOUNTED_FOR
+    # And naming it does not change what the ratio counts.
+    written = [c for c in coverage if c.slice_name == sqlwrite.SLICE_NAME]
+    assert [(c.explained, c.candidates) for c in written] == [(0, 1)]
+
+
+def test_a_placeholder_bound_without_its_colon_is_told_from_one_nobody_bound():
+    # hs_scrapers writes r["source"] = url against VALUES (:source).
+    # Pooled into "nothing binds this placeholder" it reads as a value the code
+    # does not decide, which is what the same statement's other columns are --
+    # they come from a parsed HTML row.  Two findings, one of them fixable.
+    unexplained, _coverage = _sql_unexplained('''
+class TaskModule:
+    def insertRows(self, rows, url):
+        sqlI = f"INSERT INTO {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlI += "(status,oldStatus) VALUES (:status,:oldStatus) "
+        for r in rows:
+            r["status"] = url
+            self.cur.execute(sqlI + comment, r)
+''')
+
+    assert {row.column: row.reason for row in unexplained} == {
+        "status": sqlwrite.PLACEHOLDER_MISSING_COLON,
+        "oldStatus": sqlwrite.NOTHING_BINDS_IT,
+    }
 
 def test_statement_is_reassembled_from_its_concatenation():
     """A statement is built by ``=`` then a run of ``+=``, interleaved with others."""
@@ -3121,7 +3194,7 @@ def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, junctions, _c, _u, _d = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _s, junctions, _c, _u, _d, _x = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
     status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
 
     assert {(b.outcome, b.tier) for b in status[0].branches} == {
@@ -3718,7 +3791,7 @@ def test_a_bound_template_is_filed_against_the_column_not_the_bind():
         progress.spec_attributes(modules), attribution.class_bases(modules)
     )
     attributor.learn_table_classes(modules)
-    _s, _j, _c, _u, diagnostics = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _s, _j, _c, _u, diagnostics, _x = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
 
     assert [(d.template, d.field, d.form) for d in diagnostics] == [
         ("site {} is unknown", "JEDI_Tasks.errorDialog", "bind")

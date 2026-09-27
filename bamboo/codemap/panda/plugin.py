@@ -332,6 +332,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             sql_coverage,
             self._uncovered_tables,
             bound_text,
+            self._unexplained_writes,
         ) = sqlwrite.extract(self._modules, self.map_id, self._version, attributor)
         fragment.subjects.extend(sql_subjects)
         fragment.junctions.extend(sql_junctions)
@@ -346,7 +347,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         side = sqlwrite.read_side(self._modules, attributor)
         # The read side's denominator.  Without it a query form the slice
         # does not recognise can go missing without a single number moving.
-        fragment.coverage.extend(sqlwrite.read_coverage(self._modules))
+        read_cov, self._unexplained_reads = sqlwrite.read_coverage(self._modules)
+        fragment.coverage.extend(read_cov)
         selected = side.values
         fragment.entities.extend(
             sqlwrite.entity_nodes(side.entities, self.map_id, self._version, attributor)
@@ -523,6 +525,29 @@ class PandaCodeMapPlugin(CodeMapPlugin):
     def unexplained_steps(self) -> list[str]:
         """Funnel steps that count a cut the slice could not find a reason for."""
         return getattr(self, "_unexplained_steps", [])
+
+    @property
+    def unexplained_writes(self) -> list:
+        """Written columns the sql-write slice counted and could not account for.
+
+        Each carries the reason the branch that gave up recorded, and the name of
+        the junction it would have joined -- unresolved here on purpose.  Whether
+        that junction exists is a question about the whole fragment, so it is
+        answered where the fragment is, rather than by this plugin holding a
+        second copy of what it built.
+        """
+        return getattr(self, "_unexplained_writes", [])
+
+    @property
+    def unexplained_reads(self) -> list:
+        """Statements the sql-read slice counted and did not see run.
+
+        Its reasons name the call form the reader declined, not a value's
+        origin: this slice's denominator exists so that a query form nobody
+        taught it cannot go missing silently, and a count alone says a form is
+        missing without saying which one.
+        """
+        return getattr(self, "_unexplained_reads", [])
 
     @property
     def trigger_reach(self) -> tuple[int, int]:

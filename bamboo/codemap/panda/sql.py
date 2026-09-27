@@ -1335,6 +1335,12 @@ def executions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[Execution]:
 #: the same three things, reached through the task buffer instead of a cursor.
 _FORWARDED = frozenset({"querySQL", "querySQLS"})
 
+#: Every call form :func:`executions` will read a statement out of.  Exposed so
+#: that a reader reporting which form it *declined* names the same set this one
+#: accepts -- a second copy of the list would drift, and the whole point of the
+#: read side's denominator is to catch a form nobody added.
+RUNNERS = frozenset({"execute", "executemany"}) | _FORWARDED
+
 
 def _binding_window(
     func: ast.FunctionDef | ast.AsyncFunctionDef, varmap: str, line: int
@@ -1832,32 +1838,119 @@ def bound_values(
     itself because the two forms do not share a node: what the caller needs is
     the value, and the statement it sits in for the guards that reached it.
     """
+    return scan_binds(func, varmap, key, window).binds
+
+
+class BindScan(NamedTuple):
+    """The binds one pass found, and what that same pass saw on the way.
+
+    The census travels with the binds so that "nothing found" can say *which*
+    of several reasons it was, from the walk that failed rather than from a
+    second walk asking why.  A separate reader of the same nodes is free to
+    disagree with this one, and this corpus already holds that shape: a call to
+    ``reaching_modules`` with the flags and another without, under a comment
+    warning that a second reading would drift.
+
+    Everything but :attr:`binds` ignores *window*: the question those fields
+    answer is about the function, not about one execution's slice of it.
+    """
+
+    binds: list[Bind]
+    varmap_assigned: bool = False
+    """The varmap name is assigned somewhere in this function.
+
+    False means the map arrived from outside -- a parameter, or an element of
+    something iterated, as ``hs_scrapers`` does with a row of a parsed table.
+    Nothing here decided those values.
+    """
+
+    computed_keys: int = 0
+    """Subscript assignments into the varmap whose key is not a constant.
+
+    ``var_map[f":jtid{i}"] = jedi_task_id``.  The placeholder is spelled by an
+    expression, so pairing it with one the statement spells needs the loop read
+    as well as the assignment.
+    """
+
+    constant_keys: frozenset[str] = frozenset()
+    """Placeholders this function does bind by a spelled-out name."""
+
+    outside_window: int = 0
+    """Binds for this key that lay outside *window*.
+
+    Not a gap: the window exists because ``querySQLS(sql, var_map)`` names both
+    halves in one call, and without it one function's statements each claim
+    every value in it.  Counted so that a bind excluded on purpose is not
+    reported as one nobody wrote.
+    """
+
+
+def scan_binds(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    varmap: str,
+    key: str,
+    window: Optional[tuple[int, int]] = None,
+) -> BindScan:
+    """:func:`bound_values`, with the census of what the walk passed over.
+
+    One walk, so the binds and the account of why there are none cannot
+    disagree.  See :class:`BindScan` for what is counted and what ignores
+    *window*.
+    """
     found: list[Bind] = []
+    assigned = False
+    computed = 0
+    spelled_keys: set[str] = set()
+    excluded = 0
+
     for node in ast.walk(func):
         targets = targets_of(node)
         if not targets:
             continue
-        if window is not None and not window[0] <= node.lineno <= window[1]:
-            continue
+        in_window = window is None or window[0] <= node.lineno <= window[1]
         for target in targets:
             if (
                 isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)
                 and target.value.id == varmap
-                and isinstance(target.slice, ast.Constant)
-                and target.slice.value == key
             ):
-                found.append(Bind(node.value, node))
+                assigned = True
+                if not isinstance(target.slice, ast.Constant):
+                    computed += 1
+                    continue
+                spelled_keys.add(target.slice.value)
+                if target.slice.value != key:
+                    continue
+                if in_window:
+                    found.append(Bind(node.value, node))
+                else:
+                    excluded += 1
             elif isinstance(target, ast.Name) and target.id == varmap:
+                assigned = True
                 # The dict literal form.  Only constant keys: a computed one
                 # (``var_map[f":{column}"] = val``, which the worker modules
                 # also use) names a placeholder the statement itself does not
                 # spell either, so there is nothing to pair it with.
                 if not isinstance(node.value, ast.Dict):
                     continue
-                found.extend(
-                    Bind(value, node)
-                    for spelled, value in zip(node.value.keys, node.value.values, strict=True)
-                    if isinstance(spelled, ast.Constant) and spelled.value == key
-                )
-    return found
+                for spelled, value in zip(
+                    node.value.keys, node.value.values, strict=True
+                ):
+                    if not isinstance(spelled, ast.Constant):
+                        computed += 1
+                        continue
+                    spelled_keys.add(spelled.value)
+                    if spelled.value != key:
+                        continue
+                    if in_window:
+                        found.append(Bind(value, node))
+                    else:
+                        excluded += 1
+
+    return BindScan(
+        binds=found,
+        varmap_assigned=assigned,
+        computed_keys=computed,
+        constant_keys=frozenset(spelled_keys),
+        outside_window=excluded,
+    )

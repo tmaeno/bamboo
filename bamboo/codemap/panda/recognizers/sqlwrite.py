@@ -79,6 +79,86 @@ from bamboo.codemap.panda.recognizers import progress
 
 SLICE_NAME = "sql-write"
 
+#: Why a written column produced no outcome, named at the branch that decided
+#: it rather than inferred afterwards.  Counting is not enough here: the slice
+#: went five rounds with a ratio that said 89% and nothing that said which
+#: tenth, and a shape that should be read reads exactly like a value this code
+#: does not decide.
+#:
+#: ``ACCOUNTED_FOR`` holds the reasons that are **not** gaps in the extraction
+#: -- the same distinction ``uncovered_tables`` already draws for a table that
+#: holds no spec.  Kept as a set beside the strings so a reader adding a reason
+#: has to decide which side it is on.
+NO_VARMAP = "the execute call names no varmap"
+VARMAP_FROM_OUTSIDE = "the varmap is not built in this function"
+BOUND_OUTSIDE_WINDOW = "bound outside the window this execution owns"
+PLACEHOLDER_COMPUTED = "the placeholder is spelled by an expression"
+VARMAP_IS_A_LIST = "the varmap is one of a list handed to executemany"
+PLACEHOLDER_MISSING_COLON = "the placeholder is bound without its leading colon"
+NOTHING_BINDS_IT = "nothing in this function binds this placeholder"
+NO_DECIDING_FRAGMENT = "the fragment that wrote this value could not be located"
+
+#: The read side counts statements, not columns, so its reasons are about how
+#: a query is run rather than where a value came from.  ``sql.executions``
+#: accepts ``execute``/``executemany``/``querySQL``/``querySQLS`` with at least
+#: two arguments; each reason below is one of the ways a statement this slice
+#: assembled fails to reach it.
+RUN_WITHOUT_VARMAP = "run through an accepted call with no varmap argument"
+RUN_BUT_TEXT_DIFFERS = "run through an accepted call, but the two reassemblies disagree"
+RUN_THROUGH_OTHER_FORM = "run through a call form the reader does not accept"
+NOT_RUN_HERE = "assembled here and not run here"
+
+#: Reasons that are not gaps in the extraction.  ``NOT_RUN_HERE`` is a statement
+#: handed to a caller to run, so the function that assembled it is not where it
+#: could have been read.  ``BOUND_OUTSIDE_WINDOW`` is the window doing its job;
+#: see :func:`sql.bound_values`.  ``VARMAP_FROM_OUTSIDE`` is here for the shape
+#: where the map really does arrive as a parameter, and on this corpus it fires
+#: **nowhere** -- which is a correction worth keeping: 51 columns were first read
+#: that way, and the varmap turned out to be a list handed to ``executemany``
+#: with every value filled in the same function.  A reason that sounds like "not
+#: our business" is the one to check against the call form before believing.
+#:
+#: What is deliberately *not* here: ``hs_scrapers`` writes five of seven columns
+#: from a row of a parsed HTML table, and those land on the gap side under
+#: ``NOTHING_BINDS_IT``.  The walk has a terminal for exactly that ("a value
+#: another system supplies"), but nothing here can yet tell such a row from a
+#: helper filling the same map, and guessing would put a judgement where a
+#: measurement belongs.
+#:
+#: **Being on this side does not take a candidate out of the denominator.**  The
+#: ratio still counts it, because changing what counts as a candidate would
+#: move ``slice coverage`` and hide the judgement inside a number that looks
+#: like a measurement.
+ACCOUNTED_FOR = frozenset(
+    {VARMAP_FROM_OUTSIDE, BOUND_OUTSIDE_WINDOW, NOT_RUN_HERE}
+)
+
+
+class Unexplained(NamedTuple):
+    """One counted column the slice could not account for, and why.
+
+    Carries the junction name it *would* have joined so that a reader can tell
+    the two severities apart: a column whose junction exists is a way of
+    setting a value missing from a junction that looks complete, and the map's
+    enumeration is the thing being relied on.  A column whose junction does not
+    exist is a value the map cannot offer at all.
+    """
+
+    reason: str
+    file: str
+    owner: str
+    table: str
+    column: str
+    junction: str
+    detail: str = ""
+    """What the failing branch had in hand, for a reader who has to go look.
+
+    The reason names a class; this names the instance.  Without it "nothing in
+    this function binds this placeholder" sends a reader to a function that
+    plainly does bind it, and the disagreement is in which varmap or which
+    spelling -- neither of which the class can carry.
+    """
+
 
 def _declared_spelling(
     attributor: SpecAttributor, spec_class: str, column: str
@@ -143,6 +223,7 @@ def extract(
     list[CoverageStat],
     set[str],
     list[DiagnosticTemplate],
+    list[Unexplained],
 ]:
     """Extract junctions for SQL bind writes.
 
@@ -152,6 +233,14 @@ def extract(
     belong here rather than in a scan of their own because the column a bind
     lands in is the join this slice has already made.
 
+    And the columns it counted and could not account for, each with the reason
+    the branch that gave up recorded.  For the same argument as ``uncovered``,
+    one step finer: a ratio at 89% says a tenth is missing and not which tenth,
+    and this slice held 140 of those for five rounds while every number beside
+    it stayed still.  Scanning for them afterwards was tried and is what this
+    replaces -- a second reader of the same source disagreed with this one by 77
+    columns.
+
     *attributor* is passed in already taught: the table map is learned from the
     whole corpus, so it cannot be built from the module in hand.
     """
@@ -160,6 +249,7 @@ def extract(
     attributed: set[tuple[str, str, str]] = set()
     uncovered: set[str] = set()
     diagnostics: list[DiagnosticTemplate] = []
+    unexplained: list[Unexplained] = []
     settle = values.resolver(values.declared_mappings(modules))
     # The same census the attribute slice makes, for the same reading: which
     # call persists a message into a declared column.  Asked of the attributor
@@ -198,6 +288,7 @@ def extract(
                             attributor, spec_class, statement.table, column
                         )
                         templates: list[tuple[str, ast.stmt]] = []
+                        why: list[str] = []
                         outcomes = _outcomes(
                             attributor,
                             func=func,
@@ -208,6 +299,7 @@ def extract(
                             spec_class=spec_class,
                             settle=settle,
                             templates=templates,
+                            why=why,
                         )
                         diagnostics.extend(
                             DiagnosticTemplate(
@@ -227,6 +319,25 @@ def extract(
                             for template, node in templates
                         )
                         if not outcomes:
+                            unexplained.append(
+                                Unexplained(
+                                    reason=why[0] if why else "no reason given",
+                                    detail=why[1] if len(why) > 1 else "",
+                                    file=module.rel_path,
+                                    owner=f"{module.rel_path}::{func.name}",
+                                    table=statement.table,
+                                    column=column,
+                                    # The name ``_record`` would have used, so
+                                    # that resolving it against the built
+                                    # junctions asks the recogniser's own
+                                    # question rather than a second one.
+                                    junction=JunctionNode.make_name(
+                                        map_id,
+                                        SubjectNode.make_name(qualifier, attribute),
+                                        f"{module.rel_path}::{func.name}",
+                                    ),
+                                )
+                            )
                             continue
                         explained += 1
                         attributed.add((qualifier, attribute, kind))
@@ -268,7 +379,30 @@ def extract(
         )
         for qualifier, attribute, kind in sorted(attributed)
     ]
-    return subjects, list(junctions.values()), coverage, uncovered, diagnostics
+    # ``unexplained`` last: it is the only one of the five that is about what
+    # this pass could *not* do, and a caller ignoring it still builds a map.
+    return (
+        subjects,
+        list(junctions.values()),
+        coverage,
+        uncovered,
+        diagnostics,
+        unexplained,
+    )
+
+
+def _runs_many(run: sql.Execution) -> bool:
+    """Is this execution ``executemany``, whose varmap argument is a sequence?
+
+    Asked of the call the reader already paired with the statement, so the
+    answer cannot disagree with the pairing.
+    """
+    call = getattr(run, "call", None)
+    return bool(
+        call is not None
+        and isinstance(getattr(call, "func", None), ast.Attribute)
+        and call.func.attr == "executemany"
+    )
 
 
 def _deciding_fragment(
@@ -328,6 +462,7 @@ def _outcomes(
     spec_class: Optional[str],
     settle,
     templates: list[tuple[str, ast.stmt]],
+    why: list[str],
 ) -> list[tuple[str, int, ast.stmt, list[str], ast.stmt]]:
     """Return ``(outcome, tier, node, extra conditions, decided at)`` for a column.
 
@@ -341,6 +476,11 @@ def _outcomes(
     and the guards on the assignment that gave the local its value say which
     value.  Both are needed, and neither is derivable from the other's node.
 
+    *why* is appended to, and only when the return is empty: the reason a
+    column produced no outcome is decided at the branch that gave up, and
+    nowhere else can tell the four bind cases apart.  An out-parameter for the
+    same reason *templates* is one -- it is not an outcome.
+
     Diagnostic templates are appended to *templates* rather than returned: they
     are not outcomes, and the caller files them against the column rather than
     the subject.  Collected here because *which column the text lands in* is the
@@ -349,9 +489,11 @@ def _outcomes(
     """
     if supplied.kind == "bind":
         if run.varmap is None:
+            why.append(NO_VARMAP)
             return []
+        scan = sql.scan_binds(func, run.varmap, supplied.text, run.window)
         found = []
-        for bind in sql.bound_values(func, run.varmap, supplied.text, run.window):
+        for bind in scan.binds:
             value, site = bind.value, bind.site
             settled = settle(value, func)
             if settled:
@@ -386,10 +528,38 @@ def _outcomes(
             # Recorded rather than dropped: localize and prune read
             # observed values, so they work from the writer alone.
             found.append((f"runtime({ast.unparse(value)})", 2, site, [], site))
+        if not found:
+            # Which of the several reasons, from the walk that failed rather
+            # than from a second walk asking why -- see ``sql.BindScan``.
+            if _runs_many(run):
+                # ``executemany(sql, varMaps)`` is handed a *sequence* of maps,
+                # each appended after being filled, so the name in the call
+                # never carries a placeholder as a key.  Read off the call form
+                # rather than off the list, which is what makes it exact.
+                why.append(VARMAP_IS_A_LIST)
+            elif not scan.varmap_assigned:
+                why.append(VARMAP_FROM_OUTSIDE)
+            elif scan.outside_window:
+                why.append(BOUND_OUTSIDE_WINDOW)
+            elif supplied.text.lstrip(":") in scan.constant_keys:
+                # ``hs_scrapers`` writes ``r["source"] = url`` against
+                # ``VALUES (:source)``.  The key is there and the colon is not,
+                # so a reader matching the spelled placeholder misses a value
+                # that was decided right here.
+                why.append(PLACEHOLDER_MISSING_COLON)
+            elif scan.computed_keys and supplied.text not in scan.constant_keys:
+                why.append(PLACEHOLDER_COMPUTED)
+            else:
+                why.append(NOTHING_BINDS_IT)
+            why.append(
+                f"varmap={run.varmap} window={run.window} "
+                f"keys={len(scan.constant_keys)} computed={scan.computed_keys}"
+            )
         return found
 
     node = _deciding_fragment(func, run, column, supplied, statement.kind)
     if node is None:
+        why.append(NO_DECIDING_FRAGMENT)
         return []
     if supplied.kind == "literal":
         return [(supplied.text, 1, node, [], node)]
@@ -578,6 +748,7 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
     can name where the gap is.
     """
     found: list[CoverageStat] = []
+    unexplained: list[Unexplained] = []
     for module in modules:
         candidates = explained = 0
         for func, _owner in functions_with_owner(module.tree):
@@ -589,6 +760,22 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                 for statement in (execution.sql,)
             }
             explained += sum(1 for text in assembled if text in run)
+            for text, name in sorted(assembled.items()):
+                if text in run:
+                    continue
+                unexplained.append(
+                    Unexplained(
+                        reason=_why_not_run(func, name),
+                        file=module.rel_path,
+                        owner=f"{module.rel_path}::{func.name}",
+                        # The variable, not a table: this slice counts
+                        # statements, and which tables one names is what it
+                        # could not get to.
+                        table=name,
+                        column="",
+                        junction="",
+                    )
+                )
         if candidates:
             found.append(
                 CoverageStat(
@@ -598,16 +785,66 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                     explained=explained,
                 )
             )
-    return found
+    return found, unexplained
 
 
-def _assembled_queries(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+def _why_not_run(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
+    """Why a statement this function assembled is not one the reader saw run.
+
+    Asked of the calls that take *name* as their first argument, which is the
+    same place :func:`sql.executions` looks and declines.  Naming the form it
+    declined is the point: the denominator exists so that a query form the
+    slice does not recognise cannot go missing silently, and a count alone says
+    a form is missing without saying which one to add.
+    """
+    others: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        first = node.args[0]
+        mentions = isinstance(first, ast.Name) and first.id == name
+        if not mentions:
+            # ``execute(sql + comment, varMap)`` -- the reader fills and
+            # concatenates before matching, so a statement reaching a call
+            # inside an expression still counts as reaching it.
+            mentions = any(
+                isinstance(inner, ast.Name) and inner.id == name
+                for inner in ast.walk(first)
+            )
+        if not mentions:
+            continue
+        attr = node.func.attr if isinstance(node.func, ast.Attribute) else (
+            node.func.id if isinstance(node.func, ast.Name) else "?"
+        )
+        if attr in sql.RUNNERS:
+            if len(node.args) < 2:
+                return RUN_WITHOUT_VARMAP
+            # Accepted form, yet the text did not match: the reassembly this
+            # slice did and the one ``executions`` did disagree, which is a
+            # different finding from an unrecognised call.
+            return RUN_BUT_TEXT_DIFFERS
+        others.add(attr)
+    if others:
+        return f"{RUN_THROUGH_OTHER_FORM}: {', '.join(sorted(others))}"
+    return NOT_RUN_HERE
+
+
+def _assembled_queries(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> dict[str, str]:
     """Every statement *func* builds that asks for rows, however it is run.
 
     Read off the assignments rather than off the executions.  A name is a
     candidate when what it holds names a table under a read verb; the call
     that runs it is not consulted, which is what keeps this independent of the
     reading it is the denominator for.
+
+    Maps each statement to a local that holds it, so that one left out of the
+    numerator can be traced back to the variable -- which is what a reader needs
+    in order to see how it is run.  **Keyed by the text**, exactly as the set it
+    replaces was: two locals assembling the same statement were one candidate
+    and stay one, because the denominator counts statements.  Keying by the pair
+    instead would have moved ``sql-read``'s candidate count.
     """
     names = {
         target.id
@@ -618,8 +855,8 @@ def _assembled_queries(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]
         if isinstance(target, ast.Name)
     }
     return {
-        text
-        for name in names
+        text: name
+        for name in sorted(names, reverse=True)
         for text in sql.variants(func, name)
         if any(verb == "read" for verb, _table in _table_verbs(text))
     }
