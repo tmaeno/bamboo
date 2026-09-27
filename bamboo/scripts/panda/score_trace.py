@@ -35,6 +35,16 @@ measured in the same pass rather than fixed here, because it moves: the walk
 returned 2969 steps over 830 arms when this was first sized and returns four
 times that now.
 
+**Every case is pinned to one version of its file.**  The cases carry a
+``blob_sha`` beside ``file``, and it is handed to :func:`~bamboo.codemap.trace.walk`
+as ``expected_sha``, which refuses a tree that is not the one the sha names.
+Without it a corpus move does not fail the sample, it *shrinks* it: the case
+stops matching its arm, contributes neither numerator nor denominator, and the
+ratio reads the same over one case fewer.  That happened -- an upstream merge
+inserted four lines above a sampled arm and ``sound`` went from 357/357 to
+356/356, which looks like no news.  A case the walk did not run is now named
+under ``not run`` instead of being absorbed.
+
 Honest about what this cannot be: the author of the walk is also its scorer,
 so sealing the holdout buys "not tuned against these cases" and not blindness.
 """
@@ -108,6 +118,7 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
         owner=case["owner"],
         lines=[case["line"]],
         observed=case.get("outcome") or "",
+        expected_sha=case.get("blob_sha", ""),
         classify=provenance.classify,
         budget=budget,
     )
@@ -814,6 +825,7 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     honest_total = honest_said = 0
     calls_total = calls_listed = 0
     module_arms = 0
+    not_run: list[str] = []
     missing: list[str] = []
     ghost: list[str] = []
     below: list[str] = []
@@ -821,16 +833,33 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     silent: list[str] = []
 
     for case in cases:
-        steps, _note, skeleton = trace_mod.walk(
+        steps, note, skeleton = trace_mod.walk(
             roots,
             file=case["file"],
             owner=case["owner"],
             lines=[case["line"]],
             observed=case.get("outcome") or "",
+            expected_sha=case.get("blob_sha", ""),
             classify=provenance.classify,
             budget=budget,
         )
         cid = _case_id(case)
+
+        # Counted before the walk is judged, so that the skeleton line keeps
+        # saying how many arms it could not apply to even when those arms are
+        # also the ones the walk returned nothing for.
+        module_arm = case["owner"].rsplit("::", 1)[-1] == "<module>"
+        module_arms += module_arm
+
+        if not steps:
+            # A case the walk did not run takes its numerator *and* its
+            # denominator away, so every ratio below stays flat while the
+            # sample shrinks under it -- which is how a stale pin hid for a
+            # whole round.  Worse, falling through would read the wrong tree:
+            # a sha refusal still resolves a function of that name somewhere,
+            # and its logging calls would enter the skeleton denominator.
+            not_run.append(f"{cid}  {note or 'no steps and no reason given'}")
+            continue
 
         # sound: every step that names a line, read in its own frame.
         for step in steps:
@@ -912,10 +941,10 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             )
 
         # skeleton: the logging calls of the arm's function carry a row.
-        if case["owner"].rsplit("::", 1)[-1] == "<module>":
+        if module_arm:
             # A module arm has no function to bound the check by, and the
-            # skeleton does not claim the whole file.  Counted, not folded in.
-            module_arms += 1
+            # skeleton does not claim the whole file.  Counted above, not
+            # folded in here.
             continue
         rows = {row.line for row in skeleton if row.kind == models_mod.SKELETON_PRINT}
         for line, level in sorted(_logging_calls(func).items()):
@@ -925,13 +954,21 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             else:
                 silent.append(f"{cid}  the {level} call@{line} prints and has no row")
 
-    click.echo(f"sample sha256 {seal}  n={len(cases)}\n")
+    click.echo(
+        f"sample sha256 {seal}  n={len(cases)}  walked={len(cases) - len(not_run)}\n"
+    )
     click.echo(f"  complete   {names_complete}/{names} name(s), every binding of it listed")
     click.echo(f"  sound      {step_exists}/{step_total} step(s) name a site the source has")
     click.echo(f"  honest     {honest_total and honest_said}/{honest_total} "
                "step(s) under a structure say so")
     click.echo(f"  skeleton   {calls_listed}/{calls_total} logging call(s) carry a row"
                f"   ({module_arms} module arm(s) not checked)")
+    click.echo(
+        f"\nnot run: {len(not_run)} case(s)"
+        "   -- outside all four ratios above rather than counted against them"
+    )
+    for line in not_run:
+        click.echo(f"    {line}")
     click.echo(
         f"\nbelow the arm and in no loop it is in: {len(below)} step(s)"
         "   -- a position, not a verdict"

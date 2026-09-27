@@ -1,6 +1,7 @@
 [
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+  "blob_sha": "808f23c971464f07cbb936f571621014ff5f93e1",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::insertTaskParams_JEDI",
   "line": 399,
   "outcome": "runtime(prodSourceLabel)",
@@ -13,6 +14,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTask_JEDI",
   "line": 1579,
   "outcome": "submitting",
@@ -26,6 +28,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "blob_sha": "af1ea3902c8a41b3b537b63280afa364a94f262d",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::enableJumboJobs",
   "line": 2279,
   "outcome": "W",
@@ -38,6 +41,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::propagateResultToJEDI",
   "line": 4733,
   "outcome": "L",
@@ -50,6 +54,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::insertNewJob",
   "line": 3077,
   "outcome": "runtime(2000 + priorityOffset)",
@@ -62,6 +67,7 @@
  },
  {
   "file": "pandaserver/workflow/workflow_core.py",
+  "blob_sha": "21a4c1dadaf1d85d9b1d209eaba3f8eb39e59042",
   "owner": "pandaserver/workflow/workflow_core.py::process_workflow_checked",
   "line": 2684,
   "outcome": "panda_task",
@@ -76,6 +82,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::propagateResultToJEDI",
   "line": 4391,
   "outcome": "finished",
@@ -90,6 +97,7 @@
  },
  {
   "file": "pandaserver/dataservice/adder_atlas_plugin.py",
+  "blob_sha": "f504033f8024575a787a21e6c4aa7966ab17c65d",
   "owner": "pandaserver/dataservice/adder_atlas_plugin.py::check_output_file_metadata",
   "line": 200,
   "outcome": "failed",
@@ -104,6 +112,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::setCloudToTasks_JEDI",
   "line": 4277,
   "outcome": "runtime(tmpVal)",
@@ -117,6 +126,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py",
+  "blob_sha": "0b198b7b49287f7ae3be9b3877e8bed8a772b0a7",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/misc_standalone_module.py::appendDatasets_JEDI",
   "line": 3750,
   "outcome": "prepared",
@@ -131,6 +141,7 @@
  },
  {
   "file": "pandaserver/workflow/workflow_core.py",
+  "blob_sha": "21a4c1dadaf1d85d9b1d209eaba3f8eb39e59042",
   "owner": "pandaserver/workflow/workflow_core.py::process_workflow_checked",
   "line": 2652,
   "outcome": "runtime(WFDataStatus.registered)",
@@ -142,6 +153,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "blob_sha": "af1ea3902c8a41b3b537b63280afa364a94f262d",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::killUsedEventRanges",
   "line": 1107,
   "outcome": "runtime(EventServiceUtils.ST_discarded)",
@@ -153,6 +165,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py",
+  "blob_sha": "82794c66c9a3e94e55e026bace16db0af6b0cdb3",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py::resetJob",
   "line": 315,
   "outcome": "defined",
@@ -164,6 +177,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+  "blob_sha": "df811cd7418e7bed17f42e993b779ce5f23b90eb",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py::reset_resource_type_task",
   "line": 643,
   "outcome": "Undefined",
@@ -175,6 +189,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 4883,
   "outcome": "None",
@@ -186,6 +201,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5295,
   "outcome": "ready",
@@ -200,6 +216,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::getTasksToBeProcessed_JEDI",
   "line": 3445,
   "outcome": "full",
@@ -215,6 +232,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5141,
   "outcome": "ready",
@@ -230,6 +248,7 @@
  },
  {
   "file": "pandaserver/dataservice/adder_gen.py",
+  "blob_sha": "2763c1acde914976a7046499a4aae0d01116f2cd",
   "owner": "pandaserver/dataservice/adder_gen.py::finalize_job_status",
   "line": 299,
   "outcome": "None",
@@ -244,6 +263,7 @@
  },
  {
   "file": "pandaserver/jobdispatcher/Watcher.py",
+  "blob_sha": "8e4f9aa4a32ee759601212298e6bff037c002f75",
   "owner": "pandaserver/jobdispatcher/Watcher.py::run",
   "line": 117,
   "outcome": "failed",
@@ -258,6 +278,7 @@
  },
  {
   "file": "pandajedi/jedidog/AtlasProdWatchDog.py",
+  "blob_sha": "1a0dcdc755fa756e83e9c6e7d1f866de2f548d85",
   "owner": "pandajedi/jedidog/AtlasProdWatchDog.py::doActionForReassign",
   "line": 360,
   "outcome": "None",
@@ -270,8 +291,9 @@
  },
  {
   "file": "pandajedi/jedirefine/TaskRefinerBase.py",
+  "blob_sha": "e8c570886a46bbf76b80943ea09ca73033016717",
   "owner": "pandajedi/jedirefine/TaskRefinerBase.py::extractCommon",
-  "line": 129,
+  "line": 133,
   "outcome": "0",
   "tier": 1,
   "kinds": [
@@ -282,6 +304,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+  "blob_sha": "df811cd7418e7bed17f42e993b779ce5f23b90eb",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py::getSiteInfo",
   "line": 1928,
   "outcome": "0",
@@ -294,6 +317,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/worker_module.py",
+  "blob_sha": "0992085d6bf278befb348750060ba2bc3f39d73c",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/worker_module.py::updateWorkers",
   "line": 875,
   "outcome": "runtime(old_status)",
@@ -306,6 +330,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py",
+  "blob_sha": "808f23c971464f07cbb936f571621014ff5f93e1",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_standalone_module.py::getTasksToRefine_JEDI",
   "line": 1184,
   "outcome": "registered",
@@ -318,6 +343,7 @@
  },
  {
   "file": "pandaserver/dataservice/adder_atlas_plugin.py",
+  "blob_sha": "f504033f8024575a787a21e6c4aa7966ab17c65d",
   "owner": "pandaserver/dataservice/adder_atlas_plugin.py::process_subscriptions",
   "line": 972,
   "outcome": "running",
@@ -333,6 +359,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py",
+  "blob_sha": "df811cd7418e7bed17f42e993b779ce5f23b90eb",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/entity_module.py::carbon_aggregate_emissions",
   "line": 2819,
   "outcome": "GRID",
@@ -347,6 +374,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5334,
   "outcome": "toupdate",
@@ -363,6 +391,7 @@
  },
  {
   "file": "pandaserver/dataservice/setupper_atlas_plugin.py",
+  "blob_sha": "032c2b8a66ba11dbc4583a5cac4cd6460518e8c6",
   "owner": "pandaserver/dataservice/setupper_atlas_plugin.py::subscribe_dispatch_data_block",
   "line": 1105,
   "outcome": "failed",
@@ -377,6 +406,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py",
+  "blob_sha": "4ff14037733f68e8076a65600262c8b713f864e8",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::_check_task_with_unprocessed_inputs",
   "line": 2371,
   "outcome": "runtime(original_task_spec.status)",
@@ -391,6 +421,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::retryJob",
   "line": 4019,
   "outcome": "runtime(job.attemptNr + 1)",
@@ -406,6 +437,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py",
+  "blob_sha": "af1ea3902c8a41b3b537b63280afa364a94f262d",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::insertTaskParamsPanda",
   "line": 3854,
   "outcome": "waiting",
@@ -422,6 +454,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
   "line": 1544,
   "outcome": "merging",
@@ -436,6 +469,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::retryJob",
   "line": 4128,
   "outcome": "unknown",
@@ -452,6 +486,7 @@
  },
  {
   "file": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py",
+  "blob_sha": "184a7c23150388a9d673201902f1d3fd1970f6ec",
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::archiveJob",
   "line": 1447,
   "outcome": "completed",
@@ -468,6 +503,7 @@
  },
  {
   "file": "pandaserver/brokerage/SiteMapper.py",
+  "blob_sha": "270efd6e290eea5f3cf8d7e6129b3cbfc41eeebb",
   "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
   "line": 28,
   "outcome": "runtime(panda_config.def_type)",
@@ -477,6 +513,7 @@
  },
  {
   "file": "pandaserver/brokerage/SiteMapper.py",
+  "blob_sha": "270efd6e290eea5f3cf8d7e6129b3cbfc41eeebb",
   "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
   "line": 33,
   "outcome": "runtime({})",
@@ -486,6 +523,7 @@
  },
  {
   "file": "pandaserver/brokerage/SiteMapper.py",
+  "blob_sha": "270efd6e290eea5f3cf8d7e6129b3cbfc41eeebb",
   "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
   "line": 24,
   "outcome": "runtime(panda_config.def_sitename)",
@@ -495,6 +533,7 @@
  },
  {
   "file": "pandaserver/brokerage/SiteMapper.py",
+  "blob_sha": "270efd6e290eea5f3cf8d7e6129b3cbfc41eeebb",
   "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
   "line": 27,
   "outcome": "runtime({'default': panda_config.def_ddm})",
@@ -504,6 +543,7 @@
  },
  {
   "file": "pandaserver/brokerage/SiteMapper.py",
+  "blob_sha": "270efd6e290eea5f3cf8d7e6129b3cbfc41eeebb",
   "owner": "pandaserver/brokerage/SiteMapper.py::<module>",
   "line": 29,
   "outcome": "runtime(panda_config.def_status)",
@@ -513,6 +553,7 @@
  },
  {
   "file": "pandajedi/jedirefine/GenTaskRefiner.py",
+  "blob_sha": "2d3307490730729bb68b559bb3637c3423e6d780",
   "owner": "pandajedi/jedirefine/GenTaskRefiner.py::doRefine",
   "line": 71,
   "outcome": "runtime(f'tmpl_{datasetSpec.type}')",

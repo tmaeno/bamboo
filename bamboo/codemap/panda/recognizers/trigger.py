@@ -67,6 +67,7 @@ from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import (
     annotated_class,
     annotated_generic,
+    base_name,
     class_bases,
     class_type_arguments,
 )
@@ -1433,11 +1434,24 @@ def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFano
     its plugin in ``get_plugin_class`` and runs it from
     ``process_job_report``, which is where the arm is.
 
-    Not reachable this way: the 18 ``getImpl`` / ``instantiateImpl`` sites.
-    Their candidate set is in ``jedi_config.<x>.modConfig`` as a
-    ``module:className`` string, so the source does not hold it at all.  What
-    the source does hold is the proof: ``FactoryBase.initializeMods`` prints
-    ``getting class {className}`` and ``{cls} is ready for ...`` at INFO.
+    Not reachable this way: the seventeen JEDI factory sites --
+    ``requireImpl`` 10, ``getImpl`` 5, ``instantiateImpl`` 2, over the 289
+    modules this map reads on ``1.0.4-303-gba1d8bad``; ``pandajedi/jeditest``
+    holds four more that it skips, which is why a grep counts twenty-one.
+    Their *candidate set* is in ``jedi_config.<x>.modConfig`` as a
+    ``module:className`` string, so no fan-out can be read from the source: it
+    never says which plugin of a family a deployment will load.
+
+    **The interface is a different question, and the source does answer it.**
+    Each knight declares ``FactoryBase[XxxBase]``, so the factory's return type
+    names the base whose subclasses are the candidates -- read by
+    :func:`_dispatch_families`, whose docstring states what that is worth and on
+    which revision it was measured.  What is missing at these seventeen sites is
+    therefore the *choice*, not the interface, and a fan-out is a claim about
+    the choice.
+
+    The other thing the source holds is the proof: ``FactoryBase.initializeMods``
+    prints ``getting class {className}`` and ``{cls} is ready for ...`` at INFO.
     """
     subclasses: dict[str, list[str]] = {}
     declared: dict[str, list[ast.ClassDef]] = {}
@@ -1447,7 +1461,14 @@ def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFano
                 continue
             declared.setdefault(node.name, []).append(node)
             for base in node.bases:
-                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", None)
+                # Through :func:`~bamboo.codemap.panda.attribution.base_name`
+                # rather than reading ``id``/``attr`` here, which is blind to
+                # ``FactoryBase[XxxBase]`` -- the same defect that cost
+                # ``class_bases`` eight ancestries.  Measured: the fan-outs this
+                # function returns are identical either way, because none of the
+                # three is in a parameterised family.  Kept aligned so the next
+                # subscripted base does not have to be found twice.
+                name = base_name(base)
                 if name:
                     subclasses.setdefault(name, []).append(node.name)
 

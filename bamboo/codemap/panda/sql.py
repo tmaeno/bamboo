@@ -1567,6 +1567,20 @@ _JOIN = re.compile(r"\bJOIN\s+([\w{}.]+)", re.IGNORECASE)
 #: backend is not Oracle, which settles what it is.
 _PSEUDO_TABLES = frozenset({"dual"})
 
+#: SQL's own words, written where a column goes.  ``recoverLostFiles`` pads a
+#: ``UNION`` with ``SELECT fileID,datasetID,lfn,NULL`` so its projection lines up
+#: with the branch that selects ``outPandaID`` in that position, and
+#: ``closeTaskAttempt`` asks the database for the time with ``SELECT
+#: CURRENT_DATE,status``.  Neither names anything the row carries -- and the
+#: first is worse than absent, since it stands where a real column stands.
+#:
+#: **Kept to the words this corpus writes there.** Dropping SQL's reserved words
+#: as a class would delete real columns: ``get_shares`` selects twelve from
+#: ``GLOBAL_SHARES`` and ``NAME``, ``VALUE`` and ``PARENT`` are three of them,
+#: spelled in upper case exactly like the literals are.  So case cannot be the
+#: filter and a longer list is a liability rather than insurance.
+_PSEUDO_COLUMNS = frozenset({"null", "current_date", "current_timestamp"})
+
 
 def _names_a_table(name: str, defined: set[str]) -> bool:
     """Whether *name*, written where a table goes, names one that stores rows.
@@ -1598,7 +1612,15 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
 
     Only the columns that are plain names are kept.  A projection built from
     expressions (``COUNT(1)``, ``CASE WHEN ...``) says what the query computes
-    rather than what the row carries, and a boundary is about the latter.
+    rather than what the row carries, and a boundary is about the latter.  A
+    bare word that is one of SQL's own -- see :data:`_PSEUDO_COLUMNS` -- is
+    dropped for that same reason, written without the parentheses that would
+    have given it away.
+
+    An interpolated projection keeps no column at all.  ``SELECT {}, FROM ...``
+    is what the assembler sees when a statement builds its column list in a
+    loop and then slices the trailing comma off, and the empty part after that
+    comma is not a name either.
     """
     defined = {match.group(1).lower() for match in _CTE.finditer(sql)}
     found: list[tuple[str, list[str]]] = []
@@ -1607,9 +1629,11 @@ def reads(sql: str) -> list[tuple[str, list[str]]]:
         if not _names_a_table(table, defined):
             continue
         columns = [
-            part.strip().split(".")[-1]
-            for part in match.group(1).split(",")
-            if _IDENTIFIER.fullmatch(part.strip().split(".")[-1] or "_")
+            name
+            for name in (
+                part.strip().split(".")[-1] for part in match.group(1).split(",")
+            )
+            if _IDENTIFIER.fullmatch(name) and name.lower() not in _PSEUDO_COLUMNS
         ]
         found.append((table, columns))
     return found

@@ -1950,6 +1950,102 @@ def test_oracle_s_one_row_pseudo_table_is_not_a_table():
     assert sql.reads(statement) == []
 
 
+def test_a_literal_written_where_a_column_goes_is_not_a_column():
+    """``reads`` said the archive table carries a column called ``NULL``.
+
+    ``recoverLostFiles`` pads a ``UNION`` so both branches project four
+    positions: the live branch selects ``fileID,datasetID,lfn,NULL`` and the
+    branch it lines up with selects ``outPandaID`` in that fourth position.  So
+    the literal is not merely a value the row does not carry -- it stands where
+    a differently named column stands, and reading it as one put ``NULL`` on the
+    boundary ``filesTable_ARCH`` becomes.  The docstring already said
+    expressions are dropped because a boundary is about what the row carries; a
+    bare literal is the same claim written without parentheses.
+    """
+    statement = (
+        "SELECT fileID,datasetID,lfn,NULL FROM ATLAS_PANDA.filesTable4 "
+        "WHERE PandaID=:PandaID AND type IN (:type1,:type2) "
+        "UNION "
+        "SELECT fileID,datasetID,lfn,NULL FROM ATLAS_PANDAARCH.filesTable_ARCH "
+        "WHERE PandaID=:PandaID AND type IN (:type1,:type2)"
+    )
+
+    assert sql.reads(statement) == [
+        ("filesTable4", ["fileID", "datasetID", "lfn"]),
+        ("filesTable_ARCH", ["fileID", "datasetID", "lfn"]),
+    ]
+
+
+def test_the_database_s_own_clock_is_not_a_column_the_row_carries():
+    """``SELECT CURRENT_DATE,status`` asks the database what time it is.
+
+    Two spellings of it in this corpus, both in a projection beside real
+    columns: ``closeTaskAttempt`` copies ``CURRENT_DATE`` into an attempt's end
+    time, and ``base_module`` stamps ``CURRENT_TIMESTAMP`` into a status log.
+    Neither names anything ``JEDI_Tasks`` stores.
+    """
+    assert sql.reads(
+        "SELECT CURRENT_DATE,status FROM ATLAS_PANDA.JEDI_Tasks "
+        "WHERE jediTaskID=:jediTaskID"
+    ) == [("JEDI_Tasks", ["status"])]
+
+    assert sql.reads(
+        "SELECT jediTaskID,CURRENT_TIMESTAMP,status,attemptNr "
+        "FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID"
+    ) == [("JEDI_Tasks", ["jediTaskID", "status", "attemptNr"])]
+
+
+def test_an_upper_case_column_name_is_still_a_column():
+    """The guard on the rule above: case cannot be what drops a literal.
+
+    ``get_shares`` selects twelve columns from ``GLOBAL_SHARES`` and every one
+    of them is spelled in upper case, exactly like the literals are.  Excluding
+    SQL's reserved words as a class would be worse still -- ``NAME``, ``VALUE``
+    and ``PARENT`` are three of these twelve.  Only the words this corpus writes
+    where a column goes and that name no column are dropped.
+    """
+    statement = (
+        "SELECT NAME, VALUE, PARENT, PRODSOURCELABEL, WORKINGGROUP, CAMPAIGN, "
+        "PROCESSINGTYPE, TRANSPATH, RTYPE, VO, QUEUE_ID, THROTTLED "
+        "FROM ATLAS_PANDA.GLOBAL_SHARES"
+    )
+
+    assert sql.reads(statement) == [
+        (
+            "GLOBAL_SHARES",
+            [
+                "NAME", "VALUE", "PARENT", "PRODSOURCELABEL", "WORKINGGROUP",
+                "CAMPAIGN", "PROCESSINGTYPE", "TRANSPATH", "RTYPE", "VO",
+                "QUEUE_ID", "THROTTLED",
+            ],
+        )
+    ]
+
+
+def test_a_projection_the_caller_decides_leaves_no_column_behind():
+    """An empty string was entering the column list, and it is not a name.
+
+    ``getTaskAttributesPanda`` builds its projection from a list its caller
+    passes::
+
+        sqlRR = "SELECT "
+        for attr in attrs:
+            sqlRR += f"{attr},"
+        sqlRR = sqlRR[:-1]
+        sqlRR += f" FROM {panda_config.schemaJEDI}.JEDI_Tasks "
+
+    The assembler folds the loop body to ``{}`` and cannot model the slice that
+    removes the trailing comma, so it sees ``SELECT {}, FROM ...``.  ``{}`` was
+    dropped, as an interpolated name should be, and then the empty part after
+    the comma was *kept* -- the guard tested ``part or "_"`` and the fallback
+    matched.  The truthful answer is that this projection names nothing the
+    statement decides.
+    """
+    assert sql.reads("SELECT {}, FROM {}.JEDI_Tasks WHERE jediTaskID=:jediTaskID") == [
+        ("JEDI_Tasks", [])
+    ]
+
+
 def test_a_join_written_with_the_keyword_names_the_same_partner():
     """Two spellings of one statement, and the map read only one of them.
 
