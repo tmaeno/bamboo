@@ -632,8 +632,15 @@ def _record(
             anchor=Anchor(
                 package=module.package,
                 file=module.rel_path,
-                line_start=outcomes[0][2].lineno,
-                line_end=outcomes[-1][2].end_lineno,
+                # Over all the outcomes, not the first and last the scan
+                # happened to visit: ``outcomes`` is in discovery order, so an
+                # arm above the first one gave seventeen junctions a span that
+                # ends before it starts.  Nothing complained, because no
+                # production reader looks at ``line_end`` (see ``Anchor``).
+                line_start=min(node.lineno for _o, _t, node, _e, _d in outcomes),
+                line_end=max(
+                    node.end_lineno or node.lineno for _o, _t, node, _e, _d in outcomes
+                ),
                 blob_sha=module.blob_sha,
             ),
         )

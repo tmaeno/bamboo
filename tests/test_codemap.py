@@ -1508,6 +1508,49 @@ class TaskModule:
         "oldStatus": sqlwrite.NOTHING_BINDS_IT,
     }
 
+def test_a_junction_spans_the_arms_it_was_built_from_whatever_order_they_were_found():
+    """The anchor's span has to hold the outcomes, not the ends of a scan.
+
+    ``scan_binds`` walks the function with ``ast.walk``, which is breadth-first:
+    a bind assigned inside an ``if`` is found *after* one assigned below the
+    block at the function's own level.  Taking the span from the first and last
+    of that order gave seventeen junctions a ``line_end`` above their
+    ``line_start`` -- ``resetFileStatusInJEDI`` said 2249..2083 -- and another
+    nine a span that simply did not reach their topmost arm.
+
+    Nothing caught it because nothing in production reads ``line_end``:
+    ``reading.region_in`` derives the region from the containing function, and
+    ``diff.py`` leaves the anchor out of its comparison on purpose.  An
+    analyser reading the span is the first use that would believe it.
+    """
+    _subjects, junctions, *_rest = _sql_extract('''
+class TaskModule:
+    def resetStatus(self, jediTaskID, lost):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks "
+        sqlU += "SET status=:status "
+        sqlU += "WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if lost:
+            varMap[":status"] = "lost"
+        varMap[":status"] = "finished"
+        self.cur.execute(sqlU + comment, varMap)
+''')
+
+    # The fixture declares no spec for the table, so the subject is the table's
+    # own -- which is beside the point here and keeps the source to one method.
+    (junction,) = junctions
+    assert junction.subject == "JEDI_Tasks.status"
+
+    # Discovery order is not line order: the nested arm comes second.
+    assert [(b.outcome, b.line) for b in junction.branches] == [
+        ("finished", 11),
+        ("lost", 10),
+    ]
+    # The span covers both of them anyway.
+    assert (junction.anchor.line_start, junction.anchor.line_end) == (10, 11)
+
+
 def test_statement_is_reassembled_from_its_concatenation():
     """A statement is built by ``=`` then a run of ``+=``, interleaved with others."""
     module = _module(_SQL_SOURCE, "x.py")
@@ -7381,6 +7424,36 @@ def test_a_map_whose_signatures_are_all_distinct_says_nothing():
     fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
 
     assert gates.map_identities_are_distinct(fragment).passed
+
+
+def test_an_arm_the_map_offers_with_no_line_is_reported_rather_than_just_counted():
+    """A positionless arm is counted, stored, offered and compared regardless.
+
+    Which is why it needed a gate of its own: the branch survives every check
+    the map already had, because none of them reads a line.  What does read one
+    is the derivation -- ``reading.lines`` is filled from ``branch.line`` and
+    nowhere else, and ``attach_traces`` walks nothing for a reading that ends
+    up with none.  Measured against the corpus when this was written: 56 arms
+    over 15 junctions, and 18 readings that came back with no steps and no
+    skeleton, all of them about a task's status.
+    """
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1), ("broken", 1)]))
+    junction = fragment.junctions[0]
+    junction.branches[0].line = 812
+
+    result = gates.branch_positions_are_known(fragment)
+
+    assert not result.passed
+    assert result.checked == 2
+    assert result.failures == [f"1/2 arm(s) of {junction.name} say no line -- broken"]
+
+
+def test_a_map_whose_every_arm_carries_a_line_says_nothing():
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1), ("broken", 1)]))
+    for offset, branch in enumerate(fragment.junctions[0].branches):
+        branch.line = 812 + offset
+
+    assert gates.branch_positions_are_known(fragment).passed
 
 
 def test_a_subject_nothing_writes_does_not_belong_in_the_map():

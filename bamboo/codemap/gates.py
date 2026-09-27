@@ -422,6 +422,49 @@ def declared_status_is_written(fragment: MapFragment) -> GateResult:
     )
 
 
+def branch_positions_are_known(fragment: MapFragment) -> GateResult:
+    """(i) Every arm the map offers says where in the source it decided.
+
+    An arm with no line is not a smaller answer, it is a different one.
+    ``strategy`` fills ``reading.lines`` from ``branch.line`` and nothing else,
+    and ``attach_traces`` walks nothing for a reading that ends up with none --
+    so a candidate whose arms are all positionless hands back no steps and no
+    skeleton either.  Two of the three things a reader is given are empty, and
+    the count of candidates says nothing about it.
+
+    Cheap and general in the way ``map-references-resolve`` is: it makes no
+    claim about any slice, only that every arm produced can be read.  The
+    producers all have the position already -- a branch is recorded at a
+    statement -- so a missing one is a field left unfilled at one of three call
+    sites, which is the kind of omission no other check sees: the branch is
+    counted, stored, offered, and compared, because none of those read a line.
+    """
+    failures: list[str] = []
+    checked = 0
+    for junction in fragment.junctions:
+        checked += len(junction.branches)
+        lineless = [b for b in junction.branches if b.line is None]
+        if not lineless:
+            continue
+        outcomes = sorted(b.outcome or "<no outcome>" for b in lineless)
+        shown = ", ".join(outcomes[:4]) + (" ..." if len(outcomes) > 4 else "")
+        failures.append(
+            f"{len(lineless)}/{len(junction.branches)} arm(s) of {junction.name}"
+            + (f" ({junction.anchor.as_ref()})" if junction.anchor else "")
+            + f" say no line -- {shown}"
+        )
+    return GateResult(
+        gate="branch-positions-are-known",
+        passed=not failures,
+        checked=checked,
+        unit="arms",
+        question="does every arm the map offers say where it decided?",
+        finding="an arm carries no line, so the derivation has nowhere to send a reader and nothing to walk",
+        failures=sorted(failures),
+        note="A positionless arm is still counted, stored and offered; nothing downstream reads a line to notice.",
+    )
+
+
 def map_references_resolve(fragment: MapFragment) -> GateResult:
     """(i) Every edge in the map lands on a node the map contains.
 
@@ -1695,6 +1738,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))
+        results.append(branch_positions_are_known(fragment))
         results.append(map_references_resolve(fragment))
     if fragment.declaration_yields:
         results.append(spec_declarations_are_read(fragment))

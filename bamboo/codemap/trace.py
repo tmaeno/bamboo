@@ -97,13 +97,19 @@ class Budget(NamedTuple):
     answer is the failure this whole design is built to avoid.
 
     ``depth`` is set where the walk converges rather than where it is
-    comfortable: at six, two of the 481 walks were still cut short; at eight
-    one is, ``datasetManager.py::run``, and the terminals the whole corpus
-    reaches are the same as six's but for two steps.  ``steps`` bites three
-    times -- ``JobGenerator.py::runImpl``, the same ``run``, and
-    ``insertFilesForDataset_JEDI`` -- out of 540 readings.  The numbers are
-    not a tuning knob: four functions out of 540 is the design working, and
-    "none are" was written when the corpus was smaller.
+    comfortable: when eight was chosen, six still cut two of 481 walks short
+    and eight cut one, and the terminals the whole corpus reaches were the same
+    as six's but for two steps.
+
+    Re-measured since, over the derivation for every term in the vocabulary
+    rather than that one sample -- 1567 readings, all of them walked.  A bite
+    is counted per reading, so one awkward function accounts for many:
+    ``steps`` bites 49 times and ``depth`` 15, over **four functions in all**
+    -- ``insertFilesForDataset_JEDI`` (43), ``closer.py::run`` (12),
+    ``JobGenerator.py::runImpl`` (5) and ``datasetManager.py::run`` (4).  The
+    population is not the old one, so read the shape and not the difference:
+    four functions out of 1567 readings is the design working.  The numbers are
+    not a tuning knob, and "none are" was written when the corpus was smaller.
     """
 
     files: int = 12

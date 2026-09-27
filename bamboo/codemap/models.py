@@ -77,7 +77,18 @@ class Anchor(BaseModel):
     package: str
     file: str
     line_start: int
-    line_end: Optional[int] = None
+    line_end: Optional[int] = Field(
+        default=None,
+        description=(
+            "End of the span, and today nothing in production reads it -- "
+            "``reading.region_in`` derives the region from the containing "
+            "function instead, and ``diff.py`` leaves the whole anchor out of "
+            "its comparison on purpose.  So a wrong one is silent, which is "
+            "how seventeen junctions came to carry a span that ends above its "
+            "own start.  An analyser reading the span is the natural first use "
+            "of it, and that is when a wrong one would be believed."
+        ),
+    )
     blob_sha: Optional[str] = None
 
     def as_ref(self) -> str:

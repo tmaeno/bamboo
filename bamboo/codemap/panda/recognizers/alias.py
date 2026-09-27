@@ -492,5 +492,13 @@ def _record(
             path_condition=condition,
             order=len(junction.branches),
             tier=tier,
+            # The same ``node`` the anchor above is built from.  Left out until
+            # now, and nothing said so: a positionless arm is still counted,
+            # stored, offered as a candidate and compared by ``diff-map``,
+            # because none of those read a line.  What does read it is the
+            # derivation -- ``reading.lines`` is filled from here and nowhere
+            # else, and a reading that ends up with none is not walked at all,
+            # so the arm came back with no steps and no skeleton either.
+            line=node.lineno,
         )
     )
