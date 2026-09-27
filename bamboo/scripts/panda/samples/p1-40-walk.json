@@ -18,6 +18,35 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::updateTask_JEDI",
   "line": 1579,
   "outcome": "submitting",
+  "handovers": [
+   {
+    "entry": "pandajedi/jediorder/TaskCommando.py",
+    "via": "updateTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "setOldModTime": "True"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/TaskRefiner.py",
+    "via": "updateTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "oldStatus": "[taskStatus]"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/JobGenerator.py",
+    "via": "updateTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "oldStatus": "JediTaskSpec.statusForJobGenerator() + ['pending']",
+     "setOldModTime": "setOldModTime",
+     "setFrozenTime": "not noFrozenTime"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -71,6 +100,41 @@
   "owner": "pandaserver/workflow/workflow_core.py::process_workflow_checked",
   "line": 2684,
   "outcome": "panda_task",
+  "handovers": [
+   {
+    "entry": "pandaserver/api/v1/workflow_api.py",
+    "via": "init_task_buffer",
+    "reached_by": "dispatch",
+    "fields": {
+     "tbif": "global_task_buffer"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "initialize",
+    "reached_by": "dispatch",
+    "fields": {
+     "tbif": "self.tbIF"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "process_step",
+    "reached_by": "call",
+    "fields": {
+     "by": "'msg'"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "process_workflow",
+    "reached_by": "call",
+    "fields": {
+     "by": "'msg'"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -145,6 +209,41 @@
   "owner": "pandaserver/workflow/workflow_core.py::process_workflow_checked",
   "line": 2652,
   "outcome": "runtime(WFDataStatus.registered)",
+  "handovers": [
+   {
+    "entry": "pandaserver/api/v1/workflow_api.py",
+    "via": "init_task_buffer",
+    "reached_by": "dispatch",
+    "fields": {
+     "tbif": "global_task_buffer"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "initialize",
+    "reached_by": "dispatch",
+    "fields": {
+     "tbif": "self.tbIF"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "process_step",
+    "reached_by": "call",
+    "fields": {
+     "by": "'msg'"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/workflow_manager_msg_processor.py",
+    "via": "process_workflow",
+    "reached_by": "call",
+    "fields": {
+     "by": "'msg'"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 2,
   "kinds": [
    "write"
@@ -193,6 +292,21 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 4883,
   "outcome": "None",
+  "handovers": [
+   {
+    "entry": "pandajedi/jediorder/TaskCommando.py",
+    "via": "retryTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "retryChildTasks": "retryChildTasks",
+     "discardEvents": "discardEvents",
+     "release_unstaged": "releaseUnstaged",
+     "keep_share_priority": "keep_share_priority",
+     "ignore_hard_exhausted": "ignore_hard_exhausted"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "write"
@@ -205,6 +319,21 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5295,
   "outcome": "ready",
+  "handovers": [
+   {
+    "entry": "pandajedi/jediorder/TaskCommando.py",
+    "via": "retryTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "retryChildTasks": "retryChildTasks",
+     "discardEvents": "discardEvents",
+     "release_unstaged": "releaseUnstaged",
+     "keep_share_priority": "keep_share_priority",
+     "ignore_hard_exhausted": "ignore_hard_exhausted"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -220,6 +349,52 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::getTasksToBeProcessed_JEDI",
   "line": 3445,
   "outcome": "full",
+  "handovers": [
+   {
+    "entry": "pandajedi/jedimsgprocessor/jedi_job_generator_msg_processor.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nFiles": "nFiles",
+     "target_tasks": "[task_id]"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nFiles": "1000",
+     "target_tasks": "[jediTaskID]"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/JobGenerator.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nTasks": "nTasksToGetTasks",
+     "nFiles": "nFilesToGetTasks",
+     "minPriority": "throttle.minPriority",
+     "maxNumJobs": "throttle.maxNumJobs",
+     "typicalNumFilesMap": "typicalNumFilesMap",
+     "mergeUnThrottled": "mergeUnThrottled",
+     "numNewTaskWithJumbo": "numNewTaskWithJumbo",
+     "resource_name": "resource_type.resource_name"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/TaskBroker.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "simTasks": "[tmpTaskItem]",
+     "readMinFiles": "True",
+     "fullSimulation": "True"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -236,6 +411,21 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5141,
   "outcome": "ready",
+  "handovers": [
+   {
+    "entry": "pandajedi/jediorder/TaskCommando.py",
+    "via": "retryTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "retryChildTasks": "retryChildTasks",
+     "discardEvents": "discardEvents",
+     "release_unstaged": "releaseUnstaged",
+     "keep_share_priority": "keep_share_priority",
+     "ignore_hard_exhausted": "ignore_hard_exhausted"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -252,6 +442,54 @@
   "owner": "pandaserver/dataservice/adder_gen.py::finalize_job_status",
   "line": 299,
   "outcome": "None",
+  "handovers": [
+   {
+    "entry": "pandaserver/daemons/scripts/add_main.py",
+    "via": "main",
+    "reached_by": "dispatch",
+    "fields": {
+     "taskBuffer": "taskBuffer",
+     "job_id": "panda_id",
+     "job_status": "job_status",
+     "attempt_nr": "attempt_nr",
+     "ignore_tmp_error": "ignoreTmpError",
+     "siteMapper": "aSiteMapper",
+     "pid": "uniq_pid",
+     "prelock_pid": "uniq_pid",
+     "lock_offset": "lock_interval - retry_interval",
+     "lock_pool": "lock_pool"
+    }
+   },
+   {
+    "entry": "pandaserver/daemons/scripts/add_main.py",
+    "via": "run",
+    "reached_by": "dispatch",
+    "fields": {
+     "taskBuffer": "taskBuffer",
+     "job_id": "panda_id",
+     "job_status": "job_status",
+     "attempt_nr": "attempt_nr",
+     "ignore_tmp_error": "ignoreTmpError",
+     "siteMapper": "aSiteMapper",
+     "pid": "uniq_pid",
+     "prelock_pid": "uniq_pid",
+     "lock_offset": "lock_interval - retry_interval",
+     "lock_pool": "lock_pool"
+    }
+   },
+   {
+    "entry": "pandaserver/api/v1/pilot_api.py",
+    "via": "update_job",
+    "reached_by": "dispatch",
+    "fields": {
+     "taskBuffer": "global_task_buffer",
+     "job_id": "job_id",
+     "job_status": "job_status",
+     "attempt_nr": "attempt_nr"
+    }
+   }
+  ],
+  "handovers_read": 3,
   "tier": 1,
   "kinds": [
    "binding",
@@ -267,6 +505,21 @@
   "owner": "pandaserver/jobdispatcher/Watcher.py::run",
   "line": 117,
   "outcome": "failed",
+  "handovers": [
+   {
+    "entry": "pandaserver/daemons/scripts/copyArchive.py",
+    "via": "main",
+    "reached_by": "dispatch",
+    "fields": {
+     "taskBuffer": "taskBuffer",
+     "pandaID": "id",
+     "single": "True",
+     "siteMapper": "siteMapper",
+     "sleepTime": "60 * 24 * 21"
+    }
+   }
+  ],
+  "handovers_read": 1,
   "tier": 1,
   "kinds": [
    "binding",
@@ -352,7 +605,6 @@
    "binding",
    "loop-target",
    "unbound:chosen by whoever called or built this",
-   "unbound:none",
    "write"
   ],
   "stratum": "unbound:none"
@@ -367,7 +619,6 @@
   "kinds": [
    "binding",
    "loop-target",
-   "unbound:none",
    "write"
   ],
   "stratum": "unbound:none"
@@ -378,13 +629,27 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::retryTask_JEDI",
   "line": 5334,
   "outcome": "toupdate",
+  "handovers": [
+   {
+    "entry": "pandajedi/jediorder/TaskCommando.py",
+    "via": "retryTask_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "retryChildTasks": "retryChildTasks",
+     "discardEvents": "discardEvents",
+     "release_unstaged": "releaseUnstaged",
+     "keep_share_priority": "keep_share_priority",
+     "ignore_hard_exhausted": "ignore_hard_exhausted"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
    "handover",
    "loop-target",
    "unbound:chosen by whoever called or built this",
-   "unbound:none",
    "write"
   ],
   "stratum": "unbound:none"
@@ -399,7 +664,6 @@
   "kinds": [
    "binding",
    "loop-target",
-   "unbound:none",
    "write"
   ],
   "stratum": "unbound:none"
@@ -410,6 +674,52 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py::_check_task_with_unprocessed_inputs",
   "line": 2371,
   "outcome": "runtime(original_task_spec.status)",
+  "handovers": [
+   {
+    "entry": "pandajedi/jedimsgprocessor/jedi_job_generator_msg_processor.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nFiles": "nFiles",
+     "target_tasks": "[task_id]"
+    }
+   },
+   {
+    "entry": "pandajedi/jedimsgprocessor/panda_to_jedi_msg_processor.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nFiles": "1000",
+     "target_tasks": "[jediTaskID]"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/JobGenerator.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "nTasks": "nTasksToGetTasks",
+     "nFiles": "nFilesToGetTasks",
+     "minPriority": "throttle.minPriority",
+     "maxNumJobs": "throttle.maxNumJobs",
+     "typicalNumFilesMap": "typicalNumFilesMap",
+     "mergeUnThrottled": "mergeUnThrottled",
+     "numNewTaskWithJumbo": "numNewTaskWithJumbo",
+     "resource_name": "resource_type.resource_name"
+    }
+   },
+   {
+    "entry": "pandajedi/jediorder/TaskBroker.py",
+    "via": "getTasksToBeProcessed_JEDI",
+    "reached_by": "call",
+    "fields": {
+     "simTasks": "[tmpTaskItem]",
+     "readMinFiles": "True",
+     "fullSimulation": "True"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 2,
   "kinds": [
    "binding",
@@ -425,6 +735,19 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::retryJob",
   "line": 4019,
   "outcome": "runtime(job.attemptNr + 1)",
+  "handovers": [
+   {
+    "entry": "pandaserver/daemons/scripts/copyArchive.py",
+    "via": "retryJob",
+    "reached_by": "call",
+    "fields": {
+     "getNewPandaID": "True",
+     "attemptNr": "attemptNr",
+     "recoverableEsMerge": "True"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 2,
   "kinds": [
    "binding",
@@ -441,6 +764,19 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/task_event_module.py::insertTaskParamsPanda",
   "line": 3854,
   "outcome": "waiting",
+  "handovers": [
+   {
+    "entry": "pandaserver/api/v1/task_api.py",
+    "via": "insertTaskParamsPanda",
+    "reached_by": "call",
+    "fields": {
+     "properErrorCode": "True",
+     "parent_tid": "parent_tid",
+     "decode": "False"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -473,6 +809,19 @@
   "owner": "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py::retryJob",
   "line": 4128,
   "outcome": "unknown",
+  "handovers": [
+   {
+    "entry": "pandaserver/daemons/scripts/copyArchive.py",
+    "via": "retryJob",
+    "reached_by": "call",
+    "fields": {
+     "getNewPandaID": "True",
+     "attemptNr": "attemptNr",
+     "recoverableEsMerge": "True"
+    }
+   }
+  ],
+  "handovers_read": 0,
   "tier": 1,
   "kinds": [
    "binding",
@@ -496,7 +845,6 @@
    "loop-target",
    "unbound:a value the database supplies, whose writers the map names",
    "unbound:chosen by whoever called or built this",
-   "unbound:none",
    "write"
   ],
   "stratum": "unbound:a value the database supplies, whose writers the map names"

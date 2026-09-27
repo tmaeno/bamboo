@@ -45,6 +45,31 @@ inserted four lines above a sampled arm and ``sound`` went from 357/357 to
 356/356, which looks like no news.  A case the walk did not run is now named
 under ``not run`` instead of being absorbed.
 
+**And every case carries the handovers it was drawn with.**  The draw walks
+with ``handovers=_handovers(junction)`` and the two scoring walks did not, so
+every scored walk was strictly weaker than the walk that chose the case: over
+36 walked cases the scored step set was a subset of the declared one 36 times
+and a superset none, 9 lost the ``handover`` kind outright, and 9 could not
+reproduce the ``stratum`` they had been filed under.  The sha cannot see this,
+because the defect is on this side and the corpus file matches.  So the
+handovers are frozen into the sample beside ``blob_sha`` and the ``kinds``
+field is checked rather than merely recorded.
+
+*A frozen input goes stale, and this one needed its own detector.*  A handover
+is a projection of the junction's ``entry_points``, a stored field, so a move
+there is reported by ``diff-map``; re-stamp the sample from a built fragment
+then, and do not re-run ``--draw``, which would change which arms are scored.
+But that covers only the map moving.  ``blob_sha`` pins the case's *own* file,
+and a handover names a different one -- ``add_main.py`` for an arm in
+``adder_gen.py`` -- so a move there is pinned by nothing.  Measured: break the
+frozen handovers and ``sound`` returns to 357/357 and ``honest`` to 285/285,
+both still perfect over nine fewer steps, and no ratio or list says a word.
+``kinds`` cannot catch it either, because the handover step is still produced
+carrying ``could not be read here``; the *set* does not move.  So each case
+also records how many of its crossings the walk reads, and that count is
+checked.  It guards the four the walk can read and not the fifteen it cannot,
+for which "unread" is already the recorded state.
+
 Honest about what this cannot be: the author of the walk is also its scorer,
 so sealing the holdout buys "not tuned against these cases" and not blindness.
 """
@@ -78,6 +103,20 @@ logger = logging.getLogger(__name__)
 
 def _case_id(case: dict) -> str:
     return f"{case['owner']}@{case['line']}"
+
+
+def _case_handovers(case: dict) -> list:
+    """The handovers the draw walked this arm with, frozen into the case.
+
+    The draw passes ``_handovers(junction)``; scoring reads it back from here
+    rather than from the database, for the same reason ``blob_sha`` is stored
+    rather than recomputed -- a case says what it was scored against.  It is a
+    projection of the junction's ``entry_points``, so ``diff-map`` reports the
+    *map* move that makes this stale; the corpus move that makes it stale is
+    reported by ``handovers_read``, because the file a handover names is not
+    the file ``blob_sha`` pins.
+    """
+    return [models_mod.Handover(**h) for h in case.get("handovers") or ()]
 
 
 def _skeleton_rows(skeleton) -> list[str]:
@@ -119,6 +158,7 @@ def _render(case: dict, roots: dict, budget: trace_mod.Budget) -> list[str]:
         lines=[case["line"]],
         observed=case.get("outcome") or "",
         expected_sha=case.get("blob_sha", ""),
+        handovers=_case_handovers(case),
         classify=provenance.classify,
         budget=budget,
     )
@@ -825,7 +865,11 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     honest_total = honest_said = 0
     calls_total = calls_listed = 0
     module_arms = 0
+    stratum_outgrown = 0
+    crossings_read = crossings_unread = 0
     not_run: list[str] = []
+    kinds_moved: list[str] = []
+    read_moved: list[str] = []
     missing: list[str] = []
     ghost: list[str] = []
     below: list[str] = []
@@ -840,6 +884,7 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             lines=[case["line"]],
             observed=case.get("outcome") or "",
             expected_sha=case.get("blob_sha", ""),
+            handovers=_case_handovers(case),
             classify=provenance.classify,
             budget=budget,
         )
@@ -861,6 +906,58 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
             not_run.append(f"{cid}  {note or 'no steps and no reason given'}")
             continue
 
+        # The sample's own expectation, checked rather than merely recorded.
+        # Placed here because everything below it can ``continue`` past.
+        #
+        # This is the only thing in the file that watches *this side*: the four
+        # ratios are computed against the tree the walk just read, so a change
+        # to the walk moves question and answer together.  It was not watched,
+        # and it drifted -- ``a6a9416`` taught the assignment readers
+        # ``AnnAssign``, and five arms whose ``secMap: dict[str, Any] = {}`` had
+        # been an unbound name with no terminal quietly became bindings.  Every
+        # ratio stayed green through it.
+        produced = {
+            f"unbound:{step.terminal or 'none'}"
+            if step.kind == trace_mod.TRACE_UNBOUND
+            else step.kind
+            for step in steps
+        }
+        declared = set(case.get("kinds") or ())
+        if produced != declared:
+            kinds_moved.append(
+                f"{cid}  missing {sorted(declared - produced) or '[]'}"
+                f"   extra {sorted(produced - declared) or '[]'}"
+            )
+        # Not a mismatch: ``stratum`` says which stratum the *draw* put this arm
+        # in, which stays true after the walk stops producing that kind.  Said
+        # out loud anyway, because a worksheet reader sees the stratum and would
+        # otherwise have no way to know the walk no longer agrees with it.
+        if case.get("stratum") and case["stratum"] not in produced:
+            stratum_outgrown += 1
+
+        # The other half of the sample's recorded expectation, and the half
+        # ``kinds`` cannot carry.  ``blob_sha`` pins the case's own file; a
+        # handover names a *different* one -- ``add_main.py`` for an arm in
+        # ``adder_gen.py`` -- and nothing pins that.  Break the frozen
+        # handovers and ``sound`` returns to 357/357 and ``honest`` to 285/285,
+        # both still perfect over nine fewer steps, with no section naming
+        # anything: the handover step is still produced, carrying ``could not
+        # be read here``, so the set of kinds does not move.  The count does.
+        read_now = sum(
+            1 for step in steps if step.kind == models_mod.TRACE_HANDOVER and step.line
+        )
+        crossings_read += read_now
+        crossings_unread += sum(
+            1
+            for step in steps
+            if step.kind == models_mod.TRACE_HANDOVER and not step.line
+        )
+        if "handovers_read" in case and case["handovers_read"] != read_now:
+            read_moved.append(
+                f"{cid}  recorded {case['handovers_read']} crossing(s) read,"
+                f" the walk reads {read_now}"
+            )
+
         # sound: every step that names a line, read in its own frame.
         for step in steps:
             if not step.line:
@@ -878,6 +975,25 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
                     step_exists += 1
                 else:
                     ghost.append(f"{cid}  arm@{step.line} is no statement of this function")
+            elif step.kind == models_mod.TRACE_HANDOVER:
+                # A handover's line is the ``def`` line of the function that
+                # supplied the field -- ``line=getattr(other.func, "lineno")``
+                # where the step is built -- not an assignment.  Looking for a
+                # binding there is unanswerable by construction: ``name`` is
+                # what the *arm's* body reads the field as, and the handing-over
+                # function need not have a ``self`` at all (``copyArchive.py``
+                # holds not one).  Scored against the contract the step
+                # actually makes: the function it points a reader at exists and
+                # begins where it says.  Nineteen handover steps in the sample,
+                # fifteen of them ``call`` crossings whose far side would not
+                # resolve and which carry line 0, so they are skipped above.
+                if getattr(where, "lineno", None) == step.line:
+                    step_exists += 1
+                else:
+                    ghost.append(
+                        f"{cid}  {step.name}@{step.line} is not where "
+                        f"{step.owner or case['owner']} begins"
+                    )
             elif step.name and step.line in _binding_lines(where, step.name):
                 step_exists += 1
             else:
@@ -969,6 +1085,29 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
     )
     for line in not_run:
         click.echo(f"    {line}")
+    click.echo(
+        f"\nkinds moved: {len(kinds_moved)} case(s)"
+        "   -- the walk no longer produces what the case was recorded with;"
+        " re-stamp only after reading why"
+    )
+    for line in kinds_moved:
+        click.echo(f"    {line}")
+    click.echo(
+        f"  ({stratum_outgrown} case(s) carry a stratum their walk has outgrown"
+        " -- a record of the draw, not a mismatch)"
+    )
+    click.echo(
+        f"\nhandover crossings: {crossings_read} read, {crossings_unread} not"
+        "   -- an unread crossing is the one-hop rule, not a failure;"
+        " the count is what a stale freeze moves"
+    )
+    for line in read_moved:
+        click.echo(f"    {line}")
+    if read_moved:
+        click.echo(
+            "    re-stamp the sample's handovers from a built fragment"
+            " -- do not re-run --draw"
+        )
     click.echo(
         f"\nbelow the arm and in no loop it is in: {len(below)} step(s)"
         "   -- a position, not a verdict"

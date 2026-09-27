@@ -23,6 +23,17 @@ better than before (181 of 184 names against 175 of 180) with nothing
 fabricated and nothing silent.  A sample survives a rebuild that does not move
 a line number.
 
+**A case also carries frozen inputs, and those supersede on their own clock.**
+`blob_sha` pins the one file the arm is in; `handovers` freezes what the draw
+handed the walk across a module boundary, and it names *other* files that
+nothing pins.  Both are re-stamped rather than redrawn -- which arms are in the
+sample must not change, so re-stamp from a built fragment and never from
+`--draw`.  The signals to re-stamp on: `diff-map` reporting an `[entry_points]`
+change on a sampled junction, a `not run` line, a `kinds moved` line, or a
+`handover crossings` line naming a case.  The last one exists because breaking
+the frozen handovers leaves `sound` at 357/357 and `honest` at 285/285 -- both
+perfect, over nine fewer steps, with every other number unmoved.
+
 **Score a sample with the `--source-root` the map was built from.**  Without
 it `_resolve_roots(None)` reads the *installed* distribution, which is a
 different release from the one the stored map describes, and the audit comes
