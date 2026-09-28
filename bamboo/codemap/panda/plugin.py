@@ -353,6 +353,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.entities.extend(
             sqlwrite.entity_nodes(side.entities, self.map_id, self._version, attributor)
         )
+        # One node per statement, beside the per-function answer the subject
+        # already carries.  A function name says which log to read; the
+        # statement says where in the code, which is what a row that is not
+        # moving needs -- ``copyArchive.main`` asks for ``jobStatus='holding'``
+        # from three statements with three different time limits.
+        fragment.read_sites.extend(
+            sqlwrite.read_site_nodes(side.statements, self.map_id, self._version)
+        )
         self._unreadable_tables = side.unreadable
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:

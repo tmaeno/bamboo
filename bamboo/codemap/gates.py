@@ -422,6 +422,50 @@ def declared_status_is_written(fragment: MapFragment) -> GateResult:
     )
 
 
+def readers_have_a_statement(fragment: MapFragment) -> GateResult:
+    """(i) Every reader the map names says which statement does the asking.
+
+    The read side is what answers a row that is not moving: a value nothing
+    selects on is a value nothing carries a row out of.  The map has held that
+    answer as a function name since ``read_side`` first recorded it, and a
+    function name is not somewhere a reader can be sent -- ``copyArchive.py``'s
+    ``main`` asks for ``jobStatus='holding'`` three times with three different
+    time limits, and a name says "that function" for all three.
+
+    Cheap and general in the way ``map-references-resolve`` is: it compares two
+    things the extraction already holds and makes no claim about either slice.
+    A reader named with no statement recorded is the shape this gate exists for,
+    and it was the whole of the read side until the statement became a node.
+    """
+    named: dict[str, set[str]] = {}
+    for subject in fragment.subjects:
+        for value, owners in (subject.selected_by or {}).items():
+            for owner in owners:
+                named.setdefault(owner, set()).add(f"{subject.name}={value}")
+    recorded = {site.owner for site in fragment.read_sites}
+    failures: list[str] = []
+    for owner, selected in sorted(named.items()):
+        if owner in recorded:
+            continue
+        shown = sorted(selected)
+        failures.append(
+            f"{owner} is named as selecting "
+            + ", ".join(shown[:3])
+            + (f" and {len(shown) - 3} more" if len(shown) > 3 else "")
+            + " -- no statement recorded"
+        )
+    return GateResult(
+        gate="readers-have-a-statement",
+        passed=not failures,
+        checked=len(named),
+        unit="readers",
+        question="does every reader the map names say which statement asks?",
+        finding="a reader is named as selecting a value with no statement to read it at",
+        failures=failures,
+        note="The function is where to look for the log; the statement is where to look in the code.",
+    )
+
+
 def branch_positions_are_known(fragment: MapFragment) -> GateResult:
     """(i) Every arm the map offers says where in the source it decided.
 
@@ -719,6 +763,11 @@ def map_identities_are_distinct(fragment: MapFragment) -> GateResult:
         "value_enums",
         "filter_stages",
         "loop_cuts",
+        # Newest identity scheme, so the one most worth checking: a read site is
+        # keyed on ``(owner, line)`` because 189 of the 264 select on more than
+        # one ``(subject, value)`` pair, and keying per pair would put several
+        # nodes on one statement.
+        "read_sites",
     ):
         nodes = getattr(fragment, kind)
         checked += len(nodes)
@@ -1735,6 +1784,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(namespace_disambiguates(fragment))
     if fragment.boundaries:
         results.append(boundary_ownership_param_declared(fragment))
+    if fragment.subjects:
+        results.append(readers_have_a_statement(fragment))
     if fragment.junctions:
         results.append(structural_attribution_agrees(fragment))
         results.append(declared_status_is_written(fragment))

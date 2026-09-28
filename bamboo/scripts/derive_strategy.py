@@ -194,6 +194,14 @@ def _report_follow_up(strategy: Strategy) -> None:
             # takes that as the thing that will pick the row up.  This is what
             # the line above is worth.
             click.echo(f"                                   {follow.reader_acts}")
+        # And where the asking actually happens.  The name above says which log
+        # to read; these say where in the code, which is the difference between
+        # "that function selects holding" and three statements with three
+        # different time limits.  Printed under the owner rather than pooled,
+        # because which statement asked is the thing being distinguished.
+        for owner in actors:
+            for where in follow.reader_statements.get(owner, []):
+                click.echo(f"                                     {where}")
     if follow.selection_gates:
         click.echo(f"  what bounds that query's reach   {', '.join(follow.selection_gates)}")
         click.echo("                                   nothing in the map writes these")

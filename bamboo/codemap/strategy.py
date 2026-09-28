@@ -116,6 +116,7 @@ from bamboo.codemap.models import (
     Match,
     Observation,
     Reading,
+    ReadSiteNode,
     StageCut,
     Strategy,
     Symptom,
@@ -462,6 +463,49 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
     return settled
 
 
+def _reader_statements(
+    read_statements: dict[str, list[ReadSiteNode]], observed: str
+) -> dict[str, list[str]]:
+    """Where each reader asks for *observed*, and how much else it runs.
+
+    Narrowed to the value, because the unnarrowed list answers a question
+    nobody asked: ``copyArchive.py::main`` runs thirty statements and three of
+    them ask for ``holding``, so listing all thirty buries the answer in the
+    same way pooling them into the function name lost it.  The rest are counted
+    rather than dropped -- a reader asking "what else does this daemon do" is
+    asking something real, and a silent filter would make the three look like
+    the whole of it.
+
+    A reader whose statements name the value under no spelling keeps all of
+    them: the pair may have come from ``updated_by``, where the verb is the
+    other one, and answering with nothing there would be worse than answering
+    with a list.
+    """
+    rendered: dict[str, list[str]] = {}
+    for owner, sites in sorted(read_statements.items()):
+        if not sites:
+            continue
+        asking = [
+            site
+            for site in sites
+            if any(pair.endswith(f"={observed}") for pair in site.selects)
+        ]
+        shown = asking or sites
+        lines = [
+            site.anchor.as_ref()
+            + (f" (binds {site.bind_window[0]}-{site.bind_window[1]})" if site.bind_window else "")
+            + f"  asks on {', '.join(site.selects)}"
+            for site in shown
+        ]
+        if asking and len(asking) < len(sites):
+            lines.append(
+                f"and {len(sites) - len(asking)} other statement(s) in this function, "
+                "asking on other values"
+            )
+        rendered[owner] = lines
+    return rendered
+
+
 def _findings(candidates: list[Candidate], junctions: list[JunctionNode]) -> list[str]:
     """What asking this question turned up about the map itself.
 
@@ -516,6 +560,7 @@ def _follow_up(
     writers: list[JunctionNode],
     carried_from: list[str],
     log_sites: dict[str, LogSiteNode],
+    read_statements: dict[str, list["ReadSiteNode"]],
     entities: list[EntityNode],
     changing: set[str],
 ) -> FollowUp:
@@ -713,6 +758,10 @@ def _follow_up(
         creates_rows=creates_rows,
         created_by=created_by,
         reader_log_files=reader_files,
+        # Rendered here rather than in the report so the strategy carries the
+        # answer and not a handle to look it up with: a derivation is checkable
+        # only if what it concluded is in it.
+        reader_statements=_reader_statements(read_statements, observed),
         selection_gates=list(selection_gates),
         triggers=triggers,
         self_repairing=repairing,
@@ -1065,6 +1114,10 @@ async def derive(code_map: CodeMap, symptom: Symptom) -> Strategy:
             writers,
             carried,
             await code_map.log_sites(
+                subject.selected_by.get(symptom.observed, [])
+                + subject.updated_by.get(symptom.observed, [])
+            ),
+            await code_map.read_sites(
                 subject.selected_by.get(symptom.observed, [])
                 + subject.updated_by.get(symptom.observed, [])
             ),

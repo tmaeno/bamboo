@@ -72,6 +72,11 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     # ``owner`` is the signature, so it cannot differ between two nodes being
     # compared.
     NodeType.LOG_SITE.value: ("log_files", "caller_log_files", "owns_logger"),
+    # ``owner`` and the line are the signature here, so what is left to differ
+    # is what the statement asks for.  A predicate gaining a value is the read
+    # side's equivalent of a branch gaining an outcome: it is the difference
+    # between a status something carries a row out of and one it does not.
+    NodeType.READ_SITE.value: ("selects", "tables", "bind_window"),
     _JUNCTION: ("subject", "owner", "log_files", "attribution", "structural_subject"),
     NodeType.BOUNDARY.value: (
         "system",
@@ -208,6 +213,7 @@ def _index(fragment: MapFragment) -> dict[tuple[str, str], Any]:
         # log will show a reader's query running could move, or the reader
         # could appear, and the report said nothing either way.
         fragment.log_sites,
+        fragment.read_sites,
     ):
         for node in group:
             nodes[_key(node)] = node

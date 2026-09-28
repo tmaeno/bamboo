@@ -47,6 +47,7 @@ matters, and going further would compound a name match into a claim.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from typing import Collection, Iterator, Optional
 
 from bamboo.codemap.models import (
@@ -1680,6 +1681,7 @@ def attach(
         # differing-arguments report.  The same collision was already possible
         # between a call and a dispatch.
         found: dict[tuple[str, str, Optional[str], str], EntryPoint] = {}
+        folded: Counter = Counter()
         for kind in triggers.get(owner_module, ()):
             found[(kind, owner_module, None, ARRIVES_BY_CALL)] = EntryPoint(
                 trigger=kind, entry=owner_module
@@ -1709,12 +1711,19 @@ def attach(
             ):
                 continue
             for kind in triggers.get(entry, ()):
-                found[(kind, entry, via, ARRIVES_BY_DISPATCH)] = EntryPoint(
+                key = (kind, entry, via, ARRIVES_BY_DISPATCH)
+                # Counted, not merged.  The fold is deliberate -- the key is the
+                # door's, as ``construction_uplinks`` says -- but it was silent,
+                # and a row keeping the last of eight bindings reads exactly
+                # like the only one there was.
+                folded[key] += 1
+                found[key] = EntryPoint(
                     trigger=kind,
                     entry=entry,
                     via=via,
                     arg_binding=handover,
                     reached_by=ARRIVES_BY_DISPATCH,
+                    sites=folded[key],
                 )
         junction.entry_points = [found[key] for key in sorted(found, key=str)]
         if junction.entry_points:

@@ -35,6 +35,7 @@ from bamboo.codemap.models import (
     LogSiteNode,
     LoopCutNode,
     MapFragment,
+    ReadSiteNode,
     SourceModule,
     SubjectNode,
     ValueEnumNode,
@@ -7511,6 +7512,235 @@ def test_a_subject_with_no_read_side_is_not_reported_as_all_sinks():
     assert gates.unreachable_values(fragment) == []
 
 
+def test_two_queries_in_one_function_are_two_read_sites():
+    """The reason the statement is the unit and the function is not.
+
+    ``copyArchive.py::main`` asks for ``jobStatus='holding'`` from three
+    statements with three different time limits, and named by the function
+    those are one answer -- which is what the read side held until the
+    statement became a node.  ``read_side`` already told them apart, because
+    ``(sql, window)`` is what it deduplicates on; the position was dropped at
+    ``record``.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self, timeLimit):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status AND modificationtime<:timeLimit '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        varMap2 = {}\n"
+        "        varMap2[':status'] = 'finishing'\n"
+        "        sqlB = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlB += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlB + comment, varMap2)\n"
+        # Below the selects so their lines stay put.  Here only to teach the
+        # table its class: ``learn_table_classes`` reads writes, and a corpus
+        # of pure queries leaves every subject spelled by its table.
+        "    def touch(self, jediTaskID):\n"
+        "        varMap3 = {}\n"
+        "        varMap3[':status'] = 'ready'\n"
+        # Two columns, because ``status`` alone is ambiguous -- ``FileSpec``,
+        # ``DatasetSpec`` and ``JediFileSpec`` declare one too -- and an
+        # ambiguous table is left unattributed, which spells the subject by its
+        # table instead of its class.
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    side = sqlwrite.read_side(modules, attributor)
+    nodes = sqlwrite.read_site_nodes(side.statements, MAP_ID, VERSION)
+
+    # One owner in ``selected_by`` -- unchanged, and deliberately so.
+    assert side.values["JediTaskSpec.status"]["pending"].selected_by == {"x.py::sweep"}
+    # Two statements, told apart by the line the query runs on.
+    assert [(n.anchor.line_start, n.selects) for n in nodes] == [
+        (7, ["JediTaskSpec.status=pending"]),
+        (12, ["JediTaskSpec.status=finishing"]),
+    ]
+    # One row per statement, so the identities are distinct.
+    assert len({n.name for n in nodes}) == 2
+    assert [n.tables for n in nodes] == [["JEDI_Tasks"], ["JEDI_Tasks"]]
+    # ``execute`` fills its binds anywhere in the function, so no region is
+    # claimed.  The forwarded form is where a window exists to be read.
+    assert [n.bind_window for n in nodes] == [[], []]
+    assert [(n.anchor.line_start, n.anchor.line_end) for n in nodes] == [(7, 7), (12, 12)]
+
+
+def test_the_forwarded_form_carries_the_region_its_binds_are_filled_in():
+    """``var_map = {}`` twice is the code declaring its own block boundaries.
+
+    Kept because it is the region a walk would have to be scoped to: the
+    statement's own value is the SQL text, which reads no names, while the
+    threshold that decides whether a row comes back is an assignment inside the
+    window -- ``copyArchive.py``'s first ``holding`` query binds
+    ``:modificationTime`` to a ``timeLimit`` set three hours back, and the same
+    function rebinds ``timeLimit`` five times elsewhere.
+    """
+    source = (
+        "def main():\n"
+        "    sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks WHERE status=:status '\n"
+        "    var_map = {}\n"
+        "    var_map[':status'] = 'pending'\n"
+        "    taskBuffer.querySQLS(sqlA + comment, var_map)\n"
+        "    var_map = {}\n"
+        "    var_map[':status'] = 'finishing'\n"
+        "    taskBuffer.querySQLS(sqlA + comment, var_map)\n"
+        "def touch(jediTaskID):\n"
+        "    varMap3 = {}\n"
+        "    varMap3[':status'] = 'ready'\n"
+        "    sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "    sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "    cur.execute(sqlU + comment, varMap3)\n"
+    )
+    modules = [
+        _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
+        _module(source, "pandaserver/daemons/scripts/x.py"),
+    ]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    nodes = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+
+    # One statement text, two runs, told apart by the window -- which is the
+    # same key ``read_side`` deduplicates on.
+    assert [(n.anchor.line_start, n.bind_window, n.selects) for n in nodes] == [
+        (5, [3, 5], ["JediTaskSpec.status=pending"]),
+        (8, [6, 8], ["JediTaskSpec.status=finishing"]),
+    ]
+
+
+def test_a_read_site_lists_every_value_one_statement_asks_rows_by():
+    """One row per statement, not per pair -- 189 of the corpus's 264 read sites
+    ask on more than one, and keying per pair would put several nodes on one
+    line for ``map-identities-are-distinct`` to reject."""
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += \"WHERE status=:status AND vo IN ('atlas','test') \"\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "    def touch(self, jediTaskID):\n"
+        "        varMap2 = {}\n"
+        "        varMap2[':status'] = 'ready'\n"
+        # Two columns, because ``status`` alone is ambiguous -- ``FileSpec``,
+        # ``DatasetSpec`` and ``JediFileSpec`` declare one too -- and an
+        # ambiguous table is left unattributed, which spells the subject by its
+        # table instead of its class.
+        "        sqlU = f'UPDATE {schema}.JEDI_Tasks SET status=:status,oldStatus=NULL '\n"
+        "        sqlU += 'WHERE jediTaskID=:jediTaskID '\n"
+        "        self.cur.execute(sqlU + comment, varMap2)\n"
+    )
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(source, "x.py")]
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+
+    (node,) = sqlwrite.read_site_nodes(
+        sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION
+    )
+
+    assert node.selects == [
+        "JEDI_Tasks.vo=atlas",
+        "JEDI_Tasks.vo=test",
+        "JediTaskSpec.status=pending",
+    ]
+
+
+def test_a_reader_named_with_no_statement_to_read_it_at_is_reported():
+    """The whole of the read side until the statement became a node: the map
+    names the function and a function is not somewhere to be sent."""
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+    fragment.subjects[0].selected_by = {"finishing": ["x.py::sweep"]}
+
+    result = gates.readers_have_a_statement(fragment)
+
+    assert not result.passed
+    assert result.checked == 1
+    assert result.failures == [
+        "x.py::sweep is named as selecting JediTaskSpec.status=finishing"
+        " -- no statement recorded"
+    ]
+
+
+def test_a_reader_whose_statement_the_map_holds_says_nothing():
+    fragment = _fragment_with(("JediTaskSpec", "status", [("ready", 1)]))
+    fragment.subjects[0].selected_by = {"finishing": ["x.py::sweep"]}
+    fragment.read_sites = [
+        ReadSiteNode(
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            name=ReadSiteNode.make_name(MAP_ID, "x.py::sweep", 7),
+            owner="x.py::sweep",
+            selects=["JediTaskSpec.status=finishing"],
+            anchor=Anchor(package="pandaserver", file="x.py", line_start=7, line_end=7),
+        )
+    ]
+
+    assert gates.readers_have_a_statement(fragment).passed
+
+
+@pytest.mark.asyncio
+async def test_the_read_site_kind_is_on_every_list_that_has_to_know_about_it():
+    """``FilterStage`` was once missing from ``clear_map`` and stayed in the
+    database forever; ``log_sites`` was once missing from ``_index`` and all 294
+    of them compared as absent from both builds.  Several lists have to know
+    about a kind, and the two that matter most fail silently: a kind the store
+    does not write is stored as nothing, and a kind ``_index`` skips compares
+    equal to itself however much it changed."""
+    from bamboo.codemap import lookup
+    from bamboo.codemap.store import store_fragment
+    from bamboo.models.graph_element import CODE_MAP_NODE_TYPES
+
+    assert NodeType.READ_SITE in CODE_MAP_NODE_TYPES
+    assert NodeType.READ_SITE.value in diff.CONTENT_FIELDS
+    assert lookup._MODELS[ReadSiteNode] is NodeType.READ_SITE
+    assert "read_sites" in MapFragment.model_fields
+
+    site = ReadSiteNode(
+        map_id=MAP_ID,
+        derived_from=VERSION,
+        name=ReadSiteNode.make_name(MAP_ID, "x.py::sweep", 7),
+        owner="x.py::sweep",
+        selects=["JediTaskSpec.status=finishing"],
+        anchor=Anchor(package="pandaserver", file="x.py", line_start=7, line_end=7),
+    )
+
+    # The store writes it and says so.
+    graph_db = AsyncMock()
+    graph_db.clear_map.return_value = 0
+    written = await store_fragment(
+        MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site]), graph_db
+    )
+    assert written["read_sites"] == 1
+    assert graph_db.merge_map_node.await_count == 1
+
+    # And ``_index`` reaches it, so a change to one is a change the diff reports.
+    fragment = MapFragment(map_id=MAP_ID, derived_from=VERSION, read_sites=[site])
+    other = fragment.model_copy(deep=True)
+    other.read_sites[0].selects = ["JediTaskSpec.status=pending"]
+
+    result = diff.compare(fragment, other)
+
+    assert [(c.field, c.before, c.after) for c in result.changes] == [
+        ("selects", "[JediTaskSpec.status=finishing]", "[JediTaskSpec.status=pending]")
+    ]
+
+
 def test_a_where_clause_says_which_values_something_acts_on():
     """The other half of the same statements, and the half that makes it a graph."""
     source = (
@@ -10575,6 +10805,47 @@ def test_the_handover_is_keyed_by_the_name_the_worker_body_uses():
     # ``threadPool`` goes to the base class and the body never names it, so it
     # is left out rather than reported under the parameter's name.
     assert "threadPool" not in binding
+
+
+_KNIGHT_BUILDING_TWICE = _KNIGHT_WITH_WORKER.replace(
+    "            thr = TaskCommandoThread(taskList, threadPool, self.taskBufferIF, self.pid)\n"
+    "            thr.start()\n",
+    "            thr = TaskCommandoThread(taskList, threadPool, self.taskBufferIF, self.pid)\n"
+    "            thr.start()\n"
+    "            other = TaskCommandoThread(urgentList, threadPool, self.taskBufferIF, self.pid)\n"
+    "            other.start()\n",
+)
+
+
+def test_an_entry_point_says_how_many_places_hand_over_that_way():
+    """The fold is the door's, and it was silent.
+
+    An entry is keyed on ``(trigger, entry, via, reached_by)`` because the set
+    of reasons a task was not picked up differs *by entry* -- so two
+    constructions in one function are one entry, deliberately.  What the row did
+    not say is that it is keeping one of them: ``copyArchive.py::main`` builds a
+    ``Watcher`` eight times with four different ``sleepTime`` values and the map
+    held the last, which is the kill-running path rather than either holding
+    one.  Measured over the corpus: 177 rows across 23 doors are samples.
+    """
+    junction = _worker_junction(_KNIGHT_BUILDING_TWICE)
+    trigger.attach([junction], _worker_modules(_KNIGHT_BUILDING_TWICE), set())
+
+    (worker,) = [e for e in junction.entry_points if e.via == "start"]
+
+    assert worker.sites == 2
+    # Still one row, and its bindings are one site's -- the later one read.
+    assert worker.arg_binding["taskList"] == "urgentList"
+
+
+def test_an_entry_point_built_once_says_so():
+    """One site is the common case and has to read as a fact, not a sample."""
+    junction = _worker_junction()
+    trigger.attach([junction], _worker_modules(), set())
+
+    (worker,) = [e for e in junction.entry_points if e.via == "start"]
+
+    assert worker.sites == 1
 
 
 def test_a_worker_that_is_never_dispatched_opens_nothing():

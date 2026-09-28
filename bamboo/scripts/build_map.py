@@ -474,6 +474,25 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
                 click.echo(f"      {module:<56} {count} owner(s)")
             if len(by_module) > top:
                 click.echo(f"      … {len(by_module) - top} more module(s)")
+    # The other side of the same statements: where the query that would carry a
+    # row onwards actually is.  Reported beside the log sites because the two
+    # answer one question between them -- which log to read, and where in the
+    # code -- and because a reader the map names with no statement recorded is
+    # what ``readers-have-a-statement`` fails on.
+    reads = fragment.read_sites
+    if reads:
+        many = [r for r in reads if len(r.selects) > 1]
+        windowed = [r for r in reads if r.bind_window]
+        click.echo(
+            f"  read sites: {len(reads)} statement(s) over "
+            f"{len({r.owner for r in reads})} owner(s), {len(many)} asking on more "
+            f"than one value, {len(windowed)} with a bind window"
+        )
+        busiest = Counter(r.owner for r in reads).most_common(top)
+        for owner, count in busiest:
+            if count < 2:
+                break
+            click.echo(f"    {owner:<58} {count} statement(s)")
     if silent:
         # Not a defect: a base class logging through a caller's MsgWrapper has
         # no file to name.  Listed because an unnamed file is an observation

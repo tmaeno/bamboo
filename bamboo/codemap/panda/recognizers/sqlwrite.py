@@ -58,6 +58,7 @@ from bamboo.codemap.models import (
     DiagnosticTemplate,
     EntityNode,
     JunctionNode,
+    ReadSiteNode,
     SourceModule,
     SubjectNode,
 )
@@ -728,6 +729,34 @@ class ReadSide(NamedTuple):
     #: is one whose rows belong to nothing, and an unreadable name looks
     #: exactly like a table that holds no spec once both end up in one list.
     unreadable: dict[str, int]
+    #: ``{(owner, line): ReadStatement}`` -- the same records as ``values``,
+    #: kept per statement instead of per function.  The walk already tells the
+    #: statements apart, because ``(sql, window)`` is what it deduplicates on;
+    #: until now ``record`` was handed the owner and the position was dropped,
+    #: which made three queries in ``copyArchive.main`` one answer.
+    statements: dict[tuple[str, int], "ReadStatement"]
+
+
+class ReadStatement(NamedTuple):
+    """One run of one statement, and every value its predicates ask rows by.
+
+    Per run, not per text: the forwarded form pairs one statement with several
+    varmaps, and ``window`` is what tells those runs apart -- so two runs of the
+    same text in one function are two of these, which is the distinction the
+    whole record exists to keep.
+    """
+
+    owner: str
+    package: str
+    file: str
+    blob_sha: str
+    line: int
+    #: The lines the forwarded form filled this run's binds within, or ``None``
+    #: for ``execute``, where the binds are the function's own.
+    window: Optional[tuple[int, int]]
+    #: ``{(subject, value)}`` the predicates name, for the read verb only.
+    selects: set[tuple[str, str]]
+    tables: set[str]
 
 
 READ_SLICE_NAME = "sql-read"
@@ -929,9 +958,23 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
     unreadable: dict[str, int] = {}
     joins: dict[str, set[frozenset[str]]] = {}
 
-    def record(subject: str, value: str, owner: str, verb: str) -> None:
+    statements: dict[tuple[str, int], ReadStatement] = {}
+
+    def record(
+        subject: str,
+        value: str,
+        owner: str,
+        verb: str,
+        at: Optional[ReadStatement] = None,
+    ) -> None:
         use = found.setdefault(subject, {}).setdefault(value, ValueUse(set(), set()))
         (use.selected_by if verb == "read" else use.updated_by).add(owner)
+        if verb != "read" or at is None:
+            return
+        # Filed against the statement as well as the function, and only kept
+        # when a pair actually lands: a run whose predicates name nothing the
+        # map promoted is not somewhere to send a reader, so it gets no row.
+        statements.setdefault((at.owner, at.line), at).selects.add((subject, value))
 
     def touch(table: str, owner: str, verb: str) -> None:
         use = rows.setdefault(table.lower(), EntityUse(set(), set(), set(), set(), set()))
@@ -969,8 +1012,25 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             together.add(spec_class)
                 if len(together) > 1:
                     joins.setdefault(owner, set()).add(frozenset(together))
+                # Built before the verbs so ``record`` has somewhere to file a
+                # pair, and thrown away again if none lands.  The line is the
+                # one the statement *runs* on: the text is assembled further up
+                # and the binds are not in scope there.
+                at = ReadStatement(
+                    owner=owner,
+                    package=module.package,
+                    file=module.rel_path,
+                    blob_sha=module.blob_sha,
+                    line=run.call.lineno,
+                    window=run.window,
+                    selects=set(),
+                    tables=set(),
+                )
+                read_tables: set[str] = set()
                 for verb, table in _table_verbs(run.sql):
                     spec_class = attributor.class_for_table(table)
+                    if verb == "read":
+                        read_tables.add(table)
                     for column, key in sql.predicates(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
@@ -980,7 +1040,7 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             func, run.varmap or "", key, run.window
                         ):
                             for value in settle(bind.value, func):
-                                record(subject, value, owner, verb)
+                                record(subject, value, owner, verb, at)
                     for column, value in sql.selected_literals(run.sql):
                         qualifier, attribute, _kind = _subject_of(
                             attributor, spec_class, table, column
@@ -990,8 +1050,65 @@ def read_side(modules: list[SourceModule], attributor: SpecAttributor) -> ReadSi
                             value,
                             owner,
                             verb,
+                            at,
                         )
-    return ReadSide(values=found, entities=rows, unreadable=unreadable, joins=joins)
+                # After the verbs, and onto whichever record was kept: a join
+                # reads two tables in one statement, and the second one would
+                # otherwise land on the copy ``setdefault`` discarded.
+                kept = statements.get((owner, run.call.lineno))
+                if kept is not None:
+                    kept.tables.update(read_tables)
+    return ReadSide(
+        values=found,
+        entities=rows,
+        unreadable=unreadable,
+        joins=joins,
+        statements=statements,
+    )
+
+
+def read_site_nodes(
+    statements: dict[tuple[str, int], "ReadStatement"],
+    map_id: str,
+    derived_from: str,
+) -> list[ReadSiteNode]:
+    """Turn the statements :func:`read_side` saw into one node each.
+
+    No promotion and no criterion.  A statement that asks for rows by a value
+    the map already holds a subject for is somewhere an investigation can be
+    sent, and there is nothing further to judge -- which is the difference
+    between this and :func:`entity_nodes`, where "is this worth asking about"
+    is a question about a column.
+
+    ``selects`` is rendered rather than kept as pairs because it is read, not
+    matched: the pair is already in ``SubjectNode.selected_by``, and what this
+    row adds is which statement, in what company.
+    """
+    nodes: list[ReadSiteNode] = []
+    for (owner, line), at in sorted(statements.items()):
+        nodes.append(
+            ReadSiteNode(
+                map_id=map_id,
+                derived_from=derived_from,
+                name=ReadSiteNode.make_name(map_id, owner, line),
+                owner=owner,
+                selects=sorted(f"{subject}={value}" for subject, value in at.selects),
+                tables=sorted(at.tables),
+                # Kept where it is a fact and left empty where it is not:
+                # ``execute`` fills its binds anywhere in the function, so
+                # claiming a region there would be claiming a scope the code
+                # does not declare.
+                bind_window=list(at.window) if at.window else [],
+                anchor=Anchor(
+                    package=at.package,
+                    file=at.file,
+                    line_start=line,
+                    line_end=line,
+                    blob_sha=at.blob_sha,
+                ),
+            )
+        )
+    return nodes
 
 
 def entity_nodes(

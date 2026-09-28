@@ -568,7 +568,23 @@ class EntryPoint(BaseModel):
             "constructed worker.  Comparable only within one ``reached_by``: "
             "the two are different namespaces and an empty set means "
             "'positional, not bound' on one side and 'handed nothing' on the "
-            "other."
+            "other.  **One site's bindings, and ``sites`` says how many there "
+            "were**: an entry is keyed on the door, so several constructions in "
+            "one function fold into this row and the values here are the last "
+            "one read."
+        ),
+    )
+    sites: int = Field(
+        default=1,
+        description=(
+            "How many places hand over this way.  The key is ``(trigger, entry, "
+            "via, reached_by)`` because that is a property of the door, so "
+            "``copyArchive.py::main`` building a ``Watcher`` eight times with "
+            "four different ``sleepTime`` values is one entry -- and until this "
+            "field the row presented the last one read as though it were the "
+            "handover.  Above one means ``arg_binding`` is a sample: which site "
+            "goes with which statement is a question about the statement, and "
+            "the read side is where that is answered."
         ),
     )
     reached_by: str = Field(
@@ -933,6 +949,100 @@ class LogSiteNode(BaseNode):
         return sorted(set(self.log_files) | set(self.caller_log_files))
 
 
+class ReadSiteNode(BaseNode):
+    """One statement that asks the database for rows by a value.
+
+    The other half of a state machine, and the half that answers a row which is
+    not moving.  A junction says what a value becomes; this says which statement
+    would pick the row up and carry it on, and *where that statement is*.
+    Until now the map held the reader as a function name only --
+    ``SubjectNode.selected_by[value]`` -- which is not enough to send a reader
+    anywhere: ``copyArchive.py::main`` selects ``jobStatus='holding'`` from
+    three statements with three different time limits, and
+    ``getTasksToExecCommand_JEDI`` runs the orphan rescue beside the query it
+    exists for.  Named by the function, those are one answer; they are three and
+    two.
+
+    **One row per statement, not per subject.**  A statement selects on
+    everything its ``WHERE`` names -- measured on the corpus, 189 of the 264
+    read sites select on more than one ``(subject, value)`` pair and one names
+    twelve subjects -- so keying per subject would put several nodes at one
+    ``(owner, line)`` and ``map-identities-are-distinct`` would be right to
+    fail.  What the statement asks for is a list on the row.
+
+    **No log files here.**  The owner already has them, on its junction or on
+    its :class:`LogSiteNode`, and a reader joins on ``owner``; one fact in two
+    places is the mistake ``LogSiteNode`` records having made.
+
+    Not the whole of what a reader needs.  The exits -- which rows the
+    predicate refuses, what the code does with the ones it gets, and which of
+    those paths print nothing -- are a separate question, and two of the three
+    need the walk scoped to this statement rather than to its function.  This
+    is the unit that makes asking them possible.
+    """
+
+    node_type: NodeType = NodeType.READ_SITE
+    map_id: str
+    derived_from: str
+    owner: str = Field(
+        ...,
+        description=(
+            "``module::function``, the same spelling a junction's ``owner``, a "
+            "subject's ``selected_by`` and a log site's ``owner`` use, because "
+            "that is what the reader joins on to find the log."
+        ),
+    )
+    selects: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``subject=value`` for every pair this statement asks rows by, "
+            "sorted.  Several because one ``WHERE`` names several columns, and "
+            "the same subject twice because ``jobStatus IN ('running', "
+            "'starting')`` asks for both."
+        ),
+    )
+    tables: list[str] = Field(
+        default_factory=list,
+        description="The tables the statement reads, as the source spells them.",
+    )
+    bind_window: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``[first, last]`` -- the lines the forwarded form fills this run's "
+            "binds within, and empty for ``execute``, where the binds are the "
+            "whole function's.  47 of the corpus's 264 read sites have one, "
+            "and ``copyArchive.py::main``'s three ``holding`` queries have "
+            "``[374, 381]``, ``[400, 405]`` and ``[429, 433]``.\n\n"
+            "Its own field rather than the anchor's span, because the two say "
+            "different things: the anchor is where to send a reader, and this "
+            "is the region a walk would have to be scoped to -- seeded at the "
+            "bind assignments inside it rather than at the statement, whose "
+            "value is the SQL text and reads no names at all."
+        ),
+    )
+    anchor: Anchor = Field(
+        ...,
+        description=(
+            "``line_start`` is the line the statement *runs* on -- the "
+            "``execute`` / ``querySQLS`` call -- not the line the text was "
+            "assembled on, which is where a reader looking for the query would "
+            "start but not where the binds are in scope.  ``line_end`` is the "
+            "same line: a statement is one line of execution, and the region "
+            "around it is ``bind_window``, which is a different claim."
+        ),
+    )
+
+    @staticmethod
+    def make_name(map_id: str, owner: str, line: int) -> str:
+        """Identity is the statement: one owner runs many.
+
+        The line rather than the text, because two runs of the *same* text in
+        one function are two sites -- that is the whole reason this node
+        exists -- and because the text is not a name anybody can look up.
+        """
+        return f"{map_id}:{owner}@{line}"
+
+
 class BoundaryNode(BaseNode):
     """Where causation crosses into a system this map does not cover.
 
@@ -1113,6 +1223,7 @@ class MapFragment(BaseModel):
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     log_sites: list[LogSiteNode] = Field(default_factory=list)
+    read_sites: list["ReadSiteNode"] = Field(default_factory=list)
     diagnostics: list["DiagnosticTemplate"] = Field(default_factory=list)
     enumeration_writes: list["EnumerationWrite"] = Field(default_factory=list)
     coverage: list[CoverageStat] = Field(default_factory=list)
@@ -1160,6 +1271,7 @@ class MapFragment(BaseModel):
         self.filter_stages.extend(other.filter_stages)
         self.loop_cuts.extend(other.loop_cuts)
         self.log_sites.extend(other.log_sites)
+        self.read_sites.extend(other.read_sites)
         self.diagnostics.extend(other.diagnostics)
         self.enumeration_writes.extend(other.enumeration_writes)
         self.coverage.extend(other.coverage)
@@ -2090,11 +2202,23 @@ class FollowUp(BaseModel):
     reader_log_files: list[str] = Field(
         default_factory=list,
         description=(
-            "Where those readers' diagnostics land, for the ones the map holds "
-            "a log for -- which is the readers that also settle something, "
-            "since a function that only selects is not a junction and has no "
-            "node to hang a file on.  Empty is a finding, not a licence to "
-            "guess a file."
+            "Where those readers' diagnostics land.  Read from the reader's "
+            "junction where it settles something and from its "
+            ":class:`LogSiteNode` where it does not -- an earlier wording here "
+            "said a function that only selects \"has no node to hang a file "
+            "on\", which was the state of things the log site node was added to "
+            "fix.  Empty is a finding, not a licence to guess a file."
+        ),
+    )
+    reader_statements: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "``{reader: where its statements are}``, one entry per statement, "
+            "as ``file:line`` plus what that statement asks rows by.  The log "
+            "file says which log to read and this says where in the code: "
+            "``copyArchive.py::main`` asks for ``jobStatus='holding'`` from "
+            "three statements with three different time limits, and named by "
+            "the function alone those are one answer."
         ),
     )
     triggers: list[str] = Field(

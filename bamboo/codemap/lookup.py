@@ -45,6 +45,7 @@ from bamboo.codemap.models import (
     LogSiteNode,
     LoopCutNode,
     MapTerm,
+    ReadSiteNode,
     SubjectNode,
     Symptom,
     ValueEnumNode,
@@ -64,6 +65,7 @@ _MODELS: dict[Type[BaseNode], NodeType] = {
     FilterStageNode: NodeType.FILTER_STAGE,
     LoopCutNode: NodeType.LOOP_CUT,
     LogSiteNode: NodeType.LOG_SITE,
+    ReadSiteNode: NodeType.READ_SITE,
     BoundaryNode: NodeType.BOUNDARY,
     ValueEnumNode: NodeType.VALUE_ENUM,
 }
@@ -538,6 +540,29 @@ class CodeMap:
             j.owner: {"own": list(j.log_files), "caller": list(j.caller_log_files)}
             for j in await self.writers_of(subject)
         }
+
+    async def read_sites(self, owners: list[str]) -> dict[str, list[ReadSiteNode]]:
+        """The statements *owners* ask for rows with, in source order.
+
+        A list per owner, because that is the whole point of the node: one
+        function runs many statements and they ask for different things.
+        ``copyArchive.py::main`` returns thirty, three of which select
+        ``jobStatus='holding'`` with three different time limits.
+
+        Keyed on the owner rather than on the subject so a caller that already
+        has the readers of a value -- ``SubjectNode.selected_by`` -- can ask
+        where they are without asking the map a second question.
+        """
+        if not owners:
+            return {}
+        wanted = set(owners)
+        found: dict[str, list[ReadSiteNode]] = {}
+        for site in await self._find(ReadSiteNode):
+            if site.owner in wanted:
+                found.setdefault(site.owner, []).append(site)
+        for sites in found.values():
+            sites.sort(key=lambda s: s.anchor.line_start)
+        return found
 
     async def log_sites(self, owners: list[str]) -> dict[str, LogSiteNode]:
         """The log rows for *owners* that settle nothing themselves.
