@@ -87,6 +87,12 @@ _LIBRARY_CONTAINERS = {
     ("collections", "deque"),
     ("collections", "Counter"),
 }
+#: The standard library's copies, and the method a class defines to copy
+#: itself some other way.  ``copy.copy(x)`` is an object of ``x``'s class --
+#: typeshed states ``def copy(x: _T) -> _T`` -- unless that class defines the
+#: hook, and then it is what the hook returns.  The map reads the corpus's
+#: annotations and not typeshed's, so it is said here.
+_COPIES = {("copy", "copy"): "__copy__", ("copy", "deepcopy"): "__deepcopy__"}
 
 
 #: Parsed modules shared by every reading of the same files.  A walk is made
@@ -2177,6 +2183,11 @@ class Types:
             constructed = self.class_named(file, called) if isinstance(called, (ast.Name, ast.Attribute)) else None
             if constructed is not None:
                 return frozenset({constructed})
+            hook = self._copy_hook(file, called)
+            if hook is not None:
+                # ``jobSpec = copy.copy(job)``: what ``job`` is declared to be.
+                copied = self.declared(file, func, expression.args[0], depth + 1) if expression.args else None
+                return self._copied(copied, hook)
             if isinstance(called, ast.Name):
                 # ``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``.
                 function = self._function_named(file, called.id)
@@ -2256,6 +2267,20 @@ class Types:
         if instances and (builtin := self._builtin_instance(file, func, expression)):
             return frozenset({(BUILTIN, builtin)}), False
         if isinstance(expression, ast.Call):
+            hook = self._copy_hook(file, expression.func) if instances else None
+            if hook is not None:
+                # A copy is an instance of what it copies; a class that copies
+                # itself with the hook is what the hook returns, unread here.
+                if not expression.args:
+                    return frozenset(), True
+                copied, opened = self._values(file, func, expression.args[0], depth + 1, instances=True, seen=seen)
+                for where, name in copied:
+                    cls = self.class_def(where, name) if where != BUILTIN else None
+                    if cls is not None and self.method(where, cls, hook) is not None:
+                        opened = True
+                    else:
+                        found.add((where, name))
+                return frozenset(found), opened
             if instances:
                 # An instance of whatever class the callee is: ``Cls(...)``,
                 # or ``self.plugin_class(...)`` holding a class.
@@ -2388,6 +2413,38 @@ class Types:
             if held is not None and not held[1] and (held[0], called.attr) in _LIBRARY_CONTAINERS:
                 return called.attr
         return ""
+
+    def _copy_hook(self, file: str, called: ast.expr) -> Optional[str]:
+        """The hook a class would copy itself with, where *called* is one of :data:`_COPIES`."""
+        imported = self.imports(file)
+        if isinstance(called, ast.Name):
+            held = imported.get(called.id)
+            return _COPIES.get(held) if held is not None else None
+        if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+            held = imported.get(called.value.id)
+            if held is not None and not held[1]:
+                return _COPIES.get((held[0], called.attr))
+        return None
+
+    def _copied(self, copied: Optional[Classes], hook: str) -> Optional[Classes]:
+        """What a copy of an object of the classes *copied* is declared to be.
+
+        The same classes; where one defines *hook*, what the hook is declared
+        to return, and nothing where it declares nothing.
+        """
+        if copied is None:
+            return None
+        found: set[tuple[str, ast.ClassDef]] = set()
+        for where, cls in copied:
+            hooked = self.method(where, cls, hook)
+            if hooked is None:
+                found.add((where, cls))
+                continue
+            returned = self.annotated_all(hooked[0], hooked[1].returns)
+            if returned is None:
+                return None
+            found |= returned
+        return frozenset(found)
 
     def _owner_of(self, file: str, func: ast.AST, called: ast.expr) -> Optional[tuple[str, ast.AST]]:
         """The function *called* names, for a call on ``self`` or a plain name."""

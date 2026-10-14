@@ -2811,3 +2811,54 @@ def test_a_local_holding_one_class_only_lands_there_closed_and_one_holding_nothi
 
     assert [(t.cls.name, known.unplaced) for t in known.targets] == [("AtlasPlugin", "")]
     assert (unknown.targets, unknown.unplaced) == ((), calls_mod.UNPLACED_NAME)
+
+
+def test_a_copy_is_an_object_of_the_class_it_copies_unless_the_class_copies_itself(tmp_path):
+    """``copy.copy(x)`` is what ``x`` is; a class defining ``__copy__`` is what that returns."""
+    roots = _tree(
+        tmp_path,
+        m=(
+            "import copy\n"
+            "from copy import deepcopy\n"
+            "\n"
+            "class Job:\n"
+            "    def run(self):\n"
+            "        pass\n"
+            "\n"
+            "class Other:\n"
+            "    pass\n"
+            "\n"
+            "class Selfish:\n"
+            "    def __copy__(self) -> Other:\n"
+            "        return Other()\n"
+            "\n"
+            "def shallow(job: Job):\n"
+            "    clone = copy.copy(job)\n"
+            "    clone.run()\n"
+            "\n"
+            "def deep(job: Job):\n"
+            "    return deepcopy(job)\n"
+            "\n"
+            "def hooked(thing: Selfish):\n"
+            "    return copy.copy(thing)\n"
+            "\n"
+            "def untyped(job):\n"
+            "    held = Job()\n"
+            "    clone = copy.copy(held)\n"
+            "    clone.run()\n"
+        ),
+    )
+    calls = _calls(roots)
+    types = calls.types
+
+    def declared(name, text):
+        func = _function(calls, "m", name)
+        node = next(n for n in ast.walk(func) if isinstance(n, ast.Call) and ast.unparse(n) == text)
+        return sorted(cls.name for _file, cls in types.declared("pkg/m.py", func, node) or ())
+
+    assert declared("shallow", "copy.copy(job)") == ["Job"]
+    assert declared("deep", "deepcopy(job)") == ["Job"]
+    assert declared("hooked", "copy.copy(thing)") == ["Other"]
+    # Where nothing declares the copied value, it is read from the values.
+    assert [t.cls.name for t in _placed(calls, "m", "untyped", "clone.run").targets] == ["Job"]
+    assert [t.cls.name for t in _placed(calls, "m", "shallow", "clone.run").targets] == ["Job"]
