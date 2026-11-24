@@ -171,7 +171,7 @@ class EpicprodCodeMapPlugin(CodeMapPlugin):
                 self._visit_sql(node.value, node, owner, rel)
             elif isinstance(node, ast.JoinedStr):
                 text = "".join(
-                    v.value if isinstance(v, ast.Constant) else "%s"
+                    str(v.value) if isinstance(v, ast.Constant) else "%s"
                     for v in node.values
                 )
                 self._visit_sql(text, node, owner, rel)
@@ -230,7 +230,7 @@ class EpicprodCodeMapPlugin(CodeMapPlugin):
                 for v in url.values
             ):
                 path = "".join(
-                    v.value for v in url.values if isinstance(v, ast.Constant)
+                    str(v.value) for v in url.values if isinstance(v, ast.Constant)
                 )
                 self._boundary(
                     owner,
